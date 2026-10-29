@@ -102,7 +102,11 @@ All integers are host-endian (LMDB does not byte-swap). We implement the
   mm_last_pg:u64, mm_txnid:u64`. `mm_dbs[0].md_pad` doubles as page size and
   `mm_dbs[0].md_flags` as persistent env flags.
 * Named databases are entries in the main DB whose node has `F_SUBDATA` and
-  whose data is an `MDB_db` (`mdb_dbi_open`, line 9955).
+  whose data is an `MDB_db` (`mdb_dbi_open`, line 9955). A new environment
+  stores `(env_flags & 0xffff) | MDB_INTEGERKEY` in the free DB's
+  `md_flags` (line 3870), so `MDB_FIXEDMAP`/`MDB_NOSUBDIR` bits land in the
+  file (mtest produces 0x09). Stale-record refresh (line 5757): empty main
+  DB gives `NOTFOUND`, inexact match `BAD_DBI`, changed flags `INCOMPATIBLE`.
 * The free DB (DBI 0) maps `txnid_t` keys (8 bytes host-endian) to `MDB_IDL`
   values: `[count:u64, pgno..]` with pgnos sorted **descending**
   (`mdb_freelist_save`, line 3169; `midl.h`). Pages listed under txn T may be
@@ -115,7 +119,13 @@ All integers are host-endian (LMDB does not byte-swap). We implement the
   `me_nodemax = ((psize - PAGEHDRSZ) / MDB_MINKEYS) & -2 - sizeof(indx_t)`;
   a leaf item whose `LEAFSIZE` exceeds nodemax goes to overflow pages.
 * Comparators (`mdb_default_cmp`, line 9940) decide sort order and must match
-  bit for bit: keys use `mdb_cmp_memnr` for `MDB_REVERSEKEY`, `mdb_cmp_cint`
+  bit for bit. The free DB's key comparator is set explicitly to
+  `mdb_cmp_long` at open (line 5136). `mdb_cmp_clong` is `mdb_cmp_long` on
+  x86 and `mdb_cmp_cint` elsewhere (line 1494); C swaps `mdb_cmp_int` for it
+  on 8-byte items in `mdb_xcursor_init1` (line 7771), `mdb_cursor_set` for
+  `GET_BOTH` (line 6342) and `mdb_dcmp`. The implemented `crate::cmp`
+  module is the reference now; see `KNOWN_C_BUGS.md` #7 for the
+  mismatched-size behaviour that is ported on purpose. Otherwise: keys use `mdb_cmp_memnr` for `MDB_REVERSEKEY`, `mdb_cmp_cint`
   for `MDB_INTEGERKEY`, else `mdb_cmp_memn`. Dup data: `MDB_INTEGERDUP` →
   `mdb_cmp_int` if `MDB_DUPFIXED` else `mdb_cmp_cint`; `MDB_REVERSEDUP` →
   `mdb_cmp_memnr`; else `mdb_cmp_memn`. Read those five functions (lines
@@ -143,19 +153,29 @@ platform**:
   `(st_dev, st_ino)` of the lock file encoded with `mdb_hash_enc` (lines
   4823-4880; read the exact byte encoding). Opened with `sem_open`; the creator
   (exclusive opener) `sem_unlink`s then creates with `O_CREAT|O_EXCL`, value 1.
-  Semaphores are not robust; C has the same limitation.
+  Semaphores are not robust; C has the same limitation. C hashes a struct
+  with 4 bytes of uninitialised padding (line 4996), so the names cannot be
+  recomputed: later openers read them from the lock file.
 * `format == MDB_LOCK_VERSION + (MDB_PIDLOCK << 16) == 0x10001` on Unix.
-* Reader slot (`MDB_reader`, 64 bytes): `txnid:u64, pid:i32, tid:u64
-  (pthread_t)`; rest padding. Free slot ⇔ `pid == 0`. `txnid == !0` marks a
+* Reader slot (`MDB_reader`, 64 bytes): `txnid:u64` at 0, `pid:i32` at 8,
+  `tid:u64 (pthread_t)` at 16 (after padding); rest padding. Free slot ⇔ `pid == 0`. `txnid == !0` marks a
   slot owned but not in a txn.
 * File locking (`mdb_env_excl_lock`, line 4741; `mdb_reader_pid`, line 2718):
   try `fcntl F_WRLCK` on byte 0 of the lock file; on success we are exclusive
-  and (re)initialise the table; else take `F_RDLCK` on byte 0 (shared).
+  and (re)initialise the table; else take `F_RDLCK` on byte 0 with a
+  *blocking* `F_SETLKW` (later openers wait until the creator downgrades,
+  line 4776). The lock file is opened `O_RDWR|O_CREAT` even for read-only
+  environments and only skipped on `EROFS` (line 4893). An exclusive opener
+  only grows the lock file; a larger existing file raises `max_readers`.
   Reader liveness: each process holds `F_WRLCK` on byte `pid` of the lock file
   (`MDB_PIDLOCK`); `mdb_reader_check` probes with `F_GETLK` (line 10403).
 * Txn begin/renew for readers: lock `rmutex`, find a free slot (`pid == 0`),
   set `pid`, `tid`, bump `numreaders` if needed, unlock; then write the
-  snapshot `txnid` into the slot (line 2758). Writers lock `wmutex` for the
+  snapshot `txnid` into the slot (line 2758). Readers start from
+  `metas[mti_txnid & 1]`, not "the newer meta"; only with `mti_txnid == 0`
+  in a read-only env does C fall back to the newer meta (line 2833).
+  `mdb_env_read_header` (line 3804) reads 152 bytes per meta page at offset 0
+  and at the first meta's page size. Writers lock `wmutex` for the
   whole write transaction and commit sets `mti_txnid`.
 
 Compatibility means **both** files: a Rust process must be able to be the
@@ -377,9 +397,15 @@ returns the C int; `from_err_code`; `Display` strings match `mdb_strerror`.
   exhaust memory. Implement it; it is part of the commit correctness path for
   nested txns too. If deferred in a first pass, return `TxnFull` rather than
   silently misbehaving.
-* The write lock: one `RwTxn` per `Env` at a time; `begin_rw` blocks on the
-  shared `wmutex` like C. (No TLS-based "same thread" detection; the C API
-  layer keeps C semantics where it must.)
+* The write lock: one `RwTxn` per `Env` at a time; `begin_rw_txn` blocks on
+  the shared `wmutex` like C. On Linux the writer mutex is a pthread mutex
+  owned by the locking thread, so the write transaction must be unlocked on
+  the thread that began it: `RwTxn` is `!Send`. (The C API layer keeps C
+  semantics where it must.)
+* `set_map_size` must not invalidate slices held by live read transactions.
+  Design: transactions hold an `Arc` to the current data map; `set_map_size`
+  (and the `MapResized` path at txn begin) install a new map in the
+  environment, old maps live until their last transaction drops.
 
 ### Code conventions
 
@@ -442,9 +468,15 @@ Facts about C 0.9.36 behaviour that implementers must honour; the harness in
   `MDB_INTEGERKEY`.
 * `mdb_load` in 0.9.36 drops the flags of the first DB in its input (the
   `flags = 0;` from ITS#8662); the Rust tool must not copy that bug.
-* `mtest6` needs an `MDB_DEBUG` build; the harness does not build it.
+* `mtest6` calls `mdb_dkey`, which exists only with `MDB_DEBUG`;
+  `lmdb/tests` builds it against a small shim, the interop harness skips it.
 
 ## Staged plan
+
+Stage 1 is done (commits `c13c67d` interop, and the lmdb read path). The
+implemented `rust/lmdb` crate is the reference for the core API from here
+on; read its `src/core/mod.rs` and `src/core/txn.rs` (`TxnCore::page` is
+where dirty pages plug in) before extending it.
 
 **Stage 1 (parallel):**
 
