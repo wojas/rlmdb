@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "lmdb",
+    "lmdb-capi",
+    "lmdb-tools",
+    "interop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "OLDAP-2.8"
+repository = "https://github.com/LMDB/lmdb"
+
+[workspace.dependencies]
+libc = "0.2"
+
+[profile.release]
+debug = 1
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"

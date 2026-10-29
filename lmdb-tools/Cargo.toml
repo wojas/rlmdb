@@ -1,0 +1,9 @@
+[package]
+name = "lmdb-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop in Rust"
+
+[dependencies]

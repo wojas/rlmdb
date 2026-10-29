@@ -1,0 +1,13 @@
+[package]
+name = "lmdb-capi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "C ABI (liblmdb-compatible) for the Rust LMDB implementation"
+
+[lib]
+name = "lmdb"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
