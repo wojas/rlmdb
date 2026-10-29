@@ -18,6 +18,8 @@ use std::sync::OnceLock;
 
 use lmdb::{Dbi, Environment, RoTxn, Transaction};
 
+pub mod dataset;
+
 /// A key/data pair as owned bytes.
 pub type Pair = (Vec<u8>, Vec<u8>);
 
@@ -187,9 +189,113 @@ fn build_c_tools() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Builds the interop C peer (`rust/interop/c/cpeer*.c`, see
+/// `rust/interop/README.md`) against the C library of `tools`, once per
+/// version of its sources. Built here rather than through the `interop`
+/// crate so that these tests do not depend on that crate building.
+fn build_cpeer(tools: &CTools) -> Result<PathBuf, String> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = manifest.join("../interop/c");
+    let names = [
+        "cpeer.h",
+        "cpeer.c",
+        "cpeer_data.c",
+        "cpeer_loops.c",
+        "cpeer_misc.c",
+        "cpeer_pagewalk.c",
+        "dataset.c",
+    ];
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    fnv(&mut h, tools.dir.to_string_lossy().as_bytes());
+    for n in names {
+        fnv(&mut h, n.as_bytes());
+        fnv(&mut h, &fs::read(src.join(n)).map_err(|e| format!("{n}: {e}"))?);
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let dir = base.join(format!("cpeer-{h:016x}"));
+    let bin = dir.join("cpeer");
+    if dir.join(".ok").exists() {
+        return Ok(bin);
+    }
+    let tmp = base.join(format!("cpeer-{h:016x}.tmp{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_owned());
+    let mut cmd = Command::new(&cc);
+    cmd.current_dir(&tmp)
+        .args(["-pthread", "-O2", "-g", "-I"])
+        .arg(&tools.dir)
+        .arg("-o")
+        .arg(tmp.join("cpeer"));
+    for n in names.iter().filter(|n| n.ends_with(".c")) {
+        cmd.arg(src.join(n));
+    }
+    cmd.arg(tools.dir.join("liblmdb.a"));
+    run_ok(&mut cmd)?;
+    fs::write(tmp.join(".ok"), b"ok").map_err(|e| e.to_string())?;
+    if fs::rename(&tmp, &dir).is_err() {
+        let _ = fs::remove_dir_all(&tmp);
+        if !dir.join(".ok").exists() {
+            return Err("concurrent cpeer build left no usable directory".into());
+        }
+    }
+    Ok(bin)
+}
+
+/// Output of a `cpeer` command: exit code, stdout, stderr.
+#[derive(Debug)]
+pub struct PeerOutput {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl PeerOutput {
+    /// The value of `key=` on the first line that has it.
+    pub fn field(&self, key: &str) -> Option<String> {
+        let prefix = format!("{key}=");
+        self.stdout
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix(&prefix).map(str::to_owned))
+    }
+}
+
 impl CTools {
     pub fn bin(&self, name: &str) -> PathBuf {
         self.dir.join(name)
+    }
+
+    /// The interop C peer, built on first use.
+    pub fn cpeer(&self) -> PathBuf {
+        static CPEER: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+        match CPEER.get_or_init(|| build_cpeer(self)) {
+            Ok(p) => p.clone(),
+            Err(e) => panic!("cannot build cpeer: {e}"),
+        }
+    }
+
+    /// Runs `cpeer <args>` and returns its output whatever the exit code.
+    pub fn peer(&self, args: &[&str]) -> PeerOutput {
+        let out = Command::new(self.cpeer())
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("cpeer: {e}"));
+        PeerOutput {
+            code: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    }
+
+    /// Runs `cpeer <args>` and panics unless it exits 0.
+    pub fn peer_ok(&self, args: &[&str]) -> PeerOutput {
+        let out = self.peer(args);
+        assert_eq!(
+            out.code, 0,
+            "cpeer {args:?} failed:\n{}\n{}",
+            out.stdout, out.stderr
+        );
+        out
     }
 
     /// Runs a C program and returns its output, panicking on failure.

@@ -43,6 +43,11 @@ impl Idl {
         &self.ids
     }
 
+    /// The IDs as a vector.
+    pub fn into_vec(self) -> Vec<u64> {
+        self.ids
+    }
+
     /// Number of IDs (`ids[0]` in C).
     pub fn len(&self) -> usize {
         self.ids.len()

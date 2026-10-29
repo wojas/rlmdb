@@ -189,10 +189,36 @@ impl LockRegion {
         self.locks.as_ref().expect("lock region already closed")
     }
 
-    /// The writer mutex (`me_wmutex`), for write transactions.
-    #[allow(dead_code)] // used by the write path (stage 2)
-    pub(crate) fn writer_mutex(&self) -> &SharedMutex {
-        &self.locks().wmutex
+    /// Locks the writer mutex (`me_wmutex`) for a write transaction,
+    /// blocking until other writers (threads or processes) are done.
+    ///
+    /// If the previous owner died holding it (robust mutexes, Linux), this
+    /// repairs state as `mdb_mutex_failed` (mdb.c line 10463) does for the
+    /// writer: publish the txnid of the newest meta page in `mti_txnid`
+    /// (`newest_txnid`), so the next writer cannot overwrite pages that meta
+    /// refers to, clear dead readers, and mark the mutex consistent.
+    pub(crate) fn lock_writer(&self, newest_txnid: impl FnOnce() -> Result<u64>) -> Result<()> {
+        let m = &self.locks().wmutex;
+        match m.lock()? {
+            LockStatus::Acquired => Ok(()),
+            LockStatus::OwnerDied => {
+                let repaired = newest_txnid()
+                    .map(|t| self.set_txnid(t))
+                    .and_then(|()| self.reader_check0(false))
+                    .and_then(|_| m.mark_consistent().map_err(Error::from));
+                if let Err(e) = repaired {
+                    let _ = m.unlock();
+                    return Err(e);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Unlocks the writer mutex (`UNLOCK_MUTEX(env->me_wmutex)`). Must be
+    /// called on the thread that locked it.
+    pub(crate) fn unlock_writer(&self) {
+        let _ = self.locks().wmutex.unlock();
     }
 
     // --- header fields ----------------------------------------------------
@@ -203,7 +229,6 @@ impl LockRegion {
     }
 
     /// Sets `mti_txnid` (writers after commit, and dead-writer recovery).
-    #[allow(dead_code)] // used by the write path (stage 2)
     pub(crate) fn set_txnid(&self, txnid: u64) {
         self.map.store_u64(TXNINFO_TXNID, txnid)
     }
@@ -339,7 +364,6 @@ impl LockRegion {
 
     /// `mdb_find_oldest`: the oldest snapshot still in use by any reader, or
     /// `txnid - 1` if there is none older.
-    #[allow(dead_code)] // used by the write path (stage 2)
     pub(crate) fn find_oldest(&self, txnid: u64) -> u64 {
         let mut oldest = txnid.wrapping_sub(1);
         for i in (0..self.num_readers()).rev() {

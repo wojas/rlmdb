@@ -27,17 +27,18 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 
 use crate::cmp::CmpFn;
 use crate::consts::*;
 use crate::core::dbi::{Dbi, DbiRegistry};
 use crate::core::reader::{LockRegion, ReaderInfo};
 use crate::core::txn::{RoTxn, Transaction};
+use crate::core::txn_rw::RwTxn;
 use crate::core::{Info, Stat};
 use crate::error::{Error, MdbError, Result};
-use crate::flags::EnvironmentFlags;
+use crate::flags::{DatabaseFlags, EnvironmentFlags};
 use crate::format;
 use crate::format::layout::{META_OFFSET_IN_PAGE, META_SIZE, PAGE_HDR_SIZE};
 use crate::format::meta::{pick_newest, Meta};
@@ -201,19 +202,37 @@ pub struct Environment {
     // Field order is drop order and mirrors mdb_env_close0: unmap the data
     // file, close its descriptors, then the lock file, and only then leave
     // the registry.
-    map: DataMap,
+    /// The current data map. Transactions keep an `Arc` of the map that was
+    /// current when they began, so [`Environment::set_map_size`] can install
+    /// a new map without invalidating slices held by live transactions.
+    map: RwLock<Arc<DataMap>>,
     meta_file: Option<File>,
     data_file: File,
     lock: Option<LockRegion>,
     pub(crate) dbis: DbiRegistry,
     flags: AtomicU32,
+    /// `MDB_FATAL_ERROR`: a meta page write failed; every new transaction
+    /// fails with `MDB_PANIC`.
+    fatal: AtomicBool,
+    /// Writer state that lives in `MDB_env` in C (`me_pgoldest`). Its mutex
+    /// also serialises write transactions within this process (the shared
+    /// writer mutex does that across processes).
+    writer: Mutex<WriterState>,
     page_size: usize,
-    map_size: usize,
-    max_pgno: u64,
+    map_size: AtomicUsize,
     max_readers: u32,
     node_max: usize,
     path: PathBuf,
     _registration: Registration,
+}
+
+/// Per-environment state of the (single) write transaction.
+#[derive(Debug, Default)]
+pub(crate) struct WriterState {
+    /// `me_pgoldest`: the oldest reader's snapshot the last time a writer
+    /// looked (`mdb_page_alloc`). Only grows; refreshed when it is in the
+    /// way.
+    pub(crate) pg_oldest: u64,
 }
 
 impl std::fmt::Debug for Environment {
@@ -221,7 +240,7 @@ impl std::fmt::Debug for Environment {
         f.debug_struct("Environment")
             .field("path", &self.path)
             .field("page_size", &self.page_size)
-            .field("map_size", &self.map_size)
+            .field("map_size", &self.map_size())
             .finish_non_exhaustive()
     }
 }
@@ -320,15 +339,16 @@ impl Environment {
 
         let max_readers = lock.as_ref().map_or(opts.max_readers, |l| l.max_readers());
         let env = Environment {
-            map,
+            map: RwLock::new(Arc::new(map)),
             meta_file,
             data_file,
             lock,
             dbis: DbiRegistry::new(opts.max_dbs),
             flags: AtomicU32::new(flags),
+            fatal: AtomicBool::new(false),
+            writer: Mutex::new(WriterState::default()),
             page_size,
-            map_size,
-            max_pgno: (map_size / page_size) as u64,
+            map_size: AtomicUsize::new(map_size),
             max_readers,
             node_max: format::node_max(page_size),
             path: path.to_path_buf(),
@@ -351,7 +371,7 @@ impl Environment {
     pub(crate) fn read_meta(&self, i: usize) -> Result<Meta> {
         let mut buf = [0u8; META_SIZE];
         if !self
-            .map
+            .data_map()
             .read_volatile(i * self.page_size + META_OFFSET_IN_PAGE, &mut buf)
         {
             return Err(MdbError::Corrupted.into());
@@ -370,32 +390,50 @@ impl Environment {
 
     // --- internals used by transactions --------------------------------------
 
-    pub(crate) fn data_map(&self) -> &DataMap {
-        &self.map
+    /// The current data map. A transaction keeps the `Arc` it got at
+    /// begin for its whole life.
+    pub(crate) fn data_map(&self) -> Arc<DataMap> {
+        Arc::clone(&self.map.read().unwrap_or_else(|e| e.into_inner()))
     }
 
     pub(crate) fn lock_region(&self) -> Option<&LockRegion> {
         self.lock.as_ref()
     }
 
-    /// `me_maxpg`: number of pages the map can hold.
-    pub(crate) fn max_pgno(&self) -> u64 {
-        self.max_pgno
-    }
-
     pub(crate) fn is_read_only(&self) -> bool {
         self.flags.load(Ordering::Relaxed) & MDB_RDONLY != 0
     }
 
+    /// `me_flags & MDB_*` as raw bits (including `MDB_RDONLY`).
+    pub(crate) fn raw_flags(&self) -> u32 {
+        self.flags.load(Ordering::Relaxed)
+    }
+
+    /// `me_flags & MDB_FATAL_ERROR`.
+    pub(crate) fn has_fatal_error(&self) -> bool {
+        self.fatal.load(Ordering::SeqCst)
+    }
+
+    /// Sets `MDB_FATAL_ERROR` (a meta page write failed, `mdb_env_write_meta`).
+    pub(crate) fn set_fatal_error(&self) {
+        self.fatal.store(true, Ordering::SeqCst);
+    }
+
     /// `me_nodemax`: largest node that stays inline in a page.
-    #[allow(dead_code)] // used by the write path (stage 2)
     pub(crate) fn node_max(&self) -> usize {
         self.node_max
     }
 
-    #[allow(dead_code)] // used by the write path (stage 2)
+    /// `me_mfd`: the `O_DSYNC` descriptor for meta page writes (`None` for
+    /// a read-only environment).
     pub(crate) fn meta_file(&self) -> Option<&File> {
         self.meta_file.as_ref()
+    }
+
+    /// Locks the in-process writer state. Held by a write transaction for
+    /// its whole life (which also makes `RwTxn` `!Send`).
+    pub(crate) fn lock_writer_state(&self) -> MutexGuard<'_, WriterState> {
+        self.writer.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     // --- public API -------------------------------------------------------
@@ -418,6 +456,25 @@ impl Environment {
     /// snapshot.
     pub fn begin_ro_txn(&self) -> Result<RoTxn<'_>> {
         RoTxn::begin(self)
+    }
+
+    /// `mdb_txn_begin(env, NULL, 0)`: start the write transaction, waiting
+    /// for the writer lock (held by another thread or process). `EACCES`
+    /// for a read-only environment. The transaction is bound to the calling
+    /// thread (`!Send`), because the Linux writer mutex is owned by the
+    /// thread that locked it.
+    pub fn begin_rw_txn(&self) -> Result<RwTxn<'_>> {
+        RwTxn::begin(self)
+    }
+
+    /// `mdb_dbi_open` with `MDB_CREATE` in a short write transaction: the
+    /// handle of the database `name` (`None` = the main DB), created with
+    /// `flags` if it does not exist yet.
+    pub fn create_db(&self, name: Option<&str>, flags: DatabaseFlags) -> Result<Dbi> {
+        let mut txn = self.begin_rw_txn()?;
+        let db = txn.create_db(name, flags)?;
+        txn.commit()?;
+        Ok(db)
     }
 
     /// `mdb_env_sync`: flush the data file to disk (`fdatasync`, or
@@ -444,7 +501,7 @@ impl Environment {
     pub fn info(&self) -> Result<Info> {
         let meta = self.pick_meta()?;
         Ok(Info {
-            map_size: self.map_size,
+            map_size: self.map_size(),
             last_pgno: meta.last_pgno as usize,
             last_txnid: meta.txnid as usize,
             max_readers: self.max_readers,
@@ -509,7 +566,45 @@ impl Environment {
 
     /// The size of the memory map (`me_mapsize`).
     pub fn map_size(&self) -> usize {
-        self.map_size
+        self.map_size.load(Ordering::SeqCst)
+    }
+
+    /// `mdb_env_set_mapsize` on an open environment: map the data file
+    /// with `size` bytes (`0` = the size recorded in the newest meta page),
+    /// raised to cover all pages in use. The value is persisted by the next
+    /// commit (`mdb_env_write_meta` keeps the larger of the old and the new
+    /// size).
+    ///
+    /// C requires that no transaction is active. Here read transactions may
+    /// be live: they keep using the map they started with. Like C, this
+    /// fails with `EINVAL` while this process has a write transaction
+    /// active. Also the way to adopt a larger size after another process
+    /// grew the database (`MDB_MAP_RESIZED`).
+    pub fn set_map_size(&self, size: usize) -> Result<()> {
+        // C: `if (env->me_txn) return EINVAL;`
+        let _writer = match self.writer.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(Error::einval()),
+        };
+        let meta = self.pick_meta()?;
+        let mut size = if size == 0 {
+            meta.map_size as usize
+        } else {
+            size
+        };
+        // Silently round up to minimum if the size is too small.
+        let min_size = (meta.last_pgno as usize)
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(self.page_size))
+            .ok_or(MdbError::Invalid)?;
+        size = size.max(min_size);
+        let random = self.raw_flags() & MDB_NORDAHEAD != 0;
+        let map = DataMap::map_readonly(self.data_file.try_clone()?, size, random)?;
+        let mut current = self.map.write().unwrap_or_else(|e| e.into_inner());
+        *current = Arc::new(map);
+        self.map_size.store(size, Ordering::SeqCst);
+        Ok(())
     }
 
     /// `mdb_env_get_fd`-like access to the data file.

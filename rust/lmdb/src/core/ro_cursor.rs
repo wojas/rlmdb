@@ -147,6 +147,29 @@ impl<'txn> RoCursor<'txn> {
         }
     }
 
+    /// A cursor over existing positions (used to run read operations on a
+    /// write cursor's state, see `wcursor`).
+    pub(crate) fn from_parts(
+        txn: &'txn TxnCore<'txn>,
+        dbi: Dbi,
+        mc: Cursor<'txn>,
+        mx: Option<Cursor<'txn>>,
+        dcmp: Option<Comparator>,
+    ) -> RoCursor<'txn> {
+        RoCursor {
+            txn,
+            dbi,
+            mc,
+            mx,
+            dcmp,
+        }
+    }
+
+    /// The main cursor and sub-cursor, for writing their state back.
+    pub(crate) fn parts(&self) -> (&Cursor<'txn>, Option<&Cursor<'txn>>) {
+        (&self.mc, self.mx.as_ref())
+    }
+
     /// The database this cursor reads (`mdb_cursor_dbi`).
     pub fn dbi(&self) -> Dbi {
         self.dbi

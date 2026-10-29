@@ -503,6 +503,27 @@ dump.
 spill, copy/compact). D2 rest of the C API + run `mtest*.c` against it. B3
 bidirectional and concurrent interop stress. T `lmdb-tools`.
 
+**Stage 3 inputs gathered in stage 2** (core API gaps reported by the C API
+and interop agents; the core agent adds them, additively):
+
+* `Transaction::set_compare(db, Option<CmpFn>)` / `set_dupsort` that also
+  update the calling transaction's cached comparators (C's usual
+  `mdb_dbi_open` -> `mdb_set_compare` -> use within one txn).
+* `Transaction::open_db_bytes(Option<&[u8]>)`: C database names are
+  arbitrary NUL-free bytes, not necessarily UTF-8.
+* `Info::map_address` (`mm_address`) for `mdb_stat -e`/`mdb_dump` output.
+* `Environment::has_lock_file()` (read-only env on a read-only fs has none).
+* `Transaction::comparators(db) -> (Comparator, Option<Comparator>)` for
+  `mdb_cmp`/`mdb_dcmp`.
+* `RoCursor::is_initialized()` and "current item has duplicates" so the C
+  layer reproduces C's untouched-key cases exactly.
+* `Environment::copy_to_path` / `copy_to_fd`.
+* Crate naming: the C ABI crate's lib must be `lmdb` (to produce
+  `liblmdb.a`), and it needs an `rlib` so cargo builds the staticlib before
+  its integration tests, so the Rust library cannot also be `lmdb`. Rename
+  the library to package `lmdb-core`, lib `lmdb_core` (directory
+  `rust/lmdb-core`) once no agent is editing it.
+
 **Stage 4:** review, benchmarks vs C, docs. Until the heed layer exists,
 `lib.rs` re-exports `core::*` at the crate root.
 

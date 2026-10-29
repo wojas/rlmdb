@@ -32,13 +32,32 @@
 //! * [`cursor`]: B-tree search and movement (`mdb_page_get`,
 //!   `mdb_page_search*`, `mdb_node_search`, `mdb_cursor_*`,
 //!   `mdb_xcursor_init*`).
+//! * [`txn_rw`]: write transactions and write cursors (`mdb_txn_begin`,
+//!   `mdb_txn_commit`, `mdb_put`, `mdb_cursor_put`, `mdb_dbi_open` with
+//!   `MDB_CREATE`), built on private modules: `wcursor` (write cursors and
+//!   their fixups, `mdb_page_touch`), `dirty` (the dirty page list),
+//!   `page_ops` (byte-level node edits), `freelist` (`mdb_page_alloc`,
+//!   `mdb_freelist_save`), `cursor_put` (`mdb_cursor_put`,
+//!   `mdb_node_add`), `split` (`mdb_page_split`), `cursor_del`
+//!   (`mdb_cursor_del`, `mdb_rebalance`, `mdb_page_merge`,
+//!   `mdb_node_move`) and `commit` (`mdb_page_flush`,
+//!   `mdb_env_write_meta`).
 
+mod commit;
 pub mod cursor;
+mod cursor_del;
+mod cursor_put;
 pub mod dbi;
+pub(crate) mod dirty;
 pub mod env;
+mod freelist;
+pub(crate) mod page_ops;
 pub mod reader;
 pub mod ro_cursor;
+mod split;
 pub mod txn;
+pub mod txn_rw;
+pub(crate) mod wcursor;
 
 pub use crate::cmp::{CmpFn, Comparator};
 pub use crate::error::{Error, MdbError, Result};
@@ -48,6 +67,7 @@ pub use env::{Environment, EnvironmentBuilder};
 pub use reader::{format_reader_list, ReaderInfo};
 pub use ro_cursor::{CursorOp, Entry, RoCursor};
 pub use txn::{InactiveTxn, RoTxn, Transaction};
+pub use txn_rw::{CursorId, RwCursor, RwTxn};
 
 /// Statistics for a database (`MDB_stat`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
