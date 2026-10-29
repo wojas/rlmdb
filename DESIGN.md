@@ -176,10 +176,10 @@ rust/
 ### `lmdb` module map
 
 ```
-src/lib.rs          crate docs, lint settings, re-exports
-src/consts.rs       flag bits and error codes with the C values (MDB_*), as
-                    bitflags-style newtypes: EnvFlags, DbFlags, PutFlags, CopyFlags
-src/error.rs        Error (enum with C code mapping), Result<T>
+src/lib.rs          crate docs, lint settings, heed-compatible re-exports
+src/consts.rs       MDB_* flag bits, error codes and cursor op values (the C numbers)
+src/flags.rs        bitflags types: EnvironmentFlags, DatabaseFlags, WriteFlags
+src/error.rs        MdbError (C code mapping) and the heed-style Error, Result<T>
 src/format/         pure parsing/serialisation of on-disk structures over &[u8]
   mod.rs            PAGE_HDR_SIZE, NODE_SIZE, …; `layout` constants
   page.rs           PageRef/PageMut: header accessors, node index, leaf2 keys
@@ -193,93 +193,153 @@ src/os/             ALL unsafe lives here. mod.rs selects unix; unix.rs: Mmap,
                     file open/lock/pread/pwrite/writev/fsync (F_FULLFSYNC on
                     macOS), pid/tid, page size; shared_lock.rs: SharedMutex
                     (pthread on linux, named sem on macos) + reader table access
-src/env.rs          Env, EnvBuilder, open sequence, meta selection, mapsize
-src/reader.rs       reader table: slot acquire/release, oldest reader, reader_check, reader_list
-src/txn.rs          RoTxn, RwTxn, nested txns, dirty page store, spill, commit
-src/freelist.rs     page allocation and free DB maintenance (mdb_page_alloc, mdb_freelist_save)
-src/cursor.rs       Cursor core: search, next/prev, set, dup sub-cursor
-src/cursor_put.rs   put, node add/del, split (write side)
-src/cursor_del.rs   del, rebalance, merge, drop
-src/dbi.rs          Database handles, open/create/close, flags, stat
-src/copy.rs         env copy (plain and compacting)
+src/core/mod.rs     the byte-level API (see "Core layer")
+src/core/env.rs     Environment, EnvironmentBuilder, open sequence, meta selection, mapsize
+src/core/reader.rs  reader table: slot acquire/release, oldest reader, reader_check, reader_list
+src/core/txn.rs     RoTxn, RwTxn, nested txns, dirty page store, spill, commit
+src/core/freelist.rs page allocation and free DB maintenance (mdb_page_alloc, mdb_freelist_save)
+src/core/cursor.rs  cursor core: search, next/prev, set, dup sub-cursor
+src/core/cursor_put.rs  put, node add/del, split (write side)
+src/core/cursor_del.rs  del, rebalance, merge, drop
+src/core/dbi.rs     Dbi handles, open/create/close, flags, stat, comparators
+src/core/copy.rs    env copy (plain and compacting)
+src/env.rs, src/env_open_options.rs, src/txn.rs, src/database.rs,
+src/iterator/*.rs, src/iteration_method.rs, src/reserved_space.rs,
+src/traits.rs, src/types/*.rs      the heed-compatible layer over core
 ```
 
 Keep files under ~1500 lines; split further rather than growing a file.
 
-### Public Rust API sketch
+### Public Rust API: mirror `heed` 0.23.1
 
-This is the shape; refine names if a better one is obvious, but keep the
-semantics. Everything is `Send`; `Env` is also `Sync`.
+The public API **mirrors the `heed` crate, version 0.23.1** (Meilisearch's
+LMDB wrapper, the actively maintained Rust binding). Code written against
+`heed` should compile against this crate with at most an import change. The
+sources are in `~/.cargo/registry/src/*/heed-0.23.1/src/`,
+`heed-traits-0.20.0/src/lib.rs` and `heed-types-0.21.0/src/`; read them and
+copy names, signatures, generics, lifetimes and doc comments.
+
+The crate has two layers:
+
+* **`lmdb::core`** (byte-level, documented, public): `Environment`,
+  `EnvironmentBuilder`, `RoTxn`, `RwTxn`, `Dbi` (a `Copy` handle),
+  `RoCursor`, `RwCursor`, `CursorOp`, `Stat`, `Info`, `ReaderInfo`. This is
+  what the C API crate, the tools, the interop peer and the heed layer are
+  built on. Its shape is described in the next subsection.
+* **top level** (heed-compatible, typed): `Env<T = WithTls>`,
+  `EnvOpenOptions<T>`, `RoTxn<'e, T = AnyTls>`, `RwTxn<'p>`,
+  `Database<'t, KC, DC, C = DefaultComparator, CDUP = DefaultComparator>`,
+  `DatabaseOpenOptions`, `DatabaseStat`, `EnvInfo`, `ReservedSpace`,
+  `CompactionOption`, `FlagSetMode`, `EnvClosingEvent`, `env_closing_event`,
+  `lmdb_version`/`LmdbVersion`, `Unspecified`, the iterator families
+  (`RoIter/RwIter/RoRevIter/RwRevIter`, `RoRange/RwRange/RoRevRange/RwRevRange`,
+  `RoPrefix/RwPrefix/RoRevPrefix/RwRevPrefix`) with the `IterationMethod`
+  markers (`MoveThroughDuplicateValues`, `MoveBetweenKeys`,
+  `MoveOnCurrentKeyDuplicates`), the TLS markers (`WithTls`, `WithoutTls`,
+  `AnyTls`, `TlsUsage`), the traits (`BytesEncode`, `BytesDecode`,
+  `Comparator`, `LexicographicComparator`, `BoxedError`), the comparators
+  (`DefaultComparator`, `IntegerComparator`), flags (`EnvFlags`,
+  `DatabaseFlags`, `PutFlags` with the heed names), `Error { Io, Mdb(MdbError),
+  Encoding, Decoding, EnvAlreadyOpened }`, `MdbError` (the C codes), and the
+  `types` module (`Bytes`, `Str`, `Unit`, `DecodeIgnore`, `LazyDecode`/`Lazy`,
+  and the integer codecs `U8..U64, I8..I64` with `BE`/`LE` order markers;
+  re-export `byteorder` like heed does). Serde codecs (`SerdeBincode`,
+  `SerdeJson`, `SerdeRmp`) are feature-gated exactly as in heed and may be
+  left for later.
+
+Deliberate differences from heed:
+
+* No `EncryptedEnv` / `EncryptedDatabase` (those need LMDB 1.0 features).
+* No `Env::env_mut_ptr()`-style raw pointer accessors.
+* `WithTls` vs `WithoutTls`: our read transactions are never thread-bound,
+  so both behave like `WithoutTls`; keep the markers so signatures match and
+  so `RoTxn<'_, WithoutTls>: Send` holds.
+* `EnvAlreadyOpened`: heed keeps a process-global registry of opened paths
+  and refuses a second open of the same path (LMDB forbids opening one env
+  twice in one process because of the pid-based reader locks). Implement the
+  same registry; it is needed for correctness, not just API parity.
+* `Env::open_databases_and_commit` / `create_databases_and_commit` helpers
+  and the `OnCommit` machinery may be implemented as thin wrappers; they are
+  low priority.
+* Custom comparators (`C`, `CDUP` type params) are per-process callbacks in
+  C too (`mdb_set_compare`); a C peer must install the same comparator. The
+  core layer accepts `fn(&[u8], &[u8]) -> Ordering` comparators.
+
+### Core layer (`lmdb::core`)
+
+This is the C API in Rust clothing, byte slices in and out, with lifetimes
+doing the work that the C docs' "do not do X" paragraphs do.
 
 ```rust
-pub struct Env { .. }                       // open environment; share via Arc<Env>
-pub struct EnvBuilder { .. }
-impl Env {
-    pub fn builder() -> EnvBuilder;         // .map_size(), .max_readers(), .max_dbs(), .flags(EnvFlags), .mode(u32)
-    pub fn begin_ro(&self) -> Result<RoTxn<'_>>;
-    pub fn begin_rw(&self) -> Result<RwTxn<'_>>;
-    pub fn stat(&self) -> Result<Stat>;
-    pub fn info(&self) -> Result<EnvInfo>;
+pub struct Environment;             // Send + Sync; Drop closes; share via Arc
+pub struct EnvironmentBuilder;      // map_size, max_readers, max_dbs, flags(EnvironmentFlags), open(path), open_with_permissions(path, mode)
+impl Environment {
+    pub fn open_db(&self, name: Option<&str>) -> Result<Dbi>;                     // existing only
+    pub fn create_db(&self, name: Option<&str>, flags: DatabaseFlags) -> Result<Dbi>;
+    pub fn close_db(&self, db: Dbi);                                             // later use -> Err(BadDbi)
+    pub fn begin_ro_txn(&self) -> Result<RoTxn<'_>>;
+    pub fn begin_rw_txn(&self) -> Result<RwTxn<'_>>;
     pub fn sync(&self, force: bool) -> Result<()>;
-    pub fn flags(&self) -> EnvFlags;
-    pub fn set_flags(&self, flags: EnvFlags, on: bool) -> Result<()>;
-    pub fn path(&self) -> &Path;
+    pub fn stat(&self) -> Result<Stat>;  pub fn info(&self) -> Result<Info>;  pub fn freelist(&self) -> Result<usize>;
+    pub fn flags(&self) -> EnvironmentFlags;  pub fn set_flags(&self, flags: EnvironmentFlags, on: bool) -> Result<()>;
+    pub fn path(&self) -> &Path;  pub fn max_readers(&self) -> u32;  pub fn max_key_size(&self) -> usize;  // 511
     pub fn set_map_size(&self, size: usize) -> Result<()>;
-    pub fn max_readers(&self) -> u32;
-    pub fn max_key_size(&self) -> usize;    // 511
-    pub fn reader_list(&self) -> Result<Vec<ReaderInfo>>;
-    pub fn reader_check(&self) -> Result<usize>;
-    pub fn copy(&self, path: &Path, compact: bool) -> Result<()>;
-    pub fn copy_to_fd(&self, fd: BorrowedFd, compact: bool) -> Result<()>;
+    pub fn reader_list(&self) -> Result<Vec<ReaderInfo>>;  pub fn reader_check(&self) -> Result<usize>;
+    pub fn copy_to_path(&self, path: &Path, compact: bool) -> Result<()>;  pub fn copy_to_fd(&self, fd: BorrowedFd<'_>, compact: bool) -> Result<()>;
+    pub fn set_compare(&self, db: Dbi, cmp: Option<fn(&[u8], &[u8]) -> Ordering>) -> Result<()>;  pub fn set_dupsort(..) likewise
 }
-impl EnvBuilder { pub fn open(self, path: &Path) -> Result<Env>; }
-
-#[derive(Clone, Copy)] pub struct Database { .. }   // cheap handle (dbi + flags); valid for the Env's lifetime like C MDB_dbi
-pub struct DbOptions { pub flags: DbFlags, pub key_cmp: Option<Comparator>, pub dup_cmp: Option<Comparator> }
-
-pub struct RoTxn<'env> { .. }
-pub struct RwTxn<'env> { .. }   // RwTxn: Deref<Target = RoTxn>? No: use a shared trait so read code works on both.
-pub trait Transaction {
-    fn env(&self) -> &Env;
-    fn id(&self) -> u64;
-    fn open_db(&self, name: Option<&str>) -> Result<Database>;         // existing DB only (mdb_dbi_open without MDB_CREATE)
-    fn open_db_with(&self, name: Option<&str>, opts: DbOptions) -> Result<Database>;
-    fn get(&self, db: Database, key: &[u8]) -> Result<Option<&[u8]>>;
-    fn cursor(&self, db: Database) -> Result<Cursor<'_>>;
-    fn db_stat(&self, db: Database) -> Result<Stat>;
-    fn db_flags(&self, db: Database) -> Result<DbFlags>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)] pub struct Dbi(u32);
+pub trait Transaction {                      // implemented by RoTxn and RwTxn
+    fn env(&self) -> &Environment;  fn id(&self) -> u64;
+    fn open_db(&self, name: Option<&str>) -> Result<Dbi>;
+    fn get<'txn>(&'txn self, db: Dbi, key: &[u8]) -> Result<Option<&'txn [u8]>>;
+    fn cursor<'txn>(&'txn self, db: Dbi) -> Result<RoCursor<'txn>>;
+    fn db_flags(&self, db: Dbi) -> Result<DatabaseFlags>;  fn stat(&self, db: Dbi) -> Result<Stat>;
 }
-impl<'env> RoTxn<'env> {
-    pub fn reset(self) -> ResetTxn<'env>;   // mdb_txn_reset; ResetTxn::renew(self) -> Result<RoTxn>
-    pub fn abort(self);                     // also on Drop
+pub struct RoTxn<'env>;              // reset(self) -> InactiveTxn<'env>; InactiveTxn::renew(self) -> Result<RoTxn<'env>>; abort(self); Drop aborts; Send
+pub struct RwTxn<'env> {
+    pub fn create_db(&mut self, name: Option<&str>, flags: DatabaseFlags) -> Result<Dbi>;
+    pub fn put(&mut self, db: Dbi, key: &[u8], data: &[u8], flags: WriteFlags) -> Result<()>;
+    pub fn reserve<'txn>(&'txn mut self, db: Dbi, key: &[u8], len: usize, flags: WriteFlags) -> Result<&'txn mut [u8]>;
+    pub fn del(&mut self, db: Dbi, key: &[u8], data: Option<&[u8]>) -> Result<bool>;   // false = not found
+    pub fn cursor_mut<'txn>(&'txn mut self, db: Dbi) -> Result<RwCursor<'txn>>;
+    pub fn clear_db(&mut self, db: Dbi) -> Result<()>;  pub fn drop_db(&mut self, db: Dbi) -> Result<()>;
+    pub fn nested<'txn>(&'txn mut self) -> Result<RwTxn<'txn>>;
+    pub fn commit(self) -> Result<()>;  pub fn abort(self);   // Drop aborts
 }
-impl<'env> RwTxn<'env> {
-    pub fn create_db(&mut self, name: Option<&str>, flags: DbFlags) -> Result<Database>;
-    pub fn put(&mut self, db: Database, key: &[u8], data: &[u8], flags: PutFlags) -> Result<()>;
-    pub fn reserve(&mut self, db: Database, key: &[u8], len: usize, flags: PutFlags) -> Result<&mut [u8]>;
-    pub fn del(&mut self, db: Database, key: &[u8], data: Option<&[u8]>) -> Result<bool>;   // false = not found
-    pub fn cursor_mut(&mut self, db: Database) -> Result<CursorMut<'_>>;
-    pub fn drop_db(&mut self, db: Database) -> Result<()>;   // mdb_drop(del=1)
-    pub fn clear_db(&mut self, db: Database) -> Result<()>;  // mdb_drop(del=0)
-    pub fn nested(&mut self) -> Result<RwTxn<'_>>;           // child txn; parent unusable until child is committed/aborted (borrowck enforces)
-    pub fn commit(self) -> Result<()>;
-    pub fn abort(self);                                      // also on Drop
+pub enum CursorOp { First, FirstDup, GetBoth, GetBothRange, GetCurrent, GetMultiple, Last, LastDup, Next, NextDup, NextMultiple, NextNoDup, Prev, PrevDup, PrevNoDup, Set, SetKey, SetRange, PrevMultiple }   // <-> MDB_cursor_op values
+pub struct RoCursor<'txn> {          // get returns &'txn [u8]: pages of a read snapshot never move
+    pub fn get(&mut self, key: Option<&[u8]>, data: Option<&[u8]>, op: CursorOp) -> Result<Option<(&'txn [u8], &'txn [u8])>>;
+    pub fn first(&mut self) -> ..; next(); prev(); last(); set_range(key); get_both(key, data); count() -> Result<u64>; ...
 }
-
-pub struct Cursor<'txn> { .. }      // read-only cursor; Cursor::get(op) → Option<(&[u8], &[u8])>
-pub struct CursorMut<'txn> { .. }   // adds put/del/count; get* take &self, put/del take &mut self
-pub enum CursorOp { First, FirstDup, GetBoth, GetBothRange, GetCurrent, GetMultiple, Last, LastDup, Next, NextDup, NextMultiple, NextNoDup, Prev, PrevDup, PrevNoDup, Set, SetKey, SetRange, PrevMultiple }
-// Plus typed convenience methods: first(), last(), next(), prev(), set_range(key), get_both(key, data), …
+pub struct RwCursor<'txn> {          // get borrows &self: dirty pages may move on the next put/del
+    pub fn get<'c>(&'c mut self, key: Option<&[u8]>, data: Option<&[u8]>, op: CursorOp) -> Result<Option<(&'c [u8], &'c [u8])>>;
+    pub fn put(&mut self, key: &[u8], data: &[u8], flags: WriteFlags) -> Result<()>;
+    pub fn reserve<'c>(&'c mut self, key: &[u8], len: usize, flags: WriteFlags) -> Result<&'c mut [u8]>;
+    pub fn del(&mut self, flags: WriteFlags) -> Result<()>;  pub fn count(&self) -> Result<u64>;
+}
+pub struct Stat { page_size, depth, branch_pages, leaf_pages, overflow_pages, entries }
+pub struct Info { map_size, last_pgno, last_txnid, max_readers, num_readers }
 ```
 
-Footgun rules: `put`/`del` take `&mut self` so no `&[u8]` borrowed from the
-txn can be alive across a mutation; a `Database` handle is `Copy` and does not
-borrow anything (mirrors C; `Transaction::open_db` on a handle that has been
-dropped returns `Error::BadDbi`); nested txn borrows the parent mutably;
-`RoTxn` is not bound to a thread (we always behave like `MDB_NOTLS` internally,
-which is compatible with any C peer, because `MDB_NOTLS` is a per-process
-behaviour and the lock file does not record it); `Drop` aborts. No panics on
-corrupt input: a bad page/offset yields `Error::Corrupted` or `Error::PageNotFound`.
+Core flags: `EnvironmentFlags` (`NO_SUB_DIR, NO_SYNC, READ_ONLY, NO_META_SYNC,
+WRITE_MAP, MAP_ASYNC, NO_TLS, NO_LOCK, NO_READ_AHEAD, NO_MEM_INIT, FIXED_MAP,
+PREV_SNAPSHOT`), `DatabaseFlags` (`REVERSE_KEY, DUP_SORT, INTEGER_KEY,
+DUP_FIXED, INTEGER_DUP, REVERSE_DUP, CREATE`), `WriteFlags` (`NO_OVERWRITE,
+NO_DUP_DATA, CURRENT, RESERVE, APPEND, APPEND_DUP, MULTIPLE`), all with the C
+bit values; the heed layer re-exports them under heed's names (`EnvFlags`,
+`DatabaseFlags`, `PutFlags`). Unsupported env flags (`FIXED_MAP`,
+`WRITE_MAP`, `MAP_ASYNC`, `NO_MEM_INIT`) are accepted and ignored, or return
+`Incompatible`; document which per flag.
+
+Footgun rules: `put`/`del` take `&mut self` so no `&[u8]` borrowed from a
+write txn can be alive across a mutation; a `Dbi` is `Copy` and borrows
+nothing (mirrors C; using a dropped/closed handle returns `BadDbi`); a nested
+txn borrows the parent mutably; read transactions are not bound to a thread
+(we always behave like `MDB_NOTLS` internally, which is compatible with any C
+peer because `MDB_NOTLS` is a per-process behaviour the lock file does not
+record); `Drop` aborts. No panics on corrupt input: a bad page/offset yields
+`Corrupted` or `PageNotFound`, never an index-out-of-bounds panic.
 
 ### Error codes
 
@@ -290,8 +350,9 @@ corrupt input: a bad page/offset yields `Error::Corrupted` or `Error::PageNotFou
 `TxnFull (-30788)`, `CursorFull (-30787)`, `PageFull (-30786)`,
 `MapResized (-30785)`, `Incompatible (-30784)`, `BadRslot (-30783)`,
 `BadTxn (-30782)`, `BadValSize (-30781)`, `BadDbi (-30780)`, `Problem (-30779)`,
-plus `Os(i32)` for errno. `Error::code()` returns the C int; `Error::from_code`.
-`mdb_strerror` strings must match `lmdb.h` / `mdb_strerror`.
+plus `Other(c_int)` for errno. This is `MdbError` in the heed layer and
+`core::Error` in the core layer (one type, re-exported). `to_err_code()`
+returns the C int; `from_err_code`; `Display` strings match `mdb_strerror`.
 
 ### Concurrency model and memory safety
 
@@ -339,8 +400,9 @@ plus `Os(i32)` for errno. `Error::code()` returns the C int; `Error::from_code`.
 
 **Stage 1 (parallel):**
 
-* A. `lmdb` foundation + read path: workspace member, consts, errors, format,
-  idl, cmp, os (mmap, locks, shared mutex, reader table), env open (including
+* A. `lmdb` foundation + `core` read path: workspace member, consts, flags,
+  errors, format, idl, cmp, os (mmap, locks, shared mutex, reader table),
+  env open (including
   creating a fresh environment: `mdb_env_init_meta`, line 3882), read txns,
   `open_db` for existing DBs, read cursors (all `CursorOp`s, DUPSORT,
   DUPFIXED/LEAF2, overflow pages), stats/info, reader_list/reader_check.
@@ -359,6 +421,7 @@ dump.
 
 **Stage 3:** C2 write path part 2 (del, rebalance, merge, drop, nested txns,
 spill, copy/compact). D2 rest of the C API + run `mtest*.c` against it. B3
-bidirectional and concurrent interop stress. T `lmdb-tools`.
+bidirectional and concurrent interop stress. T `lmdb-tools`. H the
+heed-compatible layer over `core`.
 
 **Stage 4:** review, benchmarks vs C, docs.
