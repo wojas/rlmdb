@@ -27,7 +27,8 @@ pub const EXIT_MISMATCH: u8 = 1;
 pub const EXIT_USAGE: u8 = 2;
 /// An LMDB call failed unexpectedly.
 pub const EXIT_LMDB: u8 = 3;
-/// The command exists in the protocol but rpeer does not implement it yet.
+/// The command exists in the protocol but rpeer does not implement it yet
+/// (it needs a part of `lmdb_core` that does not exist yet).
 pub const EXIT_NOT_IMPLEMENTED: u8 = 4;
 
 /// Why a command stopped early: the process exit status plus a message for
@@ -72,11 +73,14 @@ impl Fail {
         )
     }
 
-    /// [`EXIT_NOT_IMPLEMENTED`] for a write-side command (stage 3).
+    /// [`EXIT_NOT_IMPLEMENTED`]: `command` needs a part of `lmdb_core` that
+    /// does not exist yet. (Every command is implemented now; this stays
+    /// for protocol additions that run ahead of the library.)
+    #[allow(dead_code)]
     pub fn not_implemented(command: &str) -> Fail {
         Fail::new(
             EXIT_NOT_IMPLEMENTED,
-            format!("{command}: not implemented in rpeer yet (needs the write path, stage 3)"),
+            format!("NOT-IMPLEMENTED {command}: not implemented in rpeer yet"),
         )
     }
 
@@ -180,6 +184,8 @@ pub struct Opts {
     pub until_stdin: bool,
     /// `--check` (nested-test).
     pub check: bool,
+    /// `--delete` (drop).
+    pub delete: bool,
     /// `--keys N` (writer-loop; default 500).
     pub keys: u32,
     /// `--max-commits N` (writer-loop; 0 = no limit).
@@ -241,6 +247,7 @@ impl Opts {
                 "--all" => o.all = true,
                 "--until-stdin" => o.until_stdin = true,
                 "--check" => o.check = true,
+                "--delete" => o.delete = true,
                 _ => return Err(Fail::usage(format!("unknown option {a}"))),
             }
         }

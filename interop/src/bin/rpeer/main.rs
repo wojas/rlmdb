@@ -12,19 +12,19 @@
 //! |---|---|---|
 //! | `args` | `cpeer.c` | option parsing, exit codes, env open |
 //! | `dataset` | `dataset.c` | the deterministic data set |
-//! | `data` | `cpeer_data.c` | `verify`, `dump` (`fill`, `delete`: stage 3) |
-//! | `loops` | `cpeer_loops.c` | `hold-reader`, `hold-env`, `reader-loop` (`writer-loop`: stage 3) |
-//! | `misc` | `cpeer_misc.c` | `stat`, `readers`, `reader-check`, `gen`, `nested-test --check` (`create`, `copy`: stage 3) |
+//! | `data` | `cpeer_data.c` | `fill`, `verify`, `delete`, `drop`, `dump` |
+//! | `loops` | `cpeer_loops.c` | `hold-reader`, `hold-env`, `hold-writer`, `writer-loop`, `reader-loop` |
+//! | `misc` | `cpeer_misc.c` | `create`, `stat`, `readers`, `reader-check`, `copy`, `nested-test`, `gen` |
 //! | `pagewalk` | `cpeer_pagewalk.c` | `check-freelist` |
 //!
 //! It uses only the public API of the `lmdb` crate: `lmdb_core::core` for
 //! everything except `check-freelist`, which decodes the data file itself
 //! with `lmdb_core::format`.
 //!
-//! Commands that need the write path (stage 3) parse their arguments and
-//! then exit with status 4 ("not implemented in rpeer yet"); `rpeer
-//! commands` lists what is implemented, which is how the harness decides to
-//! skip or substitute (`interop::Peer::supports`).
+//! Commands that need a part of `lmdb_core` that does not exist yet parse
+//! their arguments and then exit with status 4 ("not implemented in rpeer
+//! yet"); `rpeer commands` lists what is implemented, which is how the
+//! harness decides to skip or substitute (`interop::Peer::supports`).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::all)]
@@ -48,7 +48,8 @@ struct Command {
     min_pos: usize,
     max_pos: usize,
     usage: &'static str,
-    /// `false` for the write-side commands of stage 3 (exit status 4).
+    /// `false` for commands that need a part of `lmdb_core` that does not
+    /// exist yet (exit status 4).
     implemented: bool,
 }
 
@@ -59,7 +60,7 @@ const COMMANDS: &[Command] = &[
         min_pos: 3,
         max_pos: 3,
         usage: "create <env> <mapsize> <maxdbs>",
-        implemented: false,
+        implemented: true,
     },
     Command {
         name: "fill",
@@ -67,7 +68,7 @@ const COMMANDS: &[Command] = &[
         min_pos: 4,
         max_pos: 4,
         usage: "fill <env> <db|-> <count> <seed> [data options]",
-        implemented: false,
+        implemented: true,
     },
     Command {
         name: "verify",
@@ -83,7 +84,15 @@ const COMMANDS: &[Command] = &[
         min_pos: 4,
         max_pos: 4,
         usage: "delete <env> <db|-> <count> <seed> [--every N] [data options]",
-        implemented: false,
+        implemented: true,
+    },
+    Command {
+        name: "drop",
+        run: data::cmd_drop,
+        min_pos: 2,
+        max_pos: 2,
+        usage: "drop <env> <db|-> [--delete]",
+        implemented: true,
     },
     Command {
         name: "dump",
@@ -134,12 +143,20 @@ const COMMANDS: &[Command] = &[
         implemented: true,
     },
     Command {
+        name: "hold-writer",
+        run: loops::cmd_hold_writer,
+        min_pos: 2,
+        max_pos: 2,
+        usage: "hold-writer <env> <seconds> [--until-stdin]",
+        implemented: true,
+    },
+    Command {
         name: "writer-loop",
         run: loops::cmd_writer_loop,
         min_pos: 4,
         max_pos: 4,
         usage: "writer-loop <env> <db|-> <seconds> <seed> [--keys N] [--max-commits N]",
-        implemented: false,
+        implemented: true,
     },
     Command {
         name: "reader-loop",
@@ -158,14 +175,12 @@ const COMMANDS: &[Command] = &[
         implemented: true,
     },
     Command {
-        // Only `--check` is implemented; listed as not implemented because
-        // the write mode is what `Peer::supports("nested-test")` asks about.
         name: "nested-test",
         run: misc::cmd_nested_test,
         min_pos: 1,
         max_pos: 1,
         usage: "nested-test <env> [--check]",
-        implemented: false,
+        implemented: true,
     },
     Command {
         name: "copy",
@@ -173,7 +188,7 @@ const COMMANDS: &[Command] = &[
         min_pos: 2,
         max_pos: 2,
         usage: "copy <env> <dest> [--compact]",
-        implemented: false,
+        implemented: true,
     },
     Command {
         name: "gen",
@@ -212,7 +227,9 @@ fn usage() -> Fail {
     s.push_str(
         "env options: --nosubdir --notls --nosync --nometasync --mapsize N --maxdbs N --maxreaders N\n\
          data options: --dupsort --dupfixed --intkey --intdup --revkey --revdup --valsize N --big N \
-         --dups N --deleted-every N --per-txn N --append --reserve",
+         --dups N --deleted-every N --per-txn N --append --reserve\n\
+         command options: --every N --keys N --max-commits N --compact --all --until-stdin \
+         --check --delete",
     );
     Fail::usage(s)
 }

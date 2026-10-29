@@ -1,28 +1,63 @@
-//! `stat`, `readers`, `reader-check`, `gen` and `nested-test --check`;
-//! `create` and `copy` are stage 3 (the counterpart of `c/cpeer_misc.c`).
+//! `create`, `stat`, `readers`, `reader-check`, `copy`, `nested-test` and
+//! `gen` (the counterpart of `c/cpeer_misc.c`).
 
 use std::io::{self, BufWriter, Write};
 
-use lmdb_core::{Dbi, RoTxn, Transaction};
+use lmdb_core::{DatabaseFlags, Dbi, Environment, MdbError, RoTxn, RwTxn, Transaction, WriteFlags};
 
-use crate::args::{parse_u32, parse_u32_opt, parse_u64, show, Check, CmdResult, Fail, Opts};
-use crate::data::subdb_name;
+use crate::args::{
+    parse_u32, parse_u32_opt, parse_u64, show, Check, CmdResult, Fail, Opts, EXIT_LMDB,
+};
+use crate::data::subdb;
 use crate::dataset::splitmix_fill;
 
-// ---- create / copy (stage 3) ---------------------------------------------------------
+// ---- create ----------------------------------------------------------------------------
 
-/// `create <env> <mapsize> <maxdbs>`: creating an environment writes its
-/// meta pages; the write side of rpeer arrives in stage 3.
+/// `create <env> <mapsize> <maxdbs>`: create (or open) the environment with
+/// that map size and DB limit and print `created psize=.. mapsize=..
+/// maxkeysize=.. last_txnid=..`.
 pub fn cmd_create(o: &mut Opts) -> CmdResult {
-    parse_u64(&o.pos[1], "mapsize")?;
-    parse_u32(&o.pos[2], "maxdbs")?;
-    Err(Fail::not_implemented("create"))
+    o.mapsize = parse_u64(&o.pos[1], "mapsize")?;
+    o.maxdbs = parse_u32(&o.pos[2], "maxdbs")?;
+    let env = o.open_env(false)?;
+    let st = env.stat().check("mdb_env_stat")?;
+    let info = env.info().check("mdb_env_info")?;
+    println!(
+        "created psize={} mapsize={} maxkeysize={} last_txnid={}",
+        st.page_size,
+        info.map_size,
+        env.max_key_size(),
+        info.last_txnid
+    );
+    Ok(())
 }
 
-/// `copy <env> <dest> [--compact]`: needs `Environment::copy_to_path`
-/// (stage 3).
-pub fn cmd_copy(_o: &mut Opts) -> CmdResult {
-    Err(Fail::not_implemented("copy"))
+// ---- copy ------------------------------------------------------------------------------
+
+/// `copy <env> <dest> [--compact]`: `mdb_env_copy2`, with `MDB_CP_COMPACT`
+/// for `--compact`. `<dest>` is a directory, created if missing (with
+/// `--nosubdir` the new data file); the data file must not exist.
+pub fn cmd_copy(o: &mut Opts) -> CmdResult {
+    let dest = o.pos[1].clone();
+    // The destination directory must exist (as for mdb_copy); with
+    // --nosubdir `dest` is the new data file.
+    if !o.nosubdir {
+        use std::os::unix::fs::DirBuilderExt;
+        match std::fs::DirBuilder::new().mode(0o775).create(&dest) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(Fail::new(EXIT_LMDB, format!("mkdir {dest}: {e}"))),
+        }
+    }
+    let env = o.open_env(true)?;
+    copy_env(&env, &dest, o.compact)?;
+    println!("copied compact={}", u8::from(o.compact));
+    Ok(())
+}
+
+/// `mdb_env_copy2(env, dest, compact ? MDB_CP_COMPACT : 0)`.
+fn copy_env(env: &Environment, dest: &str, compact: bool) -> CmdResult {
+    env.copy_to_path(dest, compact).check("mdb_env_copy2")
 }
 
 // ---- stat ----------------------------------------------------------------------------
@@ -30,9 +65,12 @@ pub fn cmd_copy(_o: &mut Opts) -> CmdResult {
 /// `print_stat_line`: `db=<label> [flags=0x..] depth=.. branch_pages=..
 /// leaf_pages=.. overflow_pages=.. entries=..`. `mdb_dbi_flags` rejects the
 /// free DB, so its line has no flags.
-fn print_stat_line(out: &mut impl Write, txn: &RoTxn<'_>, dbi: Dbi, label: &str) -> CmdResult {
+fn print_stat_line(out: &mut impl Write, txn: &RoTxn<'_>, dbi: Dbi, label: &[u8]) -> CmdResult {
     let st = txn.stat(dbi).check("mdb_stat")?;
-    write!(out, "db={label} ")?;
+    // The label is a DB name: bytes, printed as they are (C's "%s").
+    out.write_all(b"db=")?;
+    out.write_all(label)?;
+    out.write_all(b" ")?;
     if dbi != Dbi::FREE {
         let flags = txn.db_flags(dbi).check("mdb_dbi_flags")?.bits();
         write!(out, "flags={flags:#x} ")?;
@@ -75,16 +113,15 @@ pub fn cmd_stat(o: &mut Opts) -> CmdResult {
         free_pages += u64::from_ne_bytes(count.try_into().expect("8 bytes"));
     }
     writeln!(out, "free_pages={free_pages}")?;
-    print_stat_line(&mut out, &txn, Dbi::FREE, "@free")?;
+    print_stat_line(&mut out, &txn, Dbi::FREE, b"@free")?;
 
     // Main DB, then every named DB it records.
     let main = txn.open_db(None).check("mdb_dbi_open")?;
-    print_stat_line(&mut out, &txn, main, "-")?;
+    print_stat_line(&mut out, &txn, main, b"-")?;
     let mut cur = txn.cursor(main).check("mdb_cursor_open")?;
     while let Some((key, _)) = cur.next_nodup().check("mdb_cursor_get(main)")? {
-        if let Some(name) = subdb_name(&txn, key) {
-            let dbi = txn.open_db(Some(name)).check("mdb_dbi_open")?;
-            print_stat_line(&mut out, &txn, dbi, name)?;
+        if let Some(dbi) = subdb(&txn, key) {
+            print_stat_line(&mut out, &txn, dbi, key)?;
         }
     }
     out.flush()?;
@@ -165,7 +202,7 @@ fn make_big() -> Vec<u8> {
 }
 
 /// `expect`: key `k` holds `v`, or is absent if `v` is `None`.
-fn expect(where_: &str, txn: &RoTxn<'_>, dbi: Dbi, k: &str, v: Option<&[u8]>) -> CmdResult {
+fn expect(where_: &str, txn: &impl Transaction, dbi: Dbi, k: &str, v: Option<&[u8]>) -> CmdResult {
     let got = txn.get(dbi, k.as_bytes());
     match (v, got) {
         (None, Ok(None)) => Ok(()),
@@ -191,7 +228,7 @@ fn expect(where_: &str, txn: &RoTxn<'_>, dbi: Dbi, k: &str, v: Option<&[u8]>) ->
 }
 
 /// `expect_no_db`: DB `name` does not exist (checked in a fresh read txn).
-fn expect_no_db(env: &lmdb_core::Environment, name: &str) -> CmdResult {
+fn expect_no_db(env: &Environment, name: &str) -> CmdResult {
     let txn = env.begin_ro_txn().check("mdb_txn_begin")?;
     match txn.open_db(Some(name)) {
         Err(e) if e.not_found() => Ok(()),
@@ -210,7 +247,7 @@ fn expect_no_db(env: &lmdb_core::Environment, name: &str) -> CmdResult {
 /// `nested_check`: the final state of nested-test (README.md): DB `nested`
 /// is `k1=v1 k2=v2 k3=v3 k5=<big>` and `n%05u = val%05u` for odd `u`, in
 /// that cursor order; DBs `nested2` and `nested3` do not exist.
-fn nested_check(env: &lmdb_core::Environment) -> CmdResult {
+fn nested_check(env: &Environment) -> CmdResult {
     let small = [("k1", "v1"), ("k2", "v2"), ("k3", "v3")];
     let big = make_big();
     let txn = env.begin_ro_txn().check("mdb_txn_begin")?;
@@ -261,14 +298,170 @@ fn nested_check(env: &lmdb_core::Environment) -> CmdResult {
     expect_no_db(env, "nested3")
 }
 
-/// `nested-test <env> [--check]`: only `--check` (read-only) is
-/// implemented; the write mode needs nested write transactions (stage 3).
-pub fn cmd_nested_test(o: &mut Opts) -> CmdResult {
-    if !o.check {
-        return Err(Fail::not_implemented("nested-test (write mode)"));
+/// `expect_entries`: `dbi` holds `n` items.
+fn expect_entries(where_: &str, txn: &impl Transaction, dbi: Dbi, n: usize) -> CmdResult {
+    let entries = txn.stat(dbi).check("mdb_stat")?.entries;
+    if entries != n {
+        return Err(Fail::mismatch(format!(
+            "nested-test {where_}: {entries} entries, expected {n}"
+        )));
     }
-    let env = o.open_env(true)?;
+    Ok(())
+}
+
+/// `put_s`: store `v` under `k`.
+fn put_s(txn: &mut RwTxn<'_>, dbi: Dbi, k: &str, v: &[u8]) -> CmdResult {
+    txn.put(dbi, k.as_bytes(), v, WriteFlags::empty())
+        .check("mdb_put")
+}
+
+/// `del_s`: delete `k`, which must exist.
+fn del_s(txn: &mut RwTxn<'_>, dbi: Dbi, k: &str) -> CmdResult {
+    let what = format!("mdb_del({k})");
+    if txn.del(dbi, k.as_bytes(), None).check(&what)? {
+        Ok(())
+    } else {
+        Err(Fail::lmdb(&what, &MdbError::NotFound.into()))
+    }
+}
+
+/// `nested_write`: the write mode of nested-test, step by step as in C
+/// (README.md); every step checks its intermediate states.
+fn nested_write(env: &Environment) -> CmdResult {
+    let big = make_big();
+    let begin = || env.begin_rw_txn().check("mdb_txn_begin");
+
+    // 1. A committed child is visible to the parent and is persisted.
+    let mut t = begin()?;
+    let dbi = t
+        .create_db(Some("nested"), DatabaseFlags::CREATE)
+        .check("mdb_dbi_open(nested)")?;
+    put_s(&mut t, dbi, "k1", b"v1")?;
+    let mut c = t.begin_nested_txn().check("mdb_txn_begin(child)")?;
+    expect("1/child", &c, dbi, "k1", Some(b"v1"))?;
+    put_s(&mut c, dbi, "k2", b"v2")?;
+    c.commit().check("mdb_txn_commit(child)")?;
+    expect("1/parent", &t, dbi, "k2", Some(b"v2"))?;
+    t.commit().check("mdb_txn_commit")?;
+
+    // 2. An aborted child changes nothing, including overwrites.
+    let mut t = begin()?;
+    put_s(&mut t, dbi, "k3", b"v3")?;
+    let mut c = t.begin_nested_txn().check("mdb_txn_begin(child)")?;
+    put_s(&mut c, dbi, "k4", b"v4")?;
+    put_s(&mut c, dbi, "k1", b"v1b")?;
+    expect("2/child", &c, dbi, "k3", Some(b"v3"))?;
+    c.abort();
+    expect("2/parent", &t, dbi, "k4", None)?;
+    expect("2/parent", &t, dbi, "k1", Some(b"v1"))?;
+    t.commit().check("mdb_txn_commit")?;
+
+    // 3. Overflow pages, and a committed grandchild inside an aborted child.
+    let mut t = begin()?;
+    let mut c = t.begin_nested_txn().check("mdb_txn_begin(child)")?;
+    put_s(&mut c, dbi, "k5", &big)?;
+    c.commit().check("mdb_txn_commit(child)")?;
+    expect("3/parent", &t, dbi, "k5", Some(&big))?;
+    let mut c = t.begin_nested_txn().check("mdb_txn_begin(child)")?;
+    del_s(&mut c, dbi, "k5")?;
+    put_s(&mut c, dbi, "k6", b"v6")?;
+    let mut g = c.begin_nested_txn().check("mdb_txn_begin(grandchild)")?;
+    put_s(&mut g, dbi, "k7", b"v7")?;
+    del_s(&mut g, dbi, "k2")?;
+    expect("3/grandchild", &g, dbi, "k5", None)?;
+    g.commit().check("mdb_txn_commit(grandchild)")?;
+    expect("3/child", &c, dbi, "k7", Some(b"v7"))?;
+    expect("3/child", &c, dbi, "k2", None)?;
+    c.abort();
+    expect("3/parent", &t, dbi, "k5", Some(&big))?;
+    expect("3/parent", &t, dbi, "k6", None)?;
+    expect("3/parent", &t, dbi, "k7", None)?;
+    expect("3/parent", &t, dbi, "k2", Some(b"v2"))?;
+    t.commit().check("mdb_txn_commit")?;
+
+    // 4. A DB created in a committed child of an aborted parent is gone.
+    let mut t = begin()?;
+    let mut c = t.begin_nested_txn().check("mdb_txn_begin(child)")?;
+    let d2 = c
+        .create_db(Some("nested2"), DatabaseFlags::CREATE)
+        .check("mdb_dbi_open(nested2)")?;
+    put_s(&mut c, d2, "x", b"1")?;
+    c.commit().check("mdb_txn_commit(child)")?;
+    expect("4/parent", &t, d2, "x", Some(b"1"))?;
+    t.abort();
+    expect_no_db(env, "nested2")?;
+
+    // 5. Page splits: an aborted child with many keys leaves no trace; a
+    //    committed child whose committed grandchild deletes half of them
+    //    leaves the other half.
+    let mut t = begin()?;
+    let mut c = t.begin_nested_txn().check("mdb_txn_begin(child)")?;
+    for u in 0..NESTED_N {
+        put_s(
+            &mut c,
+            dbi,
+            &format!("n{u:05}"),
+            format!("val{u:05}").as_bytes(),
+        )?;
+    }
+    c.abort();
+    expect("5/parent", &t, dbi, "n00000", None)?;
+    let mut c = t.begin_nested_txn().check("mdb_txn_begin(child)")?;
+    for u in 0..NESTED_N {
+        put_s(
+            &mut c,
+            dbi,
+            &format!("n{u:05}"),
+            format!("val{u:05}").as_bytes(),
+        )?;
+    }
+    let mut g = c.begin_nested_txn().check("mdb_txn_begin(grandchild)")?;
+    for u in (0..NESTED_N).step_by(2) {
+        del_s(&mut g, dbi, &format!("n{u:05}"))?;
+    }
+    g.commit().check("mdb_txn_commit(grandchild)")?;
+    c.commit().check("mdb_txn_commit(child)")?;
+    expect_entries("5/parent", &t, dbi, 4 + (NESTED_N / 2) as usize)?;
+    t.commit().check("mdb_txn_commit")?;
+
+    // 6. mdb_drop in children: emptying in an aborted child, deleting in a
+    //    committed one.
+    nested_drop(env)
+}
+
+/// Step 6 of `nested_write`: `mdb_drop` in children: emptying in an
+/// aborted child, deleting in a committed one.
+fn nested_drop(env: &Environment) -> CmdResult {
+    let mut t = env.begin_rw_txn().check("mdb_txn_begin")?;
+    let d3 = t
+        .create_db(Some("nested3"), DatabaseFlags::CREATE)
+        .check("mdb_dbi_open(nested3)")?;
+    for u in 0..10 {
+        put_s(&mut t, d3, &format!("z{u}"), b"z")?;
+    }
+    t.commit().check("mdb_txn_commit")?;
+    let mut t = env.begin_rw_txn().check("mdb_txn_begin")?;
+    let mut c = t.begin_nested_txn().check("mdb_txn_begin(child)")?;
+    c.clear_db(d3).check("mdb_drop(0)")?;
+    expect_entries("6/child", &c, d3, 0)?;
+    c.abort();
+    expect_entries("6/parent", &t, d3, 10)?;
+    let mut c = t.begin_nested_txn().check("mdb_txn_begin(child)")?;
+    c.drop_db(d3).check("mdb_drop(1)")?;
+    c.commit().check("mdb_txn_commit(child)")?;
+    t.commit().check("mdb_txn_commit")?;
+    expect_no_db(env, "nested3")
+}
+
+/// `nested-test <env> [--check]`: nested write transactions (the write
+/// mode runs `nested_write` first), then the final state is checked; with
+/// `--check` read-only.
+pub fn cmd_nested_test(o: &mut Opts) -> CmdResult {
+    let env = o.open_env(o.check)?;
+    if !o.check {
+        nested_write(&env)?;
+    }
     nested_check(&env)?;
-    println!("nested ok mode=check");
+    println!("nested ok mode={}", if o.check { "check" } else { "write" });
     Ok(())
 }

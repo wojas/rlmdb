@@ -6,8 +6,8 @@ use std::fmt;
 /// or a check failed. The message includes the command line and the peer's
 /// output where that helps.
 ///
-/// A peer that exits with status 4 does not implement the command yet
-/// (`rpeer` before stage 3); such errors are marked
+/// A peer that exits with status 4 does not implement the command yet (or
+/// an LMDB call of `COnRust` failed with `ENOSYS`); such errors are marked
 /// [`is_not_implemented`](Self::is_not_implemented) so that
 /// [`scenario_tests!`](crate::scenario_tests) can report the scenario as
 /// skipped instead of failed.

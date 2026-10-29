@@ -18,8 +18,12 @@ use crate::{bins, Error, Result, TestEnv};
 pub enum Peer {
     /// `cpeer`: C, linked against `liblmdb` built from `libraries/liblmdb`.
     C,
-    /// `rpeer`: Rust, built on the `lmdb` crate (`src/bin/rpeer`).
+    /// `rpeer`: Rust, built on the `lmdb-core` crate (`src/bin/rpeer`).
     Rust,
+    /// `cpeer_capi`: the same C program as [`Peer::C`], linked against the
+    /// Rust `liblmdb.a` of `lmdb-capi` instead of the C library (see
+    /// [`bins::cpeer_capi`]).
+    COnRust,
 }
 
 impl fmt::Display for Peer {
@@ -27,7 +31,28 @@ impl fmt::Display for Peer {
         f.write_str(match self {
             Peer::C => "C",
             Peer::Rust => "Rust",
+            Peer::COnRust => "COnRust",
         })
+    }
+}
+
+/// Report something a test did not do, or only partly did, on the test's
+/// real stderr (libtest captures `print!`/`eprint!`, not direct writes), so
+/// that it shows up in a normal `cargo test` run: `[interop] SKIPPED ...`.
+pub fn skipped(msg: impl fmt::Display) {
+    let _ = writeln!(std::io::stderr().lock(), "[interop] SKIPPED {msg}");
+}
+
+/// A peer that completes a command with parts left out says so on stderr
+/// with a `NOT-IMPLEMENTED` line (e.g. rpeer's `nested-test` while
+/// `lmdb-core` had no `mdb_drop`); pass those on as SKIPPED notes. (A
+/// command that fails as not implemented is reported where it fails.)
+fn report_partial(out: &Output) {
+    if !out.success() {
+        return;
+    }
+    for line in out.stderr.lines().filter(|l| l.contains("NOT-IMPLEMENTED")) {
+        skipped(format_args!("partly: `{}`: {line}", out.label));
     }
 }
 
@@ -74,8 +99,12 @@ fn rpeer_path() -> Result<PathBuf> {
 }
 
 /// Exit status of a peer that does not implement a command (yet): `rpeer`
-/// before stage 3 for the write-side commands.
+/// for a command that needs a part of `lmdb-core` that does not exist yet.
 pub const EXIT_NOT_IMPLEMENTED: i32 = 4;
+
+/// `strerror(ENOSYS)` on macOS and glibc: what `cpeer` prints when a call
+/// into a not yet implemented part of the Rust C API (`lmdb-capi`) fails.
+const ENOSYS_TEXT: &str = "Function not implemented";
 
 /// The answer of `<peer> commands`: `(command, implemented)` pairs.
 type CommandTable = Option<Vec<(String, bool)>>;
@@ -105,8 +134,8 @@ pub(crate) fn default_timeout() -> Duration {
 }
 
 impl Peer {
-    /// Both peers.
-    pub const ALL: [Peer; 2] = [Peer::C, Peer::Rust];
+    /// All three peers.
+    pub const ALL: [Peer; 3] = [Peer::C, Peer::Rust, Peer::COnRust];
 
     /// Does this peer implement `command`? Asks the peer once per process
     /// (`<peer> commands`) and caches the answer.
@@ -117,9 +146,11 @@ impl Peer {
     pub fn supports(&self, command: &str) -> bool {
         static C: OnceLock<CommandTable> = OnceLock::new();
         static RUST: OnceLock<CommandTable> = OnceLock::new();
+        static CONRUST: OnceLock<CommandTable> = OnceLock::new();
         let cell = match self {
             Peer::C => &C,
             Peer::Rust => &RUST,
+            Peer::COnRust => &CONRUST,
         };
         match cell.get_or_init(|| query_commands(*self)) {
             None => true,
@@ -132,7 +163,14 @@ impl Peer {
         match self {
             Peer::C => Ok(bins::cpeer().to_path_buf()),
             Peer::Rust => rpeer_path(),
+            Peer::COnRust => Ok(bins::cpeer_capi()?.to_path_buf()),
         }
+    }
+
+    /// Is this peer built on the Rust library (`rpeer`, or `cpeer` on
+    /// `lmdb-capi`)?
+    pub fn is_rust(&self) -> bool {
+        *self != Peer::C
     }
 
     /// A command without an environment argument (e.g. `gen`).
@@ -219,7 +257,9 @@ impl PeerCmd {
     /// Run to completion, whatever the exit status.
     pub fn output(self) -> Result<Output> {
         let label = self.label();
-        run_command(self.command()?, label, None, self.timeout)
+        let out = run_command(self.command()?, label, None, self.timeout)?;
+        report_partial(&out);
+        Ok(out)
     }
 
     /// Start the peer in the background (for `hold-reader`, `writer-loop`,
@@ -257,14 +297,21 @@ impl Output {
     }
 
     /// `Ok(self)` if the process succeeded, else an error describing it.
-    /// Exit status 4 ([`EXIT_NOT_IMPLEMENTED`]) gives an error that
+    /// Exit status 4 ([`EXIT_NOT_IMPLEMENTED`]), and an LMDB call failing
+    /// with `ENOSYS` (a part of the Rust C API that is not implemented
+    /// yet, seen through [`Peer::COnRust`]), give an error that
     /// [`is_not_implemented`](Error::is_not_implemented).
     pub fn ok(self) -> Result<Self> {
         if self.success() {
             Ok(self)
         } else if self.code() == Some(EXIT_NOT_IMPLEMENTED) {
             Err(Error::not_implemented(format!(
-                "command not implemented by the peer: {self}"
+                "NOT-IMPLEMENTED command not implemented by the peer: {self}"
+            )))
+        } else if self.code() == Some(3) && self.stderr.contains(ENOSYS_TEXT) {
+            Err(Error::not_implemented(format!(
+                "NOT-IMPLEMENTED an LMDB call returned ENOSYS (not implemented in lmdb-capi \
+                 yet): {self}"
             )))
         } else {
             Err(Error::new(format!("command failed: {self}")))
@@ -491,7 +538,9 @@ impl PeerProcess {
     /// command's timeout) and return its output, whatever the exit status.
     pub fn finish(mut self) -> Result<Output> {
         let timeout = self.timeout;
-        self.finish_inner(timeout)
+        let out = self.finish_inner(timeout)?;
+        report_partial(&out);
+        Ok(out)
     }
 
     fn finish_inner(&mut self, timeout: Duration) -> Result<Output> {

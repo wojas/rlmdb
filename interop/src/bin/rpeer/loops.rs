@@ -3,10 +3,11 @@
 //!
 //! * `hold-reader` pins a snapshot (a read transaction) for a while: MVCC.
 //! * `hold-env` keeps the environment open without a read transaction.
+//! * `hold-writer` holds the writer lock: an open write transaction.
 //! * `reader-loop` repeatedly opens read transactions and checks invariants
 //!   that every committed state of `writer-loop` satisfies.
-//! * `writer-loop` commits many small random write transactions; it needs
-//!   the write path (stage 3).
+//! * `writer-loop` commits many small random write transactions, with
+//!   nested transactions and aborts mixed in.
 //!
 //! writer-loop data (README.md), in DB `<db>` (or the main DB):
 //!
@@ -24,14 +25,16 @@ use std::io::BufRead;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use lmdb_core::{CursorOp, Dbi, Environment, RoTxn, Transaction};
+use lmdb_core::{
+    CursorOp, DatabaseFlags, Dbi, Environment, MdbError, RoTxn, RwTxn, Transaction, WriteFlags,
+};
 
 use crate::args::{
-    now_seconds, parse_seconds, parse_u64, show, sleep_seconds, strtoull10, Check, CmdResult, Fail,
-    Opts, EXIT_MISMATCH,
+    found, now_seconds, parse_seconds, parse_u64, show, sleep_seconds, strtoull10, Check,
+    CmdResult, Fail, Opts, EXIT_MISMATCH,
 };
 use crate::data::verify_in_txn;
-use crate::dataset::{fmix32, splitmix_fill};
+use crate::dataset::{fmix32, splitmix64, splitmix_fill};
 
 // ---- hold-reader ---------------------------------------------------------------------
 
@@ -112,14 +115,42 @@ pub fn cmd_hold_env(o: &mut Opts) -> CmdResult {
     Ok(())
 }
 
-// ---- writer-loop (stage 3) -----------------------------------------------------------
+// ---- hold-writer -----------------------------------------------------------------------
 
-/// `writer-loop <env> <db|-> <seconds> <seed> [--keys N] [--max-commits N]`:
-/// needs the write path.
-pub fn cmd_writer_loop(o: &mut Opts) -> CmdResult {
-    parse_seconds(o.pos.get(2).map(String::as_str))?;
-    parse_u64(o.pos.get(3).map(String::as_str).unwrap_or_default(), "seed")?;
-    Err(Fail::not_implemented("writer-loop"))
+/// `hold-writer <env> <seconds> [--until-stdin]`: begin a write
+/// transaction, put `#held` = `<pid>` into the main DB (not committed),
+/// print `READY txnid=.. pid=..`, wait, then abort and print `released
+/// txnid=.. held=..`. Tests kill it with SIGKILL while it holds the writer
+/// lock.
+pub fn cmd_hold_writer(o: &mut Opts) -> CmdResult {
+    let secs = parse_seconds(o.pos.get(1).map(String::as_str))?;
+    let env = o.open_env(false)?;
+    let mut txn = env.begin_rw_txn().check("mdb_txn_begin")?;
+    let main = txn
+        .create_db(None, DatabaseFlags::empty())
+        .check("mdb_dbi_open")?;
+    let pid = std::process::id();
+    txn.put(
+        main,
+        b"#held",
+        pid.to_string().as_bytes(),
+        WriteFlags::empty(),
+    )
+    .check("mdb_put(#held)")?;
+    let start = now_seconds();
+    println!("READY txnid={} pid={pid}", txn.id());
+    if o.until_stdin {
+        wait_stdin(start + secs);
+    } else {
+        sleep_seconds(secs);
+    }
+    println!(
+        "released txnid={} held={:.3}",
+        txn.id(),
+        now_seconds() - start
+    );
+    txn.abort();
+    Ok(())
 }
 
 // ---- shared writer-loop data -----------------------------------------------------------
@@ -157,7 +188,7 @@ fn dup_check(t: u64, r: u32) -> u32 {
 }
 
 /// `get_counter`: a decimal counter from the main DB, 0 if absent.
-fn get_counter(txn: &RoTxn<'_>, dbi: Dbi, name: &str) -> CmdResult<u64> {
+fn get_counter(txn: &impl Transaction, dbi: Dbi, name: &str) -> CmdResult<u64> {
     match txn.get(dbi, name.as_bytes()).check("mdb_get(counter)")? {
         None => Ok(0),
         Some(data) if data.is_empty() || data.len() >= 32 => Err(Fail::mismatch(format!(
@@ -165,6 +196,212 @@ fn get_counter(txn: &RoTxn<'_>, dbi: Dbi, name: &str) -> CmdResult<u64> {
             data.len()
         ))),
         Some(data) => Ok(strtoull10(data)),
+    }
+}
+
+/// `dup_value`: a dups value: `t` (u64 LE), then its check word (u32 LE).
+fn dup_value(t: u64, r: u32) -> [u8; 12] {
+    let mut buf = [0u8; 12];
+    buf[..8].copy_from_slice(&t.to_le_bytes());
+    buf[8..].copy_from_slice(&dup_check(t, r).to_le_bytes());
+    buf
+}
+
+/// `put_counter`: store a decimal counter in the main DB.
+fn put_counter(txn: &mut RwTxn<'_>, dbi: Dbi, name: &str, v: u64) -> CmdResult {
+    txn.put(
+        dbi,
+        name.as_bytes(),
+        v.to_string().as_bytes(),
+        WriteFlags::empty(),
+    )
+    .check("mdb_put(counter)")
+}
+
+// ---- writer-loop -----------------------------------------------------------------------
+
+/// Key space of the dups DB.
+const DUP_KEYS: u32 = 64;
+
+/// The state of a writer loop (`struct wloop`).
+struct WriterLoop {
+    main: Dbi,
+    dups: Dbi,
+    /// SplitMix64 state: the whole loop is a function of the seed (and of
+    /// what other writers committed in between).
+    rng: u64,
+    keys: u32,
+}
+
+impl WriterLoop {
+    /// `rnd`: a random number below `n`.
+    fn rnd(&mut self, n: u32) -> u32 {
+        (splitmix64(&mut self.rng) % u64::from(n)) as u32
+    }
+
+    /// `wl_ops`: a random batch of puts and deletes in `txn` (top-level or
+    /// nested); the counters are updated in the same transaction, so they
+    /// stay consistent with the data whether it commits or aborts.
+    fn ops(&mut self, txn: &mut RwTxn<'_>, version: u64) -> CmdResult {
+        let mut count = get_counter(txn, self.main, "#count")?;
+        let mut ndups = get_counter(txn, self.main, "#dups")?;
+        let nops = 1 + self.rnd(8);
+        // One cursor on the dups DB for the whole batch, next to the puts
+        // and deletes on both DBs, as in C.
+        let cur = txn.open_cursor(self.dups).check("mdb_cursor_open")?;
+        for _ in 0..nops {
+            let mut r = self.rnd(self.keys);
+            let sel = self.rnd(10);
+            if sel < 5 {
+                // insert or overwrite w<r>
+                let len = if self.rnd(40) == 0 {
+                    WL_BIG
+                } else {
+                    40 + self.rnd(100) as usize
+                };
+                let key = format!("w{r:06}");
+                let value = wl_value(r, version, len);
+                match txn.put(self.main, key.as_bytes(), &value, WriteFlags::NO_OVERWRITE) {
+                    Ok(()) => count += 1,
+                    Err(lmdb_core::Error::Mdb(MdbError::KeyExist)) => txn
+                        .put(self.main, key.as_bytes(), &value, WriteFlags::empty())
+                        .check("mdb_put(w)")?,
+                    Err(e) => return Err(Fail::lmdb("mdb_put(w)", &e)),
+                }
+            } else if sel < 7 {
+                // delete w<r> if present
+                let key = format!("w{r:06}");
+                if txn
+                    .del(self.main, key.as_bytes(), None)
+                    .check("mdb_del(w)")?
+                {
+                    count = count.wrapping_sub(1);
+                }
+            } else if sel < 9 {
+                // add a value to d<r>
+                r %= DUP_KEYS;
+                let key = format!("d{r:04}");
+                let value = dup_value(splitmix64(&mut self.rng), r);
+                match txn.put(self.dups, key.as_bytes(), &value, WriteFlags::NO_DUP_DATA) {
+                    Ok(()) => ndups += 1,
+                    Err(lmdb_core::Error::Mdb(MdbError::KeyExist)) => {}
+                    Err(e) => return Err(Fail::lmdb("mdb_put(d)", &e)),
+                }
+            } else {
+                // delete one value of d<r>, or all of them
+                r %= DUP_KEYS;
+                let key = format!("d{r:04}");
+                if txn
+                    .cursor_get(cur, Some(key.as_bytes()), None, CursorOp::Set)
+                    .check("mdb_cursor_get(d)")?
+                    .is_none()
+                {
+                    continue;
+                }
+                let c = txn.cursor_count(cur).check("mdb_cursor_count")?;
+                if self.rnd(4) == 0 {
+                    txn.cursor_del(cur, WriteFlags::NO_DUP_DATA)
+                        .check("mdb_cursor_del(MDB_NODUPDATA)")?;
+                    ndups = ndups.wrapping_sub(c);
+                } else {
+                    for _ in 0..self.rnd(c as u32) {
+                        found(
+                            txn.cursor_get(cur, None, None, CursorOp::NextDup),
+                            "mdb_cursor_get(MDB_NEXT_DUP)",
+                        )?;
+                    }
+                    txn.cursor_del(cur, WriteFlags::empty())
+                        .check("mdb_cursor_del")?;
+                    ndups = ndups.wrapping_sub(1);
+                }
+            }
+        }
+        txn.close_cursor(cur);
+        put_counter(txn, self.main, "#count", count)?;
+        put_counter(txn, self.main, "#dups", ndups)
+    }
+}
+
+/// `writer-loop <env> <db|-> <seconds> <seed> [--keys N] [--max-commits N]`:
+/// commit small random write transactions until `<seconds>` pass (at least
+/// one) or `N` commits. Each: read the counters, 1-8 random operations,
+/// write the counters; one in 6 adds a nested transaction doing the same
+/// (committed or aborted at random); one in 10 (after the first) aborts.
+/// Prints `READY` after the first commit, then `commits=.. aborts=..
+/// nested_commits=.. nested_aborts=.. last_commit=..`.
+pub fn cmd_writer_loop(o: &mut Opts) -> CmdResult {
+    let db = Some(o.pos[1].as_str()).filter(|d| *d != "-");
+    let deadline = now_seconds() + parse_seconds(o.pos.get(2).map(String::as_str))?;
+    let seed = parse_u64(o.pos.get(3).map(String::as_str).unwrap_or_default(), "seed")?;
+    let env = o.open_env(false)?;
+
+    let mut txn = env.begin_rw_txn().check("mdb_txn_begin")?;
+    let main = txn
+        .create_db(db, DatabaseFlags::CREATE)
+        .check("mdb_dbi_open")?;
+    let dups = txn
+        .create_db(
+            Some(&dups_db_name(db)),
+            DatabaseFlags::CREATE | DatabaseFlags::DUP_SORT,
+        )
+        .check("mdb_dbi_open(dups)")?;
+    txn.commit().check("mdb_txn_commit")?;
+
+    let mut w = WriterLoop {
+        main,
+        dups,
+        rng: seed,
+        keys: o.keys.max(1),
+    };
+    let (mut commits, mut aborts, mut ncommits, mut naborts) = (0u64, 0u64, 0u64, 0u64);
+    let mut last = 0u64;
+    // Always commit at least once, so "0 seconds" initialises the DBs.
+    while commits == 0
+        || (now_seconds() < deadline && (o.max_commits == 0 || commits < o.max_commits))
+    {
+        let mut txn = env.begin_rw_txn().check("mdb_txn_begin")?;
+        let version = get_counter(&txn, w.main, "#commits")? + 1;
+        w.ops(&mut txn, version)?;
+        if w.rnd(6) == 0 {
+            // A nested transaction on top, committed or aborted.
+            if nested_ops(&mut w, &mut txn, version)? {
+                ncommits += 1;
+            } else {
+                naborts += 1;
+            }
+        }
+        if commits > 0 && w.rnd(10) == 0 {
+            txn.abort();
+            aborts += 1;
+            continue;
+        }
+        put_counter(&mut txn, w.main, "#commits", version)?;
+        txn.commit().check("mdb_txn_commit")?;
+        last = version;
+        if commits == 0 {
+            println!("READY");
+        }
+        commits += 1;
+    }
+    println!(
+        "commits={commits} aborts={aborts} nested_commits={ncommits} nested_aborts={naborts} \
+         last_commit={last}"
+    );
+    Ok(())
+}
+
+/// The nested transaction of a writer-loop step: `wl_ops` in a child of
+/// `txn`, then committed or aborted at random. Returns whether it
+/// committed.
+fn nested_ops(w: &mut WriterLoop, txn: &mut RwTxn<'_>, version: u64) -> CmdResult<bool> {
+    let mut child = txn.begin_nested_txn().check("mdb_txn_begin(nested)")?;
+    w.ops(&mut child, version)?;
+    if w.rnd(2) != 0 {
+        child.commit().check("mdb_txn_commit(nested)")?;
+        Ok(true)
+    } else {
+        child.abort();
+        Ok(false)
     }
 }
 

@@ -2,6 +2,7 @@
  *
  * hold-reader  pins a snapshot (a read transaction) for a while: MVCC test.
  * hold-env     keeps the environment open without a read transaction.
+ * hold-writer  holds the writer lock: an open write transaction.
  * writer-loop  commits many small random write transactions.
  * reader-loop  repeatedly opens read transactions and checks invariants
  *              that every committed state of writer-loop satisfies.
@@ -107,6 +108,43 @@ cmd_hold_env(struct opts *o)
 	else
 		sleep_seconds(secs);
 	printf("released held=%.3f\n", now_seconds() - start);
+	mdb_env_close(env);
+	return 0;
+}
+
+/* ---- hold-writer -------------------------------------------------------- */
+
+/* Begin a write transaction, put "#held" = "<pid>" into the main DB (not
+ * committed), print READY and wait; then abort. A test kills this process
+ * with SIGKILL while it holds the writer lock: the next writer must recover
+ * the lock (robust mutexes on Linux), and "#held" must never be seen. */
+int
+cmd_hold_writer(struct opts *o)
+{
+	double secs = parse_seconds(o->pos[1]), start;
+	MDB_env *env;
+	MDB_txn *txn;
+	MDB_dbi dbi;
+	MDB_val key, data;
+	char buf[32];
+
+	env = open_env(o, 0);
+	txn = begin_write(env);
+	CHECK(mdb_dbi_open(txn, NULL, 0, &dbi));
+	key.mv_data = "#held";
+	key.mv_size = 5;
+	data.mv_data = buf;
+	data.mv_size = (size_t)snprintf(buf, sizeof(buf), "%d", (int)getpid());
+	CHECK(mdb_put(txn, dbi, &key, &data, 0));
+	start = now_seconds();
+	printf("READY txnid=%zu pid=%d\n", mdb_txn_id(txn), (int)getpid());
+	fflush(stdout);
+	if (o->until_stdin)
+		wait_stdin(start + secs);
+	else
+		sleep_seconds(secs);
+	printf("released txnid=%zu held=%.3f\n", mdb_txn_id(txn), now_seconds() - start);
+	abort_write(txn);
 	mdb_env_close(env);
 	return 0;
 }
