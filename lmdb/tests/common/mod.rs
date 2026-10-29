@@ -166,7 +166,7 @@ fn build_c_tools() -> Result<PathBuf, String> {
         "dkey_shim.c",
         "liblmdb.a",
     ]))?;
-    for helper in ["holder", "cursorops"] {
+    for helper in ["holder", "cursorops", "writeops"] {
         run_ok(Command::new(&cc).current_dir(&tmp).args([
             "-pthread",
             "-O2",
@@ -209,7 +209,10 @@ fn build_cpeer(tools: &CTools) -> Result<PathBuf, String> {
     fnv(&mut h, tools.dir.to_string_lossy().as_bytes());
     for n in names {
         fnv(&mut h, n.as_bytes());
-        fnv(&mut h, &fs::read(src.join(n)).map_err(|e| format!("{n}: {e}"))?);
+        fnv(
+            &mut h,
+            &fs::read(src.join(n)).map_err(|e| format!("{n}: {e}"))?,
+        );
     }
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let dir = base.join(format!("cpeer-{h:016x}"));
