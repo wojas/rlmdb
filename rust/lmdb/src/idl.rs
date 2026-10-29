@@ -114,6 +114,44 @@ impl Idl {
         self.ids = out;
     }
 
+    /// The run search of `mdb_page_alloc`: the 1-based C index `i` of the
+    /// lowest page of `num` contiguous page numbers (`ids[i-num+1..=i]` in C
+    /// terms is `pgno+num-1, ..., pgno`), preferring the tail (lowest
+    /// numbers). `None` if there is no such run.
+    pub fn find_run(&self, num: usize) -> Option<usize> {
+        let n2 = num.checked_sub(1)?;
+        let mut i = self.ids.len();
+        if i <= n2 {
+            return None;
+        }
+        loop {
+            let pgno = self.ids[i - 1];
+            if self.ids[i - 1 - n2] == pgno + n2 as u64 {
+                return Some(i);
+            }
+            i -= 1;
+            if i <= n2 {
+                return None;
+            }
+        }
+    }
+
+    /// Removes the run found by [`Idl::find_run`] (C index `i`, `num` IDs)
+    /// and returns its lowest page number.
+    pub fn remove_run(&mut self, i: usize, num: usize) -> u64 {
+        let pgno = self.ids[i - 1];
+        self.ids.drain(i - num..i);
+        pgno
+    }
+
+    /// Inserts the `n` page numbers `pgno..pgno+n` keeping the descending
+    /// order, as `mdb_ovpage_free` does for `me_pghead`.
+    pub fn insert_run(&mut self, pgno: u64, n: usize) {
+        let at = self.ids.partition_point(|&x| x > pgno);
+        self.ids
+            .splice(at..at, (0..n as u64).rev().map(|i| pgno + i));
+    }
+
     /// `mdb_midl_sort`: sort descending. (Sorting integers has a unique
     /// result, so the algorithm need not be C's quicksort.)
     pub fn sort(&mut self) {
@@ -306,6 +344,76 @@ mod tests {
         let mut b = Idl::from_vec(vec![3, 9, 1, 7]);
         b.sort();
         assert_eq!(b.as_slice(), &[9, 7, 3, 1]);
+    }
+
+    /// Literal port of the run search and removal in `mdb_page_alloc`.
+    fn c_alloc_run(mop: &mut Vec<u64>, num: usize) -> Option<u64> {
+        // mop[0] is the count, 1-based.
+        let n2 = num - 1;
+        let mut mop_len = mop[0] as usize;
+        if mop_len <= n2 {
+            return None;
+        }
+        let mut i = mop_len;
+        let pgno;
+        loop {
+            let p = mop[i];
+            if mop[i - n2] == p + n2 as u64 {
+                pgno = p;
+                break;
+            }
+            i -= 1;
+            if i <= n2 {
+                return None;
+            }
+        }
+        mop_len -= num;
+        mop[0] = mop_len as u64;
+        let mut j = i - num;
+        while j < mop_len {
+            j += 1;
+            i += 1;
+            mop[j] = mop[i];
+        }
+        mop.truncate(mop_len + 1);
+        Some(pgno)
+    }
+
+    #[test]
+    fn runs_match_c() {
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        for round in 0..300 {
+            let mut ids: Vec<u64> = Vec::new();
+            let n = 1 + round % 60;
+            for _ in 0..n {
+                rng = rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ids.push(3 + (rng >> 40) % 200);
+            }
+            ids.sort_unstable_by(|a, b| b.cmp(a));
+            ids.dedup();
+            for num in 1..6 {
+                let mut idl = Idl::from_vec(ids.clone());
+                let mut c = vec![ids.len() as u64];
+                c.extend_from_slice(&ids);
+                let got = idl.find_run(num).map(|i| idl.remove_run(i, num));
+                assert_eq!(got, c_alloc_run(&mut c, num), "{ids:?} num {num}");
+                assert_eq!(idl.as_slice(), &c[1..]);
+                if let Some(p) = got {
+                    // Putting the run back restores the list.
+                    idl.insert_run(p, num);
+                    assert_eq!(idl.as_slice(), &ids[..]);
+                }
+            }
+        }
+        let mut idl = Idl::from_vec(vec![20, 9, 8, 7, 3]);
+        assert_eq!(idl.find_run(3), Some(4));
+        assert_eq!(idl.remove_run(4, 3), 7);
+        assert_eq!(idl.as_slice(), &[20, 3]);
+        idl.insert_run(10, 2);
+        assert_eq!(idl.as_slice(), &[20, 11, 10, 3]);
+        assert_eq!(Idl::new().find_run(1), None);
     }
 
     #[test]

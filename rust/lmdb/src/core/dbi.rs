@@ -131,7 +131,9 @@ impl DbiRegistry {
 
     /// `me_dbiseqs[i]`.
     pub(crate) fn seq_of(&self, i: usize) -> u32 {
-        self.seqs.get(i).map_or(u32::MAX, |s| s.load(Ordering::SeqCst))
+        self.seqs
+            .get(i)
+            .map_or(u32::MAX, |s| s.load(Ordering::SeqCst))
     }
 
     /// `++me_dbiseqs[i]`: the new sequence number of a (re)used slot.
@@ -200,7 +202,11 @@ impl DbiRegistry {
     }
 
     /// The comparators to use for slot `i` given the DB's flags.
-    pub(crate) fn comparators(slot: &DbiSlot, i: usize, flags: u16) -> (Comparator, Option<Comparator>) {
+    pub(crate) fn comparators(
+        slot: &DbiSlot,
+        i: usize,
+        flags: u16,
+    ) -> (Comparator, Option<Comparator>) {
         if i == FREE_DBI as usize {
             // me_dbxs[FREE_DBI].md_cmp = mdb_cmp_long (aligned MDB_INTEGERKEY)
             return (Comparator::Long, None);
