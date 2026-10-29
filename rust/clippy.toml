@@ -1,0 +1,1 @@
+# keep defaults; crates set their own lint levels in lib.rs
