@@ -9,13 +9,10 @@ use std::ffi::{CStr, CString, OsStr};
 use std::os::fd::AsRawFd;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::FileExt;
 use std::ptr;
 use std::sync::atomic::Ordering;
 
-use lmdb_core::consts::{CHANGEABLE, CHANGELESS, MDB_NOLOCK};
-use lmdb_core::format::layout::{META_SIZE, PAGE_HDR_SIZE};
-use lmdb_core::format::meta::{pick_newest, Meta};
+use lmdb_core::consts::{CHANGEABLE, CHANGELESS};
 use lmdb_core::{Environment, EnvironmentFlags};
 
 use crate::handles::{lock, MDB_env};
@@ -136,7 +133,7 @@ pub unsafe extern "C" fn mdb_env_info(env: *mut MDB_env, info: *mut MDB_envinfo)
     match e.info() {
         Ok(i) => {
             let out = MDB_envinfo {
-                me_mapaddr: recorded_map_address(e) as *mut c_void,
+                me_mapaddr: i.map_address as *mut c_void,
                 me_mapsize: i.map_size,
                 me_last_pgno: i.last_pgno,
                 me_last_txnid: i.last_txnid,
@@ -148,29 +145,6 @@ pub unsafe extern "C" fn mdb_env_info(env: *mut MDB_env, info: *mut MDB_envinfo)
             SUCCESS
         }
         Err(err) => err.to_err_code(),
-    }
-}
-
-/// `me_mapaddr` as C reports it: the `mm_address` recorded in the newest
-/// meta page (non-zero only for environments a C program created with
-/// `MDB_FIXEDMAP`), read from the data file. 0 if the pages cannot be read.
-///
-/// Stop-gap until `lmdb_core::Info` carries the recorded address itself.
-fn recorded_map_address(env: &Environment) -> usize {
-    let read = |i: usize| {
-        let mut page = [0u8; PAGE_HDR_SIZE + META_SIZE];
-        env.data_file()
-            .read_exact_at(&mut page, (i * env.page_size()) as u64)
-            .ok()?;
-        Meta::read_page(&page).ok()
-    };
-    match (read(0), read(1)) {
-        (Some(m0), Some(m1)) => {
-            let metas = [m0, m1];
-            metas[pick_newest(&metas)].address as usize
-        }
-        (Some(m), None) | (None, Some(m)) => m.address as usize,
-        (None, None) => 0,
     }
 }
 
@@ -397,11 +371,12 @@ pub unsafe extern "C" fn mdb_reader_list(
         return -1;
     };
     let text = match e.open_env() {
-        Some(open) if open.flags().bits() & MDB_NOLOCK == 0 => match open.reader_list() {
+        Some(open) if open.has_lock_file() => match open.reader_list() {
             Ok(readers) => lmdb_core::format_reader_list(&readers),
             Err(err) => return err.to_err_code(),
         },
-        // C: no lock table (MDB_NOLOCK, or not open yet).
+        // C: no lock table (MDB_NOLOCK, a read-only environment on a
+        // read-only file system, or not open yet).
         _ => "(no reader locks)\n".to_owned(),
     };
     let mut result = 0;

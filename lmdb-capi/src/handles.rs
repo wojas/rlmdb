@@ -15,13 +15,20 @@
 //! Cursor tracking: C frees read-only transactions without touching their
 //! cursors, which survive (unusable) until `mdb_cursor_close` or
 //! `mdb_cursor_renew`. Here every cursor is registered with the
-//! transaction it is bound to; when the transaction is reset, committed or
-//! aborted it first drops the Rust cursors (they borrow it, see
+//! transaction it is bound to; when a read-only transaction is reset,
+//! committed or aborted it first drops the Rust cursors (they borrow it, see
 //! `crate::erased`), leaving the C handles alive but detached. A detached
 //! cursor's operations return `EINVAL` (C: undefined behaviour); a cursor of
 //! a reset transaction returns `MDB_BAD_TXN` as in C, and after
-//! `mdb_txn_renew` it is re-created unpositioned on first use. Write
-//! transactions (stage 3) will free their cursors at the end, as C does.
+//! `mdb_txn_renew` it is re-created unpositioned on first use. Cursors of a
+//! write transaction are tracked cursors of the core
+//! ([`lmdb_core::CursorId`]); the transaction frees their handles when it
+//! ends, as C does.
+//!
+//! Re-entrancy: while a write operation runs, the transaction state is
+//! borrowed mutably. A C comparison function that calls back into the
+//! library with the same transaction gets `EINVAL` (C would let it read
+//! inconsistent state).
 
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
@@ -31,9 +38,9 @@ use std::sync::atomic::AtomicPtr;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use lmdb_core::consts::DEFAULT_READERS;
-use lmdb_core::{Dbi, Environment};
+use lmdb_core::{CursorId, Dbi, Environment, RwTxn, Transaction};
 
-use crate::erased::{ErasedInactiveTxn, ErasedRoCursor, ErasedRoTxn};
+use crate::erased::{ErasedInactiveTxn, ErasedRoCursor, ErasedRoTxn, ErasedRwTxn};
 use crate::types::{MDB_assert_func, MDB_cmp_func, MDB_dbi};
 
 // ---------------------------------------------------------------------------
@@ -162,10 +169,6 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 // MDB_txn
 // ---------------------------------------------------------------------------
 
-/// Placeholder for the write transaction of stage 3. Uninhabited, so every
-/// `match` on [`TxnState`] already has the arm the write path will fill in.
-pub(crate) enum WriteTxn {}
-
 /// What an `MDB_txn` holds.
 pub(crate) enum TxnState {
     /// An active read-only transaction.
@@ -176,19 +179,32 @@ pub(crate) enum TxnState {
     /// A read-only transaction whose `mdb_txn_renew` failed: it holds
     /// nothing; the next renew begins afresh.
     Finished,
-    /// A write transaction (stage 3).
-    #[allow(dead_code)] // constructed by the write path (stage 3)
-    Write(WriteTxn),
+    /// An active write transaction.
+    Write(ErasedRwTxn),
+}
+
+/// `MDB_BAD_TXN`.
+pub(crate) fn bad_txn() -> c_int {
+    lmdb_core::MdbError::BadTxn.to_err_code()
 }
 
 /// `MDB_txn`: a transaction handle (opaque to C).
 pub struct MDB_txn {
     env: NonNull<MDB_env>,
     state: RefCell<TxnState>,
+    /// A write transaction (not `MDB_TXN_RDONLY`).
+    write: bool,
     /// `mt_txnid`: kept across `mdb_txn_reset` as C does.
     txnid: Cell<u64>,
     /// Cursors bound to this transaction (see the module documentation).
     cursors: RefCell<Vec<NonNull<MDB_cursor>>>,
+    /// `mt_parent`: the parent of a nested transaction, else NULL.
+    parent: *mut MDB_txn,
+    /// `mt_child`: the active nested transaction, else NULL. While there
+    /// is one, this transaction's state is borrowed by the child and must
+    /// not be touched (`crate::erased` rule 5): every operation fails with
+    /// `MDB_BAD_TXN` (C's `MDB_TXN_HAS_CHILD`).
+    child: Cell<*mut MDB_txn>,
 }
 
 impl MDB_txn {
@@ -197,11 +213,29 @@ impl MDB_txn {
     /// `mdb_txn_env` hands it back).
     pub(crate) fn new_read(env: NonNull<MDB_env>, txn: ErasedRoTxn) -> MDB_txn {
         let txnid = lmdb_core::Transaction::id(txn.txn());
+        MDB_txn::new(env, TxnState::Read(txn), txnid, ptr::null_mut())
+    }
+
+    /// A handle for the write transaction `txn` of `env`; `parent` is the
+    /// parent's handle for a nested transaction, else NULL.
+    pub(crate) fn new_write(
+        env: NonNull<MDB_env>,
+        txn: ErasedRwTxn,
+        parent: *mut MDB_txn,
+    ) -> MDB_txn {
+        let txnid = lmdb_core::Transaction::id(txn.txn());
+        MDB_txn::new(env, TxnState::Write(txn), txnid, parent)
+    }
+
+    fn new(env: NonNull<MDB_env>, state: TxnState, txnid: u64, parent: *mut MDB_txn) -> MDB_txn {
         MDB_txn {
             env,
-            state: RefCell::new(TxnState::Read(txn)),
+            write: matches!(state, TxnState::Write(_)),
+            state: RefCell::new(state),
             txnid: Cell::new(txnid),
             cursors: RefCell::new(Vec::new()),
+            parent,
+            child: Cell::new(ptr::null_mut()),
         }
     }
 
@@ -232,37 +266,119 @@ impl MDB_txn {
         self.txnid.get()
     }
 
-    /// The transaction state, borrowed for one call.
-    pub(crate) fn state(&self) -> std::cell::Ref<'_, TxnState> {
-        self.state.borrow()
+    /// The transaction state, borrowed for one call. `None` if it is
+    /// borrowed mutably already (a C comparison function called back into
+    /// the library during a write) or lent to an active child.
+    fn state(&self) -> Option<std::cell::Ref<'_, TxnState>> {
+        if self.has_child() {
+            return None;
+        }
+        self.state.try_borrow().ok()
+    }
+
+    /// `MDB_TXN_HAS_CHILD`: a nested transaction is active.
+    pub(crate) fn has_child(&self) -> bool {
+        !self.child.get().is_null()
+    }
+
+    /// `mdb_txn_begin` with this transaction as the parent: `EINVAL` for a
+    /// read-only parent, `MDB_BAD_TXN` if `read_only` is asked for or the
+    /// parent is blocked (it has a child, or failed), as in C.
+    pub(crate) fn begin_child(&self, read_only: bool) -> Result<ErasedRwTxn, c_int> {
+        if !self.write {
+            return Err(libc::EINVAL);
+        }
+        if read_only || self.has_child() {
+            return Err(bad_txn());
+        }
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            return Err(libc::EINVAL);
+        };
+        match &mut *state {
+            // SAFETY: the caller records the child in `self.child` before
+            // anything else can reach `self`; from then on every access to
+            // the parent's state is refused until the child has ended
+            // (crate::erased rule 5).
+            TxnState::Write(w) => unsafe { w.begin_nested() }.map_err(|e| e.to_err_code()),
+            _ => Err(libc::EINVAL),
+        }
+    }
+
+    /// Records the active child (`mt_child`).
+    pub(crate) fn set_child(&self, child: *mut MDB_txn) {
+        self.child.set(child);
     }
 
     /// The active read transaction, or `err` if the transaction is reset or
-    /// finished. (Write transactions do not exist yet.)
+    /// finished (`EINVAL` for a write transaction).
     pub(crate) fn with_read<T>(
         &self,
         err: c_int,
         f: impl FnOnce(&ErasedRoTxn) -> Result<T, c_int>,
     ) -> Result<T, c_int> {
-        match &*self.state() {
-            TxnState::Read(txn) => f(txn),
-            TxnState::Reset(_) | TxnState::Finished => Err(err),
-            TxnState::Write(w) => match *w {},
+        match self.state().as_deref() {
+            Some(TxnState::Read(txn)) => f(txn),
+            Some(TxnState::Reset(_) | TxnState::Finished) => Err(err),
+            Some(TxnState::Write(_)) | None => Err(libc::EINVAL),
+        }
+    }
+
+    /// The active transaction (read or write) for an operation that only
+    /// reads, or `err` if it is a reset or finished read transaction
+    /// (`MDB_BAD_TXN` for a write transaction with an active child).
+    pub(crate) fn with_txn<T>(
+        &self,
+        err: c_int,
+        f: impl FnOnce(&dyn Transaction) -> Result<T, c_int>,
+    ) -> Result<T, c_int> {
+        if self.has_child() {
+            return Err(bad_txn());
+        }
+        match self.state().as_deref() {
+            Some(TxnState::Read(txn)) => f(txn.txn()),
+            Some(TxnState::Write(w)) => f(w.txn()),
+            Some(TxnState::Reset(_) | TxnState::Finished) => Err(err),
+            None => Err(libc::EINVAL),
+        }
+    }
+
+    /// The write transaction, or `EACCES` for a read-only one (C checks
+    /// `MDB_TXN_RDONLY` first, so a reset read transaction gets `EACCES`
+    /// too), or `MDB_BAD_TXN` while a nested transaction is active.
+    pub(crate) fn with_write<T>(
+        &self,
+        f: impl FnOnce(&mut RwTxn<'static>) -> Result<T, c_int>,
+    ) -> Result<T, c_int> {
+        if !self.write {
+            return Err(libc::EACCES);
+        }
+        if self.has_child() {
+            return Err(bad_txn());
+        }
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            return Err(libc::EINVAL);
+        };
+        match &mut *state {
+            TxnState::Write(w) => f(w.txn_mut()),
+            TxnState::Read(_) | TxnState::Reset(_) | TxnState::Finished => Err(libc::EACCES),
         }
     }
 
     /// `MDB_TXN_RDONLY`.
     pub(crate) fn is_read_only(&self) -> bool {
-        match &*self.state() {
-            TxnState::Read(_) | TxnState::Reset(_) | TxnState::Finished => true,
-            TxnState::Write(w) => match *w {},
-        }
+        !self.write
     }
 
     /// `mdb_txn_reset`: drop the cursors' Rust state (they stay bound to
-    /// this transaction) and release the snapshot.
+    /// this transaction) and release the snapshot. Write transactions are
+    /// left alone, as in C.
     pub(crate) fn reset(&self) {
-        let mut state = self.state.borrow_mut();
+        if self.write {
+            return;
+        }
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            return;
+        };
         if let TxnState::Read(_) = &*state {
             self.release_cursors(false);
             if let TxnState::Read(txn) = std::mem::replace(&mut *state, TxnState::Finished) {
@@ -271,9 +387,15 @@ impl MDB_txn {
         }
     }
 
-    /// `mdb_txn_renew` of a reset or finished read transaction.
+    /// `mdb_txn_renew` of a reset or finished read transaction (`EINVAL`
+    /// for anything else, as in C).
     pub(crate) fn renew(&self) -> c_int {
-        let mut state = self.state.borrow_mut();
+        if self.write {
+            return libc::EINVAL;
+        }
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            return libc::EINVAL;
+        };
         let renewed = match std::mem::replace(&mut *state, TxnState::Finished) {
             TxnState::Reset(inactive) => inactive.renew(),
             TxnState::Finished => match self.env().open_env() {
@@ -282,11 +404,10 @@ impl MDB_txn {
                 Some(env) => unsafe { ErasedRoTxn::begin(env) },
                 None => return libc::EINVAL,
             },
-            active @ TxnState::Read(_) => {
+            active @ (TxnState::Read(_) | TxnState::Write(_)) => {
                 *state = active;
                 return libc::EINVAL;
             }
-            TxnState::Write(w) => match w {},
         };
         match renewed {
             Ok(txn) => {
@@ -298,8 +419,47 @@ impl MDB_txn {
         }
     }
 
-    /// Ends the transaction (`mdb_txn_abort`, `mdb_txn_commit` of a read
-    /// transaction) and frees the handle.
+    /// `mdb_txn_commit`: commits a write transaction, ends a read
+    /// transaction, and frees the handle either way (C frees it also when
+    /// the commit fails: the transaction is aborted then). An active child
+    /// is committed first; if that fails, this transaction is aborted.
+    ///
+    /// # Safety
+    ///
+    /// `p` is a live handle from `mdb_txn_begin`; it is invalid afterwards.
+    pub(crate) unsafe fn commit_and_free(p: *mut MDB_txn) -> c_int {
+        // SAFETY: per this function's contract.
+        let txn = unsafe { &*p };
+        let child = txn.child.get();
+        if !child.is_null() {
+            // SAFETY: the active child is a live handle.
+            let rc = unsafe { MDB_txn::commit_and_free(child) };
+            if rc != crate::SUCCESS {
+                // SAFETY: per this function's contract.
+                unsafe { MDB_txn::end_and_free(p) };
+                return rc;
+            }
+        }
+        txn.release_cursors(true);
+        // SAFETY: p came from Box::into_raw in mdb_txn_begin; no reference
+        // derived from it outlives this call (cursors are freed or
+        // detached, the child has ended).
+        let handle = unsafe { Box::from_raw(p) };
+        let parent = handle.parent;
+        let rc = match handle.state.into_inner() {
+            TxnState::Write(w) => crate::rc(w.commit()),
+            TxnState::Read(_) | TxnState::Reset(_) | TxnState::Finished => crate::SUCCESS,
+        };
+        // SAFETY: a parent outlives its child; the child's borrow of it
+        // ended with the commit above.
+        if let Some(parent) = unsafe { MDB_txn::from_ptr(parent) } {
+            parent.set_child(ptr::null_mut());
+        }
+        rc
+    }
+
+    /// Ends the transaction (`mdb_txn_abort`), after its active child, and
+    /// frees the handle.
     ///
     /// # Safety
     ///
@@ -307,10 +467,20 @@ impl MDB_txn {
     pub(crate) unsafe fn end_and_free(p: *mut MDB_txn) {
         // SAFETY: per this function's contract.
         let txn = unsafe { &*p };
+        let child = txn.child.get();
+        if !child.is_null() {
+            // SAFETY: the active child is a live handle.
+            unsafe { MDB_txn::end_and_free(child) };
+        }
         txn.release_cursors(true);
-        // SAFETY: p came from Box::into_raw in mdb_txn_begin; no reference
-        // derived from it outlives this call (cursors are detached).
-        drop(unsafe { Box::from_raw(p) });
+        // SAFETY: as in commit_and_free. Dropping the state aborts.
+        let handle = unsafe { Box::from_raw(p) };
+        let parent = handle.parent;
+        drop(handle);
+        // SAFETY: as in commit_and_free.
+        if let Some(parent) = unsafe { MDB_txn::from_ptr(parent) } {
+            parent.set_child(ptr::null_mut());
+        }
     }
 
     /// Registers a cursor bound to this transaction.
@@ -323,20 +493,27 @@ impl MDB_txn {
         self.cursors.borrow_mut().retain(|&x| x != c);
     }
 
-    /// Drops the Rust state of every bound cursor; with `detach`, also
-    /// unbinds them (the transaction is about to be freed).
-    fn release_cursors(&self, detach: bool) {
+    /// Drops the Rust state of every bound read cursor; with `end` (the
+    /// transaction is about to be freed), also unbinds them, and frees the
+    /// handles of write cursors, which C closes with their transaction.
+    fn release_cursors(&self, end: bool) {
         let mut cursors = self.cursors.borrow_mut();
         for c in cursors.iter() {
             // SAFETY: registered cursors are live: mdb_cursor_close
             // unregisters a cursor before freeing it.
             let cursor = unsafe { c.as_ref() };
-            cursor.inner.borrow_mut().take();
-            if detach {
+            let inner = cursor.inner.borrow_mut().take();
+            if end {
                 cursor.txn.set(ptr::null_mut());
+                if let Some(CursorInner::Write(_)) = inner {
+                    // SAFETY: the handle came from Box::into_raw in
+                    // mdb_cursor_open; lmdb.h forbids using a write cursor
+                    // after its transaction ended (C frees it too).
+                    drop(unsafe { Box::from_raw(c.as_ptr()) });
+                }
             }
         }
-        if detach {
+        if end {
             cursors.clear();
         }
     }
@@ -346,18 +523,37 @@ impl MDB_txn {
 // MDB_cursor
 // ---------------------------------------------------------------------------
 
+/// The Rust side of a cursor handle.
+// Lives inside the boxed MDB_cursor; boxing the read cursor (its fixed
+// cursor stacks make it large) would only add an allocation.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum CursorInner {
+    /// A cursor of a read-only transaction.
+    Read(ErasedRoCursor),
+    /// A tracked cursor of a write transaction (a handle into it).
+    Write(CursorId),
+}
+
+/// What an operation on a cursor gets to work with.
+pub(crate) enum CursorAccess<'a> {
+    /// A cursor of a read-only transaction.
+    Read(&'a mut ErasedRoCursor),
+    /// A cursor of a write transaction: the transaction and the handle.
+    Write(&'a mut RwTxn<'static>, CursorId),
+}
+
 /// `MDB_cursor`: a cursor handle (opaque to C).
 pub struct MDB_cursor {
-    /// The transaction this cursor is bound to; NULL once that transaction
-    /// was committed or aborted.
+    /// The transaction this cursor is bound to; NULL once that read-only
+    /// transaction was committed or aborted.
     txn: Cell<*mut MDB_txn>,
     dbi: MDB_dbi,
     /// The database's persistent flags when the cursor was opened (C checks
     /// `MDB_DUPSORT`/`MDB_DUPFIXED` before the transaction state in a few
     /// places).
     db_flags: c_uint,
-    /// The Rust cursor; `None` while the transaction is reset or ended.
-    inner: RefCell<Option<ErasedRoCursor>>,
+    /// The Rust cursor; `None` while the read transaction is reset or ended.
+    inner: RefCell<Option<CursorInner>>,
 }
 
 impl MDB_cursor {
@@ -366,7 +562,7 @@ impl MDB_cursor {
         txn: *mut MDB_txn,
         dbi: MDB_dbi,
         db_flags: c_uint,
-        inner: ErasedRoCursor,
+        inner: CursorInner,
     ) -> MDB_cursor {
         MDB_cursor {
             txn: Cell::new(txn),
@@ -408,26 +604,38 @@ impl MDB_cursor {
         self.db_flags
     }
 
-    /// Runs `f` on the Rust cursor, (re)creating it if the transaction was
-    /// renewed since. `EINVAL` for a detached cursor, `MDB_BAD_TXN` if the
-    /// transaction is reset or finished (C checks `MDB_TXN_BLOCKED`).
+    /// The write-transaction cursor handle, if this is one (`C_UNTRACK`).
+    pub(crate) fn write_id(&self) -> Option<CursorId> {
+        match self.inner.try_borrow().ok()?.as_ref()? {
+            CursorInner::Write(id) => Some(*id),
+            CursorInner::Read(_) => None,
+        }
+    }
+
+    /// Runs `f` on the cursor. A read cursor is (re)created if its
+    /// transaction was renewed since. `EINVAL` for a detached cursor,
+    /// `MDB_BAD_TXN` if the read transaction is reset or finished (C
+    /// checks `MDB_TXN_BLOCKED`).
     pub(crate) fn with_cursor<T>(
         &self,
-        f: impl FnOnce(&mut ErasedRoCursor) -> Result<T, c_int>,
+        f: impl FnOnce(CursorAccess<'_>) -> Result<T, c_int>,
     ) -> Result<T, c_int> {
         let txn = self.txn().ok_or(libc::EINVAL)?;
-        txn.with_read(lmdb_core::MdbError::BadTxn.to_err_code(), |rt| {
-            let mut inner = self.inner.borrow_mut();
+        if let Some(id) = self.write_id() {
+            return txn.with_write(|w| f(CursorAccess::Write(w, id)));
+        }
+        txn.with_read(bad_txn(), |rt| {
+            let mut inner = self.inner.try_borrow_mut().map_err(|_| libc::EINVAL)?;
             if inner.is_none() {
                 // SAFETY: this cursor is registered with `txn`, which drops
                 // `inner` before it resets or ends the read transaction.
-                *inner = Some(
-                    unsafe { rt.cursor(Dbi::from_raw(self.dbi)) }.map_err(|e| e.to_err_code())?,
-                );
+                let cursor =
+                    unsafe { rt.cursor(Dbi::from_raw(self.dbi)) }.map_err(|e| e.to_err_code())?;
+                *inner = Some(CursorInner::Read(cursor));
             }
             match inner.as_mut() {
-                Some(cursor) => f(cursor),
-                None => Err(libc::EINVAL),
+                Some(CursorInner::Read(cursor)) => f(CursorAccess::Read(cursor)),
+                _ => Err(libc::EINVAL),
             }
         })
     }
@@ -451,7 +659,7 @@ impl MDB_cursor {
         // The old Rust cursor (if any) goes before the new one is stored.
         c.inner.borrow_mut().take();
         c.txn.set(txn);
-        *c.inner.borrow_mut() = Some(inner);
+        *c.inner.borrow_mut() = Some(CursorInner::Read(inner));
         // SAFETY: per this function's contract.
         unsafe { &*txn }.register_cursor(this);
     }
@@ -465,6 +673,17 @@ impl MDB_cursor {
         // SAFETY: per this function's contract.
         let c = unsafe { p.as_ref() };
         if let Some(txn) = c.txn() {
+            if let Some(id) = c.write_id() {
+                if txn.has_child() {
+                    // C: the cursor is shadowed by the child (mc_backup),
+                    // and mdb_cursor_close ignores it.
+                    return;
+                }
+                let _ = txn.with_write(|w| {
+                    w.close_cursor(id);
+                    Ok(())
+                });
+            }
             txn.unregister_cursor(p);
         }
         c.inner.borrow_mut().take();

@@ -22,10 +22,20 @@
 //!    a list of its cursors for exactly this purpose
 //!    (`MDB_txn::release_cursors`).
 //!
+//! 4. **Write transactions need no cursor borrows.** A write transaction
+//!    ([`ErasedRwTxn`]) is boxed too, but its cursors are handles
+//!    ([`lmdb_core::CursorId`]) into the transaction, not borrows: nothing
+//!    refers to it except through its owning `MDB_txn`.
+//! 5. **A parent is untouched while its child lives.** A nested write
+//!    transaction borrows its parent mutably. [`ErasedRwTxn::begin_nested`]
+//!    is `unsafe`: the parent's `MDB_txn` refuses every access to the
+//!    parent (`MDB_BAD_TXN`, as C's `MDB_TXN_HAS_CHILD`) and ends the child
+//!    before the parent (`MDB_txn::child`).
+//!
 //! Nothing here hands out `'static` references: values read through an
 //! erased transaction or cursor borrow the erased handle itself.
 
-use lmdb_core::{Dbi, Environment, InactiveTxn, RoCursor, RoTxn, Transaction};
+use lmdb_core::{Dbi, Environment, InactiveTxn, RoCursor, RoTxn, RwTxn, Transaction};
 use std::ptr::NonNull;
 
 /// An active read transaction, boxed at a stable address.
@@ -133,5 +143,69 @@ impl ErasedRoCursor {
     /// `mdb_cursor_count`.
     pub(crate) fn count(&mut self) -> lmdb_core::Result<u64> {
         self.cursor.count()
+    }
+
+    /// `C_INITIALIZED`: the cursor is positioned.
+    pub(crate) fn is_initialized(&self) -> bool {
+        self.cursor.is_initialized()
+    }
+
+    /// The item at the cursor has duplicates (`F_DUPDATA`).
+    pub(crate) fn current_has_dups(&self) -> bool {
+        self.cursor.current_has_dups()
+    }
+}
+
+/// An active write transaction (`mdb_txn_begin` without `MDB_RDONLY`),
+/// boxed at a stable address.
+pub(crate) struct ErasedRwTxn {
+    txn: Box<RwTxn<'static>>,
+}
+
+impl ErasedRwTxn {
+    /// `mdb_txn_begin(env, NULL, 0)`: waits for the writer lock.
+    ///
+    /// # Safety
+    ///
+    /// As [`ErasedRoTxn::begin`]: `env` must stay alive and must not move
+    /// until the returned value has been dropped.
+    pub(crate) unsafe fn begin(env: &Environment) -> lmdb_core::Result<ErasedRwTxn> {
+        let txn = env.begin_rw_txn()?;
+        // SAFETY: only the lifetime changes; the caller guarantees that the
+        // environment outlives the transaction (rule 1).
+        let txn = unsafe { std::mem::transmute::<RwTxn<'_>, RwTxn<'static>>(txn) };
+        Ok(ErasedRwTxn { txn: Box::new(txn) })
+    }
+
+    /// `mdb_txn_begin(env, parent, 0)`: a transaction nested in this one.
+    ///
+    /// # Safety
+    ///
+    /// `self` must not be used, moved or dropped until the returned child
+    /// has been dropped (rule 5).
+    pub(crate) unsafe fn begin_nested(&mut self) -> lmdb_core::Result<ErasedRwTxn> {
+        let child = self.txn.begin_nested_txn()?;
+        // SAFETY: only the lifetime changes. The child borrows the boxed
+        // parent, which does not move, and per the caller's guarantee is
+        // neither used nor dropped while the child exists.
+        let child = unsafe { std::mem::transmute::<RwTxn<'_>, RwTxn<'static>>(child) };
+        Ok(ErasedRwTxn {
+            txn: Box::new(child),
+        })
+    }
+
+    /// The transaction, for reading. Slices read through it borrow `self`.
+    pub(crate) fn txn(&self) -> &RwTxn<'static> {
+        &self.txn
+    }
+
+    /// The transaction, for writing.
+    pub(crate) fn txn_mut(&mut self) -> &mut RwTxn<'static> {
+        &mut self.txn
+    }
+
+    /// `mdb_txn_commit`. On failure the transaction is aborted.
+    pub(crate) fn commit(self) -> lmdb_core::Result<()> {
+        self.txn.commit()
     }
 }
