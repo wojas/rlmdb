@@ -66,26 +66,36 @@ impl Dbi {
     }
 }
 
+/// `mt_dbflags` bit: the DB was written in this transaction (`DB_DIRTY`);
+/// its record goes back into the main DB at commit.
+pub(crate) const DB_DIRTY: u8 = 0x01;
 /// `mt_dbflags` bit: the DB record is older than the transaction.
 pub(crate) const DB_STALE: u8 = 0x02;
+/// `mt_dbflags` bit: the handle was created by this write transaction
+/// (`DB_NEW`); it becomes valid for others at commit and is closed by an
+/// abort.
+pub(crate) const DB_NEW: u8 = 0x04;
 /// `mt_dbflags` bit: the handle is valid (`DB_VALID`).
 pub(crate) const DB_VALID: u8 = 0x08;
 /// `mt_dbflags` bit: valid for user operations (not set for `FREE_DBI`).
 pub(crate) const DB_USRVALID: u8 = 0x10;
+/// `mx_dbflag` bit: the DB is a `MDB_DUPSORT` sub-DB (`DB_DUPDATA`).
+pub(crate) const DB_DUPDATA: u8 = 0x20;
 
 /// One slot of the environment's DBI table (`me_dbxs[i]` + `me_dbflags[i]`).
 #[derive(Debug, Clone, Default)]
-struct DbiSlot {
+pub(crate) struct DbiSlot {
     /// `md_name`; `None` for the core DBs and for free slots.
-    name: Option<Box<[u8]>>,
+    pub(crate) name: Option<Box<[u8]>>,
     /// Persistent flags (`me_dbflags & PERSISTENT_FLAGS`).
-    flags: u16,
-    /// `MDB_VALID`.
-    valid: bool,
+    pub(crate) flags: u16,
+    /// `MDB_VALID`. A slot reserved by a write transaction for a database it
+    /// created stays invalid for other transactions until the commit.
+    pub(crate) valid: bool,
     /// Key comparator installed with `set_compare`.
-    custom_cmp: Option<CmpFn>,
+    pub(crate) custom_cmp: Option<CmpFn>,
     /// Data comparator installed with `set_dupsort`.
-    custom_dcmp: Option<CmpFn>,
+    pub(crate) custom_dcmp: Option<CmpFn>,
 }
 
 /// The environment's DBI table.
@@ -119,12 +129,43 @@ impl DbiRegistry {
         self.seqs[i].load(Ordering::SeqCst)
     }
 
-    fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<DbiSlot>> {
+    /// `me_dbiseqs[i]`.
+    pub(crate) fn seq_of(&self, i: usize) -> u32 {
+        self.seqs.get(i).map_or(u32::MAX, |s| s.load(Ordering::SeqCst))
+    }
+
+    /// `++me_dbiseqs[i]`: the new sequence number of a (re)used slot.
+    pub(crate) fn bump_seq(&self, i: usize) -> u32 {
+        self.seqs[i].fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// `me_dbxs[i].md_name`.
+    pub(crate) fn name_of(&self, i: usize) -> Option<Box<[u8]>> {
+        self.read().get(i).and_then(|s| s.name.clone())
+    }
+
+    pub(crate) fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<DbiSlot>> {
         self.slots.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Vec<DbiSlot>> {
+    pub(crate) fn write(&self) -> std::sync::RwLockWriteGuard<'_, Vec<DbiSlot>> {
         self.slots.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `mdb_dbis_update` for one `DB_NEW` slot: publish it with `flags`
+    /// (commit) or close it (abort).
+    pub(crate) fn finish_new(&self, i: usize, keep: bool, flags: u16) {
+        if keep {
+            let mut slots = self.write();
+            if let Some(slot) = slots.get_mut(i) {
+                if slot.name.is_some() {
+                    slot.flags = (u32::from(flags) & PERSISTENT_FLAGS) as u16;
+                    slot.valid = true;
+                }
+            }
+        } else {
+            self.close(Dbi(i as u32));
+        }
     }
 
     /// `mdb_dbi_close`: forget a named handle. Core handles and unknown
@@ -159,7 +200,7 @@ impl DbiRegistry {
     }
 
     /// The comparators to use for slot `i` given the DB's flags.
-    fn comparators(slot: &DbiSlot, i: usize, flags: u16) -> (Comparator, Option<Comparator>) {
+    pub(crate) fn comparators(slot: &DbiSlot, i: usize, flags: u16) -> (Comparator, Option<Comparator>) {
         if i == FREE_DBI as usize {
             // me_dbxs[FREE_DBI].md_cmp = mdb_cmp_long (aligned MDB_INTEGERKEY)
             return (Comparator::Long, None);
@@ -240,7 +281,7 @@ pub(crate) fn init_txn_dbs(registry: &DbiRegistry, dbs: &mut Vec<TxnDb>, core_db
 }
 
 /// Outcome of looking a name up in the main DB.
-enum NamedDb {
+pub(crate) enum NamedDb {
     /// An `F_SUBDATA` node with this record.
     Found(Db),
     /// No exact match.
@@ -322,7 +363,7 @@ impl TxnCore<'_> {
     /// is a named DB. `MDB_NOTFOUND` if the main DB is empty; `Missing` if
     /// there is no exact match; `MDB_INCOMPATIBLE` if the key holds plain
     /// data instead of a DB record.
-    fn find_named_db(&self, name: &[u8]) -> Result<NamedDb> {
+    pub(crate) fn find_named_db(&self, name: &[u8]) -> Result<NamedDb> {
         let main = self.dbs.borrow()[MAIN_DBI as usize];
         let mut mc = Cursor::new(main.db, main.key_cmp, 0);
         mc.page_search(self, Some(name), 0)?;

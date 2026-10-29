@@ -22,16 +22,19 @@
 //! database beyond our `map_size`), begin fails with `MDB_MAP_RESIZED`.
 
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use crate::consts::*;
 use crate::core::cursor::{self, Cursor, RoCursor};
 use crate::core::dbi::{init_txn_dbs, Dbi, TxnDb, DB_USRVALID, DB_VALID};
+use crate::core::dirty::DirtyPages;
 use crate::core::env::Environment;
 use crate::core::Stat;
 use crate::error::{MdbError, Result};
 use crate::flags::DatabaseFlags;
 use crate::format::meta::Meta;
 use crate::format::{overflow_pages_for, PageRef};
+use crate::os::DataMap;
 
 /// Operations shared by read and write transactions.
 pub trait Transaction {
@@ -65,60 +68,79 @@ pub trait Transaction {
 /// table (`MDB_txn` minus the write-only parts).
 ///
 /// All page access goes through `TxnCore::page` and
-/// `TxnCore::overflow_data`. A write transaction (later stage) plugs its
-/// dirty-page store in there, so cursors work unchanged on both.
+/// `TxnCore::overflow_data`. A write transaction keeps its dirty pages in
+/// `dirty`, which both consult first (`mdb_page_get`), so cursors work
+/// unchanged on read and write transactions.
 pub(crate) struct TxnCore<'env> {
     pub(crate) env: &'env Environment,
+    /// The data map current when the transaction began. Kept alive by the
+    /// transaction so that [`Environment::set_map_size`] cannot invalidate
+    /// the slices it hands out.
+    pub(crate) map: Arc<DataMap>,
     /// `mt_txnid`.
     pub(crate) txnid: u64,
-    /// `mt_next_pgno`: first page not in this snapshot.
+    /// `mt_next_pgno`: first page not in this snapshot (write transactions:
+    /// first page never allocated).
     pub(crate) next_pgno: u64,
     /// `mt_dbs` + `mt_dbflags` (+ seqs and comparators), one per DBI slot.
     pub(crate) dbs: RefCell<Vec<TxnDb>>,
+    /// `mt_u.dirty_list`: pages written by a write transaction. Always
+    /// empty for read transactions.
+    pub(crate) dirty: DirtyPages,
 }
 
 impl<'env> TxnCore<'env> {
-    fn new(env: &'env Environment, dbs: Vec<TxnDb>) -> TxnCore<'env> {
+    pub(crate) fn new(env: &'env Environment, dbs: Vec<TxnDb>) -> TxnCore<'env> {
         TxnCore {
             env,
+            map: env.data_map(),
             txnid: 0,
             next_pgno: 0,
             dbs: RefCell::new(dbs),
+            dirty: DirtyPages::new(),
         }
+    }
+
+    /// `me_maxpg` for this transaction's map: the number of pages it holds.
+    pub(crate) fn max_pgno(&self) -> u64 {
+        (self.map.len() / self.env.page_size()) as u64
     }
 
     /// Installs the snapshot described by `meta` (the tail of
     /// `mdb_txn_renew0`).
-    fn set_snapshot(&mut self, txnid: u64, meta: &Meta) -> Result<()> {
+    pub(crate) fn set_snapshot(&mut self, txnid: u64, meta: &Meta) -> Result<()> {
         self.txnid = txnid;
         self.next_pgno = meta.last_pgno.wrapping_add(1);
         init_txn_dbs(&self.env.dbis, self.dbs.get_mut(), &meta.dbs);
-        if self.env.max_pgno() < self.next_pgno {
+        if self.env.has_fatal_error() {
+            return Err(MdbError::Panic.into());
+        }
+        if self.max_pgno() < self.next_pgno {
             return Err(MdbError::MapResized.into());
         }
         Ok(())
     }
 
-    /// `mdb_page_get`: page `pgno` of this snapshot. Meta pages are never
-    /// returned (they change under readers), nor pages past the snapshot's
-    /// end (`MDB_PAGE_NOTFOUND`).
+    /// `mdb_page_get`: page `pgno` of this snapshot: a dirty page of this
+    /// transaction, else the mapped page. Meta pages are never returned
+    /// (they change under readers), nor pages past the snapshot's end
+    /// (`MDB_PAGE_NOTFOUND`).
     pub(crate) fn page(&self, pgno: u64) -> Result<PageRef<'_>> {
+        let ps = self.env.page_size();
+        if let Some(buf) = self.dirty.get(pgno) {
+            return PageRef::new(&buf[..ps]).ok_or_else(|| MdbError::Corrupted.into());
+        }
         if pgno < NUM_METAS as u64 {
             return Err(MdbError::Corrupted.into());
         }
         if pgno >= self.next_pgno {
             return Err(MdbError::PageNotFound.into());
         }
-        let ps = self.env.page_size();
         let off = usize::try_from(pgno)
             .ok()
             .and_then(|p| p.checked_mul(ps))
             .ok_or(MdbError::PageNotFound)?;
-        let bytes = self
-            .env
-            .data_map()
-            .slice(off, ps)
-            .ok_or(MdbError::PageNotFound)?;
+        let bytes = self.map.slice(off, ps).ok_or(MdbError::PageNotFound)?;
         PageRef::new(bytes).ok_or_else(|| MdbError::Corrupted.into())
     }
 
@@ -127,23 +149,26 @@ impl<'env> TxnCore<'env> {
     pub(crate) fn overflow_data(&self, pgno: u64, len: usize) -> Result<&[u8]> {
         let ps = self.env.page_size();
         let npages = overflow_pages_for(len, ps) as u64;
-        if pgno < NUM_METAS as u64 {
-            return Err(MdbError::Corrupted.into());
-        }
-        if pgno
-            .checked_add(npages)
-            .is_none_or(|end| end > self.next_pgno)
-        {
-            return Err(MdbError::PageNotFound.into());
-        }
-        let off = (pgno as usize)
-            .checked_mul(ps)
-            .ok_or(MdbError::PageNotFound)?;
-        let bytes = self
-            .env
-            .data_map()
-            .slice(off, npages as usize * ps)
-            .ok_or(MdbError::PageNotFound)?;
+        let bytes = match self.dirty.get(pgno) {
+            Some(buf) => buf,
+            None => {
+                if pgno < NUM_METAS as u64 {
+                    return Err(MdbError::Corrupted.into());
+                }
+                if pgno
+                    .checked_add(npages)
+                    .is_none_or(|end| end > self.next_pgno)
+                {
+                    return Err(MdbError::PageNotFound.into());
+                }
+                let off = (pgno as usize)
+                    .checked_mul(ps)
+                    .ok_or(MdbError::PageNotFound)?;
+                self.map
+                    .slice(off, npages as usize * ps)
+                    .ok_or(MdbError::PageNotFound)?
+            }
+        };
         let page = PageRef::new(bytes).ok_or(MdbError::Corrupted)?;
         if !page.is_overflow() {
             return Err(MdbError::Corrupted.into());

@@ -53,7 +53,6 @@ pub(crate) const C_SUB: u8 = 0x04;
 pub(crate) const C_DEL: u8 = 0x08;
 
 /// `MDB_PS_ROOTONLY`: stop at the root page.
-#[allow(dead_code)] // used by the write path (stage 2)
 pub(crate) const PS_ROOTONLY: u8 = 2;
 /// `MDB_PS_FIRST`: descend to the first leaf.
 pub(crate) const PS_FIRST: u8 = 4;
@@ -63,7 +62,7 @@ pub(crate) const PS_LAST: u8 = 8;
 /// A header-only page used to fill unused cursor stack slots.
 static EMPTY_PAGE: [u8; 16] = [0; 16];
 
-fn empty_page() -> PageRef<'static> {
+pub(crate) fn empty_page() -> PageRef<'static> {
     // EMPTY_PAGE holds exactly a header, so `new` cannot fail.
     PageRef::new(&EMPTY_PAGE).unwrap_or_else(|| unreachable!())
 }
@@ -119,6 +118,53 @@ impl<'t> Cursor<'t> {
             cmp,
             subpage: None,
         }
+    }
+
+    /// Rebuilds a cursor from the state of a write cursor (`wcursor`):
+    /// `pages[i]` for the `snum` pushed levels, the indices, and for a
+    /// sub-cursor over a `P_SUBP` sub-page that sub-page.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        db: Db,
+        cmp: Comparator,
+        flags: u8,
+        pages: &[PageRef<'t>],
+        ki: &[u16; CURSOR_STACK],
+        snum: usize,
+        top: usize,
+        subpage: Option<PageRef<'t>>,
+    ) -> Cursor<'t> {
+        let mut c = Cursor::new(db, cmp, flags);
+        c.pg[..pages.len()].copy_from_slice(pages);
+        c.ki = *ki;
+        c.snum = snum;
+        c.top = top;
+        c.subpage = subpage;
+        c
+    }
+
+    /// `mc_pg[i]`.
+    #[inline]
+    pub(crate) fn page_at(&self, i: usize) -> PageRef<'t> {
+        self.pg[i]
+    }
+
+    /// `mc_ki`.
+    #[inline]
+    pub(crate) fn ki_array(&self) -> &[u16; CURSOR_STACK] {
+        &self.ki
+    }
+
+    /// `mc_top`.
+    #[inline]
+    pub(crate) fn top_level(&self) -> usize {
+        self.top
+    }
+
+    /// The sub-page this sub-cursor walks, if any.
+    #[inline]
+    pub(crate) fn subpage(&self) -> Option<PageRef<'t>> {
+        self.subpage
     }
 
     #[inline]
@@ -179,7 +225,7 @@ impl<'t> Cursor<'t> {
     }
 
     /// `mdb_cursor_push`.
-    fn push(&mut self, mp: PageRef<'t>) -> Result<()> {
+    pub(crate) fn push(&mut self, mp: PageRef<'t>) -> Result<()> {
         if self.snum >= CURSOR_STACK {
             return Err(MdbError::CursorFull.into());
         }
@@ -270,7 +316,7 @@ impl<'t> Cursor<'t> {
     }
 
     /// `mdb_page_search_root`: descend from the page on top of the stack.
-    fn page_search_root(
+    pub(crate) fn page_search_root(
         &mut self,
         txn: &'t TxnCore<'_>,
         key: Option<&[u8]>,
