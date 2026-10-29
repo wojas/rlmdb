@@ -34,16 +34,24 @@
 //!   `mdb_xcursor_init*`).
 //! * [`txn_rw`]: write transactions and write cursors (`mdb_txn_begin`,
 //!   `mdb_txn_commit`, `mdb_put`, `mdb_cursor_put`, `mdb_dbi_open` with
-//!   `MDB_CREATE`), built on private modules: `wcursor` (write cursors and
-//!   their fixups, `mdb_page_touch`), `dirty` (the dirty page list),
-//!   `page_ops` (byte-level node edits), `freelist` (`mdb_page_alloc`,
-//!   `mdb_freelist_save`), `cursor_put` (`mdb_cursor_put`,
-//!   `mdb_node_add`), `split` (`mdb_page_split`), `cursor_del`
-//!   (`mdb_cursor_del`, `mdb_rebalance`, `mdb_page_merge`,
-//!   `mdb_node_move`) and `commit` (`mdb_page_flush`,
-//!   `mdb_env_write_meta`).
+//!   `MDB_CREATE`, `mdb_drop`), built on private modules: `wcursor` (write
+//!   cursors and their fixups, `mdb_page_touch`), `dirty` (the dirty page
+//!   list), `page_ops` (byte-level node edits), `freelist`
+//!   (`mdb_page_alloc`, `mdb_freelist_save`), `cursor_put`
+//!   (`mdb_cursor_put`, `mdb_node_add`), `split` (`mdb_page_split`),
+//!   `cursor_del` (`mdb_cursor_del`, `mdb_rebalance`, `mdb_page_merge`,
+//!   `mdb_node_move`, `mdb_drop`), `commit` (`mdb_page_flush`,
+//!   `mdb_env_write_meta`), `nested` (nested transactions:
+//!   `mdb_txn_begin` with a parent, `mdb_cursor_shadow`, the nested commit
+//!   and abort) and `spill` (`mdb_page_spill`, `mdb_page_unspill`);
+//! * `copy`: [`Environment::copy_to_path`] and
+//!   [`Environment::copy_to_fd`] (`mdb_env_copyfd0`, `mdb_env_copyfd1`,
+//!   `mdb_env_cwalk`).
 
+#[cfg(test)]
+pub(crate) mod audit;
 mod commit;
+mod copy;
 pub mod cursor;
 mod cursor_del;
 mod cursor_put;
@@ -51,9 +59,11 @@ pub mod dbi;
 pub(crate) mod dirty;
 pub mod env;
 mod freelist;
+mod nested;
 pub(crate) mod page_ops;
 pub mod reader;
 pub mod ro_cursor;
+mod spill;
 mod split;
 pub mod txn;
 pub mod txn_rw;
@@ -112,4 +122,9 @@ pub struct Info {
     pub max_readers: u32,
     /// `me_numreaders`: max reader slots used in the environment.
     pub num_readers: u32,
+    /// `me_mapaddr`: the map address recorded in the newest meta page
+    /// (`mm_address`; non-zero only for C environments created with
+    /// `MDB_FIXEDMAP`). C reports its own map address there; this crate
+    /// never uses a fixed address, so it reports the recorded one.
+    pub map_address: usize,
 }

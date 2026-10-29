@@ -377,9 +377,10 @@ impl<'env> RwTxn<'env> {
         Ok(())
     }
 
-    /// `mdb_page_spill`'s size estimate. Spilling itself is stage 3: where C
-    /// would write dirty pages out to make room, we fail with
-    /// `MDB_TXN_FULL` (the transaction stays usable).
+    /// The start of `mdb_page_spill`: estimate how many pages the operation
+    /// of `mc` may dirty (`kd` = key and data size of a put) and spill
+    /// dirty pages to disk if the dirty list does not have room for that
+    /// many.
     pub(crate) fn spill_check(&mut self, mc: CRef, kd: Option<(usize, usize)>) -> Result<()> {
         if self.cur(mc).is_sub() {
             return Ok(());
@@ -398,8 +399,7 @@ impl<'env> RwTxn<'env> {
         if self.w.dirty_room > i {
             return Ok(());
         }
-        // stage 3: mdb_page_spill
-        Err(MdbError::TxnFull.into())
+        self.page_spill(mc, i)
     }
 
     /// One pass of `mdb_cursor_put` from the insert/overwrite decision on
@@ -587,14 +587,26 @@ impl<'env> RwTxn<'env> {
             // Overflow page overwrites need special handling.
             let pg = ovpgno.ok_or_else(corrupted)?;
             let dpages = overflow_pages_for(item.size, ps);
-            let (ovpages, dirty) = {
+            let (ovpages, mut dirty) = {
                 let omp = self.core.page(pg)?;
                 (omp.overflow_pages() as usize, omp.flags() & P_DIRTY != 0)
             };
-            // Is the ov page large enough, and dirty (written in this txn)?
-            // Then overwrite it. (A clean page from a spilled or parent txn
-            // would be unspilled or copied here: stage 3.)
+            let mut level = self.core.page_level(pg);
+            // Is the ov page large enough?
+            if ovpages >= dpages && !dirty && level != 0 {
+                // Spilled by this txn or an ancestor: make it dirty again.
+                dirty = self.page_unspill(pg)?;
+                level = 0; // dirty in this txn or clean
+            }
+            // Is it dirty? Yes, overwrite it. Note in this case we don't
+            // bother to try shrinking the page if the new data is smaller
+            // than the overflow threshold.
             if ovpages >= dpages && dirty {
+                if level > 1 {
+                    // It is writable only in a parent txn: copy it (it is
+                    // already counted in the parent's dirty room).
+                    self.copy_ancestor_page(pg)?;
+                }
                 let page = self.top_page_mut(mc)?;
                 page_ops::set_node_dsize(page, ki, item.size).ok_or_else(corrupted)?;
                 if flags & MDB_RESERVE == 0 {

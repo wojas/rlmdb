@@ -186,6 +186,16 @@ impl DbiRegistry {
         }
     }
 
+    /// Reopens a handle closed by `drop_db` in a nested transaction that
+    /// aborted, in its old slot, if that is still free. Returns the slot's
+    /// new sequence number.
+    pub(crate) fn reopen(&self, i: usize, slot: DbiSlot) -> Option<u32> {
+        let mut slots = self.write();
+        let dst = slots.get_mut(i).filter(|s| s.name.is_none())?;
+        *dst = slot;
+        Some(self.bump_seq(i))
+    }
+
     /// `mdb_set_compare` / `mdb_set_dupsort`: install a custom comparator.
     pub(crate) fn set_comparator(&self, dbi: Dbi, cmp: Option<CmpFn>, dup: bool) -> Result<()> {
         let mut slots = self.write();
@@ -241,6 +251,21 @@ pub(crate) struct TxnDb {
     pub(crate) key_cmp: Comparator,
     /// Data comparator (`MDB_DUPSORT` only).
     pub(crate) dup_cmp: Option<Comparator>,
+    /// [`name_id`] of the database's name (0 for the core DBs): a slot may
+    /// be closed and reused for another name, and a nested transaction may
+    /// register a name again in a new slot generation; this tells whether
+    /// a view and a registration are about the same database.
+    pub(crate) name_id: u64,
+}
+
+/// A fingerprint of a database name (FNV-1a, never 0).
+pub(crate) fn name_id(name: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for &b in name {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h | 1
 }
 
 impl TxnDb {
@@ -260,6 +285,7 @@ impl TxnDb {
         seq: 0,
         key_cmp: Comparator::Memn,
         dup_cmp: None,
+        name_id: 0,
     };
 }
 
@@ -282,8 +308,18 @@ pub(crate) fn init_txn_dbs(registry: &DbiRegistry, dbs: &mut Vec<TxnDb>, core_db
             seq: registry.seq(i),
             key_cmp,
             dup_cmp,
+            name_id: 0,
         };
     }
+}
+
+/// Database names are C strings: arbitrary bytes without NUL. A name with
+/// a NUL byte could not be opened by a C process (`EINVAL`).
+pub(crate) fn check_db_name(name: &[u8]) -> Result<()> {
+    if name.contains(&0) {
+        return Err(Error::einval());
+    }
+    Ok(())
 }
 
 /// Outcome of looking a name up in the main DB.
@@ -314,6 +350,7 @@ impl TxnCore<'_> {
                 seq: registry.seq(i),
                 key_cmp,
                 dup_cmp,
+                name_id: slot.name.as_deref().map_or(0, name_id),
             };
             drop(slots);
             self.dbs.borrow_mut()[i] = entry;
@@ -370,6 +407,10 @@ impl TxnCore<'_> {
     /// there is no exact match; `MDB_INCOMPATIBLE` if the key holds plain
     /// data instead of a DB record.
     pub(crate) fn find_named_db(&self, name: &[u8]) -> Result<NamedDb> {
+        // mdb_cursor_set: a zero-length key (DB name) is invalid.
+        if name.is_empty() {
+            return Err(MdbError::BadValSize.into());
+        }
         let main = self.dbs.borrow()[MAIN_DBI as usize];
         let mut mc = Cursor::new(main.db, main.key_cmp, 0);
         mc.page_search(self, Some(name), 0)?;
@@ -389,11 +430,11 @@ impl TxnCore<'_> {
 
     /// `mdb_dbi_open` without `MDB_CREATE`: the handle of an existing
     /// database (`None` = the main DB).
-    pub(crate) fn open_db(&self, name: Option<&str>) -> Result<Dbi> {
+    pub(crate) fn open_db(&self, name: Option<&[u8]>) -> Result<Dbi> {
         let Some(name) = name else {
             return Ok(Dbi::MAIN);
         };
-        let name = name.as_bytes();
+        check_db_name(name)?;
         let registry = &self.env.dbis;
         let mut slots = registry.write();
 
@@ -404,9 +445,16 @@ impl TxnCore<'_> {
                 None => {
                     unused.get_or_insert(i);
                 }
-                Some(n) if &**n == name => return Ok(Dbi(i as u32)),
+                Some(n) if &**n == name => {
+                    drop(slots);
+                    self.adopt_registration(i, name);
+                    return Ok(Dbi(i as u32));
+                }
                 Some(_) => {}
             }
+        }
+        if let Some(dbi) = self.reopen_live_view(&mut slots, name) {
+            return Ok(dbi);
         }
         // If no free slot and max hit, fail.
         if unused.is_none() && slots.len() >= registry.capacity() {
@@ -449,8 +497,98 @@ impl TxnCore<'_> {
             seq,
             key_cmp,
             dup_cmp,
+            name_id: name_id(name),
         };
         Ok(Dbi(i as u32))
+    }
+
+    /// `name` is not open in the environment, but this transaction may
+    /// still have a live view of it in a slot whose handle was closed under
+    /// it (`drop_db` in a nested transaction, or `Environment::close_db`).
+    /// Opening it again must keep that view: within a write transaction the
+    /// DB record in the main DB is only written back at commit, so reading
+    /// it would lose this transaction's changes to the database (C does,
+    /// KNOWN_C_BUGS.md #19). Registers the view's slot again and returns
+    /// its handle.
+    pub(crate) fn reopen_live_view(&self, slots: &mut Vec<DbiSlot>, name: &[u8]) -> Option<Dbi> {
+        let id = name_id(name);
+        let mut dbs = self.dbs.borrow_mut();
+        let i = (CORE_DBS as usize..dbs.len()).find(|&i| {
+            let e = &dbs[i];
+            e.state & DB_VALID != 0
+                && e.name_id == id
+                && slots.get(i).is_none_or(|s| s.name.is_none())
+        })?;
+        let e = &mut dbs[i];
+        let slot = DbiSlot {
+            name: Some(name.into()),
+            flags: (u32::from(e.db.flags) & PERSISTENT_FLAGS) as u16,
+            valid: e.state & DB_NEW == 0,
+            custom_cmp: None,
+            custom_dcmp: None,
+        };
+        if i < slots.len() {
+            slots[i] = slot;
+        } else if i == slots.len() {
+            slots.push(slot);
+        } else {
+            return None;
+        }
+        e.seq = self.env.dbis.bump_seq(i);
+        Some(Dbi(i as u32))
+    }
+
+    /// `name` is open in the environment in slot `i`. If this transaction
+    /// has a usable view of the same database from an earlier generation
+    /// of the slot (the handle was closed by `drop_db` in a nested
+    /// transaction that aborted, or registered again by one), it carries
+    /// over to the current one; C gets the same effect from the nested
+    /// transaction updating its parent's `mt_dbiseqs`. A view of a
+    /// database this transaction dropped, or of another name, is
+    /// forgotten: the handle is looked at afresh when it is used. Returns
+    /// `false` in that case.
+    pub(crate) fn adopt_registration(&self, i: usize, name: &[u8]) -> bool {
+        let seq = self.env.dbis.seq_of(i);
+        let mut dbs = self.dbs.borrow_mut();
+        let e = &mut dbs[i];
+        if e.state == 0 || e.seq == seq {
+            return true;
+        }
+        if e.state & DB_VALID != 0 && e.name_id == name_id(name) {
+            e.seq = seq;
+            return true;
+        }
+        *e = TxnDb::UNKNOWN;
+        false
+    }
+
+    /// `mdb_set_compare` / `mdb_set_dupsort` called with a transaction:
+    /// install `cmp` for the handle (environment-wide, as C's `me_dbxs`)
+    /// and use it in this transaction from now on.
+    pub(crate) fn set_comparator(&self, db: Dbi, cmp: Option<CmpFn>, dup: bool) -> Result<()> {
+        let entry = self.dbi_entry(db, DB_USRVALID)?;
+        let i = db.0 as usize;
+        let registry = &self.env.dbis;
+        let mut slots = registry.write();
+        let slot = slots.get_mut(i).ok_or_else(Error::einval)?;
+        if dup {
+            slot.custom_dcmp = cmp;
+        } else {
+            slot.custom_cmp = cmp;
+        }
+        let (key_cmp, dup_cmp) = DbiRegistry::comparators(slot, i, entry.db.flags);
+        drop(slots);
+        let mut dbs = self.dbs.borrow_mut();
+        dbs[i].key_cmp = key_cmp;
+        dbs[i].dup_cmp = dup_cmp;
+        Ok(())
+    }
+
+    /// The key and duplicate-data comparators this transaction uses for
+    /// `db` (`mdb_cmp` / `mdb_dcmp`).
+    pub(crate) fn comparators(&self, db: Dbi) -> Result<(Comparator, Option<Comparator>)> {
+        let entry = self.dbi_entry(db, DB_VALID)?;
+        Ok((entry.key_cmp, entry.dup_cmp))
     }
 
     /// `mdb_dbi_flags`: the persistent flags of a user DB.
@@ -465,5 +603,82 @@ impl TxnCore<'_> {
     pub(crate) fn db_stat(&self, dbi: Dbi) -> Result<Stat> {
         let entry = self.fresh_dbi(dbi, DB_VALID)?;
         Ok(Stat::from_db(self.env.page_size(), &entry.db))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::{Environment, Transaction};
+    use crate::error::{Error, MdbError};
+    use crate::flags::{DatabaseFlags, EnvironmentFlags};
+
+    fn code(e: Error) -> i32 {
+        e.to_err_code()
+    }
+
+    /// Names are validated as C validates keys in `mdb_dbi_open`: the
+    /// empty name fails in `mdb_cursor_set` with `MDB_BAD_VALSIZE` (open
+    /// and create); a name longer than the maximum key size is simply not
+    /// found when opening and fails the record's put with
+    /// `MDB_BAD_VALSIZE` when creating.
+    #[test]
+    fn empty_and_too_long_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = Environment::builder()
+            .max_dbs(4)
+            .flags(EnvironmentFlags::NO_SYNC)
+            .open(dir.path())
+            .unwrap();
+        let bad = MdbError::BadValSize.to_err_code();
+        let long = vec![b'n'; 512];
+        let max = vec![b'm'; 511];
+        for populated in [false, true] {
+            let mut txn = env.begin_rw_txn().unwrap();
+            assert_eq!(code(txn.open_db(Some("")).unwrap_err()), bad);
+            assert_eq!(code(txn.open_db_bytes(Some(b"")).unwrap_err()), bad);
+            assert_eq!(
+                code(txn.create_db(Some(""), DatabaseFlags::CREATE).unwrap_err()),
+                bad
+            );
+            assert_eq!(
+                code(
+                    txn.create_db_bytes(Some(b""), DatabaseFlags::CREATE)
+                        .unwrap_err()
+                ),
+                bad
+            );
+            assert!(txn.open_db_bytes(Some(&long)).unwrap_err().not_found());
+            assert_eq!(
+                code(
+                    txn.create_db_bytes(Some(&long), DatabaseFlags::CREATE)
+                        .unwrap_err()
+                ),
+                bad
+            );
+            // The longest valid name works.
+            if populated {
+                txn.create_db_bytes(Some(&max), DatabaseFlags::CREATE)
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+            let ro = env.begin_ro_txn().unwrap();
+            assert_eq!(code(ro.open_db(Some("")).unwrap_err()), bad);
+            assert_eq!(code(ro.open_db_bytes(Some(b"")).unwrap_err()), bad);
+            assert!(ro.open_db_bytes(Some(&long)).unwrap_err().not_found());
+            assert_eq!(ro.open_db_bytes(Some(&max)).is_ok(), populated);
+        }
+        // NUL bytes cannot be part of a C name.
+        let mut txn = env.begin_rw_txn().unwrap();
+        let e = txn
+            .create_db_bytes(Some(b"a\0b"), DatabaseFlags::CREATE)
+            .unwrap_err();
+        assert_eq!(code(e), libc::EINVAL);
+        // Non-UTF-8 names are fine.
+        let db = txn
+            .create_db_bytes(Some(b"\xff\xfe"), DatabaseFlags::CREATE)
+            .unwrap();
+        txn.commit().unwrap();
+        let ro = env.begin_ro_txn().unwrap();
+        assert_eq!(ro.open_db_bytes(Some(b"\xff\xfe")).unwrap(), db);
     }
 }

@@ -325,7 +325,7 @@ pub struct RwTxn<'env> {
     pub fn del(&mut self, db: Dbi, key: &[u8], data: Option<&[u8]>) -> Result<bool>;   // false = not found
     pub fn cursor_mut<'txn>(&'txn mut self, db: Dbi) -> Result<RwCursor<'txn>>;
     pub fn clear_db(&mut self, db: Dbi) -> Result<()>;  pub fn drop_db(&mut self, db: Dbi) -> Result<()>;
-    pub fn nested<'txn>(&'txn mut self) -> Result<RwTxn<'txn>>;
+    pub fn begin_nested_txn(&mut self) -> Result<RwTxn<'_>>;
     pub fn commit(self) -> Result<()>;  pub fn abort(self);   // Drop aborts
 }
 pub enum CursorOp { First, FirstDup, GetBoth, GetBothRange, GetCurrent, GetMultiple, Last, LastDup, Next, NextDup, NextMultiple, NextNoDup, Prev, PrevDup, PrevNoDup, Set, SetKey, SetRange, PrevMultiple }   // <-> MDB_cursor_op values
@@ -394,9 +394,9 @@ returns the C int; `from_err_code`; `Display` strings match `mdb_strerror`.
   (`mdb_page_flush`, line 3394), data is `fdatasync`ed (or `fsync`/
   `F_FULLFSYNC`), then the meta page is written.
 * Spilling (`mdb_page_spill`, line 2080) exists so huge write txns do not
-  exhaust memory. Implement it; it is part of the commit correctness path for
-  nested txns too. If deferred in a first pass, return `TxnFull` rather than
-  silently misbehaving.
+  exhaust memory. Implemented (`core/spill.rs`) with C's exact choice of
+  pages, so the free list comes out as C's; spilled pages are read back
+  through the map.
 * The write lock: one `RwTxn` per `Env` at a time; `begin_rw_txn` blocks on
   the shared `wmutex` like C. On Linux the writer mutex is a pthread mutex
   owned by the locking thread, so the write transaction must be unlocked on
@@ -523,6 +523,29 @@ and interop agents; the core agent adds them, additively):
   its integration tests, so the Rust library cannot also be `lmdb`. Rename
   the library to package `lmdb-core`, lib `lmdb_core` (directory
   `rust/lmdb-core`) once no agent is editing it.
+
+**Findings of stage 3 C2** (nested transactions, spilling, `mdb_drop`,
+env copy; see `KNOWN_C_BUGS.md` #18-#22):
+
+* Nested transactions move the parent's dirty/spilled pages and cursor
+  arena into the child (`core/nested.rs`); the parent is borrowed. As in C,
+  the parent's cursor handles (`CursorId`) work through the child (shadowed:
+  kept on commit, restored on abort, `close_cursor` on them is a no-op);
+  `RwCursor`s cannot cross (borrowck).
+* Spilling is byte-for-byte C's: a full-size lock-step test
+  (`write_differential::diff_spill_full_size`, ignored) ends with the same
+  `mdb_stat -a -f` page usage as C. A child inherits its parent's dirty room
+  and cannot re-spill pages an ancestor spilled, so it can hit `TXN_FULL`
+  (ported, #22).
+* `mdb_drop(del=1)` closes the handle at once (C); an aborting child
+  reopens what it dropped (#20), and an abort closes handles of databases
+  that no longer exist (#19).
+* `copy_to_path`/`copy_to_fd` output is byte-identical to `mdb_copy` and
+  `mdb_copy -c` (the compacting writer reproduces C's double-buffer reuse,
+  so even unused page bytes match).
+* Empty DB names fail with `MDB_BAD_VALSIZE` (C's `mdb_cursor_set`); names
+  over 511 bytes are `NOTFOUND` on open and `BAD_VALSIZE` on create, as C;
+  names with NUL bytes are `EINVAL`.
 
 **Stage 4:** review, benchmarks vs C, docs. Until the heed layer exists,
 `lib.rs` re-exports `core::*` at the crate root.

@@ -63,6 +63,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "libc",
+ "lmdb-capi",
  "lmdb-core",
  "tempfile",
 ]
@@ -100,6 +101,11 @@ dependencies = [
 [[package]]
 name = "lmdb-tools"
 version = "0.1.0"
+dependencies = [
+ "cc",
+ "lmdb-core",
+ "tempfile",
+]
 
 [[package]]
 name = "once_cell"

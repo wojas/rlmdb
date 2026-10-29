@@ -106,7 +106,22 @@ fn build_c_tools() -> Result<PathBuf, String> {
         }
     }
     files.sort();
+    let targets = [
+        "liblmdb.a",
+        "mdb_stat",
+        "mdb_dump",
+        "mdb_load",
+        "mdb_copy",
+        "mtest",
+        "mtest2",
+        "mtest3",
+        "mtest4",
+        "mtest5",
+    ];
     let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for t in targets {
+        fnv(&mut h, t.as_bytes());
+    }
     for f in &files {
         fnv(&mut h, f.file_name().unwrap().to_string_lossy().as_bytes());
         fnv(&mut h, &fs::read(f).map_err(|e| e.to_string())?);
@@ -142,17 +157,7 @@ fn build_c_tools() -> Result<PathBuf, String> {
         Command::new("make")
             .current_dir(&tmp)
             .arg(format!("CC={cc}"))
-            .args([
-                "liblmdb.a",
-                "mdb_stat",
-                "mdb_dump",
-                "mdb_load",
-                "mtest",
-                "mtest2",
-                "mtest3",
-                "mtest4",
-                "mtest5",
-            ]),
+            .args(targets),
     )?;
     run_ok(Command::new(&cc).current_dir(&tmp).args([
         "-pthread",

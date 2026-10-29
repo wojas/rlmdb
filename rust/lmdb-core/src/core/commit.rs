@@ -21,7 +21,7 @@
 use crate::consts::*;
 use crate::core::cursor_put::PutData;
 use crate::core::dbi::DB_DIRTY;
-use crate::core::txn_rw::{RwTxn, TXN_DIRTY, TXN_ERROR, TXN_FINISHED, TXN_SPILLS};
+use crate::core::txn_rw::{RwTxn, TXN_DIRTY, TXN_ERROR, TXN_FINISHED, TXN_HAS_CHILD, TXN_SPILLS};
 use crate::core::wcursor::CRef;
 use crate::error::{MdbError, Result};
 use crate::format::layout::{META_MAPSIZE, META_OFFSET_IN_PAGE, META_SIZE};
@@ -41,7 +41,10 @@ impl<'env> RwTxn<'env> {
     /// `_mdb_txn_commit` for a top-level transaction, up to (not including)
     /// `mdb_txn_end`.
     pub(crate) fn commit0(&mut self) -> Result<()> {
-        if self.w.flags & (TXN_FINISHED | TXN_ERROR) != 0 {
+        // (TXN_HAS_CHILD is still set if a nested transaction was leaked with
+        // `mem::forget`: its pages are with the child, so nothing may be
+        // written.)
+        if self.w.flags & (TXN_FINISHED | TXN_ERROR | TXN_HAS_CHILD) != 0 {
             return Err(MdbError::BadTxn.into());
         }
         // mdb_cursors_close: no user cursor can be alive (they borrow the
@@ -56,7 +59,7 @@ impl<'env> RwTxn<'env> {
         self.freelist_save()?;
         self.w.pghead = None;
 
-        self.page_flush(0)?;
+        self.page_flush()?;
         self.core.env.sync(false)?;
         self.write_meta()
     }
@@ -92,23 +95,37 @@ impl<'env> RwTxn<'env> {
         Ok(())
     }
 
-    /// `mdb_page_flush`: write the dirty pages after the first `keep` to
-    /// the data file, clearing `P_DIRTY` in each first. Loose pages (and
-    /// `P_KEEP` ones, used by spilling) stay dirty and in the list; written
-    /// pages leave it.
-    pub(crate) fn page_flush(&mut self, keep: usize) -> Result<()> {
-        let ps = self.psize();
-        // Pass 1: decide what to write and clear the dirty flags.
-        let mut writes: Vec<(u64, usize)> = Vec::new();
-        let pgnos: Vec<u64> = self.core.dirty.pgnos().skip(keep).collect();
-        for pgno in pgnos {
-            let page = self.dirty_mut(pgno)?;
+    /// `mdb_page_flush(txn, 0)` at commit: write every dirty page to the
+    /// data file, clearing `P_DIRTY` in each first. Loose pages (and
+    /// `P_KEEP` ones, which lose the mark) stay dirty and in the list;
+    /// written pages leave it.
+    pub(crate) fn page_flush(&mut self) -> Result<()> {
+        let mut pgnos: Vec<u64> = Vec::with_capacity(self.core.dirty.len());
+        self.core.dirty.retain(|pgno, page| {
             let flags = crate::core::page_ops::flags(page);
             // Don't flush this page yet.
             if flags & (P_LOOSE | P_KEEP) != 0 {
                 crate::core::page_ops::set_flags(page, flags & !P_KEEP);
-                continue;
+            } else {
+                pgnos.push(pgno);
             }
+            true
+        });
+        self.write_pages(&pgnos)
+    }
+
+    /// The writing part of `mdb_page_flush`: write the dirty pages `pgnos`
+    /// (ascending) with `P_DIRTY` cleared, contiguous runs batched into one
+    /// `pwritev` of up to `MDB_COMMIT_PAGES` buffers, then drop them from
+    /// the dirty list (`mt_dirty_room` grows accordingly). Used by commit
+    /// and by `mdb_page_spill`.
+    pub(crate) fn write_pages(&mut self, pgnos: &[u64]) -> Result<()> {
+        let ps = self.psize();
+        // Pass 1: clear the dirty flags and size the runs.
+        let mut writes: Vec<(u64, usize)> = Vec::with_capacity(pgnos.len());
+        for &pgno in pgnos {
+            let page = self.dirty_mut(pgno)?;
+            let flags = crate::core::page_ops::flags(page);
             crate::core::page_ops::set_flags(page, flags & !P_DIRTY);
             let npages = if flags & P_OVERFLOW != 0 {
                 crate::format::get_u32(page, crate::format::layout::PAGE_OVERFLOW_PAGES)
@@ -140,10 +157,15 @@ impl<'env> RwTxn<'env> {
         }
         write_batch(file, &batch, wpos, wsize)?;
 
-        // Pass 3: drop the written pages from the dirty list.
-        for &(pgno, _) in &writes {
-            self.core.dirty.remove(pgno);
-        }
+        // Pass 3: drop the written pages from the dirty list (both lists
+        // are ascending).
+        let mut next = writes.iter().map(|w| w.0).peekable();
+        self.core.dirty.retain(|pgno, _| {
+            while next.peek().is_some_and(|&w| w < pgno) {
+                next.next();
+            }
+            next.peek() != Some(&pgno)
+        });
         self.w.dirty_room += writes.len();
         Ok(())
     }

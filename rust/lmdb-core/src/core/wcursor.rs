@@ -46,7 +46,7 @@ use crate::core::cursor::{corrupted, empty_page, Cursor, C_INITIALIZED, C_SUB};
 use crate::core::dbi::{DB_DIRTY, DB_DUPDATA, DB_USRVALID, DB_VALID};
 use crate::core::page_ops;
 use crate::core::txn::TxnCore;
-use crate::core::txn_rw::{RwTxn, TXN_ERROR};
+use crate::core::txn_rw::{RwTxn, TXN_ERROR, TXN_SPILLS};
 use crate::error::{MdbError, Result};
 use crate::format::node::{F_DUPDATA, F_SUBDATA};
 use crate::format::page::P_DIRTY;
@@ -177,6 +177,11 @@ pub(crate) struct Slot {
     live: bool,
     /// Bumped whenever the slot is freed, for [`CursorId`](crate::core::CursorId) validation.
     pub(crate) gen: u32,
+    /// Nesting depth of the transaction that opened the cursor (0 = the
+    /// top-level transaction). A nested transaction keeps its ancestors'
+    /// cursors up to date (C's `mdb_cursor_shadow`), but only its own are
+    /// usable through it.
+    pub(crate) owner: u32,
 }
 
 /// Names a cursor in the arena: the main cursor of a slot or its
@@ -199,16 +204,21 @@ impl CRef {
     }
 }
 
-/// The cursors of a write transaction.
+/// The cursors of a write transaction. A nested transaction takes over
+/// its parent's arena while it runs (`mdb_cursor_shadow`) and gives it back
+/// when it ends (`mdb_cursors_close`).
 #[derive(Debug, Default)]
 pub(crate) struct Arena {
     slots: Vec<Slot>,
     free: Vec<usize>,
+    /// Nesting depth of the transaction currently using the arena.
+    depth: u32,
 }
 
 impl Arena {
     /// Stores a new cursor and returns its slot.
     pub(crate) fn alloc(&mut self, main: WCursor, x: Option<XState>, tracked: bool) -> usize {
+        let owner = self.depth;
         match self.free.pop() {
             Some(i) => {
                 let s = &mut self.slots[i];
@@ -216,6 +226,7 @@ impl Arena {
                 s.x = x;
                 s.tracked = tracked;
                 s.live = true;
+                s.owner = owner;
                 i
             }
             None => {
@@ -225,8 +236,51 @@ impl Arena {
                     tracked,
                     live: true,
                     gen: 0,
+                    owner,
                 });
                 self.slots.len() - 1
+            }
+        }
+    }
+
+    /// Nesting depth of the transaction using the arena.
+    pub(crate) fn depth(&self) -> u32 {
+        self.depth
+    }
+
+    /// Hands the arena to a transaction at nesting depth `depth`.
+    pub(crate) fn set_depth(&mut self, depth: u32) {
+        self.depth = depth;
+    }
+
+    /// Copies of the live slots (`mc_backup` of `mdb_cursor_shadow`), to
+    /// put back with [`Arena::restore`] if a nested transaction aborts.
+    pub(crate) fn backup(&self) -> Vec<(usize, Slot)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.live)
+            .map(|(i, s)| (i, s.clone()))
+            .collect()
+    }
+
+    /// Puts slots saved by [`Arena::backup`] back (`*mc = *bk` in
+    /// `mdb_cursors_close` without merge). Their generation numbers have not
+    /// changed: a slot is only freed by the transaction that owns it.
+    pub(crate) fn restore(&mut self, backup: Vec<(usize, Slot)>) {
+        for (i, s) in backup {
+            if let Some(dst) = self.slots.get_mut(i) {
+                *dst = s;
+            }
+        }
+    }
+
+    /// Frees every slot opened at nesting depth `depth` (the cursors of a
+    /// nested transaction that ends).
+    pub(crate) fn release_owned(&mut self, depth: u32) {
+        for i in 0..self.slots.len() {
+            if self.slots[i].owner == depth {
+                self.release(i);
             }
         }
     }
@@ -665,8 +719,12 @@ impl<'env> RwTxn<'env> {
     /// cursor on the old page moves to the copy.
     ///
     /// Sub-pages live inside a dirty leaf and are always `P_DIRTY` in C, so
-    /// touching them is a no-op. (Nested transactions and spilled pages,
-    /// the other branches of the C function, are stage 3.)
+    /// touching them is a no-op. A page this transaction (or an ancestor)
+    /// spilled is copied back under its own number (`mdb_page_unspill`); in
+    /// a nested transaction, a page dirty in an ancestor is copied into
+    /// this transaction's dirty list under its own number. Neither moves a
+    /// cursor: they hold page numbers, which do not change (C's fixups only
+    /// replace the page pointer there).
     pub(crate) fn page_touch(&mut self, mc: CRef) -> Result<()> {
         let (top, mp, snum, is_sub) = {
             let w = self.cur(mc);
@@ -676,7 +734,23 @@ impl<'env> RwTxn<'env> {
             (w.top, w.pg[w.top], w.snum, w.is_sub())
         };
         if self.core.page(mp)?.flags() & P_DIRTY != 0 {
+            if self.has_parent() && !self.core.dirty.contains(mp) {
+                // If txn has a parent, make sure the page is in our dirty
+                // list. No - copy it (it is already counted in the parent's
+                // dirty room).
+                self.copy_ancestor_page(mp)?;
+            }
             return Ok(());
+        }
+        if self.w.flags & TXN_SPILLS != 0 {
+            match self.page_unspill(mp) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(e) => {
+                    self.w.flags |= TXN_ERROR;
+                    return Err(e);
+                }
+            }
         }
         let np = match self.page_alloc(1) {
             Ok(p) => p,
@@ -714,6 +788,20 @@ impl<'env> RwTxn<'env> {
             if w3.pg[top] == mp && !(top == 0 && w3.subp) {
                 w3.pg[top] = np;
             }
+        }
+        Ok(())
+    }
+
+    /// The nested branch of `mdb_page_touch`: copy the page (`ps` bytes, or
+    /// the whole overflow run) that an ancestor has dirty into this
+    /// transaction's dirty list under the same number.
+    pub(crate) fn copy_ancestor_page(&mut self, pgno: u64) -> Result<()> {
+        let crate::core::txn::PageSource::Dirty(src, _) = self.core.locate(pgno) else {
+            return Err(corrupted());
+        };
+        let buf: Box<[u8]> = src.into();
+        if !self.core.dirty.insert(pgno, buf) {
+            return Err(corrupted());
         }
         Ok(())
     }

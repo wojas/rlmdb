@@ -124,6 +124,21 @@ pub(crate) fn node_data_range(p: &[u8], i: usize) -> Option<std::ops::Range<usiz
     (end <= p.len()).then_some(start..end)
 }
 
+/// Sets the overflow page number stored as the data of `F_BIGDATA` leaf
+/// node `i` (the node's data size is that of the value, not of the 8-byte
+/// page number, so [`node_data_range`] does not apply).
+pub(crate) fn set_node_overflow_pgno(p: &mut [u8], i: usize, pgno: u64) -> Option<()> {
+    if i >= num_keys(p) {
+        return None;
+    }
+    let off = ptr(p, i)?;
+    let (ksize, _, _) = node_hdr(p, off)?;
+    let start = off.checked_add(NODE_DATA + ksize)?;
+    p.get_mut(start..start.checked_add(8)?)?
+        .copy_from_slice(&pgno.to_ne_bytes());
+    Some(())
+}
+
 /// `SETDSZ`: sets the data size of leaf node `i`.
 pub(crate) fn set_node_dsize(p: &mut [u8], i: usize, size: usize) -> Option<()> {
     let off = ptr(p, i)?;

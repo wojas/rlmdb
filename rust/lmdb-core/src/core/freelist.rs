@@ -213,19 +213,27 @@ impl<'env> RwTxn<'env> {
     }
 
     /// `mdb_ovpage_free`: free the overflow run starting at `pgno`. A run
-    /// allocated in this transaction goes straight back to `pghead` (if the
-    /// free DB is in use); otherwise it goes on the free list.
+    /// allocated in this transaction (dirty, or spilled by it) goes straight
+    /// back to `pghead` (if the free DB is in use); otherwise it goes on the
+    /// free list. Not in nested transactions: they would need to hide the
+    /// run in their ancestors' dirty and spill lists.
     pub(crate) fn ovpage_free(&mut self, mc: CRef, pgno: u64) -> Result<()> {
         let page = self.core.page(pgno)?;
         let ovpages = page.overflow_pages() as usize;
         let dirty = page.flags() & P_DIRTY != 0;
-        if self.w.pghead.is_some() && dirty {
-            // Remove from dirty list.
-            if self.core.dirty.remove(pgno).is_none() {
-                self.w.flags |= TXN_ERROR;
-                return Err(MdbError::Corrupted.into());
+        let spilled = !dirty && self.core.spilled.contains(&pgno);
+        if self.w.pghead.is_some() && !self.has_parent() && (dirty || spilled) {
+            if spilled {
+                // This page is no longer spilled.
+                self.core.spilled.remove(&pgno);
+            } else {
+                // Remove from dirty list.
+                if self.core.dirty.remove(pgno).is_none() {
+                    self.w.flags |= TXN_ERROR;
+                    return Err(MdbError::Corrupted.into());
+                }
+                self.w.dirty_room += 1;
             }
-            self.w.dirty_room += 1;
             // Insert in me_pghead, keeping it descending.
             let mop = self.w.pghead.as_mut().ok_or_else(corrupted)?;
             mop.insert_run(pgno, ovpages);

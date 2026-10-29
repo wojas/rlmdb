@@ -175,6 +175,21 @@ impl<'txn> RoCursor<'txn> {
         self.dbi
     }
 
+    /// `true` once the cursor has been positioned (C's `C_INITIALIZED`):
+    /// after a successful positioning operation, and also after a failed
+    /// search that left it on a page (C then still has the flag set).
+    pub fn is_initialized(&self) -> bool {
+        self.mc.is_initialized()
+    }
+
+    /// `true` if the cursor is on an item whose key has its duplicates in a
+    /// sub-page or sub-DB (an `F_DUPDATA` node of a `DUP_SORT` database).
+    /// For such a key C's `MDB_FIRST_DUP`/`MDB_LAST_DUP` (and
+    /// `MDB_GET_MULTIPLE` & co.) leave the caller's `key` untouched.
+    pub fn current_has_dups(&self) -> bool {
+        current_has_dups(&self.mc)
+    }
+
     /// `mdb_cursor_get`: perform `op`. `key` is required by `Set`, `SetKey`,
     /// `SetRange`, `GetBoth` and `GetBothRange`; `data` by `GetBoth` and
     /// `GetBothRange` (`EINVAL` if missing). Returns `Ok(None)` for
@@ -479,6 +494,15 @@ impl<'txn> RoCursor<'txn> {
     pub fn prev_multiple(&mut self) -> Result<Option<Entry<'txn>>> {
         self.get(None, None, CursorOp::PrevMultiple)
     }
+}
+
+/// See [`RoCursor::current_has_dups`].
+pub(crate) fn current_has_dups(mc: &Cursor<'_>) -> bool {
+    if !mc.is_initialized() || mc.depth() == 0 {
+        return false;
+    }
+    let page = mc.top_page();
+    !page.is_leaf2() && page.node(mc.ki_top()).is_some_and(|n| n.is_dupdata())
 }
 
 #[cfg(test)]
