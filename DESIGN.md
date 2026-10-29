@@ -395,6 +395,11 @@ returns the C int; `from_err_code`; `Display` strings match `mdb_strerror`.
 * Tests: unit tests next to the code for format parsing (hand-built pages),
   integration tests in `lmdb/tests/` for API behaviour, and `interop/` for
   cross-process checks against the C build.
+* Linux is tested in Docker: `rust/scripts/linux-test.sh [cargo args]` runs
+  cargo inside `rust:1-bookworm` (Debian, glibc, aarch64, 4 KiB pages) with
+  the workspace bind-mounted. Run it before declaring a stage done; the lock
+  file differs there: `lock_mode=posix_mutex`, `sizeof(pthread_mutex_t)=48`,
+  reader slots at offset 192 (macOS: `posix_sem`, slots at 128).
 * Do not commit. The coordinator commits between stages.
 
 ## Findings from the interop harness (stage 1B)
