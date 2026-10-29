@@ -421,7 +421,10 @@ dump.
 
 **Stage 3:** C2 write path part 2 (del, rebalance, merge, drop, nested txns,
 spill, copy/compact). D2 rest of the C API + run `mtest*.c` against it. B3
-bidirectional and concurrent interop stress. T `lmdb-tools`. H the
-heed-compatible layer over `core`.
+bidirectional and concurrent interop stress. T `lmdb-tools`.
 
-**Stage 4:** review, benchmarks vs C, docs.
+**Stage 4:** review, benchmarks vs C, docs. Until the heed layer exists,
+`lib.rs` re-exports `core::*` at the crate root.
+
+**Stage 5:** the heed-compatible layer over `core` (last; it is API sugar
+and does not affect compatibility or the C API).
