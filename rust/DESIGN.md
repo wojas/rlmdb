@@ -456,5 +456,7 @@ bidirectional and concurrent interop stress. T `lmdb-tools`.
 **Stage 4:** review, benchmarks vs C, docs. Until the heed layer exists,
 `lib.rs` re-exports `core::*` at the crate root.
 
-**Stage 5:** the heed-compatible layer over `core` (last; it is API sugar
-and does not affect compatibility or the C API).
+**Deferred (not scheduled):** the heed-compatible layer over `core`. The
+user wants the core validated through the C API first. The crate root keeps
+re-exporting `core::*`; the heed section above stays as the intended design
+only.
