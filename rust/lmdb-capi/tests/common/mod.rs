@@ -8,9 +8,23 @@
 //!
 //! No build script: the `cc` crate is used at test time, with the target
 //! triple derived from the host (the tests always run on the build host).
-//! Programs are built once per test binary into
-//! `CARGO_TARGET_TMPDIR/capi/<test binary>/`, which is rebuilt every run so
-//! Rust-linked programs always use the current library.
+//! Programs are built once per test process into
+//! `CARGO_TARGET_TMPDIR/capi/<test binary>-<pid>-<nanos>/`, so Rust-linked
+//! programs always use the current library.
+//!
+//! The directory is unique per test process because several test runs may
+//! share one target directory at the same time: two `cargo test` commands
+//! in one checkout, or `scripts/linux-test.sh` runs from different
+//! worktrees, which all mount the same Docker volume as `target/` (with
+//! PID namespaces, even the pids of two containers can be equal). With a
+//! fixed directory, a starting run deleted and rewrote the programs and
+//! environments another run was using (the cause of an intermittent
+//! failure of all of `tests/concurrency.rs` on Linux). Directories of runs
+//! that ended more than a day ago are removed.
+//!
+//! The upstream `mtest*.c` programs seed `rand()` with `time(NULL)`; the
+//! tests build them with `tests/c/mtest_shim.h`, which makes the seed
+//! `$MTEST_SEED` (default 20261030), so their data is deterministic.
 
 #![allow(dead_code)]
 
@@ -19,6 +33,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 /// Which LMDB a program is linked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,6 +66,12 @@ pub fn c_src() -> PathBuf {
 /// `tests/c`: our own C test programs.
 pub fn test_c_dir() -> PathBuf {
     crate_dir().join("tests/c")
+}
+
+/// `rust/interop/c`: the C peer of the interop test bed (`cpeer`), a plain
+/// `lmdb.h` client.
+pub fn cpeer_dir() -> PathBuf {
+    crate_dir().join("../interop/c")
 }
 
 /// The Rust static library: next to the test executable (`deps/`), where
@@ -121,18 +142,21 @@ pub struct Builder {
     c_lib: OnceLock<PathBuf>,
 }
 
-/// The builder for this test binary.
+/// The builder for this test process.
 pub fn builder() -> &'static Builder {
     static B: OnceLock<Builder> = OnceLock::new();
     B.get_or_init(|| {
         let exe = std::env::current_exe().unwrap();
-        // "capi_read-<hash>" -> "capi_read": one directory per test binary.
+        // "capi_read-<hash>" -> "capi_read": one directory per test binary
+        // and process.
         let stem = exe.file_stem().unwrap().to_string_lossy().into_owned();
         let stem = stem.split('-').next().unwrap_or("tests").to_owned();
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-            .join("capi")
-            .join(stem);
-        let _ = fs::remove_dir_all(&dir);
+        let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("capi");
+        remove_old_runs(&base);
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = base.join(format!("{stem}-{}-{nanos}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         Builder {
             dir,
@@ -140,6 +164,26 @@ pub fn builder() -> &'static Builder {
             c_lib: OnceLock::new(),
         }
     })
+}
+
+/// Removes run directories in `base` not modified for a day (runs that
+/// ended long ago; a live run touches its directory when it builds).
+fn remove_old_runs(base: &Path) {
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+    let day = Duration::from_secs(24 * 3600);
+    for e in entries.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > day);
+        if old {
+            let _ = fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 impl Builder {
@@ -159,9 +203,20 @@ impl Builder {
     }
 
     /// Builds program `name` from `sources` against `lib` (once per test
-    /// binary) and returns its path. The Rust-linked build is compiled with
+    /// process) and returns its path. The Rust-linked build is compiled with
     /// `-DLMDB_RUST` (see `GAP()` in the test programs).
     pub fn program(&self, name: &str, sources: &[PathBuf], lib: Lib) -> PathBuf {
+        self.program_with(name, sources, lib, &[])
+    }
+
+    /// As [`Builder::program`], with extra compiler arguments.
+    pub fn program_with(
+        &self,
+        name: &str,
+        sources: &[PathBuf],
+        lib: Lib,
+        extra: &[&str],
+    ) -> PathBuf {
         let key = (name.to_owned(), lib);
         let mut built = self.built.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(p) = built.get(&key) {
@@ -179,6 +234,7 @@ impl Builder {
         if lib == Lib::Rust {
             cmd.arg("-DLMDB_RUST");
         }
+        cmd.args(extra);
         cmd.arg("-o").arg(&exe).args(sources).arg(&archive);
         cmd.arg("-lpthread");
         if lib == Lib::Rust {
@@ -208,6 +264,40 @@ impl Builder {
         self.program(name, &[test_c_dir().join(format!("{name}.c"))], lib)
     }
 
+    /// One of the upstream `mtest*.c` programs, unmodified, built with
+    /// `tests/c/mtest_shim.{h,c}`: a fixed `rand()` seed (`$MTEST_SEED`)
+    /// and the `mdb_dkey()` that `mtest6.c` needs.
+    pub fn mtest(&self, name: &str, lib: Lib) -> PathBuf {
+        let shim_h = test_c_dir().join("mtest_shim.h");
+        self.program_with(
+            name,
+            &[
+                c_src().join(format!("{name}.c")),
+                test_c_dir().join("mtest_shim.c"),
+            ],
+            lib,
+            &["-Dtime=mtest_time", "-include", shim_h.to_str().unwrap()],
+        )
+    }
+
+    /// The interop test bed's C peer (`rust/interop/c`), linked against
+    /// `lib`.
+    pub fn cpeer(&self, lib: Lib) -> PathBuf {
+        let sources: Vec<PathBuf> = [
+            "cpeer.c",
+            "cpeer_data.c",
+            "cpeer_loops.c",
+            "cpeer_misc.c",
+            "cpeer_pagewalk.c",
+            "dataset.c",
+        ]
+        .iter()
+        .map(|f| cpeer_dir().join(f))
+        .collect();
+        let include = cpeer_dir();
+        self.program_with("cpeer", &sources, lib, &["-I", include.to_str().unwrap()])
+    }
+
     /// A fresh scratch directory.
     pub fn scratch(&self, name: &str) -> PathBuf {
         let d = self.dir.join("scratch").join(name);
@@ -230,19 +320,38 @@ pub fn run_ok(cmd: &mut Command) -> Output {
     out
 }
 
-/// Runs C `mtest`-style program `prog` in `dir` (they use `./testdb`).
+/// The default seed of the `mtest*` programs (see `tests/c/mtest_shim.c`).
+pub const MTEST_SEED: u32 = 20261030;
+
+/// Runs `mtest`-style program `prog`, linked against `lib`, in `dir` (they
+/// use `./testdb`) with `rand()` seeded with `seed`, and returns its
+/// output (it must succeed).
+pub fn run_mtest_seeded(prog: &str, lib: Lib, dir: &Path, seed: u32) -> Output {
+    fs::create_dir_all(dir.join("testdb")).unwrap();
+    let exe = builder().mtest(prog, lib);
+    run_ok(
+        Command::new(exe)
+            .current_dir(dir)
+            .env("MTEST_SEED", seed.to_string()),
+    )
+}
+
+/// Runs C `mtest`-style program `prog` (C library, default seed) in `dir`
+/// and returns the environment path.
 pub fn run_mtest(prog: &str, dir: &Path) -> PathBuf {
-    let env = dir.join("testdb");
-    fs::create_dir_all(&env).unwrap();
-    let exe = builder().tool(prog, Lib::C);
-    run_ok(Command::new(exe).current_dir(dir));
-    env
+    run_mtest_seeded(prog, Lib::C, dir, MTEST_SEED);
+    dir.join("testdb")
 }
 
 /// Writes the fixture environment of `tests/c/fixture.c` into `dir`.
 pub fn make_fixture(dir: &Path) {
+    make_fixture_with(Lib::C, dir);
+}
+
+/// [`make_fixture`] with `fixture.c` linked against `lib`.
+pub fn make_fixture_with(lib: Lib, dir: &Path) {
     fs::create_dir_all(dir).unwrap();
-    let exe = builder().test_program("fixture", Lib::C);
+    let exe = builder().test_program("fixture", lib);
     run_ok(Command::new(exe).arg(dir));
 }
 

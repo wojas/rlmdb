@@ -1,4 +1,4 @@
-//! The C API of LMDB 0.9 (`lmdb.h`), implemented over the Rust [`lmdb`]
+//! The C API of LMDB 0.9 (`lmdb.h`), implemented over the Rust [`lmdb_core`]
 //! crate: `liblmdb.a` / `liblmdb.so` / `liblmdb.dylib` built from this crate
 //! are drop-in replacements for the C library, so existing C programs link
 //! against them unchanged. `include/lmdb.h` is the unmodified 0.9.36 header.
@@ -15,10 +15,10 @@
 //! * `mdb_txn_*` in [`txn`].
 //! * `mdb_dbi_*`, `mdb_stat`, `mdb_set_compare` & co., `mdb_cmp`,
 //!   `mdb_dcmp` in [`dbi`].
-//! * `mdb_get`, `mdb_cursor_*` (read side) in [`cursor`].
+//! * `mdb_get`, `mdb_cursor_open`/`close`/`renew`/`get`/`count` & co. in
+//!   [`cursor`], for read-only and write transactions.
 //! * `mdb_put`, `mdb_del`, `mdb_cursor_put`, `mdb_cursor_del`, `mdb_drop`,
-//!   `mdb_env_copy*` in [`write`](mod@write): argument checks as in C,
-//!   then the stage 3 placeholder [`write::stage3_stub`].
+//!   `mdb_env_copy*` in [`write`](mod@write).
 //! * The `#[repr(C)]` structs and callback types of the header in
 //!   [`types`]; the opaque handles `MDB_env`, `MDB_txn`, `MDB_cursor` in
 //!   [`handles`].

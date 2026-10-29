@@ -446,6 +446,10 @@ static void test_reads(MDB_env *env, const char *path)
 	CHECK(veq(d, "only"));
 	OK(mdb_cursor_count(dc, &cnt));
 	CHECK(cnt == 1);
+	/* a key without duplicates: MDB_FIRST_DUP stores the key */
+	k = sv("sentinel");
+	OK(mdb_cursor_get(dc, &k, &d, MDB_FIRST_DUP));
+	CHECK(veq(k, "a") && veq(d, "only"));
 	k = sv("b");
 	OK(mdb_cursor_get(dc, &k, &d, MDB_SET));
 	CHECK(veq(d, "b1"));
@@ -458,10 +462,12 @@ static void test_reads(MDB_env *env, const char *path)
 	RC(mdb_cursor_get(dc, &k, &d, MDB_NEXT_DUP), MDB_NOTFOUND);
 	OK(mdb_cursor_get(dc, &k, &d, MDB_GET_CURRENT));
 	CHECK(veq(k, "b") && veq(d, "b3"));
+	/* key untouched on a key with duplicates */
+	k = sv("sentinel");
 	OK(mdb_cursor_get(dc, &k, &d, MDB_FIRST_DUP));
-	CHECK(veq(d, "b1"));
+	CHECK(veq(d, "b1") && veq(k, "sentinel"));
 	OK(mdb_cursor_get(dc, &k, &d, MDB_LAST_DUP));
-	CHECK(veq(d, "b3"));
+	CHECK(veq(d, "b3") && veq(k, "sentinel"));
 	OK(mdb_cursor_get(dc, &k, &d, MDB_PREV_DUP));
 	CHECK(veq(d, "b2"));
 	OK(mdb_cursor_get(dc, &k, &d, MDB_NEXT_NODUP));
@@ -527,9 +533,11 @@ static void test_reads(MDB_env *env, const char *path)
 		last = (unsigned)(d.mv_size / 4);
 	}
 	CHECK(rc && items == 10000 && last > 0 && first_page < 10000);
+	k = sv("sentinel");
 	for (n = 0; mdb_cursor_get(fc, &k, &d, MDB_PREV_MULTIPLE) == 0;)
 		n += d.mv_size / 4;
 	CHECK(n + last == 10000);
+	CHECK(veq(k, "sentinel"));	/* untouched on a positioned cursor */
 	RC(mdb_cursor_get(fc, &k, NULL, MDB_GET_MULTIPLE), EINVAL);
 	RC(mdb_cursor_get(fc, &k, NULL, MDB_NEXT_MULTIPLE), EINVAL);
 	k = sv("k2");
@@ -613,8 +621,7 @@ static void test_reads(MDB_env *env, const char *path)
 	OK(mdb_dbi_open(txn2, "revkeys", 0, &revkeys));
 	OK(mdb_set_compare(txn2, revkeys, revcmp));
 	k = sv("m");
-	rc = mdb_get(txn2, revkeys, &k, &d);
-	GAP("mdb_set_compare takes effect in the transaction that opened the handle", rc == 0);
+	OK(mdb_get(txn2, revkeys, &k, &d));
 	OK(mdb_txn_commit(txn2));
 	OK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn2));
 	OK(mdb_get(txn2, revkeys, &k, &d));
@@ -751,10 +758,8 @@ static void test_writable_env(const char *path, const char *scratch)
 	OK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
 	RC(mdb_txn_begin(env, txn, 0, &t), EINVAL);
 	mdb_txn_abort(txn);
-	rc = mdb_txn_begin(env, NULL, 0, &t);
-	GAP("write transactions", rc == 0);
-	if (rc == 0)
-		mdb_txn_abort(t);
+	OK(mdb_txn_begin(env, NULL, 0, &t));
+	mdb_txn_abort(t);
 	OK(mdb_env_set_mapsize(env, 128UL << 20));
 	{
 		MDB_envinfo info;
@@ -765,18 +770,18 @@ static void test_writable_env(const char *path, const char *scratch)
 	snprintf(dir, sizeof(dir), "%s/copy", scratch);
 	mkdir(dir, 0775);
 	rc = mdb_env_copy(env, dir);
-	GAP("mdb_env_copy", rc == 0);
+	RC(rc, 0);
 	snprintf(dir, sizeof(dir), "%s/copy-compact", scratch);
 	mkdir(dir, 0775);
 	rc = mdb_env_copy2(env, dir, MDB_CP_COMPACT);
-	GAP("mdb_env_copy2 (MDB_CP_COMPACT)", rc == 0);
+	RC(rc, 0);
 	snprintf(dir, sizeof(dir), "%s/copy.mdb", scratch);
 	fd = open(dir, O_WRONLY | O_CREAT | O_TRUNC, 0664);
 	CHECK(fd >= 0);
 	rc = mdb_env_copyfd(env, fd);
-	GAP("mdb_env_copyfd", rc == 0);
+	RC(rc, 0);
 	rc = mdb_env_copyfd2(env, fd, 0);
-	GAP("mdb_env_copyfd2", rc == 0);
+	RC(rc, 0);
 	close(fd);
 	mdb_env_close(env);
 }

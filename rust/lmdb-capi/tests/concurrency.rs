@@ -1,9 +1,18 @@
-//! Test 3: a C program linked against the Rust library holds read
-//! transactions while C writers (`mtest` and `tests/c/fixture.c`, built
-//! against the C library) commit into the same environment; its snapshots
-//! must stay stable through the C API (`tests/c/capi_snapshot.c`). The same
-//! program linked against the C library runs the same scenario as the
-//! oracle.
+//! Test 3: a C program holds read transactions while writers (`mtest` and
+//! `tests/c/fixture.c`) commit into the same environment from other
+//! processes; its snapshots must stay stable through the C API
+//! (`tests/c/capi_snapshot.c`). Every combination runs: the reader linked
+//! against the C library (the oracle) or the Rust library, the writers
+//! linked against the C library or the Rust library.
+//!
+//! Determinism: `mtest` is the fixed-seed build (`tests/c/mtest_shim.h`),
+//! so every run writes the same data, and every run works in its own
+//! directory (see `common`). An earlier version used the time-seeded
+//! `mtest` and fixed directories under the shared target directory; two
+//! test runs at once (another `cargo test`, or `scripts/linux-test.sh`
+//! from another worktree, which mounts the same `target` volume) then
+//! deleted and rewrote each other's environments, and all four tests
+//! failed together.
 //!
 //! (The second writer is not `mtest2`: while the reader pins snapshot 0 no
 //! freed page can be reused, and `mtest2`'s hundreds of small transactions
@@ -113,8 +122,8 @@ fn c_dump(env: &Path) -> Vec<String> {
     data.chunks(2).map(|kv| kv.join(" ")).collect()
 }
 
-fn snapshot_stability(lib: Lib) {
-    let dir = builder().scratch(&format!("stability-{}", lib.name()));
+fn snapshot_stability(lib: Lib, writers: Lib) {
+    let dir = builder().scratch(&format!("stability-{}-{}", lib.name(), writers.name()));
     let env = dir.join("testdb");
     std::fs::create_dir_all(&env).unwrap();
     let dump = dir.join("t1.dump");
@@ -122,8 +131,8 @@ fn snapshot_stability(lib: Lib) {
     let pid = reader.child.id();
     assert_eq!(reader.expect("READY"), vec![0, 0]);
 
-    // A C writer fills the environment while T0 pins the empty snapshot.
-    run_mtest("mtest", &dir);
+    // A writer fills the environment while T0 pins the empty snapshot.
+    run_mtest_seeded("mtest", writers, &dir, MTEST_SEED);
     reader.step();
     let t1 = reader.expect("T1");
     let (id1, n1) = (t1[0], t1[1]);
@@ -140,10 +149,10 @@ fn snapshot_stability(lib: Lib) {
     let ours = std::fs::read_to_string(&dump).unwrap();
     assert_eq!(ours.lines().collect::<Vec<_>>(), c_dump(&env));
 
-    // Another C writer rewrites the main DB's pages (copy on write); the
+    // Another writer rewrites the main DB's pages (copy on write); the
     // reader verifies T0 and T1 byte for byte, then renews T1 onto the
     // latest snapshot.
-    make_fixture(&env);
+    make_fixture_with(writers, &env);
     reader.step();
     let t1r = reader.expect("T1R");
     assert!(t1r[0] > id1, "{t1r:?}");
@@ -151,34 +160,49 @@ fn snapshot_stability(lib: Lib) {
     reader.finish();
 }
 
-fn map_resized(lib: Lib) {
-    let dir = builder().scratch(&format!("resize-{}", lib.name()));
+fn map_resized(lib: Lib, writers: Lib) {
+    let dir = builder().scratch(&format!("resize-{}-{}", lib.name(), writers.name()));
     let env = dir.join("testdb");
     std::fs::create_dir_all(&env).unwrap();
     let mut reader = Reader::start(lib, &[Path::new("resize"), &env]);
     reader.expect("READY");
     // mtest maps 10 MiB and grows the file beyond the reader's map.
-    run_mtest("mtest", &dir);
+    run_mtest_seeded("mtest", writers, &dir, MTEST_SEED);
     reader.step();
     reader.finish();
 }
 
 #[test]
 fn snapshot_stability_c_oracle() {
-    snapshot_stability(Lib::C);
+    snapshot_stability(Lib::C, Lib::C);
 }
 
 #[test]
 fn snapshot_stability_rust() {
-    snapshot_stability(Lib::Rust);
+    snapshot_stability(Lib::Rust, Lib::C);
+}
+
+#[test]
+fn snapshot_stability_rust_writers() {
+    snapshot_stability(Lib::C, Lib::Rust);
+}
+
+#[test]
+fn snapshot_stability_rust_both() {
+    snapshot_stability(Lib::Rust, Lib::Rust);
 }
 
 #[test]
 fn map_resized_c_oracle() {
-    map_resized(Lib::C);
+    map_resized(Lib::C, Lib::C);
 }
 
 #[test]
 fn map_resized_rust() {
-    map_resized(Lib::Rust);
+    map_resized(Lib::Rust, Lib::C);
+}
+
+#[test]
+fn map_resized_rust_writers() {
+    map_resized(Lib::C, Lib::Rust);
 }

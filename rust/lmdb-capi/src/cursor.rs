@@ -4,14 +4,15 @@
 //! `mdb_cursor_count`.
 //!
 //! Returned keys and data point into the memory map (zero copy) and stay
-//! valid until the transaction ends, as in C.
+//! valid until the transaction ends, as in C. In a write transaction they
+//! may point into the transaction's dirty pages and are valid until the
+//! next change in that transaction, as in C.
 //!
 //! Output parameters: `mdb_cursor_get` writes `key` and `data` (when not
-//! NULL) on success exactly where C does, with two simplifications: for
-//! `MDB_FIRST_DUP`/`MDB_LAST_DUP` on a key with duplicates and for
-//! `MDB_PREV_MULTIPLE` on a positioned cursor, C leaves `key` untouched
-//! while this implementation stores the current key (the same key the
-//! caller is positioned on).
+//! NULL) on success exactly where C does. In particular `key` is left
+//! untouched by the exact-match lookups, `MDB_GET_MULTIPLE`,
+//! `MDB_FIRST_DUP`/`MDB_LAST_DUP` on a key with duplicates and
+//! `MDB_PREV_MULTIPLE` on a positioned cursor.
 
 use std::os::raw::{c_int, c_uint};
 use std::ptr::{self, NonNull};
@@ -19,7 +20,7 @@ use std::ptr::{self, NonNull};
 use lmdb_core::consts::{FREE_DBI, MDB_DUPSORT};
 use lmdb_core::{CursorOp, Dbi, Transaction};
 
-use crate::handles::{MDB_cursor, MDB_txn};
+use crate::handles::{CursorAccess, CursorInner, MDB_cursor, MDB_txn};
 use crate::types::*;
 use crate::SUCCESS;
 
@@ -49,8 +50,8 @@ pub unsafe extern "C" fn mdb_get(
         Ok(None) => return EINVAL,
         Err(code) => return code,
     };
-    let result = t.with_read(EINVAL, |rt| {
-        match rt.txn().get(Dbi::from_raw(dbi), key) {
+    let result = t.with_txn(EINVAL, |rt| {
+        match rt.get(Dbi::from_raw(dbi), key) {
             Ok(Some(value)) => {
                 // SAFETY: data is non-NULL and writable (lmdb.h); the
                 // value lives in the map until the transaction ends.
@@ -66,7 +67,7 @@ pub unsafe extern "C" fn mdb_get(
 
 /// The persistent flags of `dbi` for a new cursor (the free DB has none
 /// that matter here).
-fn cursor_db_flags(txn: &impl Transaction, dbi: MDB_dbi) -> c_uint {
+fn cursor_db_flags(txn: &dyn Transaction, dbi: MDB_dbi) -> c_uint {
     if dbi == FREE_DBI {
         return 0;
     }
@@ -74,7 +75,14 @@ fn cursor_db_flags(txn: &impl Transaction, dbi: MDB_dbi) -> c_uint {
 }
 
 /// `mdb_cursor_open`: create a cursor handle. `EINVAL` for a reset
-/// transaction (C: `TXN_DBI_EXIST` fails).
+/// transaction (C: `TXN_DBI_EXIST` fails) and for the free DB in a write
+/// transaction (as in C).
+///
+/// A cursor of a write transaction is closed (freed) when the transaction
+/// ends, unless `mdb_cursor_close` closed it before, as in C; it stays
+/// valid across all changes made in the transaction. A cursor of a
+/// read-only transaction must be closed explicitly, also after its
+/// transaction ended.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_cursor_open(
     txn: *mut MDB_txn,
@@ -86,17 +94,23 @@ pub unsafe extern "C" fn mdb_cursor_open(
         Some(t) if !cursor.is_null() => t,
         _ => return EINVAL,
     };
-    let opened = t.with_read(EINVAL, |rt| {
-        // SAFETY: the cursor is registered with `t` below, which drops it
-        // before resetting or ending the read transaction.
-        let inner = unsafe { rt.cursor(Dbi::from_raw(dbi)) }.map_err(|e| e.to_err_code())?;
-        Ok(MDB_cursor::new(
-            txn,
-            dbi,
-            cursor_db_flags(rt.txn(), dbi),
-            inner,
-        ))
-    });
+    let opened = if t.is_read_only() {
+        t.with_read(EINVAL, |rt| {
+            // SAFETY: the cursor is registered with `t` below, which drops
+            // it before resetting or ending the read transaction.
+            let inner = unsafe { rt.cursor(Dbi::from_raw(dbi)) }.map_err(|e| e.to_err_code())?;
+            let flags = cursor_db_flags(rt.txn(), dbi);
+            Ok(MDB_cursor::new(txn, dbi, flags, CursorInner::Read(inner)))
+        })
+    } else {
+        t.with_write(|w| {
+            let id = w
+                .open_cursor(Dbi::from_raw(dbi))
+                .map_err(|e| e.to_err_code())?;
+            let flags = cursor_db_flags(w, dbi);
+            Ok(MDB_cursor::new(txn, dbi, flags, CursorInner::Write(id)))
+        })
+    };
     match opened {
         Ok(c) => {
             let handle = NonNull::from(Box::leak(Box::new(c)));
@@ -109,8 +123,10 @@ pub unsafe extern "C" fn mdb_cursor_open(
     }
 }
 
-/// `mdb_cursor_close`: close a cursor handle. Valid before or after its
-/// read-only transaction ended.
+/// `mdb_cursor_close`: close a cursor handle. For a read-only transaction
+/// valid before or after the transaction ended; a cursor of a write
+/// transaction must be closed before the transaction ends (it is freed
+/// with it), as in C.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_cursor_close(cursor: *mut MDB_cursor) {
     if let Some(c) = NonNull::new(cursor) {
@@ -122,7 +138,8 @@ pub unsafe extern "C" fn mdb_cursor_close(cursor: *mut MDB_cursor) {
 
 /// `mdb_cursor_renew`: renew a cursor handle on a (new) read-only
 /// transaction, for the same database. The previous transaction may be
-/// live or ended.
+/// live or ended. `EINVAL` for a cursor of a write transaction or a write
+/// transaction `txn`, as in C.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_cursor_renew(txn: *mut MDB_txn, cursor: *mut MDB_cursor) -> c_int {
     let Some(handle) = NonNull::new(cursor) else {
@@ -133,7 +150,12 @@ pub unsafe extern "C" fn mdb_cursor_renew(txn: *mut MDB_txn, cursor: *mut MDB_cu
         return EINVAL;
     };
     // SAFETY: cursor is a live handle (lmdb.h).
-    let dbi = unsafe { handle.as_ref() }.dbi();
+    let c = unsafe { handle.as_ref() };
+    let dbi = c.dbi();
+    if c.write_id().is_some() || !t.is_read_only() {
+        // C: C_UNTRACK cursor or a transaction with mt_cursors.
+        return EINVAL;
+    }
     let result = t.with_read(EINVAL, |rt| {
         // SAFETY: rebind registers the cursor with `t`, which drops it
         // before resetting or ending the read transaction.
@@ -161,13 +183,22 @@ pub unsafe extern "C" fn mdb_cursor_dbi(cursor: *mut MDB_cursor) -> MDB_dbi {
     unsafe { MDB_cursor::from_ptr(cursor) }.map_or(0, MDB_cursor::dbi)
 }
 
-/// Whether C's `mdb_cursor_get` stores the key for `op` (it leaves the
-/// caller's key alone for exact-match lookups and `MDB_GET_MULTIPLE`).
-fn writes_key(op: CursorOp) -> bool {
-    !matches!(
-        op,
-        CursorOp::Set | CursorOp::GetBoth | CursorOp::GetBothRange | CursorOp::GetMultiple
-    )
+/// Whether C's `mdb_cursor_get` stores the key for `op`. It leaves the
+/// caller's key alone for exact-match lookups and `MDB_GET_MULTIPLE`, for
+/// `MDB_FIRST_DUP`/`MDB_LAST_DUP` when the item has duplicates (`has_dups`,
+/// after the operation, which does not change the item), and for
+/// `MDB_PREV_MULTIPLE` when the cursor was positioned before (`was_init`).
+fn writes_key(
+    op: CursorOp,
+    was_init: impl FnOnce() -> bool,
+    has_dups: impl FnOnce() -> bool,
+) -> bool {
+    match op {
+        CursorOp::Set | CursorOp::GetBoth | CursorOp::GetBothRange | CursorOp::GetMultiple => false,
+        CursorOp::FirstDup | CursorOp::LastDup => !has_dups(),
+        CursorOp::PrevMultiple => !was_init(),
+        _ => true,
+    }
 }
 
 /// Whether `op` needs a `data` argument (`EINVAL` if NULL).
@@ -182,6 +213,11 @@ fn requires_data(op: CursorOp) -> bool {
             | CursorOp::FirstDup
             | CursorOp::LastDup
     )
+}
+
+/// A found key/data pair as `MDB_val`s.
+fn raw_entry(e: Option<(&[u8], &[u8])>) -> Option<(MDB_val, MDB_val)> {
+    e.map(|(k, d)| (MDB_val::from_slice(k), MDB_val::from_slice(d)))
 }
 
 /// `mdb_cursor_get`: retrieve by cursor.
@@ -201,7 +237,7 @@ pub unsafe extern "C" fn mdb_cursor_get(
     let Some(c) = (unsafe { MDB_cursor::from_ptr(cursor) }) else {
         return EINVAL;
     };
-    let result = c.with_cursor(|rc| {
+    let result = c.with_cursor(|access| {
         let op = CursorOp::from_raw(op).ok_or(EINVAL)?;
         if data.is_null() && requires_data(op) {
             return Err(EINVAL);
@@ -220,18 +256,36 @@ pub unsafe extern "C" fn mdb_cursor_get(
             CursorOp::GetBoth | CursorOp::GetBothRange => unsafe { input(data) }?,
             _ => None,
         };
-        match rc.get(key_in, data_in, op) {
+        // The values point into the map or the transaction's pages and stay
+        // valid after the borrows below end, as in C.
+        let (got, store_key) = match access {
+            CursorAccess::Read(rc) => {
+                let was_init = rc.is_initialized();
+                let got = rc.get(key_in, data_in, op).map(raw_entry);
+                (got, writes_key(op, || was_init, || rc.current_has_dups()))
+            }
+            CursorAccess::Write(w, id) => {
+                let was_init = w.cursor_is_initialized(id).unwrap_or(false);
+                let got = w.cursor_get(id, key_in, data_in, op).map(raw_entry);
+                let store = writes_key(
+                    op,
+                    || was_init,
+                    || w.cursor_current_has_dups(id).unwrap_or(false),
+                );
+                (got, store)
+            }
+        };
+        match got {
             Ok(Some((k, d))) => {
-                if writes_key(op) {
-                    // SAFETY: key is NULL or writable (lmdb.h); k lives in
-                    // the map until the transaction ends.
-                    unsafe { output(key, k) };
+                if store_key && !key.is_null() {
+                    // SAFETY: key is non-NULL and writable (lmdb.h).
+                    unsafe { *key = k };
                 }
                 // MDB_GET_MULTIPLE with nothing to fetch: C returns success
                 // and leaves `data` untouched (KNOWN_C_BUGS.md #8).
-                if !(op == CursorOp::GetMultiple && d.is_empty()) {
-                    // SAFETY: as for key.
-                    unsafe { output(data, d) };
+                if !(op == CursorOp::GetMultiple && d.mv_size == 0) && !data.is_null() {
+                    // SAFETY: data is non-NULL and writable (lmdb.h).
+                    unsafe { *data = d };
                 }
                 Ok(())
             }
@@ -254,7 +308,13 @@ pub unsafe extern "C" fn mdb_cursor_count(cursor: *mut MDB_cursor, countp: *mut 
     if c.db_flags() & MDB_DUPSORT == 0 {
         return lmdb_core::MdbError::Incompatible.to_err_code();
     }
-    let result = c.with_cursor(|rc| rc.count().map_err(|e| e.to_err_code()));
+    let result = c.with_cursor(|access| {
+        match access {
+            CursorAccess::Read(rc) => rc.count(),
+            CursorAccess::Write(w, id) => w.cursor_count(id),
+        }
+        .map_err(|e| e.to_err_code())
+    });
     match result {
         Ok(n) => {
             // SAFETY: countp is non-NULL and writable (lmdb.h).

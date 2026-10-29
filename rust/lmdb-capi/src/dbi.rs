@@ -5,24 +5,24 @@
 //! C's `TXN_DBI_EXIST` check fails for a reset read transaction (C sets
 //! its `mt_numdbs` to 0), so these functions return `EINVAL` there, except
 //! `mdb_dbi_open`, which checks `MDB_TXN_BLOCKED` and returns `MDB_BAD_TXN`.
+//!
+//! Handles of databases created by a write transaction (`MDB_CREATE`) are
+//! usable in that transaction at once and by other transactions after it
+//! commits; if it aborts, the handle is closed (as C's `mdb_dbis_update`).
 
 use std::cmp::Ordering;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 
 use lmdb_core::consts::{FREE_DBI, MDB_CREATE, MDB_DUPSORT, MDB_INTEGERKEY, VALID_FLAGS};
-use lmdb_core::{Comparator, Dbi, Transaction};
+use lmdb_core::{Comparator, DatabaseFlags, Dbi, Transaction};
 
 use crate::cmp::trampoline_for;
-use crate::handles::{MDB_env, MDB_txn};
+use crate::handles::{bad_txn, MDB_env, MDB_txn};
 use crate::types::*;
 use crate::SUCCESS;
 
 const EINVAL: c_int = libc::EINVAL;
-
-fn bad_txn() -> c_int {
-    lmdb_core::MdbError::BadTxn.to_err_code()
-}
 
 /// Turns `Result<(), code>` into a return code.
 fn code(r: Result<(), c_int>) -> c_int {
@@ -42,12 +42,13 @@ unsafe fn txn_ref<'a>(txn: *mut MDB_txn) -> Result<&'a MDB_txn, c_int> {
 /// `mdb_dbi_open`: open a database in the environment.
 ///
 /// Without `MDB_CREATE` this opens an existing database (`MDB_NOTFOUND`
-/// otherwise). With `MDB_CREATE` in a read-only transaction a missing
-/// database gives `EACCES`, as in C (creating one needs the write path,
-/// stage 3). The flags of an existing database are taken from the file;
-/// other flags in `flags` are ignored, as in C. For the main DB (`name ==
-/// NULL`) in a read-only transaction the flags are ignored (C would OR
-/// them into the transaction's in-memory copy of the main DB record).
+/// otherwise). With `MDB_CREATE` a missing database is created in a write
+/// transaction (and gives `EACCES` in a read-only one, as in C). The flags
+/// of an existing database are taken from the file; other flags in `flags`
+/// are ignored, as in C. For the main DB (`name == NULL`) a write
+/// transaction adds the persistent flags to its record, as in C; in a
+/// read-only transaction they are ignored (C would OR them into the
+/// transaction's in-memory copy of the main DB record).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_dbi_open(
     txn: *mut MDB_txn,
@@ -67,34 +68,16 @@ pub unsafe extern "C" fn mdb_dbi_open(
         None
     } else {
         // SAFETY: name is a NUL-terminated string (lmdb.h).
-        Some(unsafe { CStr::from_ptr(name) })
+        Some(unsafe { CStr::from_ptr(name) }.to_bytes())
     };
-    let opened = t.with_read(bad_txn(), |rt| {
-        let txn = rt.txn();
-        let Some(name) = name else {
-            return Ok(Dbi::MAIN);
-        };
-        // The core takes UTF-8 names; a name that is not UTF-8 cannot have
-        // been created through it, nor be looked up yet.
-        let result = match name.to_str() {
-            Ok(name) => txn.open_db(Some(name)),
-            Err(_) => Err(lmdb_core::MdbError::NotFound.into()),
-        };
-        match result {
-            Ok(db) => Ok(db),
-            Err(e) if e.not_found() && flags & MDB_CREATE != 0 => {
-                // C: a main DB with these flags cannot hold named DBs.
-                let main = txn.db_flags(Dbi::MAIN).map_err(|e| e.to_err_code())?;
-                if main.bits() & (MDB_DUPSORT | MDB_INTEGERKEY) != 0 {
-                    Err(lmdb_core::MdbError::Incompatible.to_err_code())
-                } else {
-                    // Creating a database needs a write transaction.
-                    Err(libc::EACCES)
-                }
-            }
-            Err(e) => Err(e.to_err_code()),
-        }
-    });
+    let opened = if t.is_read_only() {
+        t.with_read(bad_txn(), |rt| open_in_read_txn(rt.txn(), name, flags))
+    } else {
+        t.with_write(|w| {
+            w.create_db_bytes(name, DatabaseFlags::from_bits_retain(flags))
+                .map_err(|e| e.to_err_code())
+        })
+    };
     match opened {
         Ok(db) => {
             // SAFETY: dbi is non-NULL and writable (lmdb.h).
@@ -102,6 +85,31 @@ pub unsafe extern "C" fn mdb_dbi_open(
             SUCCESS
         }
         Err(code) => code,
+    }
+}
+
+/// `mdb_dbi_open` in a read-only transaction: existing databases only.
+fn open_in_read_txn(
+    txn: &dyn Transaction,
+    name: Option<&[u8]>,
+    flags: c_uint,
+) -> Result<Dbi, c_int> {
+    let Some(name) = name else {
+        return Ok(Dbi::MAIN);
+    };
+    match txn.open_db_bytes(Some(name)) {
+        Ok(db) => Ok(db),
+        Err(e) if e.not_found() && flags & MDB_CREATE != 0 => {
+            // C: a main DB with these flags cannot hold named DBs.
+            let main = txn.db_flags(Dbi::MAIN).map_err(|e| e.to_err_code())?;
+            if main.bits() & (MDB_DUPSORT | MDB_INTEGERKEY) != 0 {
+                Err(lmdb_core::MdbError::Incompatible.to_err_code())
+            } else {
+                // Creating a database needs a write transaction.
+                Err(libc::EACCES)
+            }
+        }
+        Err(e) => Err(e.to_err_code()),
     }
 }
 
@@ -113,10 +121,8 @@ pub unsafe extern "C" fn mdb_stat(txn: *mut MDB_txn, dbi: MDB_dbi, stat: *mut MD
         Ok(t) if !stat.is_null() => t,
         _ => return EINVAL,
     };
-    let result = t.with_read(EINVAL, |rt| {
-        rt.txn()
-            .stat(Dbi::from_raw(dbi))
-            .map_err(|e| e.to_err_code())
+    let result = t.with_txn(EINVAL, |rt| {
+        rt.stat(Dbi::from_raw(dbi)).map_err(|e| e.to_err_code())
     });
     match result {
         Ok(s) => {
@@ -141,10 +147,8 @@ pub unsafe extern "C" fn mdb_dbi_flags(
         Ok(t) if !flags.is_null() => t,
         _ => return EINVAL,
     };
-    let result = t.with_read(EINVAL, |rt| {
-        rt.txn()
-            .db_flags(Dbi::from_raw(dbi))
-            .map_err(|e| e.to_err_code())
+    let result = t.with_txn(EINVAL, |rt| {
+        rt.db_flags(Dbi::from_raw(dbi)).map_err(|e| e.to_err_code())
     });
     match result {
         Ok(f) => {
@@ -191,17 +195,16 @@ unsafe fn set_comparator(
         Ok(t) => t,
         Err(code) => return code,
     };
-    let result = t.with_read(EINVAL, |rt| {
+    let result = t.with_txn(EINVAL, |rt| {
         let rust_cmp = match cmp {
             Some(f) => Some(trampoline_for(f).ok_or(libc::ENOMEM)?),
             None => None,
         };
-        let env = rt.txn().env();
         let db = Dbi::from_raw(dbi);
         let set = if dup {
-            env.set_dupsort(db, rust_cmp)
+            rt.set_dupsort(db, rust_cmp)
         } else {
-            env.set_compare(db, rust_cmp)
+            rt.set_compare(db, rust_cmp)
         };
         set.map_err(|e| e.to_err_code())
     });
@@ -219,11 +222,12 @@ unsafe fn set_comparator(
 
 /// `mdb_set_compare`: set a custom key comparison function for a database.
 ///
-/// Takes effect for every transaction that first uses the handle after
-/// this call. Unlike C, a transaction that already used the handle (for
-/// example the one that opened it with `mdb_dbi_open`) keeps the order it
-/// started with; call this right after opening the handle and use the
-/// handle in later transactions.
+/// As in C, the function belongs to the environment's handle: it takes
+/// effect at once in `txn` and in every transaction that uses the handle
+/// later (cursors opened before keep the order they started with). Call it
+/// before anything is read or written with the handle, in every process
+/// that uses the database (`lmdb.h`). A NULL function restores the default
+/// order (C would crash on the next comparison).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_set_compare(
     txn: *mut MDB_txn,
@@ -235,7 +239,7 @@ pub unsafe extern "C" fn mdb_set_compare(
 }
 
 /// `mdb_set_dupsort`: set a custom data comparison function for an
-/// `MDB_DUPSORT` database. Same timing as [`mdb_set_compare`].
+/// `MDB_DUPSORT` database. Same rules as [`mdb_set_compare`].
 #[no_mangle]
 pub unsafe extern "C" fn mdb_set_dupsort(
     txn: *mut MDB_txn,
@@ -257,8 +261,8 @@ unsafe fn check_user_dbi(txn: *mut MDB_txn, dbi: MDB_dbi) -> c_int {
         Ok(t) => t,
         Err(code) => return code,
     };
-    code(t.with_read(EINVAL, |rt| {
-        match rt.txn().db_flags(Dbi::from_raw(dbi)) {
+    code(t.with_txn(EINVAL, |rt| {
+        match rt.db_flags(Dbi::from_raw(dbi)) {
             // C does not check for closed/reused handles here.
             Ok(_) | Err(lmdb_core::Error::Mdb(lmdb_core::MdbError::BadDbi)) => Ok(()),
             Err(_) => Err(EINVAL),
@@ -309,10 +313,8 @@ fn default_comparator(t: &MDB_txn, dbi: MDB_dbi, dup: bool, a_len: usize) -> Opt
         return (!dup).then_some(Comparator::Long);
     }
     let flags = t
-        .with_read(EINVAL, |rt| {
-            rt.txn()
-                .db_flags(Dbi::from_raw(dbi))
-                .map_err(|e| e.to_err_code())
+        .with_txn(EINVAL, |rt| {
+            rt.db_flags(Dbi::from_raw(dbi)).map_err(|e| e.to_err_code())
         })
         .ok()?
         .bits();
