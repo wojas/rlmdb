@@ -402,6 +402,19 @@ returns the C int; `from_err_code`; `Display` strings match `mdb_strerror`.
   reader slots at offset 192 (macOS: `posix_sem`, slots at 128).
 * Do not commit. The coordinator commits between stages.
 
+## Bugs in C 0.9.36: do not port them, track them
+
+Where a C 0.9.36 behaviour is a plain and clear bug, do not reimplement it.
+Record it in `rust/KNOWN_C_BUGS.md` (what, where in the C source, what we
+do instead) and keep the Rust behaviour the obviously correct one. The one
+hard constraint: the deviation must not cause interoperability issues. A
+file written by Rust must still be read and written correctly by C, and the
+other way round. If avoiding a bug changes bytes on disk or in the lock file,
+or changes what a C peer would conclude about the state, port the bug
+instead and note it. Tool bugs (`mdb_load` dropping flags) and API-only
+quirks (`mdb_stat -r` exit code) are safe to fix. Crashes on malformed input
+are bugs; the Rust side returns an error.
+
 ## Findings from the interop harness (stage 1B)
 
 Facts about C 0.9.36 behaviour that implementers must honour; the harness in
