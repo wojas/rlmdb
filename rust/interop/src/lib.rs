@@ -9,8 +9,10 @@
 //! * A **peer** is a program that speaks the command protocol documented in
 //!   `README.md` (`fill`, `verify`, `writer-loop`, `check-freelist`, …).
 //!   [`Peer::C`] is `cpeer`, written in C against `liblmdb` (built from
-//!   `../../libraries/liblmdb` by `build.rs`); [`Peer::Rust`] is `rpeer`,
-//!   built on the `lmdb` crate (added in stage 2).
+//!   `../../libraries/liblmdb` by `build.rs`); [`Peer::Rust`] is `rpeer`
+//!   (`src/bin/rpeer`), built on the `lmdb` crate. Commands a peer does not
+//!   implement yet exit with status 4; [`Peer::supports`] tells, and
+//!   scenarios skip or substitute the C peer for them.
 //! * [`TestEnv`] is an environment in a temporary directory.
 //! * [`scenarios`] holds every test scenario, parameterised by a
 //!   [`scenarios::Pair`] of (writer, reader) peers. [`scenario_tests!`]
@@ -36,5 +38,5 @@ mod testenv;
 pub mod tools;
 
 pub use error::{Error, Result};
-pub use peer::{register_rpeer, Output, Peer, PeerCmd, PeerProcess};
+pub use peer::{register_rpeer, Output, Peer, PeerCmd, PeerProcess, EXIT_NOT_IMPLEMENTED};
 pub use testenv::TestEnv;

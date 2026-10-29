@@ -18,7 +18,7 @@ use crate::{bins, Error, Result, TestEnv};
 pub enum Peer {
     /// `cpeer`: C, linked against `liblmdb` built from `libraries/liblmdb`.
     C,
-    /// `rpeer`: Rust, built on the `lmdb` crate (added in stage 2).
+    /// `rpeer`: Rust, built on the `lmdb` crate (`src/bin/rpeer`).
     Rust,
 }
 
@@ -67,10 +67,31 @@ fn rpeer_path() -> Result<PathBuf> {
     }
     candidates.into_iter().find(|p| p.is_file()).ok_or_else(|| {
         Error::new(
-            "the Rust peer `rpeer` is not built yet (it is added in stage 2); \
-             set INTEROP_RPEER to its path or add a [[bin]] rpeer to the interop crate",
+            "the Rust peer `rpeer` is not built: run `cargo build -p interop --bin rpeer` \
+             or set INTEROP_RPEER to its path",
         )
     })
+}
+
+/// Exit status of a peer that does not implement a command (yet): `rpeer`
+/// before stage 3 for the write-side commands.
+pub const EXIT_NOT_IMPLEMENTED: i32 = 4;
+
+/// The answer of `<peer> commands`: `(command, implemented)` pairs.
+type CommandTable = Option<Vec<(String, bool)>>;
+
+/// Ask `peer` which commands it implements (`<peer> commands` prints
+/// `command=<name> implemented=<0|1>` lines). `None` if it cannot be asked.
+fn query_commands(peer: Peer) -> CommandTable {
+    let out = peer.cmd("commands").run().ok()?;
+    let table = out
+        .lines()
+        .filter_map(|line| {
+            let kv = crate::report::Kv::from_lines([line]);
+            Some((kv.get("command")?.to_owned(), kv.get("implemented")? == "1"))
+        })
+        .collect();
+    Some(table)
 }
 
 /// Seconds a peer command may run before it is killed: `$INTEROP_TIMEOUT_SECS`
@@ -86,6 +107,25 @@ pub(crate) fn default_timeout() -> Duration {
 impl Peer {
     /// Both peers.
     pub const ALL: [Peer; 2] = [Peer::C, Peer::Rust];
+
+    /// Does this peer implement `command`? Asks the peer once per process
+    /// (`<peer> commands`) and caches the answer.
+    ///
+    /// If the peer cannot be asked (not built, crashed), the answer is
+    /// `true`: the real command then runs and reports the real problem,
+    /// instead of a scenario silently skipping work.
+    pub fn supports(&self, command: &str) -> bool {
+        static C: OnceLock<CommandTable> = OnceLock::new();
+        static RUST: OnceLock<CommandTable> = OnceLock::new();
+        let cell = match self {
+            Peer::C => &C,
+            Peer::Rust => &RUST,
+        };
+        match cell.get_or_init(|| query_commands(*self)) {
+            None => true,
+            Some(table) => table.iter().any(|(name, yes)| name == command && *yes),
+        }
+    }
 
     /// The peer executable.
     pub fn bin(&self) -> Result<PathBuf> {
@@ -217,9 +257,15 @@ impl Output {
     }
 
     /// `Ok(self)` if the process succeeded, else an error describing it.
+    /// Exit status 4 ([`EXIT_NOT_IMPLEMENTED`]) gives an error that
+    /// [`is_not_implemented`](Error::is_not_implemented).
     pub fn ok(self) -> Result<Self> {
         if self.success() {
             Ok(self)
+        } else if self.code() == Some(EXIT_NOT_IMPLEMENTED) {
+            Err(Error::not_implemented(format!(
+                "command not implemented by the peer: {self}"
+            )))
         } else {
             Err(Error::new(format!("command failed: {self}")))
         }
@@ -429,6 +475,15 @@ impl PeerProcess {
             // The peer may already have exited; that is not our concern here.
             let _ = stdin.write_all(b"\n");
         }
+        Ok(())
+    }
+
+    /// Kill the process with `SIGKILL` (no chance to clean up: its reader
+    /// slot stays in the lock file) and wait until it is gone.
+    pub fn kill(mut self) -> Result<()> {
+        self.child.kill()?;
+        self.child.wait()?;
+        self.finished = true;
         Ok(())
     }
 

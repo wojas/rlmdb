@@ -186,6 +186,8 @@ open_env(const struct opts *o, unsigned int extra_flags)
 
 /* ---- Command table ------------------------------------------------------ */
 
+static int cmd_commands(struct opts *o);
+
 struct command {
 	const char	*name;
 	int		(*run)(struct opts *);
@@ -201,16 +203,31 @@ static const struct command commands[] = {
 	{ "dump", cmd_dump, 1, 2, "dump <env> <db|-> | dump <env> --all" },
 	{ "stat", cmd_stat, 1, 1, "stat <env>" },
 	{ "readers", cmd_readers, 1, 1, "readers <env>" },
+	{ "reader-check", cmd_reader_check, 1, 1, "reader-check <env>" },
 	{ "hold-reader", cmd_hold_reader, 2, 5,
 		"hold-reader <env> <seconds> [--until-stdin] [<db|-> <count> <seed> [data options]]" },
+	{ "hold-env", cmd_hold_env, 2, 2, "hold-env <env> <seconds> [--until-stdin]" },
 	{ "writer-loop", cmd_writer_loop, 4, 4, "writer-loop <env> <db|-> <seconds> <seed> [--keys N] [--max-commits N]" },
 	{ "reader-loop", cmd_reader_loop, 3, 3, "reader-loop <env> <db|-> <seconds>" },
 	{ "check-freelist", cmd_check_freelist, 1, 1, "check-freelist <env>" },
 	{ "nested-test", cmd_nested_test, 1, 1, "nested-test <env> [--check]" },
 	{ "copy", cmd_copy, 2, 2, "copy <env> <dest> [--compact]" },
 	{ "gen", cmd_gen, 2, 2, "gen <seed> <i> [data options]" },
+	{ "commands", cmd_commands, 0, 0, "commands" },
 	{ NULL, NULL, 0, 0, NULL }
 };
+
+/* "command=<name> implemented=1" for every command: the harness asks peers
+ * what they implement (the Rust peer lacks the write side before stage 3). */
+static int
+cmd_commands(struct opts *o)
+{
+	const struct command *c;
+
+	for (c = commands; c->name; c++)
+		printf("command=%s implemented=1\n", c->name);
+	return 0;
+}
 
 static void
 usage(void)

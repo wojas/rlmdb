@@ -8,22 +8,39 @@ environment and checking what each sees.
 * `cpeer` (C, `c/cpeer*.c`) speaks the protocol below, linked against
   `liblmdb` built from `../../libraries/liblmdb` (LMDB 0.9.36+) by `build.rs`
   with the upstream Makefile's flags and the platform's default lock mode.
-* `rpeer` (Rust, on the `lmdb` crate) speaks the same protocol. It arrives in
-  stage 2.
+* `rpeer` (Rust, `src/bin/rpeer/`, on the `lmdb` crate) speaks the same
+  protocol. It implements the read side; the write-side commands exit with
+  status 4 until stage 3 (see "rpeer status" below).
 * `layout_dump` (`c/layout_dump.c`) `#include`s `mdb.c` and prints
   `sizeof`/`offsetof`/`alignof` of every on-disk and lock-file struct.
 * The upstream tools `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` and
   `mtest`…`mtest5` are built too. (`mdb_drop` does not exist in 0.9, and
   `mtest6` needs an `MDB_DEBUG` build, as upstream.)
 
-Everything is compiled into `$OUT_DIR/bin`; `interop::bins` has the paths.
+The C programs are compiled into `$OUT_DIR/bin` (`interop::bins` has the
+paths); `rpeer` is a normal `[[bin]]` of this crate.
 
 ## Running
 
 ```sh
-cargo test -p interop                       # all scenarios C-vs-C, layout, unit tests
+cargo test -p interop                       # everything: both pairs, layout, rpeer, unit tests
+cargo test -p interop --test c_vs_c         # every scenario with C on both sides
+cargo test -p interop --test c_writes_rust_reads   # every scenario, C writes, Rust reads
+cargo test -p interop --test rpeer          # rpeer vs cpeer outputs, checkers, exit codes
 cargo test -p interop --test c_vs_c -- --nocapture mvcc   # one scenario, with its log
+rust/scripts/linux-test.sh test -p interop  # the same on Linux (Docker)
 ```
+
+| test file | what |
+|---|---|
+| `tests/c_vs_c.rs` | `scenario_tests!(C, C)`: validates the harness and the C peer; negative tests of the C checkers |
+| `tests/c_writes_rust_reads.rs` | `scenario_tests!(C, Rust)` |
+| `tests/rpeer.rs` | `gen`, `stat`, `dump`, `verify`, `check-freelist` byte-identical to C (also failure reports); write commands exit 4; usage errors |
+| `tests/layout.rs` | the C struct layout against DESIGN.md, and every `layout_dump` value against `lmdb::consts`/`lmdb::format::layout` |
+
+A scenario step that needs a command the peer lacks prints
+`[interop] SKIPPED ...` on stderr (visible without `--nocapture`): either C
+runs that step instead, or the whole scenario is skipped (its test passes).
 
 | variable | meaning |
 |---|---|
@@ -37,9 +54,12 @@ The tests print the page size of each environment they create (`--nocapture`):
 ## Rust harness
 
 * `Peer::{C, Rust}`: `peer.on("fill", &env).args([...]).run()` runs a
-  command and requires exit 0; `.output()` returns any status; `.spawn()`
+  command and requires exit 0 (exit 4 gives an error that
+  `is_not_implemented()`); `.output()` returns any status; `.spawn()`
   returns a `PeerProcess` for long-running commands (`wait_ready()`,
-  `release()`, `finish()`; dropping it kills the process).
+  `release()`, `finish()`, `kill()` for a SIGKILL; dropping it kills the
+  process). `peer.supports(command)` tells whether the peer implements a
+  command.
 * `TestEnv`: an environment in a temp dir (`new()`, `new_nosubdir()`,
   `with_name()`, `derived(name)` for copy targets).
 * `report`: parsers for every command's output. `tools`: runs and parses
@@ -48,19 +68,36 @@ The tests print the page size of each environment they create (`--nocapture`):
   `Pair { writer, reader }`; `scenario_tests!(writer, reader)` turns them
   all into `#[test]`s. `tests/c_vs_c.rs` is just
   `interop::scenario_tests!(Peer::C, Peer::C)` plus self-tests showing the
-  checkers reject bad data and broken page accounting.
+  checkers reject bad data and broken page accounting;
+  `tests/c_writes_rust_reads.rs` is the same line for `(C, Rust)`.
 
-### Adding the Rust peer (stage 2)
+### rpeer status
 
-1. Add `src/bin/rpeer.rs` and a `[[bin]] name = "rpeer"` (with
-   `required-features = ["with-lmdb"]`, or make `lmdb` a normal dependency).
-   It implements this protocol on `lmdb::core`; the C files are the
-   reference (`dataset.c` for the generator).
-2. Add test files with one line each, e.g. `tests/c_vs_rust.rs`:
-   `interop::scenario_tests!(interop::Peer::C, interop::Peer::Rust);`, and the
-   same for `(Rust, C)` and `(Rust, Rust)`.
-3. Enable `--features with-lmdb` for `tests/layout.rs::rust_layout_matches_c`
-   (fix up the constant names there to match `lmdb::format::layout`).
+`rpeer` mirrors the C peer file by file (`args.rs` = `cpeer.c`, `dataset.rs`
+= `dataset.c`, `data.rs` = `cpeer_data.c`, `loops.rs` = `cpeer_loops.c`,
+`misc.rs` = `cpeer_misc.c`, `pagewalk.rs` = `cpeer_pagewalk.c`) and uses only
+the public API of the `lmdb` crate: `lmdb::core` for everything except
+`check-freelist`, which decodes the data file with `lmdb::format` alone.
+
+| command | rpeer | notes |
+|---|---|---|
+| `verify` | yes | all data options; output identical to C |
+| `dump`, `dump --all` | yes | identical to C |
+| `stat` | yes | identical to C |
+| `readers`, `reader-check` | yes | |
+| `hold-reader`, `hold-env` | yes | |
+| `reader-loop` | yes | |
+| `check-freelist` | yes | identical report and messages, also on corrupt files |
+| `gen` | yes | identical to C (`tests/rpeer.rs` compares ~1200 items) |
+| `nested-test --check` | yes | the write mode exits 4 |
+| `create`, `fill`, `delete`, `writer-loop`, `copy` | stage 3 | parse their arguments, then exit 4 |
+
+`rpeer commands` lists this (`command=<name> implemented=<0|1>`);
+`Peer::supports(command)` asks it once. To enable a command in stage 3,
+implement it and set `implemented: true` in `main.rs`; scenarios then use it
+automatically. The remaining pairs are one line each, e.g.
+`interop::scenario_tests!(interop::Peer::Rust, interop::Peer::C);` in
+`tests/rust_writes_c_reads.rs`, and the same for (Rust, Rust).
 
 In a pair the **writer** creates environments and writes; the **reader**
 verifies, holds snapshots and runs reader loops; page audits always run on
@@ -77,7 +114,8 @@ both; `readers` both ways).
 Options start with `--` and may appear anywhere after the command. Exit
 status: `0` success, `1` a check failed (data or invariant mismatch, message
 on stderr), `2` usage error, `3` an LMDB call failed unexpectedly (message
-names the call and the error). Output goes to stdout as lines of
+names the call and the error), `4` the peer does not implement the command
+(yet). Output goes to stdout as lines of
 space-separated `key=value` tokens, line-buffered. Messages on stderr start
 with `cpeer: ` (or `rpeer: `).
 
@@ -93,8 +131,8 @@ with `cpeer: ` (or `rpeer: `).
 | `--maxreaders N` | `mdb_env_set_maxreaders` (default: LMDB's, 126) |
 
 Commands that only read open the environment with `MDB_RDONLY`: `verify`,
-`dump`, `stat`, `readers`, `hold-reader`, `reader-loop`, `check-freelist`,
-`copy`, `nested-test --check`.
+`dump`, `stat`, `readers`, `reader-check`, `hold-reader`, `hold-env`,
+`reader-loop`, `check-freelist`, `copy`, `nested-test --check`.
 
 ### Data options (`fill`, `verify`, `delete`, `hold-reader`, `gen`)
 
@@ -176,12 +214,21 @@ db=<name> flags=0x4 depth=2 ...   (every named DB, as mdb_stat -a finds them)
 takes no slot): `reader pid=<pid> tid=0x<hex> txnid=<n|->` per used slot,
 then `readers=<n> numreaders=<slots ever used> maxreaders=<n>`.
 
+**`reader-check <env>`** — `mdb_reader_check`: clear the reader slots of
+dead processes. `reader-check cleared=<n>`.
+
 **`hold-reader <env> <seconds> [--until-stdin] [<db|-> <count> <seed> [data options]]`**
 — begin a read txn, print `READY txnid=<snapshot> pid=<pid>`, wait
 `<seconds>` (with `--until-stdin`: until a line or EOF on stdin, at most
 `<seconds>`), then, if a data set is given, verify it *in the held
 snapshot* (prints the `verified` line), then
 `released txnid=<n> held=<seconds>`.
+
+**`hold-env <env> <seconds> [--until-stdin]`** — open the environment
+read-only and wait like `hold-reader`, but without a read transaction:
+`READY pid=<pid>`, then `released held=<seconds>`. While it runs, other
+openers are not exclusive, so they do not reset the reader table (which
+would wipe the slots of dead processes before a reader check sees them).
 
 **`writer-loop <env> <db|-> <seconds> <seed> [--keys N] [--max-commits N]`**
 — commit small random write transactions until `<seconds>` pass (at least
@@ -266,6 +313,9 @@ exist. The 40000 bytes are SplitMix64 words (little-endian) from state 5.
 **`gen <seed> <i> [data options]`** — print the generated item:
 `key=<hex>`, `ndups=<n>`, `value<d>=<hex>` per value, in generation order.
 
+**`commands`** — `command=<name> implemented=<0|1>` for every command of
+the peer (C: all 1).
+
 ## Deterministic data set
 
 All arithmetic is on `uint32_t`/`uint64_t` with wrap-around; "native" means
@@ -331,6 +381,11 @@ gen 3 4 --intdup --dups 3   value0=000000005e89d359 value1=010000005f89d359 valu
 | `dump_load_roundtrip` | `mdb_dump -a` + `mdb_load` of the writer's data, verified by the reader |
 | `mtest_databases` | databases written by upstream `mtest`…`mtest5` (incl. `MDB_FIXEDMAP`) audited and dumped |
 | `gen_vectors` | the generator agrees between peers and with the pinned vectors |
+| `stale_reader_cleared_by_reader` | the writer's `hold-reader` is SIGKILLed; its slot stays and pins the snapshot (a rewrite grows the file); a check while it was alive cleared nothing; the reader peer's `reader-check` clears exactly it; the next rewrite reuses the free pages (grows ~0); audit |
+| `stale_reader_cleared_by_mdb_stat` | the same with the reader peer's `hold-reader` killed and `mdb_stat -rr` (C) clearing it |
+| `reader_creates_lock_file` | the lock file is deleted; the reader peer opens first and creates it (reader table, semaphores/mutexes; size as C makes it); the writer then does all the writing (writer loop, delete) next to reader loops of both peers and the creator's held snapshot |
+| `reader_loop_during_nested` | reader loops of both peers while the writer runs `nested-test` twice and a writer loop |
+| `notls_readers` | `--notls` holder, reader loops and verify of both peers while the writer loops |
 
 ## C behaviour the Rust implementation must match (found by this harness)
 
@@ -350,6 +405,16 @@ gen 3 4 --intdup --dups 3   value0=000000005e89d359 value1=010000005f89d359 valu
   copying the two meta pages (so the snapshot is the newest), then copies
   pages `2..next_pgno` as they are (capped at the file size). Both open the
   target with `O_EXCL`: the file must not exist.
+* **Exclusive re-open resets the reader table**: when the last process
+  using an environment exits, the next opener gets the exclusive lock and
+  reinitialises the table, so a dead reader's slot vanishes without a
+  reader check. Scenarios about stale slots keep a `hold-env` process
+  around.
+* **A pinned snapshot stops all page reuse**: with a reader held, every
+  commit of `writer-loop` takes new pages (about 9 per commit with the
+  default data); an unbounded `--nosync` loop fills a 512 MiB map of 4 KiB
+  pages in under a second on Linux. Scenarios that hold a reader during a
+  writer loop pass `--max-commits`.
 * **Reader table**: `mdb_reader_list` prints `"%10d %zx %zu"` (pid, thread
   as hex, txnid) or `"%10d %zx -"` for a slot that is not in a txn, after
   the header `"    pid     thread     txnid"`; `"(no active readers)"` if
