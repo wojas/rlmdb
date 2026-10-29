@@ -1,0 +1,22 @@
+[package]
+name = "interop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Cross-process compatibility test bed: C LMDB and Rust LMDB processes sharing one environment"
+
+[features]
+default = []
+# Stage 2: compare the C layout dump against `lmdb::format::layout`.
+# Off by default so this crate builds before the `lmdb` library is complete.
+with-lmdb = ["dep:lmdb"]
+
+[dependencies]
+lmdb = { path = "../lmdb", optional = true }
+tempfile = "3"
+
+[build-dependencies]
+cc = "1"
