@@ -24,10 +24,11 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
+use crate::cmp::{CmpFn, Comparator};
 use crate::consts::*;
 use crate::core::cursor::{self, Cursor, RoCursor};
 use crate::core::dbi::{init_txn_dbs, Dbi, TxnDb, DB_USRVALID, DB_VALID};
-use crate::core::dirty::DirtyPages;
+use crate::core::dirty::{DirtyPages, Layer, SpillSet};
 use crate::core::env::Environment;
 use crate::core::Stat;
 use crate::error::{MdbError, Result};
@@ -48,7 +49,33 @@ pub trait Transaction {
     /// `mdb_dbi_open` without `MDB_CREATE`: the handle of an existing
     /// database (`None` = the main DB). `MdbError::NotFound` if it does not
     /// exist in this transaction's snapshot.
-    fn open_db(&self, name: Option<&str>) -> Result<Dbi>;
+    fn open_db(&self, name: Option<&str>) -> Result<Dbi> {
+        self.open_db_bytes(name.map(str::as_bytes))
+    }
+
+    /// [`Transaction::open_db`] for a name given as bytes: C database
+    /// names are arbitrary bytes without NUL (`EINVAL` for a name with a
+    /// NUL byte), not necessarily UTF-8.
+    fn open_db_bytes(&self, name: Option<&[u8]>) -> Result<Dbi>;
+
+    /// `mdb_set_compare(txn, db, cmp)`: order the keys of `db` with `cmp`
+    /// (`None` = the default order again). As in C the setting belongs to
+    /// the environment's handle; unlike [`Environment::set_compare`] it
+    /// also takes effect in this transaction at once. Use it before
+    /// anything is read or written with the handle, and use the same order
+    /// in every process (`lmdb.h`). `EINVAL` for the free DB or an invalid
+    /// handle.
+    fn set_compare(&self, db: Dbi, cmp: Option<CmpFn>) -> Result<()>;
+
+    /// `mdb_set_dupsort(txn, db, cmp)`: as [`Transaction::set_compare`] for
+    /// the order of duplicate data items (`DUP_SORT` databases). Cursors
+    /// opened earlier keep the order they started with, as in C.
+    fn set_dupsort(&self, db: Dbi, cmp: Option<CmpFn>) -> Result<()>;
+
+    /// The comparators this transaction uses for `db`: the key order and,
+    /// for `DUP_SORT` databases, the duplicate order (what `mdb_cmp` and
+    /// `mdb_dcmp` call).
+    fn comparators(&self, db: Dbi) -> Result<(Comparator, Option<Comparator>)>;
 
     /// `mdb_get`: the value stored under `key`, or `None`. For `DUP_SORT`
     /// databases, the first data item of the key.
@@ -87,6 +114,24 @@ pub(crate) struct TxnCore<'env> {
     /// `mt_u.dirty_list`: pages written by a write transaction. Always
     /// empty for read transactions.
     pub(crate) dirty: DirtyPages,
+    /// `mt_spill_pgs`: pages this write transaction wrote to the data file
+    /// before commit to make room in the dirty list (`mdb_page_spill`).
+    pub(crate) spilled: SpillSet,
+    /// For a nested transaction: the dirty and spilled pages of its parent,
+    /// grandparent, … (nearest first), consulted after its own.
+    pub(crate) parents: Vec<Layer>,
+}
+
+/// Where `mdb_page_get` finds a page of a write transaction, and at which
+/// `level` (1 = this transaction, 2 = its parent, …).
+pub(crate) enum PageSource<'a> {
+    /// In the dirty list of the transaction at `level` (the whole run for
+    /// overflow pages).
+    Dirty(&'a [u8], usize),
+    /// Spilled by the transaction at `level`: read it from the map.
+    Spilled(usize),
+    /// Not written by this transaction or an ancestor (level 0): the map.
+    Clean,
 }
 
 impl<'env> TxnCore<'env> {
@@ -98,6 +143,47 @@ impl<'env> TxnCore<'env> {
             next_pgno: 0,
             dbs: RefCell::new(dbs),
             dirty: DirtyPages::new(),
+            spilled: SpillSet::new(),
+            parents: Vec::new(),
+        }
+    }
+
+    /// The `mt_parent` walk of `mdb_page_get`: at each level the spill list
+    /// is checked before the dirty list, so a page this transaction spilled
+    /// is read from the map even if a parent still has an older dirty copy.
+    #[inline]
+    pub(crate) fn locate(&self, pgno: u64) -> PageSource<'_> {
+        if !self.spilled.is_empty() && self.spilled.contains(&pgno) {
+            return PageSource::Spilled(1);
+        }
+        if let Some(buf) = self.dirty.get(pgno) {
+            return PageSource::Dirty(buf, 1);
+        }
+        for (i, layer) in self.parents.iter().enumerate() {
+            if !layer.spilled.is_empty() && layer.spilled.contains(&pgno) {
+                return PageSource::Spilled(i + 2);
+            }
+            if let Some(buf) = layer.dirty.get(pgno) {
+                return PageSource::Dirty(buf, i + 2);
+            }
+        }
+        PageSource::Clean
+    }
+
+    /// The `level` output of `mdb_page_get` (see [`PageSource`]).
+    pub(crate) fn page_level(&self, pgno: u64) -> usize {
+        match self.locate(pgno) {
+            PageSource::Dirty(_, level) | PageSource::Spilled(level) => level,
+            PageSource::Clean => 0,
+        }
+    }
+
+    /// The written buffer of `pgno` (dirty here or in an ancestor), if any.
+    #[inline]
+    fn dirty_buf(&self, pgno: u64) -> Option<&[u8]> {
+        match self.locate(pgno) {
+            PageSource::Dirty(buf, _) => Some(buf),
+            _ => None,
         }
     }
 
@@ -122,12 +208,12 @@ impl<'env> TxnCore<'env> {
     }
 
     /// `mdb_page_get`: page `pgno` of this snapshot: a dirty page of this
-    /// transaction, else the mapped page. Meta pages are never returned
-    /// (they change under readers), nor pages past the snapshot's end
-    /// (`MDB_PAGE_NOTFOUND`).
+    /// transaction or an ancestor, else the mapped page. Meta pages are
+    /// never returned (they change under readers), nor pages past the
+    /// snapshot's end (`MDB_PAGE_NOTFOUND`).
     pub(crate) fn page(&self, pgno: u64) -> Result<PageRef<'_>> {
         let ps = self.env.page_size();
-        if let Some(buf) = self.dirty.get(pgno) {
+        if let Some(buf) = self.dirty_buf(pgno) {
             return PageRef::new(&buf[..ps]).ok_or_else(|| MdbError::Corrupted.into());
         }
         if pgno < NUM_METAS as u64 {
@@ -149,7 +235,7 @@ impl<'env> TxnCore<'env> {
     pub(crate) fn overflow_data(&self, pgno: u64, len: usize) -> Result<&[u8]> {
         let ps = self.env.page_size();
         let npages = overflow_pages_for(len, ps) as u64;
-        let bytes = match self.dirty.get(pgno) {
+        let bytes = match self.dirty_buf(pgno) {
             Some(buf) => buf,
             None => {
                 if pgno < NUM_METAS as u64 {
@@ -293,6 +379,11 @@ impl<'env> RoTxn<'env> {
         }
     }
 
+    /// The transaction's snapshot state.
+    pub(crate) fn core(&self) -> &TxnCore<'env> {
+        &self.core
+    }
+
     /// The reader slot index this transaction occupies, if any.
     pub fn reader_slot(&self) -> Option<usize> {
         self.slot
@@ -318,8 +409,20 @@ impl Transaction for RoTxn<'_> {
         self.core.txnid
     }
 
-    fn open_db(&self, name: Option<&str>) -> Result<Dbi> {
+    fn open_db_bytes(&self, name: Option<&[u8]>) -> Result<Dbi> {
         self.core.open_db(name)
+    }
+
+    fn set_compare(&self, db: Dbi, cmp: Option<CmpFn>) -> Result<()> {
+        self.core.set_comparator(db, cmp, false)
+    }
+
+    fn set_dupsort(&self, db: Dbi, cmp: Option<CmpFn>) -> Result<()> {
+        self.core.set_comparator(db, cmp, true)
+    }
+
+    fn comparators(&self, db: Dbi) -> Result<(Comparator, Option<Comparator>)> {
+        self.core.comparators(db)
     }
 
     fn get<'txn>(&'txn self, db: Dbi, key: &[u8]) -> Result<Option<&'txn [u8]>> {

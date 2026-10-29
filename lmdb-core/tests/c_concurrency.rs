@@ -73,8 +73,9 @@ fn rust_creates_environment_c_uses_it() {
     assert_eq!(walk_forward(&txn, Dbi::MAIN), vec![]);
     let txn2 = env.begin_ro_txn().unwrap();
     assert!(txn2.id() > 0);
+    // (mtest seeds rand() with the time; with few values its deletes can
+    // leave the DB empty, which is a valid outcome to compare too.)
     let expected = c.dump(&path, None);
-    assert!(!expected.is_empty());
     assert_eq!(walk_forward(&txn2, Dbi::MAIN), expected);
     drop((txn, txn2));
     verify_db(&env, Dbi::MAIN, &expected);

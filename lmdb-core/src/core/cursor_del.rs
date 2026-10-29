@@ -16,9 +16,10 @@ use crate::core::cursor::{
     corrupted, cursor_first, cursor_set, CursorOp, C_DEL, C_EOF, C_INITIALIZED, PS_FIRST,
 };
 use crate::core::cursor_put::{NodeVal, MDB_NOSPILL};
+use crate::core::dbi::{DB_DIRTY, DB_STALE};
 use crate::core::page_ops;
 use crate::core::split::node_body;
-use crate::core::txn_rw::{RwTxn, TXN_ERROR};
+use crate::core::txn_rw::{RwTxn, TXN_DIRTY, TXN_ERROR};
 use crate::core::wcursor::{CRef, SUBPAGE};
 use crate::error::{Error, MdbError, Result};
 use crate::format::layout::PAGE_HDR_SIZE;
@@ -892,6 +893,59 @@ impl<'env> RwTxn<'env> {
         if let Some(s) = self.w.cursors.slot_mut(mc.slot) {
             s.tracked = false;
         }
+        rc
+    }
+
+    /// `mdb_drop` (mdb.c line 10219): free every page of `dbi` (including
+    /// overflow pages and, for `MDB_DUPSORT`, the sub-DBs of its keys) and
+    /// invalidate the cursors on it. With `del`, also delete the named DB's
+    /// record from the main DB and close the handle (the main DB is only
+    /// emptied); otherwise reset its record to an empty tree.
+    ///
+    /// The freed pages go on this transaction's free list, even those it
+    /// dirtied itself (which C writes at commit anyway). The handle is
+    /// closed for every transaction at once, as in C; if this is a nested
+    /// transaction that aborts, it is reopened (KNOWN_C_BUGS.md #20).
+    pub(crate) fn mdb_drop(&mut self, dbi: usize, del: bool) -> Result<()> {
+        let slot = self.open_slot(dbi, true);
+        let mc = CRef::main(slot);
+        let subs = u32::from(self.db_of(mc).flags) & MDB_DUPSORT != 0;
+        let rc = self.drop0(mc, subs);
+        // Invalidate the dropped DB's cursors.
+        for i in 0..self.w.cursors.len() {
+            if let Some(m2) = self.w.cursors.peer(i, dbi, false) {
+                self.cur_mut(m2).flags &= !(C_INITIALIZED | C_EOF);
+            }
+        }
+        let rc = rc.and_then(|()| {
+            // Can't delete the main DB.
+            if del && dbi >= CORE_DBS as usize {
+                let name = self.core.env.dbis.name_of(dbi).ok_or(MdbError::BadDbi)?;
+                if let Err(e) = self.del0(MAIN_DBI as usize, &name, None, u32::from(F_SUBDATA)) {
+                    self.w.flags |= TXN_ERROR;
+                    return Err(e);
+                }
+                self.core.dbs.get_mut()[dbi].state = DB_STALE;
+                let seq = self.core.env.dbis.seq_of(dbi);
+                if let Some(slot) = self.core.env.dbis.read().get(dbi).cloned() {
+                    self.w.dropped.push((dbi, slot, seq));
+                }
+                self.core.env.dbis.close(crate::core::Dbi(dbi as u32));
+            } else {
+                // Reset the DB record, mark it dirty.
+                let e = &mut self.core.dbs.get_mut()[dbi];
+                e.state |= DB_DIRTY;
+                e.db.depth = 0;
+                e.db.branch_pages = 0;
+                e.db.leaf_pages = 0;
+                e.db.overflow_pages = 0;
+                e.db.entries = 0;
+                e.db.root = P_INVALID;
+                self.w.flags |= TXN_DIRTY;
+            }
+            Ok(())
+        });
+        self.close_slot(slot);
         rc
     }
 

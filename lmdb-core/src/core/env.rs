@@ -220,6 +220,10 @@ pub struct Environment {
     writer: Mutex<WriterState>,
     page_size: usize,
     map_size: AtomicUsize,
+    /// `MDB_IDL_UM_MAX`: how many pages a write transaction may hold dirty
+    /// before it spills some to disk. Fixed in C; lowered by unit tests to
+    /// exercise spilling with small transactions.
+    dirty_limit: AtomicUsize,
     max_readers: u32,
     node_max: usize,
     path: PathBuf,
@@ -349,6 +353,7 @@ impl Environment {
             writer: Mutex::new(WriterState::default()),
             page_size,
             map_size: AtomicUsize::new(map_size),
+            dirty_limit: AtomicUsize::new(MDB_IDL_UM_MAX),
             max_readers,
             node_max: format::node_max(page_size),
             path: path.to_path_buf(),
@@ -417,6 +422,18 @@ impl Environment {
     /// Sets `MDB_FATAL_ERROR` (a meta page write failed, `mdb_env_write_meta`).
     pub(crate) fn set_fatal_error(&self) {
         self.fatal.store(true, Ordering::SeqCst);
+    }
+
+    /// `MDB_IDL_UM_MAX`: the dirty list's capacity (see the field).
+    pub(crate) fn dirty_limit(&self) -> usize {
+        self.dirty_limit.load(Ordering::Relaxed)
+    }
+
+    /// Lowers the dirty-list capacity for write transactions that begin
+    /// later, so tests can make small transactions spill.
+    #[cfg(test)]
+    pub(crate) fn set_dirty_limit(&self, pages: usize) {
+        self.dirty_limit.store(pages.max(16), Ordering::Relaxed);
     }
 
     /// `me_nodemax`: largest node that stays inline in a page.
@@ -506,6 +523,7 @@ impl Environment {
             last_txnid: meta.txnid as usize,
             max_readers: self.max_readers,
             num_readers: self.lock.as_ref().map_or(0, |l| l.raw_num_readers()),
+            map_address: meta.address as usize,
         })
     }
 
@@ -605,6 +623,14 @@ impl Environment {
         *current = Arc::new(map);
         self.map_size.store(size, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// `true` if the environment uses a lock file. `false` with
+    /// [`EnvironmentFlags::NO_LOCK`], and for a read-only environment whose
+    /// lock file could not be created because the file system is read-only
+    /// (`EROFS`, as C allows).
+    pub fn has_lock_file(&self) -> bool {
+        self.lock.is_some()
     }
 
     /// `mdb_env_get_fd`-like access to the data file.

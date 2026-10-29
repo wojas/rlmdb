@@ -221,6 +221,41 @@ pub fn fsync(file: &File) -> io::Result<()> {
     }
 }
 
+/// Asks the OS not to cache what is written through `file` (as
+/// `mdb_fopen` does for `mdb_env_copy` targets): `F_NOCACHE` on macOS,
+/// `O_DIRECT` elsewhere. Best effort, failures are ignored like in C. With
+/// `O_DIRECT`, writes must come from buffers aligned to the OS page size
+/// and have sizes that are multiples of it.
+pub fn set_nocache(file: &File) {
+    let fd = file.as_raw_fd();
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    // SAFETY: valid fd; F_NOCACHE takes an int argument.
+    unsafe {
+        libc::fcntl(fd, libc::F_NOCACHE, 1);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    // SAFETY: valid fd; F_GETFL/F_SETFL take no pointer arguments.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags != -1 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_DIRECT);
+        }
+    }
+}
+
+/// Closes `file`, reporting an error from `close` (which `File`'s `Drop`
+/// ignores; `mdb_env_copy2` reports it).
+pub fn close(file: File) -> io::Result<()> {
+    use std::os::fd::IntoRawFd;
+    let fd = file.into_raw_fd();
+    // SAFETY: we own fd (taken from the File) and close it exactly once.
+    if unsafe { libc::close(fd) } == 0 {
+        Ok(())
+    } else {
+        Err(last_error())
+    }
+}
+
 /// `ftruncate`.
 pub fn ftruncate(file: &File, len: u64) -> io::Result<()> {
     file.set_len(len)

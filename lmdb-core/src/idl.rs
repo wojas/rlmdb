@@ -282,6 +282,39 @@ impl<V> Id2List<V> {
     pub fn clear(&mut self) {
         self.items.clear();
     }
+
+    /// Keeps only the entries for which `keep` returns `true`, in one pass
+    /// (C compacts the list in place the same way in `mdb_page_flush`).
+    pub fn retain(&mut self, mut keep: impl FnMut(u64, &mut V) -> bool) {
+        self.items.retain_mut(|(k, v)| keep(*k, v));
+    }
+
+    /// Merges `other` into this list in one pass; where both have an entry
+    /// for a page number, `other`'s replaces this one's (the dirty-list
+    /// merge of a nested commit, `mdb_txn_commit`).
+    pub fn merge(&mut self, other: Id2List<V>) {
+        if other.items.is_empty() {
+            return;
+        }
+        let mine = std::mem::take(&mut self.items);
+        let mut out = Vec::with_capacity(mine.len() + other.items.len());
+        let mut a = mine.into_iter().peekable();
+        let mut b = other.items.into_iter().peekable();
+        loop {
+            let next = match (a.peek(), b.peek()) {
+                (Some(x), Some(y)) if x.0 < y.0 => a.next(),
+                (Some(x), Some(y)) if x.0 == y.0 => {
+                    a.next();
+                    b.next()
+                }
+                (Some(_), Some(_)) | (None, Some(_)) => b.next(),
+                (Some(_), None) => a.next(),
+                (None, None) => break,
+            };
+            out.extend(next);
+        }
+        self.items = out;
+    }
 }
 
 #[cfg(test)]
@@ -446,5 +479,38 @@ mod tests {
         assert_eq!(l.search(6), 2);
         assert_eq!(l.remove(2), Some("two"));
         assert_eq!(l.len(), 2);
+    }
+
+    #[test]
+    fn id2l_merge_and_retain() {
+        let mut a = Id2List::new();
+        for (k, v) in [(1, "a1"), (4, "a4"), (6, "a6"), (9, "a9")] {
+            a.append(k, v);
+        }
+        let mut b = Id2List::new();
+        for (k, v) in [(0, "b0"), (4, "b4"), (7, "b7"), (9, "b9"), (12, "b12")] {
+            b.append(k, v);
+        }
+        a.merge(b);
+        let got: Vec<_> = a.as_slice().to_vec();
+        assert_eq!(
+            got,
+            [
+                (0, "b0"),
+                (1, "a1"),
+                (4, "b4"),
+                (6, "a6"),
+                (7, "b7"),
+                (9, "b9"),
+                (12, "b12")
+            ]
+        );
+        a.retain(|k, _| k % 2 == 0);
+        assert_eq!(
+            a.as_slice().iter().map(|e| e.0).collect::<Vec<_>>(),
+            [0, 4, 6, 12]
+        );
+        a.merge(Id2List::new());
+        assert_eq!(a.len(), 4);
     }
 }

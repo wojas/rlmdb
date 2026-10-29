@@ -16,23 +16,29 @@
 //!   `mdb_txn_end`: discard the dirty pages, close handles of databases
 //!   created by the transaction, unlock.
 //!
+//! * [`RwTxn::begin_nested_txn`] = `mdb_txn_begin` with a parent (see
+//!   `super::nested`): a child transaction whose changes become the parent's
+//!   when it commits and vanish when it aborts.
+//! * When the dirty list approaches `MDB_IDL_UM_MAX` pages, some dirty
+//!   pages are written to the data file early (`mdb_page_spill`, see
+//!   `super::spill`), so transactions of any size can commit.
+//!
 //! An `RwTxn` is `!Send`: on Linux the writer mutex is a pthread mutex owned
 //! by the locking thread, so the transaction must end on the thread that
 //! began it.
-//!
-//! Not implemented yet (stage 3): nested transactions, spilling dirty pages
-//! to disk when the dirty list is full (a transaction that would need to
-//! spill fails with `MDB_TXN_FULL` instead), `mdb_drop`.
 
 use std::sync::MutexGuard;
 
+use crate::cmp::{CmpFn, Comparator};
 use crate::consts::*;
 use crate::core::cursor::C_SUB;
 use crate::core::cursor_put::{PutData, MDB_NOSPILL};
 use crate::core::dbi::{
-    Dbi, DbiRegistry, DbiSlot, NamedDb, TxnDb, DB_DIRTY, DB_NEW, DB_USRVALID, DB_VALID,
+    check_db_name, name_id, Dbi, DbiRegistry, DbiSlot, NamedDb, TxnDb, DB_DIRTY, DB_NEW, DB_STALE,
+    DB_USRVALID, DB_VALID,
 };
 use crate::core::env::{Environment, WriterState};
+use crate::core::nested::{End, Nested};
 use crate::core::reader::LockRegion;
 use crate::core::ro_cursor::{CursorOp, Entry, RoCursor};
 use crate::core::txn::{Transaction, TxnCore};
@@ -50,9 +56,9 @@ pub(crate) const TXN_FINISHED: u32 = 0x01;
 pub(crate) const TXN_ERROR: u32 = 0x02;
 /// `MDB_TXN_DIRTY`: must write a meta page even without dirty pages.
 pub(crate) const TXN_DIRTY: u32 = 0x04;
-/// `MDB_TXN_SPILLS`: the transaction (or a parent) spilled pages (stage 3).
+/// `MDB_TXN_SPILLS`: the transaction (or a parent) spilled pages.
 pub(crate) const TXN_SPILLS: u32 = 0x08;
-/// `MDB_TXN_HAS_CHILD`: a nested transaction is active (stage 3).
+/// `MDB_TXN_HAS_CHILD`: a nested transaction is active.
 pub(crate) const TXN_HAS_CHILD: u32 = 0x10;
 /// `MDB_TXN_BLOCKED`: most operations are illegal.
 pub(crate) const TXN_BLOCKED: u32 = TXN_FINISHED | TXN_ERROR | TXN_HAS_CHILD;
@@ -81,6 +87,14 @@ pub(crate) struct WriteState {
     pub(crate) pg_oldest: u64,
     /// The cursors of this transaction (`mt_cursors`).
     pub(crate) cursors: Arena,
+    /// The main DB record of the snapshot a top-level transaction began on
+    /// (to tell which named DBs exist again after an abort).
+    pub(crate) base_main: Option<Db>,
+    /// Handles closed by `drop_db` in this transaction (or its committed
+    /// children): slot index, the environment slot and its sequence number
+    /// before the close, so that a nested transaction that aborts can
+    /// reopen them.
+    pub(crate) dropped: Vec<(usize, DbiSlot, u32)>,
 }
 
 /// The writer locks a write transaction holds: the in-process writer state
@@ -100,10 +114,11 @@ impl Drop for WriterLock<'_> {
 
 /// A read-write transaction (`MDB_txn` without `MDB_RDONLY`).
 ///
-/// Only one exists per environment at a time, across all processes. Ends
-/// with [`commit`](RwTxn::commit), [`abort`](RwTxn::abort) or drop (which
-/// aborts). All read operations of [`Transaction`] work and see the
-/// transaction's own changes.
+/// Only one top-level write transaction exists per environment at a time,
+/// across all processes. Ends with [`commit`](RwTxn::commit),
+/// [`abort`](RwTxn::abort) or drop (which aborts). All read operations of
+/// [`Transaction`] work and see the transaction's own changes. A nested
+/// transaction ([`RwTxn::begin_nested_txn`]) is an `RwTxn` too.
 ///
 /// It must end on the thread that began it, so it is not `Send`:
 ///
@@ -114,14 +129,19 @@ impl Drop for WriterLock<'_> {
 pub struct RwTxn<'env> {
     pub(crate) core: TxnCore<'env>,
     pub(crate) w: WriteState,
+    /// The writer locks (top-level transactions only).
     lock: Option<WriterLock<'env>>,
+    /// The parent of a nested transaction and what ending it needs.
+    pub(crate) nested: Option<Nested<'env>>,
 }
 
 impl std::fmt::Debug for RwTxn<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RwTxn")
             .field("txnid", &self.core.txnid)
+            .field("depth", &self.w.cursors.depth())
             .field("dirty_pages", &self.core.dirty.len())
+            .field("spilled_pages", &self.core.spilled.len())
             .field("flags", &self.w.flags)
             .finish()
     }
@@ -173,19 +193,36 @@ impl<'env> RwTxn<'env> {
         Ok(RwTxn {
             core,
             w: WriteState {
-                dirty_room: MDB_IDL_UM_MAX,
+                dirty_room: env.dirty_limit(),
                 pg_oldest,
+                base_main: Some(meta.dbs[MAIN_DBI as usize]),
                 ..WriteState::default()
             },
             lock: Some(lock),
+            nested: None,
         })
     }
 
-    /// `mdb_txn_end` for a top-level write transaction: export (`keep`) or
-    /// close the handles of databases this transaction created
-    /// (`mdb_dbis_update`), drop the dirty pages and cursors, unlock.
+    /// Assembles a nested transaction (see `super::nested`).
+    pub(crate) fn from_parts(core: TxnCore<'env>, w: WriteState, nested: Nested<'env>) -> Self {
+        RwTxn {
+            core,
+            w,
+            lock: None,
+            nested: Some(nested),
+        }
+    }
+
+    /// `mdb_txn_end`: for a top-level write transaction, export (`keep`)
+    /// or close the handles of databases this transaction created
+    /// (`mdb_dbis_update`), drop the dirty pages and cursors, unlock. A
+    /// nested transaction hands its state back to its parent instead.
     fn end(&mut self, keep: bool) {
         if self.w.flags & TXN_FINISHED != 0 {
+            return;
+        }
+        if self.nested.is_some() {
+            self.end_nested(if keep { End::Commit } else { End::Abort });
             return;
         }
         let registry = &self.core.env.dbis;
@@ -203,6 +240,12 @@ impl<'env> RwTxn<'env> {
         }
         self.w.cursors.clear();
         self.core.dirty.clear();
+        self.core.spilled.clear();
+        if !keep {
+            if let Some(main) = self.w.base_main {
+                self.close_vanished_handles(main);
+            }
+        }
         self.w.free_pgs.clear();
         self.w.loose.clear();
         self.w.pghead = None;
@@ -213,6 +256,42 @@ impl<'env> RwTxn<'env> {
         }
     }
 
+    /// After an abort, with this transaction's own pages already dropped
+    /// so that reads see the state it reverts to (whose main DB record is
+    /// `main`): close the handles that name a database which does not
+    /// exist there. C closes only the handles of databases the transaction
+    /// created (`DB_NEW`); a handle the transaction opened for a database
+    /// that it (or a committed child) had created after the first handle
+    /// was closed (`drop_db`) would stay open in C and refer to nothing,
+    /// and `create_db` would return it (KNOWN_C_BUGS.md #19).
+    pub(crate) fn close_vanished_handles(&mut self, main: Db) {
+        let registry = &self.core.env.dbis;
+        let candidates: Vec<usize> = self
+            .core
+            .dbs
+            .get_mut()
+            .iter()
+            .enumerate()
+            .skip(CORE_DBS as usize)
+            .filter(|(i, e)| {
+                e.state & DB_VALID != 0 && e.state & DB_NEW == 0 && e.seq == registry.seq_of(*i)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        self.core.dbs.get_mut()[MAIN_DBI as usize].db = main;
+        for i in candidates {
+            let Some(name) = registry.name_of(i) else {
+                continue;
+            };
+            if !matches!(self.core.find_named_db(&name), Ok(NamedDb::Found(_))) {
+                registry.close(Dbi(i as u32));
+            }
+        }
+    }
+
     /// `mdb_txn_abort`: discard all changes. Same as dropping the
     /// transaction.
     pub fn abort(self) {}
@@ -220,7 +299,19 @@ impl<'env> RwTxn<'env> {
     /// `mdb_txn_commit`: make all changes durable (unless `NO_SYNC`) and
     /// visible to new transactions. On failure the transaction is aborted
     /// and nothing changes on disk that a reader could see.
+    ///
+    /// For a nested transaction: make its changes part of the parent
+    /// (nothing is written). If it failed earlier (`MdbError::BadTxn`), it
+    /// is aborted instead and the parent is marked failed too, as in C.
     pub fn commit(mut self) -> Result<()> {
+        if self.nested.is_some() {
+            if self.w.flags & (TXN_FINISHED | TXN_ERROR) != 0 {
+                self.end_nested(End::Failed);
+                return Err(MdbError::BadTxn.into());
+            }
+            self.end_nested(End::Commit);
+            return Ok(());
+        }
         let rc = self.commit0();
         self.end(rc.is_ok());
         rc
@@ -261,6 +352,13 @@ impl<'env> RwTxn<'env> {
     /// existing database is valid immediately and stays valid (see
     /// [`crate::core::dbi`]).
     pub fn create_db(&mut self, name: Option<&str>, flags: DatabaseFlags) -> Result<Dbi> {
+        self.create_db_bytes(name.map(str::as_bytes), flags)
+    }
+
+    /// [`RwTxn::create_db`] for a name given as bytes: C database names
+    /// are arbitrary bytes without NUL (`EINVAL` for a name with a NUL
+    /// byte), not necessarily UTF-8.
+    pub fn create_db_bytes(&mut self, name: Option<&[u8]>, flags: DatabaseFlags) -> Result<Dbi> {
         let flags = flags.bits();
         if flags & !VALID_FLAGS != 0 {
             return Err(Error::einval());
@@ -270,7 +368,7 @@ impl<'env> RwTxn<'env> {
             self.update_main_flags(flags);
             return Ok(Dbi::MAIN);
         };
-        let name = name.as_bytes();
+        check_db_name(name)?;
         let env = self.core.env;
         // The registry stays locked until the slot is registered. Nothing
         // below touches the registry: the main DB is never stale.
@@ -281,9 +379,20 @@ impl<'env> RwTxn<'env> {
                 None => {
                     unused.get_or_insert(i);
                 }
-                Some(n) if &**n == name => return Ok(Dbi(i as u32)),
+                Some(n) if &**n == name => {
+                    drop(slots);
+                    if !self.core.adopt_registration(i, name) && flags & MDB_CREATE != 0 {
+                        // Dropped in this transaction while the name stayed
+                        // open elsewhere: create it again in this slot.
+                        self.recreate_db(i, name, flags)?;
+                    }
+                    return Ok(Dbi(i as u32));
+                }
                 Some(_) => {}
             }
+        }
+        if let Some(dbi) = self.core.reopen_live_view(&mut slots, name) {
+            return Ok(dbi);
         }
         if unused.is_none() && slots.len() >= env.dbis.capacity() {
             return Err(MdbError::DbsFull.into());
@@ -349,8 +458,85 @@ impl<'env> RwTxn<'env> {
             seq,
             key_cmp,
             dup_cmp,
+            name_id: name_id(name),
         };
         Ok(Dbi(i as u32))
+    }
+
+    /// The create branch of `mdb_dbi_open` for a name that is open in slot
+    /// `i` although this transaction dropped the database: store an empty
+    /// record again (if the name is not in the main DB) and take a new view
+    /// of the slot.
+    fn recreate_db(&mut self, i: usize, name: &[u8], flags: u32) -> Result<()> {
+        let found = match self.core.find_named_db(name) {
+            Ok(NamedDb::Found(db)) => Some(db),
+            Ok(NamedDb::Missing) => None,
+            Err(e) if e.not_found() => None,
+            Err(e) => return Err(e),
+        };
+        let (db, state) = match found {
+            Some(db) => (db, DB_VALID | DB_USRVALID),
+            None => {
+                let db = Db::empty((flags & PERSISTENT_FLAGS) as u16);
+                let slot = self.open_slot(MAIN_DBI as usize, true);
+                let rc = self.put_at(
+                    CRef::main(slot),
+                    name,
+                    PutData::bytes(&db.to_bytes()),
+                    u32::from(crate::format::node::F_SUBDATA),
+                );
+                self.close_slot(slot);
+                rc?;
+                (db, DB_NEW | DB_VALID | DB_USRVALID | DB_DIRTY)
+            }
+        };
+        let registry = &self.core.env.dbis;
+        let slots = registry.read();
+        let (key_cmp, dup_cmp) = DbiRegistry::comparators(&slots[i], i, db.flags);
+        drop(slots);
+        self.core.dbs.get_mut()[i] = TxnDb {
+            db,
+            state,
+            seq: registry.seq_of(i),
+            key_cmp,
+            dup_cmp,
+            name_id: name_id(name),
+        };
+        Ok(())
+    }
+
+    /// `mdb_drop(txn, db, 1)`: delete database `db` from the environment
+    /// and close its handle. All its pages (with overflow pages and the
+    /// sub-DBs of a `DUP_SORT` database) go on the free list, its record is
+    /// removed from the main DB, and cursors on it become unpositioned. The
+    /// handle is closed in the environment at once, for every transaction
+    /// (whether or not this one commits, as in C); later use of it fails
+    /// with `MdbError::BadDbi`.
+    ///
+    /// The main DB cannot be deleted: for [`Dbi::MAIN`] this is
+    /// [`RwTxn::clear_db`] (which, as in C, does not free the pages of the
+    /// named databases recorded in it). `EINVAL` for the free DB or an
+    /// unknown handle.
+    pub fn drop_db(&mut self, db: Dbi) -> Result<()> {
+        let dbi = self.drop_checks(db)?;
+        self.mdb_drop(dbi, true)
+    }
+
+    /// `mdb_drop(txn, db, 0)`: empty database `db`. All its pages go on the
+    /// free list (as for [`RwTxn::drop_db`]), its record is reset to an
+    /// empty tree with the same flags and written at commit, and cursors on
+    /// it become unpositioned. The handle stays valid.
+    pub fn clear_db(&mut self, db: Dbi) -> Result<()> {
+        let dbi = self.drop_checks(db)?;
+        self.mdb_drop(dbi, false)
+    }
+
+    /// The argument checks of `mdb_drop` and its `mdb_cursor_open`.
+    fn drop_checks(&self, db: Dbi) -> Result<usize> {
+        self.core.dbi_entry(db, DB_USRVALID)?;
+        self.check_usable()?;
+        self.core.fresh_dbi(db, DB_VALID)?;
+        Ok(db.0 as usize)
     }
 
     /// The main-DB branch of `mdb_dbi_open`: add persistent flags to the
@@ -515,6 +701,10 @@ impl<'env> RwTxn<'env> {
     /// (it is adjusted as C adjusts `mt_cursors`) until
     /// [`RwTxn::close_cursor`] or the end of the transaction. `EINVAL` for
     /// the free DB, as in C.
+    ///
+    /// While a nested transaction of this one runs, the handle can be used
+    /// through the nested transaction, as in C (see
+    /// [`RwTxn::begin_nested_txn`]).
     pub fn open_cursor(&mut self, db: Dbi) -> Result<CursorId> {
         self.core.dbi_entry(db, DB_VALID)?;
         self.check_usable()?;
@@ -530,16 +720,28 @@ impl<'env> RwTxn<'env> {
         })
     }
 
-    /// `mdb_cursor_close`.
+    /// `mdb_cursor_close`. Closing a cursor of an ancestor transaction
+    /// through a nested one does nothing, as in C (`mdb_cursor_close`
+    /// skips cursors with an `mc_backup`); it stays the ancestor's.
     pub fn close_cursor(&mut self, id: CursorId) {
         if let Ok(slot) = self.cursor_slot(id) {
-            self.close_slot(slot);
+            let owner = self.w.cursors.slot(slot).map_or(0, |s| s.owner);
+            if owner == self.w.cursors.depth() {
+                self.close_slot(slot);
+            }
         }
     }
 
+    /// The slot of a cursor handle usable in this transaction: one opened
+    /// by it, or, in a nested transaction, by one of its ancestors. As in
+    /// C (`mdb_cursor_shadow`), an ancestor's cursor then works on this
+    /// transaction's data; what it does is kept when this transaction
+    /// commits and undone (the cursor is put back where it was when this
+    /// transaction began) when it aborts.
     fn cursor_slot(&self, id: CursorId) -> Result<usize> {
+        let depth = self.w.cursors.depth();
         match self.w.cursors.slot(id.slot as usize) {
-            Some(s) if s.gen == id.gen && s.tracked => Ok(id.slot as usize),
+            Some(s) if s.gen == id.gen && s.tracked && s.owner <= depth => Ok(id.slot as usize),
             _ => Err(Error::einval()),
         }
     }
@@ -554,6 +756,12 @@ impl<'env> RwTxn<'env> {
     ) -> Result<Option<Entry<'_>>> {
         let slot = self.cursor_slot(id)?;
         self.check_usable()?;
+        if !matches!(
+            op,
+            CursorOp::GetCurrent | CursorOp::FirstDup | CursorOp::LastDup | CursorOp::GetMultiple
+        ) {
+            self.check_cursor_db(slot)?;
+        }
         let c = CRef::main(slot);
         let dbi = self.cur(c).dbi;
         let dcmp = self.core.dbs.borrow()[dbi].dup_cmp;
@@ -642,7 +850,24 @@ impl<'env> RwTxn<'env> {
         if flags & !valid != 0 {
             return Err(Error::einval());
         }
+        if flags & MDB_CURRENT == 0 {
+            self.check_cursor_db(slot)?;
+        }
         self.put_at(CRef::main(slot), key, data, flags & !MDB_NOSPILL)
+    }
+
+    /// The handle of a cursor's database was closed, e.g. by
+    /// [`RwTxn::drop_db`]: operations that would search its tree fail with
+    /// `MDB_BAD_DBI`, as C's `mdb_page_search` does for a `DB_STALE` handle
+    /// whose sequence number changed (the others fail anyway because the
+    /// cursor is unpositioned).
+    fn check_cursor_db(&self, slot: usize) -> Result<()> {
+        let dbi = self.cur(CRef::main(slot)).dbi;
+        let e = self.core.dbs.borrow()[dbi];
+        if e.state & DB_STALE != 0 && e.seq != self.core.env.dbis.seq_of(dbi) {
+            return Err(MdbError::BadDbi.into());
+        }
+        Ok(())
     }
 
     /// `mdb_cursor_del` on a handle (see [`RwCursor::del`]).
@@ -668,6 +893,20 @@ impl<'env> RwTxn<'env> {
         let (mc, mx) = ro.parts();
         write_back(&mut self.w.cursors, c, mc, mx);
         res
+    }
+
+    /// [`RoCursor::is_initialized`] for a cursor handle.
+    pub fn cursor_is_initialized(&self, id: CursorId) -> Result<bool> {
+        let slot = self.cursor_slot(id)?;
+        Ok(self.cur(CRef::main(slot)).is_init())
+    }
+
+    /// [`RoCursor::current_has_dups`] for a cursor handle.
+    pub fn cursor_current_has_dups(&self, id: CursorId) -> Result<bool> {
+        let slot = self.cursor_slot(id)?;
+        let c = CRef::main(slot);
+        let (mc, _) = read_cursors(&self.core, &self.w.cursors, c)?;
+        Ok(crate::core::ro_cursor::current_has_dups(&mc))
     }
 
     /// `mdb_cursor_dbi` of a handle.
@@ -699,9 +938,21 @@ impl Transaction for RwTxn<'_> {
         self.core.txnid
     }
 
-    fn open_db(&self, name: Option<&str>) -> Result<Dbi> {
+    fn open_db_bytes(&self, name: Option<&[u8]>) -> Result<Dbi> {
         self.check_usable()?;
         self.core.open_db(name)
+    }
+
+    fn set_compare(&self, db: Dbi, cmp: Option<CmpFn>) -> Result<()> {
+        self.core.set_comparator(db, cmp, false)
+    }
+
+    fn set_dupsort(&self, db: Dbi, cmp: Option<CmpFn>) -> Result<()> {
+        self.core.set_comparator(db, cmp, true)
+    }
+
+    fn comparators(&self, db: Dbi) -> Result<(Comparator, Option<Comparator>)> {
+        self.core.comparators(db)
     }
 
     fn get<'txn>(&'txn self, db: Dbi, key: &[u8]) -> Result<Option<&'txn [u8]>> {

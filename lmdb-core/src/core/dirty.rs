@@ -14,8 +14,38 @@
 //! reproduced; the allocator does that job. Unlike C, new buffers are always
 //! zeroed (as with C's default `!MDB_NOMEMINIT`, plus the parts C leaves
 //! uninitialised), which only changes bytes no reader ever looks at.
+//!
+//! # Nested transactions and spilled pages
+//!
+//! A nested transaction has its own dirty list; reads fall back to its
+//! parent's, then the grandparent's, and so on (the `mt_parent` walk of
+//! `mdb_page_get`). While a child runs, the parent cannot be used (the child
+//! borrows it), so the child takes the parent's lists with it as [`Layer`]s
+//! and gives them back when it ends.
+//!
+//! Pages written to the data file before commit to keep the dirty list
+//! within `MDB_IDL_UM_MAX` (`mdb_page_spill`) leave the dirty list and are
+//! recorded in the transaction's spill set ([`SpillSet`], C's
+//! `mt_spill_pgs`); they are read back from the map. C keeps that list as
+//! `pgno << 1` values with the low bit marking deleted entries; a set of
+//! page numbers has the same meaning.
+
+use std::collections::BTreeSet;
 
 use crate::idl::Id2List;
+
+/// `mt_spill_pgs`: page numbers this transaction wrote to the data file
+/// before commit (see the module documentation).
+pub(crate) type SpillSet = BTreeSet<u64>;
+
+/// The dirty and spilled pages of one ancestor of a nested transaction.
+#[derive(Debug, Default)]
+pub(crate) struct Layer {
+    /// The ancestor's `mt_u.dirty_list`.
+    pub(crate) dirty: DirtyPages,
+    /// The ancestor's `mt_spill_pgs`.
+    pub(crate) spilled: SpillSet,
+}
 
 /// The dirty-page list of a write transaction.
 #[derive(Debug, Default)]
@@ -78,6 +108,16 @@ impl DirtyPages {
     /// `mdb_dlist_free`: drop all buffers.
     pub(crate) fn clear(&mut self) {
         self.list.clear();
+    }
+
+    /// Keeps the pages for which `keep` returns `true` (one pass).
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(u64, &mut [u8]) -> bool) {
+        self.list.retain(|pgno, buf| keep(pgno, buf));
+    }
+
+    /// Merges `other` in; its buffers replace ours for the same page.
+    pub(crate) fn merge(&mut self, other: DirtyPages) {
+        self.list.merge(other.list);
     }
 }
 
