@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::OnceLock;
 
-use lmdb::{Dbi, Environment, RoTxn, Transaction};
+use lmdb_core::{Dbi, Environment, RoTxn, Transaction};
 
 pub mod dataset;
 
@@ -554,7 +554,7 @@ pub fn parse_stat(text: &str) -> StatOutput {
 }
 
 /// Compares a Rust `Stat` with one block of `mdb_stat` output.
-pub fn assert_stat_matches(name: &str, rust: &lmdb::Stat, c: &BTreeMap<String, u64>) {
+pub fn assert_stat_matches(name: &str, rust: &lmdb_core::Stat, c: &BTreeMap<String, u64>) {
     assert_eq!(u64::from(rust.depth), c["Tree depth"], "{name}: depth");
     assert_eq!(
         rust.branch_pages as u64, c["Branch pages"],
@@ -618,7 +618,7 @@ pub fn verify_db(env: &Environment, db: Dbi, expected: &[Pair]) {
     let dupsort = txn
         .db_flags(db)
         .unwrap()
-        .contains(lmdb::DatabaseFlags::DUP_SORT);
+        .contains(lmdb_core::DatabaseFlags::DUP_SORT);
     assert_eq!(walk_forward(&txn, db), expected, "forward walk");
     assert_eq!(walk_backward(&txn, db), expected, "backward walk");
     let stat = txn.stat(db).unwrap();
@@ -681,7 +681,7 @@ pub fn verify_db(env: &Environment, db: Dbi, expected: &[Pair]) {
     if txn
         .db_flags(db)
         .unwrap()
-        .contains(lmdb::DatabaseFlags::INTEGER_KEY)
+        .contains(lmdb_core::DatabaseFlags::INTEGER_KEY)
     {
         return;
     }
@@ -699,7 +699,7 @@ pub fn verify_db(env: &Environment, db: Dbi, expected: &[Pair]) {
         if !txn
             .db_flags(db)
             .unwrap()
-            .contains(lmdb::DatabaseFlags::REVERSE_KEY)
+            .contains(lmdb_core::DatabaseFlags::REVERSE_KEY)
         {
             assert_eq!(
                 succ,
@@ -715,7 +715,7 @@ pub fn verify_db(env: &Environment, db: Dbi, expected: &[Pair]) {
 pub fn open_ro(path: &Path, max_dbs: u32) -> Environment {
     Environment::builder()
         .max_dbs(max_dbs)
-        .flags(lmdb::EnvironmentFlags::READ_ONLY)
+        .flags(lmdb_core::EnvironmentFlags::READ_ONLY)
         .open(path)
         .unwrap()
 }
@@ -784,8 +784,13 @@ fn probe(rng: &mut Rng, k: &[u8], integer: Option<bool>) -> Vec<u8> {
 
 /// Random cursor operations over the keys and data of `pairs`, in the
 /// `cursorops` syntax.
-pub fn gen_ops(rng: &mut Rng, pairs: &[Pair], n: usize, flags: lmdb::DatabaseFlags) -> Vec<String> {
-    use lmdb::DatabaseFlags as F;
+pub fn gen_ops(
+    rng: &mut Rng,
+    pairs: &[Pair],
+    n: usize,
+    flags: lmdb_core::DatabaseFlags,
+) -> Vec<String> {
+    use lmdb_core::DatabaseFlags as F;
     let dupfixed = flags.contains(F::DUP_FIXED);
     let ikey = flags.contains(F::INTEGER_KEY).then_some(true);
     let idup = flags.contains(F::INTEGER_DUP).then_some(false);
@@ -852,10 +857,10 @@ pub fn gen_ops(rng: &mut Rng, pairs: &[Pair], n: usize, flags: lmdb::DatabaseFla
     ops
 }
 
-fn rc_of<T>(r: &lmdb::Result<Option<T>>) -> i32 {
+fn rc_of<T>(r: &lmdb_core::Result<Option<T>>) -> i32 {
     match r {
         Ok(Some(_)) => 0,
-        Ok(None) => lmdb::consts::MDB_NOTFOUND,
+        Ok(None) => lmdb_core::consts::MDB_NOTFOUND,
         Err(e) => e.to_err_code(),
     }
 }
@@ -878,25 +883,25 @@ pub fn rust_cursorops(txn: &RoTxn<'_>, db: Dbi, ops: &[String]) -> Vec<String> {
             }
         } else {
             let op = match name {
-                "first" => lmdb::CursorOp::First,
-                "first_dup" => lmdb::CursorOp::FirstDup,
-                "get_both" => lmdb::CursorOp::GetBoth,
-                "get_both_range" => lmdb::CursorOp::GetBothRange,
-                "get_current" => lmdb::CursorOp::GetCurrent,
-                "get_multiple" => lmdb::CursorOp::GetMultiple,
-                "last" => lmdb::CursorOp::Last,
-                "last_dup" => lmdb::CursorOp::LastDup,
-                "next" => lmdb::CursorOp::Next,
-                "next_dup" => lmdb::CursorOp::NextDup,
-                "next_multiple" => lmdb::CursorOp::NextMultiple,
-                "next_nodup" => lmdb::CursorOp::NextNoDup,
-                "prev" => lmdb::CursorOp::Prev,
-                "prev_dup" => lmdb::CursorOp::PrevDup,
-                "prev_nodup" => lmdb::CursorOp::PrevNoDup,
-                "set" => lmdb::CursorOp::Set,
-                "set_key" => lmdb::CursorOp::SetKey,
-                "set_range" => lmdb::CursorOp::SetRange,
-                "prev_multiple" => lmdb::CursorOp::PrevMultiple,
+                "first" => lmdb_core::CursorOp::First,
+                "first_dup" => lmdb_core::CursorOp::FirstDup,
+                "get_both" => lmdb_core::CursorOp::GetBoth,
+                "get_both_range" => lmdb_core::CursorOp::GetBothRange,
+                "get_current" => lmdb_core::CursorOp::GetCurrent,
+                "get_multiple" => lmdb_core::CursorOp::GetMultiple,
+                "last" => lmdb_core::CursorOp::Last,
+                "last_dup" => lmdb_core::CursorOp::LastDup,
+                "next" => lmdb_core::CursorOp::Next,
+                "next_dup" => lmdb_core::CursorOp::NextDup,
+                "next_multiple" => lmdb_core::CursorOp::NextMultiple,
+                "next_nodup" => lmdb_core::CursorOp::NextNoDup,
+                "prev" => lmdb_core::CursorOp::Prev,
+                "prev_dup" => lmdb_core::CursorOp::PrevDup,
+                "prev_nodup" => lmdb_core::CursorOp::PrevNoDup,
+                "set" => lmdb_core::CursorOp::Set,
+                "set_key" => lmdb_core::CursorOp::SetKey,
+                "set_range" => lmdb_core::CursorOp::SetRange,
+                "prev_multiple" => lmdb_core::CursorOp::PrevMultiple,
                 other => panic!("bad op {other}"),
             };
             // C passes an empty (not NULL) key for ops without a key input.

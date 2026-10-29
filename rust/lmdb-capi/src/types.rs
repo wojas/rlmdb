@@ -61,8 +61,8 @@ pub struct MDB_stat {
     pub ms_entries: usize,
 }
 
-impl From<lmdb::Stat> for MDB_stat {
-    fn from(s: lmdb::Stat) -> MDB_stat {
+impl From<lmdb_core::Stat> for MDB_stat {
+    fn from(s: lmdb_core::Stat) -> MDB_stat {
         MDB_stat {
             ms_psize: s.page_size,
             ms_depth: s.depth,

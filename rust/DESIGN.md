@@ -188,7 +188,7 @@ side either way.
 rust/
   Cargo.toml          workspace
   DESIGN.md           this file
-  lmdb/               the library (package `lmdb`, lib `lmdb`)
+  lmdb-core/          the library (package `lmdb-core`, lib `lmdb_core`)
   lmdb-capi/          cdylib+staticlib `lmdb` exporting the C ABI, ships include/lmdb.h
   lmdb-tools/         mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop in Rust
   interop/            cross-process compatibility tests (builds the C library)
@@ -242,7 +242,7 @@ copy names, signatures, generics, lifetimes and doc comments.
 
 The crate has two layers:
 
-* **`lmdb::core`** (byte-level, documented, public): `Environment`,
+* **`lmdb_core::core`** (byte-level, documented, public): `Environment`,
   `EnvironmentBuilder`, `RoTxn`, `RwTxn`, `Dbi` (a `Copy` handle),
   `RoCursor`, `RwCursor`, `CursorOp`, `Stat`, `Info`, `ReaderInfo`. This is
   what the C API crate, the tools, the interop peer and the heed layer are
@@ -286,7 +286,7 @@ Deliberate differences from heed:
   C too (`mdb_set_compare`); a C peer must install the same comparator. The
   core layer accepts `fn(&[u8], &[u8]) -> Ordering` comparators.
 
-### Core layer (`lmdb::core`)
+### Core layer (`lmdb_core::core`)
 
 This is the C API in Rust clothing, byte slices in and out, with lifetimes
 doing the work that the C docs' "do not do X" paragraphs do.
@@ -474,7 +474,7 @@ Facts about C 0.9.36 behaviour that implementers must honour; the harness in
 ## Staged plan
 
 Stage 1 is done (commits `c13c67d` interop, and the lmdb read path). The
-implemented `rust/lmdb` crate is the reference for the core API from here
+implemented `rust/lmdb-core` crate is the reference for the core API from here
 on; read its `src/core/mod.rs` and `src/core/txn.rs` (`TxnCore::page` is
 where dirty pages plug in) before extending it.
 

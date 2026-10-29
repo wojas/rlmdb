@@ -109,7 +109,7 @@ impl Drop for WriterLock<'_> {
 ///
 /// ```compile_fail
 /// fn assert_send<T: Send>() {}
-/// assert_send::<lmdb::RwTxn<'static>>();
+/// assert_send::<lmdb_core::RwTxn<'static>>();
 /// ```
 pub struct RwTxn<'env> {
     pub(crate) core: TxnCore<'env>,

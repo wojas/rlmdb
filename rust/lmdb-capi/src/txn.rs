@@ -12,7 +12,7 @@
 use std::os::raw::{c_int, c_uint};
 use std::ptr::{self, NonNull};
 
-use lmdb::consts::MDB_RDONLY;
+use lmdb_core::consts::MDB_RDONLY;
 
 use crate::erased::ErasedRoTxn;
 use crate::handles::{MDB_env, MDB_txn, TxnState};

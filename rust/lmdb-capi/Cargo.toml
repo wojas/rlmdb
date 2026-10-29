@@ -20,7 +20,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 doctest = false
 
 [dependencies]
-lmdb = { path = "../lmdb" }
+lmdb-core = { path = "../lmdb-core" }
 libc.workspace = true
 
 [dev-dependencies]

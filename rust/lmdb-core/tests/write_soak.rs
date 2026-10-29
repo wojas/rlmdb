@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use common::Rng;
-use lmdb::{DatabaseFlags, Dbi, Environment, EnvironmentFlags, Transaction, WriteFlags};
+use lmdb_core::{DatabaseFlags, Dbi, Environment, EnvironmentFlags, Transaction, WriteFlags};
 
 type Plain = BTreeMap<Vec<u8>, Vec<u8>>;
 type Dups = BTreeMap<Vec<u8>, BTreeSet<Vec<u8>>>;

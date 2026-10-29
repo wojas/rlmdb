@@ -1,4 +1,4 @@
-use lmdb::{DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
+use lmdb_core::{DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
 
 #[test]
 fn put_commit_read() {

@@ -3,7 +3,7 @@
 
 use std::io::{self, BufWriter, Write};
 
-use lmdb::{Dbi, RoTxn, Transaction};
+use lmdb_core::{Dbi, RoTxn, Transaction};
 
 use crate::args::{parse_u32, parse_u32_opt, parse_u64, show, Check, CmdResult, Fail, Opts};
 use crate::data::subdb_name;
@@ -191,7 +191,7 @@ fn expect(where_: &str, txn: &RoTxn<'_>, dbi: Dbi, k: &str, v: Option<&[u8]>) ->
 }
 
 /// `expect_no_db`: DB `name` does not exist (checked in a fresh read txn).
-fn expect_no_db(env: &lmdb::Environment, name: &str) -> CmdResult {
+fn expect_no_db(env: &lmdb_core::Environment, name: &str) -> CmdResult {
     let txn = env.begin_ro_txn().check("mdb_txn_begin")?;
     match txn.open_db(Some(name)) {
         Err(e) if e.not_found() => Ok(()),
@@ -210,7 +210,7 @@ fn expect_no_db(env: &lmdb::Environment, name: &str) -> CmdResult {
 /// `nested_check`: the final state of nested-test (README.md): DB `nested`
 /// is `k1=v1 k2=v2 k3=v3 k5=<big>` and `n%05u = val%05u` for odd `u`, in
 /// that cursor order; DBs `nested2` and `nested3` do not exist.
-fn nested_check(env: &lmdb::Environment) -> CmdResult {
+fn nested_check(env: &lmdb_core::Environment) -> CmdResult {
     let small = [("k1", "v1"), ("k2", "v2"), ("k3", "v3")];
     let big = make_big();
     let txn = env.begin_ro_txn().check("mdb_txn_begin")?;

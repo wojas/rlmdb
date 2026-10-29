@@ -6,7 +6,7 @@
 //! This layer is deliberately thin: argument validation (the same checks,
 //! in the same order, with the same return codes as `mdb.c`), translation
 //! between C and Rust types, and ownership of the handles. All database
-//! logic lives in [`lmdb::core`].
+//! logic lives in [`lmdb_core::core`].
 //!
 //! # Modules (grouped like the sections of `lmdb.h`)
 //!
@@ -66,7 +66,7 @@ use std::os::raw::c_int;
 pub(crate) const SUCCESS: c_int = 0;
 
 /// The C return code for a Rust result.
-pub(crate) fn rc(result: lmdb::Result<()>) -> c_int {
+pub(crate) fn rc(result: lmdb_core::Result<()>) -> c_int {
     match result {
         Ok(()) => SUCCESS,
         Err(e) => e.to_err_code(),

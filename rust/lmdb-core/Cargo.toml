@@ -1,5 +1,5 @@
 [package]
-name = "lmdb"
+name = "lmdb-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ repository.workspace = true
 description = "A Rust rewrite of LMDB 0.9, binary compatible with the C library's data and lock files"
 
 [lib]
-name = "lmdb"
+name = "lmdb_core"
 path = "src/lib.rs"
 
 [dependencies]

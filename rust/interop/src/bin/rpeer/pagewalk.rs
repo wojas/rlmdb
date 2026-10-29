@@ -13,7 +13,7 @@
 //! meeting such a file would sooner or later corrupt data.
 //!
 //! The walk reads the data file with `pread` (`FileExt::read_at`) and
-//! decodes pages with `lmdb::format` only, independently of the library's
+//! decodes pages with `lmdb_core::format` only, independently of the library's
 //! cursor and transaction code. The snapshot is pinned with a read
 //! transaction, which keeps writers from reusing its pages while we read
 //! them. Every B-tree descriptor (`MDB_db`) is checked against what the walk
@@ -28,12 +28,14 @@ use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 
-use lmdb::consts::{MDB_DUPFIXED, P_INVALID};
-use lmdb::format::layout::{DB_SIZE, META_OFFSET_IN_PAGE, META_SIZE, NODE_SIZE, PAGE_HDR_SIZE};
-use lmdb::format::node::{F_BIGDATA, F_DUPDATA, F_SUBDATA};
-use lmdb::format::page::{P_DIRTY, P_LEAF, P_LEAF2, P_META, P_OVERFLOW, P_SUBP};
-use lmdb::format::{Db, Meta, NodeRef, PageRef};
-use lmdb::Transaction;
+use lmdb_core::consts::{MDB_DUPFIXED, P_INVALID};
+use lmdb_core::format::layout::{
+    DB_SIZE, META_OFFSET_IN_PAGE, META_SIZE, NODE_SIZE, PAGE_HDR_SIZE,
+};
+use lmdb_core::format::node::{F_BIGDATA, F_DUPDATA, F_SUBDATA};
+use lmdb_core::format::page::{P_DIRTY, P_LEAF, P_LEAF2, P_META, P_OVERFLOW, P_SUBP};
+use lmdb_core::format::{Db, Meta, NodeRef, PageRef};
+use lmdb_core::Transaction;
 
 use crate::args::{Check, CmdResult, Fail, Opts, EXIT_LMDB, EXIT_MISMATCH};
 
@@ -560,7 +562,7 @@ fn pick_meta(file: &File, txnid: u64, psize: &mut usize) -> CmdResult<Option<Met
         })?;
         let page = PageRef::new(&buf).expect("header");
         let m = Meta::read(&buf[META_OFFSET_IN_PAGE..]).expect("meta size");
-        if m.magic != lmdb::consts::MDB_MAGIC || m.version != 1 {
+        if m.magic != lmdb_core::consts::MDB_MAGIC || m.version != 1 {
             return Err(Fail::mismatch(format!(
                 "check-freelist: meta page {k}: magic {:#x} version {}",
                 m.magic, m.version

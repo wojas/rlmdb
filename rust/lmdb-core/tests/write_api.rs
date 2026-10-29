@@ -3,8 +3,8 @@
 
 mod common;
 
-use lmdb::consts::*;
-use lmdb::{
+use lmdb_core::consts::*;
+use lmdb_core::{
     CursorOp, DatabaseFlags, Dbi, Environment, EnvironmentFlags, Error, MdbError, Transaction,
     WriteFlags,
 };

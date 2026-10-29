@@ -12,8 +12,8 @@ use std::process::{Command, Stdio};
 
 use common::dataset::Dataset;
 use common::{CTools, Rng};
-use lmdb::consts::*;
-use lmdb::{DatabaseFlags, Dbi, Environment, EnvironmentFlags, Transaction, WriteFlags};
+use lmdb_core::consts::*;
+use lmdb_core::{DatabaseFlags, Dbi, Environment, EnvironmentFlags, Transaction, WriteFlags};
 
 fn open_env(path: &Path) -> Environment {
     Environment::builder()

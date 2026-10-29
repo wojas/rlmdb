@@ -11,11 +11,11 @@
 
 use std::os::raw::{c_char, c_int, c_uint};
 
-use lmdb::consts::{
+use lmdb_core::consts::{
     MDB_APPEND, MDB_APPENDDUP, MDB_DUPFIXED, MDB_MULTIPLE, MDB_NODUPDATA, MDB_NOOVERWRITE,
     MDB_RESERVE,
 };
-use lmdb::{Dbi, Transaction};
+use lmdb_core::{Dbi, Transaction};
 
 use crate::handles::{MDB_cursor, MDB_env, MDB_txn, TxnState};
 use crate::types::*;
@@ -48,7 +48,7 @@ fn user_dbi_exists(txn: &MDB_txn, dbi: MDB_dbi) -> bool {
     txn.with_read(EINVAL, |rt| {
         match rt.txn().db_flags(Dbi::from_raw(dbi)) {
             // C does not check for closed/reused handles here.
-            Ok(_) | Err(lmdb::Error::Mdb(lmdb::MdbError::BadDbi)) => Ok(()),
+            Ok(_) | Err(lmdb_core::Error::Mdb(lmdb_core::MdbError::BadDbi)) => Ok(()),
             Err(_) => Err(EINVAL),
         }
     })
@@ -123,10 +123,10 @@ pub unsafe extern "C" fn mdb_cursor_put(
         }
         second.mv_size = 0;
         if c.db_flags() & MDB_DUPFIXED == 0 {
-            return lmdb::MdbError::Incompatible.to_err_code();
+            return lmdb_core::MdbError::Incompatible.to_err_code();
         }
         if first.mv_size.checked_mul(count).is_none() {
-            return lmdb::MdbError::BadValSize.to_err_code();
+            return lmdb_core::MdbError::BadValSize.to_err_code();
         }
     }
     write_access(t)

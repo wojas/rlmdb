@@ -11,9 +11,11 @@
 use std::fmt;
 use std::time::Instant;
 
-use lmdb::consts::MDB_REVERSEKEY;
-use lmdb::consts::{MDB_DUPFIXED, MDB_DUPSORT, MDB_INTEGERDUP, MDB_INTEGERKEY, MDB_REVERSEDUP};
-use lmdb::{Environment, EnvironmentFlags};
+use lmdb_core::consts::MDB_REVERSEKEY;
+use lmdb_core::consts::{
+    MDB_DUPFIXED, MDB_DUPSORT, MDB_INTEGERDUP, MDB_INTEGERKEY, MDB_REVERSEDUP,
+};
+use lmdb_core::{Environment, EnvironmentFlags};
 
 use crate::dataset::DataSet;
 
@@ -63,7 +65,7 @@ impl Fail {
 
     /// [`EXIT_LMDB`]: `<what> failed: <code> <mdb_strerror text>`, the
     /// message C's `check_rc()` prints.
-    pub fn lmdb(what: &str, err: &lmdb::Error) -> Fail {
+    pub fn lmdb(what: &str, err: &lmdb_core::Error) -> Fail {
         Fail::new(
             EXIT_LMDB,
             format!("{what} failed: {} {err}", err.to_err_code()),
@@ -113,7 +115,7 @@ pub trait Check<T> {
     fn check(self, what: &str) -> CmdResult<T>;
 }
 
-impl<T> Check<T> for lmdb::Result<T> {
+impl<T> Check<T> for lmdb_core::Result<T> {
     fn check(self, what: &str) -> CmdResult<T> {
         self.map_err(|e| Fail::lmdb(what, &e))
     }
@@ -121,10 +123,10 @@ impl<T> Check<T> for lmdb::Result<T> {
 
 /// `CHECK` for cursor operations: `Ok(None)` is `MDB_NOTFOUND`, which is a
 /// failure where C uses `CHECK(mdb_cursor_get(...))`.
-pub fn found<T>(r: lmdb::Result<Option<T>>, what: &str) -> CmdResult<T> {
+pub fn found<T>(r: lmdb_core::Result<Option<T>>, what: &str) -> CmdResult<T> {
     match r {
         Ok(Some(v)) => Ok(v),
-        Ok(None) => Err(Fail::lmdb(what, &lmdb::MdbError::NotFound.into())),
+        Ok(None) => Err(Fail::lmdb(what, &lmdb_core::MdbError::NotFound.into())),
         Err(e) => Err(Fail::lmdb(what, &e)),
     }
 }

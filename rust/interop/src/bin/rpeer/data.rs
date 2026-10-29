@@ -9,7 +9,7 @@
 
 use std::io::{self, BufWriter, Write};
 
-use lmdb::{CursorOp, Dbi, RoCursor, RoTxn, Transaction};
+use lmdb_core::{CursorOp, Dbi, RoCursor, RoTxn, Transaction};
 
 use crate::args::{found, short_hex, Check, CmdResult, Fail, Opts};
 use crate::dataset::{DataSet, Model, ModelItem};
@@ -212,7 +212,7 @@ fn check_dups(cur: &mut RoCursor<'_>, ds: &DataSet, m: &Model) -> CmdResult {
                 ));
             }
         }
-        if ds.flags & lmdb::consts::MDB_DUPFIXED != 0 {
+        if ds.flags & lmdb_core::consts::MDB_DUPFIXED != 0 {
             check_multiple(cur, ds, it)?;
         }
     }
