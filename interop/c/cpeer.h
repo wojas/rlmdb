@@ -10,8 +10,8 @@
  *   cpeer.c           main(), option parsing, env open helpers
  *   dataset.c         the deterministic data set (keys, values, comparators)
  *   cpeer_data.c      fill, verify, delete, dump
- *   cpeer_loops.c     hold-reader, writer-loop, reader-loop
- *   cpeer_misc.c      create, stat, readers, copy, nested-test, gen
+ *   cpeer_loops.c     hold-reader, hold-env, writer-loop, reader-loop
+ *   cpeer_misc.c      create, stat, readers, reader-check, copy, nested-test, gen
  *   cpeer_pagewalk.c  check-freelist (raw page walk of a pinned snapshot)
  */
 #ifndef CPEER_H
@@ -27,6 +27,7 @@
 #define EXIT_MISMATCH	1	/* data or invariant check failed */
 #define EXIT_USAGE	2	/* bad command line */
 #define EXIT_LMDB	3	/* an LMDB call failed unexpectedly */
+/* 4 is "command not implemented by this peer" (rpeer before stage 3). */
 
 /* ---- Deterministic data set (dataset.c) -------------------------------- */
 
@@ -145,7 +146,9 @@ int cmd_delete(struct opts *o);
 int cmd_dump(struct opts *o);
 int cmd_stat(struct opts *o);
 int cmd_readers(struct opts *o);
+int cmd_reader_check(struct opts *o);
 int cmd_hold_reader(struct opts *o);
+int cmd_hold_env(struct opts *o);
 int cmd_writer_loop(struct opts *o);
 int cmd_reader_loop(struct opts *o);
 int cmd_check_freelist(struct opts *o);

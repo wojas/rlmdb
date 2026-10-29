@@ -1,4 +1,4 @@
-/* cpeer_misc.c - create, stat, readers, copy, nested-test and gen. */
+/* cpeer_misc.c - create, stat, readers, reader-check, copy, nested-test and gen. */
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -139,6 +139,22 @@ cmd_readers(struct opts *o)
 		die(EXIT_LMDB, "mdb_reader_list failed");
 	printf("readers=%d numreaders=%u maxreaders=%u\n", n, info.me_numreaders,
 		info.me_maxreaders);
+	mdb_env_close(env);
+	return 0;
+}
+
+/* ---- reader-check ------------------------------------------------------- */
+
+/* mdb_reader_check(): clear the reader slots of dead processes. */
+int
+cmd_reader_check(struct opts *o)
+{
+	MDB_env *env;
+	int dead = 0;
+
+	env = open_env(o, MDB_RDONLY);
+	CHECK(mdb_reader_check(env, &dead));
+	printf("reader-check cleared=%d\n", dead);
 	mdb_env_close(env);
 	return 0;
 }

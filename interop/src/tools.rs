@@ -125,6 +125,11 @@ pub struct MdbStat {
     pub env: Option<EnvInfo>,
     /// With `-r`: the active readers (`"(no active readers)"` gives `[]`).
     pub readers: Option<Vec<ReaderEntry>>,
+    /// With `-rr`: `"  %d stale readers cleared."`, the count from
+    /// `mdb_reader_check`.
+    pub stale_cleared: Option<u64>,
+    /// With `-rr`: the reader table listed again after the check.
+    pub readers_after_check: Option<Vec<ReaderEntry>>,
     /// With `-f`.
     pub freelist: Option<FreelistInfo>,
     /// `"Status of Main DB"` (name `None`), then with `-a` `"Status of <name>"`.
@@ -154,7 +159,20 @@ impl MdbStat {
                 continue;
             }
             if section == "Reader Table Status" {
-                parse_reader_line(line, out.readers.as_mut().expect("section"))?;
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if let [n, "stale", "readers", "cleared."] = fields.as_slice() {
+                    out.stale_cleared =
+                        Some(n.parse().map_err(|_| {
+                            Error::new(format!("mdb_stat: bad number in {line:?}"))
+                        })?);
+                    out.readers_after_check = Some(Vec::new());
+                    continue;
+                }
+                let list = match out.readers_after_check.as_mut() {
+                    Some(after) => after,
+                    None => out.readers.as_mut().expect("section"),
+                };
+                parse_reader_line(line, list)?;
                 continue;
             }
             if let Some(rest) = line.trim_start().strip_prefix("Transaction ") {
@@ -227,7 +245,6 @@ fn parse_reader_line(line: &str, readers: &mut Vec<ReaderEntry>) -> Result<()> {
     let fields: Vec<&str> = line.split_whitespace().collect();
     match fields.as_slice() {
         ["pid", "thread", "txnid"] | ["(no", "active", "readers)"] => Ok(()),
-        [_, "stale", "readers", "cleared."] => Ok(()),
         [pid, thread, txnid] => {
             readers.push(ReaderEntry {
                 pid: pid
@@ -483,6 +500,16 @@ mod tests {
         assert_eq!(f.transactions, vec![(2, 1, 1), (3, 2, 2)]);
         assert_eq!(s.dbs.len(), 2);
         assert_eq!(s.db(Some("sub")).unwrap().entries, 300);
+        assert_eq!(s.stale_cleared, None);
+    }
+
+    #[test]
+    fn parses_mdb_stat_rr() {
+        let text = "Reader Table Status\n    pid     thread     txnid\n     12345 16f3a7000 3\n  1 stale readers cleared.\n(no active readers)\n";
+        let s = MdbStat::parse(text).unwrap();
+        assert_eq!(s.readers.as_ref().unwrap().len(), 1);
+        assert_eq!(s.stale_cleared, Some(1));
+        assert_eq!(s.readers_after_check, Some(Vec::new()));
     }
 
     #[test]

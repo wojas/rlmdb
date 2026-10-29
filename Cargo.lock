@@ -62,6 +62,7 @@ name = "interop"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "libc",
  "lmdb",
  "tempfile",
 ]
@@ -90,6 +91,11 @@ dependencies = [
 [[package]]
 name = "lmdb-capi"
 version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "lmdb",
+]
 
 [[package]]
 name = "lmdb-tools"

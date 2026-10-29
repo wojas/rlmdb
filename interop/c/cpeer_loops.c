@@ -1,6 +1,7 @@
 /* cpeer_loops.c - long-running commands for cross-process concurrency tests.
  *
  * hold-reader  pins a snapshot (a read transaction) for a while: MVCC test.
+ * hold-env     keeps the environment open without a read transaction.
  * writer-loop  commits many small random write transactions.
  * reader-loop  repeatedly opens read transactions and checks invariants
  *              that every committed state of writer-loop satisfies.
@@ -83,6 +84,31 @@ cmd_hold_reader(struct opts *o)
 	mdb_txn_abort(txn);
 	mdb_env_close(env);
 	return rc;
+}
+
+/* ---- hold-env ----------------------------------------------------------- */
+
+/* Keep the environment open (read-only) without a read transaction. While
+ * this process holds its shared lock on the lock file, later openers are
+ * not exclusive and do not reset the reader table, so the slots of dead
+ * processes stay until mdb_reader_check() clears them. */
+int
+cmd_hold_env(struct opts *o)
+{
+	double secs = parse_seconds(o->pos[1]), start;
+	MDB_env *env;
+
+	env = open_env(o, MDB_RDONLY);
+	start = now_seconds();
+	printf("READY pid=%d\n", (int)getpid());
+	fflush(stdout);
+	if (o->until_stdin)
+		wait_stdin(start + secs);
+	else
+		sleep_seconds(secs);
+	printf("released held=%.3f\n", now_seconds() - start);
+	mdb_env_close(env);
+	return 0;
 }
 
 /* ---- shared writer-loop data -------------------------------------------- */
