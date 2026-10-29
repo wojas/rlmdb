@@ -4,10 +4,24 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "C ABI (liblmdb-compatible) for the Rust LMDB implementation"
+publish = false
 
 [lib]
+# The artifacts are liblmdb.a / liblmdb.so / liblmdb.dylib, drop-in
+# replacements for the C library. The rlib is not used by anyone; it makes
+# cargo build the lib (all three crate types in one rustc run) before this
+# package's integration tests, which link C programs against liblmdb.a.
 name = "lmdb"
 crate-type = ["cdylib", "staticlib", "rlib"]
+# rustdoc would see two crates named `lmdb` (this one and the dependency);
+# there are no doc examples.
+doctest = false
 
 [dependencies]
+lmdb = { path = "../lmdb" }
+libc.workspace = true
+
+[dev-dependencies]
+cc = "1"
