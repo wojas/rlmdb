@@ -9,8 +9,8 @@
  * Files:
  *   cpeer.c           main(), option parsing, env open helpers
  *   dataset.c         the deterministic data set (keys, values, comparators)
- *   cpeer_data.c      fill, verify, delete, dump
- *   cpeer_loops.c     hold-reader, hold-env, writer-loop, reader-loop
+ *   cpeer_data.c      fill, verify, delete, drop, dump
+ *   cpeer_loops.c     hold-reader, hold-env, hold-writer, writer-loop, reader-loop
  *   cpeer_misc.c      create, stat, readers, reader-check, copy, nested-test, gen
  *   cpeer_pagewalk.c  check-freelist (raw page walk of a pinned snapshot)
  */
@@ -104,6 +104,7 @@ struct opts {
 	uint32_t	per_txn;	/* fill/delete: items per transaction, 0 = all */
 	uint32_t	every;		/* delete --every */
 	int		append, reserve, compact, all, until_stdin, check;
+	int		del;		/* drop --delete */
 	uint32_t	keys;		/* writer-loop key space */
 	uint64_t	max_commits;	/* writer-loop: stop after this many, 0 = no limit */
 };
@@ -143,12 +144,14 @@ int cmd_create(struct opts *o);
 int cmd_fill(struct opts *o);
 int cmd_verify(struct opts *o);
 int cmd_delete(struct opts *o);
+int cmd_drop(struct opts *o);
 int cmd_dump(struct opts *o);
 int cmd_stat(struct opts *o);
 int cmd_readers(struct opts *o);
 int cmd_reader_check(struct opts *o);
 int cmd_hold_reader(struct opts *o);
 int cmd_hold_env(struct opts *o);
+int cmd_hold_writer(struct opts *o);
 int cmd_writer_loop(struct opts *o);
 int cmd_reader_loop(struct opts *o);
 int cmd_check_freelist(struct opts *o);

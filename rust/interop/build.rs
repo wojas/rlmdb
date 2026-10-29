@@ -5,6 +5,11 @@
 //!   -Wno-unused-parameter`, platform-default lock mode, no `MDB_DEBUG`), so
 //!   the data and lock files are the ones a normal `make` build produces.
 //! * `cpeer`: the C implementation of the peer command protocol (`c/cpeer*.c`).
+//! * The cpeer objects once more, compiled against the Rust library's
+//!   `lmdb.h` (`../lmdb-capi/include`): at test time they are linked with
+//!   the Rust `liblmdb.a` into `cpeer_capi`, the third peer
+//!   (`Peer::COnRust`, see `src/bins.rs`). That link cannot happen here:
+//!   the build script runs before cargo builds `liblmdb.a`.
 //! * `layout_dump`: prints `sizeof`/`offsetof` of the internal structs; it
 //!   `#include`s `mdb.c` to see the static definitions.
 //! * The upstream tools (`mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`) and
@@ -12,6 +17,8 @@
 //!
 //! Executables go to `$OUT_DIR/bin/` and their paths are exported to the crate
 //! as `INTEROP_<NAME>` compile-time environment variables (see `src/bins.rs`).
+//! The recipe for linking `cpeer_capi` (compiler, flags, objects) goes to
+//! `$OUT_DIR/cpeer_capi.link`, exported as `INTEROP_CPEER_CAPI_LINK`.
 //! Nothing is linked into the Rust crate itself: the C programs run as
 //! separate processes, which is the point of the exercise.
 
@@ -80,6 +87,21 @@ fn main() {
     let objs = compile(&out_dir, "cpeer", &lmdb_dir, &peer_srcs);
     exported.push(("cpeer", link(&bin_dir, "cpeer", &objs, &lib_objs)));
 
+    // cpeer against the Rust library's header, linked at test time.
+    let capi_include = manifest_dir.join("../lmdb-capi/include");
+    let capi_include = capi_include.canonicalize().unwrap_or(capi_include);
+    println!(
+        "cargo:rerun-if-changed={}",
+        capi_include.join("lmdb.h").display()
+    );
+    let capi_objs = compile(&out_dir, "cpeer_capi", &capi_include, &peer_srcs);
+    let recipe = out_dir.join("cpeer_capi.link");
+    write_link_recipe(&recipe, &bin_dir.join("cpeer_capi"), &capi_objs);
+    println!(
+        "cargo:rustc-env=INTEROP_CPEER_CAPI_LINK={}",
+        recipe.display()
+    );
+
     // layout_dump includes mdb.c itself, so it only needs midl.o.
     let objs = compile(
         &out_dir,
@@ -130,6 +152,21 @@ fn compile(out_dir: &Path, tag: &str, lmdb_dir: &Path, srcs: &[PathBuf]) -> Vec<
     let mut b = c_build(lmdb_dir);
     b.out_dir(&obj_dir).files(srcs);
     b.compile_intermediates()
+}
+
+/// Writes the recipe for linking `cpeer_capi` at test time, one item per
+/// line: `out <executable>`, `cc <compiler>`, `arg <compiler argument>`
+/// (the flags `cc` would use, e.g. `-arch`), `obj <object file>`.
+fn write_link_recipe(recipe: &Path, exe: &Path, objs: &[PathBuf]) {
+    let compiler = cc::Build::new().cargo_metadata(false).get_compiler();
+    let mut text = format!("out {}\ncc {}\n", exe.display(), compiler.path().display());
+    for a in compiler.args() {
+        text.push_str(&format!("arg {}\n", a.to_string_lossy()));
+    }
+    for o in objs {
+        text.push_str(&format!("obj {}\n", o.display()));
+    }
+    std::fs::write(recipe, text).expect("write link recipe");
 }
 
 /// Links `objs` + `libs` into the executable `bin_dir/name` with the C compiler.

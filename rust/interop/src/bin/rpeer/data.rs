@@ -1,5 +1,9 @@
-//! `verify` and `dump` of the deterministic data set; `fill` and `delete`
-//! are stage 3 (the counterpart of `c/cpeer_data.c`).
+//! `fill`, `verify`, `delete` and `dump` of the deterministic data set (the
+//! counterpart of `c/cpeer_data.c`).
+//!
+//! `fill` and `delete` write, with the same LMDB calls and the same
+//! transaction boundaries as the C peer, so both peers produce the same
+//! sequence of commits.
 //!
 //! `verify` proves that a DB holds exactly the data set (as modified by a
 //! prior `delete`), using every read path a peer must get right: point
@@ -9,31 +13,276 @@
 
 use std::io::{self, BufWriter, Write};
 
-use lmdb_core::{CursorOp, Dbi, RoCursor, RoTxn, Transaction};
+use lmdb_core::{CursorOp, DatabaseFlags, Dbi, RoCursor, RoTxn, RwTxn, Transaction, WriteFlags};
 
-use crate::args::{found, short_hex, Check, CmdResult, Fail, Opts};
-use crate::dataset::{DataSet, Model, ModelItem};
+use crate::args::{found, short_hex, show, Check, CmdResult, Fail, Opts};
+use crate::dataset::{delete_dup, delete_key, DataSet, Model, ModelItem};
 
-// ---- fill / delete (stage 3) ---------------------------------------------------------
+// ---- fill ------------------------------------------------------------------------------
+
+/// `print_db_stat`: the `filled`/`deleted`-style summary line of `dbi`, as
+/// the open write transaction sees it.
+fn print_db_stat(what: &str, txn: &RwTxn<'_>, dbi: Dbi, ds: &DataSet, txns: u32) -> CmdResult {
+    let st = txn.stat(dbi).check("mdb_stat")?;
+    println!(
+        "{what} db={} keys={} entries={} txns={txns} psize={} depth={} branch_pages={} \
+         leaf_pages={} overflow_pages={}",
+        ds.label(),
+        ds.count,
+        st.entries,
+        st.page_size,
+        st.depth,
+        st.branch_pages,
+        st.leaf_pages,
+        st.overflow_pages
+    );
+    Ok(())
+}
+
+/// `put_item`: put value `d` of key `i` with `mdb_put`, or with
+/// `MDB_RESERVE` and then write the value into the space LMDB hands out.
+fn put_item(
+    txn: &mut RwTxn<'_>,
+    dbi: Dbi,
+    o: &Opts,
+    ds: &DataSet,
+    key: &[u8],
+    i: u32,
+    d: u32,
+) -> CmdResult {
+    let value = ds.value(i, d);
+    if o.reserve {
+        let space = txn
+            .reserve(dbi, key, value.len(), WriteFlags::empty())
+            .check("mdb_put(MDB_RESERVE)")?;
+        space.copy_from_slice(&value);
+    } else {
+        txn.put(dbi, key, &value, WriteFlags::empty())
+            .check("mdb_put")?;
+    }
+    Ok(())
+}
 
 /// `fill <env> <db|-> <count> <seed> [data options] [--per-txn N] [--append]
-/// [--reserve]`: needs the write path.
+/// [--reserve]`: write the data set into `<db>`, creating it with the data
+/// flags. Items in index order with `mdb_put` (random order for the
+/// comparator); with `--append` in comparator order with `MDB_APPEND` /
+/// `MDB_APPENDDUP` through a cursor. Commits every `N` keys with
+/// `--per-txn`, exactly where the C peer does.
 pub fn cmd_fill(o: &mut Opts) -> CmdResult {
     let ds = o.dataset(1)?;
     if o.reserve && ds.is_dupsort() {
         return Err(Fail::usage("--reserve cannot be used with DUPSORT"));
     }
-    Err(Fail::not_implemented("fill"))
+    let env = o.open_env(false)?;
+    let mut txns = 1u32;
+    let mut n = 0u32;
+    let mut txn = env.begin_rw_txn().check("mdb_txn_begin")?;
+    let flags = DatabaseFlags::from_bits_retain(ds.flags) | DatabaseFlags::CREATE;
+    let dbi = txn
+        .create_db(ds.db.as_deref(), flags)
+        .check("mdb_dbi_open")?;
+
+    if o.append {
+        // Insert in comparator order with MDB_APPEND (new key) and
+        // MDB_APPENDDUP (further values of the same key) via a cursor. The
+        // DB must not already hold keys sorting after ours.
+        let m = Model::build(&ds);
+        let mut cur = txn.open_cursor(dbi).check("mdb_cursor_open")?;
+        for (k, it) in m.items.iter().enumerate() {
+            for (j, val) in it.vals.iter().enumerate() {
+                let f = if j == 0 {
+                    WriteFlags::APPEND
+                } else {
+                    WriteFlags::APPEND_DUP
+                };
+                txn.cursor_put(cur, &it.key, val, f)
+                    .check("mdb_cursor_put(MDB_APPEND)")?;
+            }
+            if o.per_txn != 0 && bump(&mut n) % o.per_txn == 0 && k + 1 < m.items.len() {
+                txn.close_cursor(cur);
+                txn.commit().check("mdb_txn_commit")?;
+                txn = env.begin_rw_txn().check("mdb_txn_begin")?;
+                txns += 1;
+                cur = txn.open_cursor(dbi).check("mdb_cursor_open")?;
+            }
+        }
+        txn.close_cursor(cur);
+    } else {
+        // Insert in index order, which is random order for the comparator.
+        for i in 0..ds.count {
+            let key = ds.key(i);
+            for d in 0..ds.ndups(i) {
+                if ds.present(i, d) {
+                    put_item(&mut txn, dbi, o, &ds, &key, i, d)?;
+                }
+            }
+            if o.per_txn != 0 && bump(&mut n) % o.per_txn == 0 && i + 1 < ds.count {
+                txn.commit().check("mdb_txn_commit")?;
+                txn = env.begin_rw_txn().check("mdb_txn_begin")?;
+                txns += 1;
+            }
+        }
+    }
+    print_db_stat("filled", &txn, dbi, &ds, txns)?;
+    txn.commit().check("mdb_txn_commit")
 }
 
-/// `delete <env> <db|-> <count> <seed> [--every N] [data options]`: needs
-/// the write path.
+/// C's `++n`: increment and return the new value.
+fn bump(n: &mut u32) -> u32 {
+    *n = n.wrapping_add(1);
+    *n
+}
+
+// ---- delete ----------------------------------------------------------------------------
+
+/// `delete <env> <db|-> <count> <seed> [--every N] [--per-txn N] [data
+/// options]`: delete a deterministic subset (README.md): key `i` entirely
+/// if `i % N == 0` (alternating `mdb_del(key, NULL)` and `MDB_SET` +
+/// `mdb_cursor_del`), for DUPSORT the values `d % 2 == 0` of keys with
+/// `i % N == 1` one by one (alternating `mdb_del(key, value)` and
+/// `MDB_GET_BOTH` + `mdb_cursor_del`). Items gone per `--deleted-every` are
+/// skipped; a missing item is a mismatch.
+///
+/// One cursor stays open for the whole transaction, as in C, so the
+/// `mdb_del` calls next to it exercise the fixups of tracked cursors.
 pub fn cmd_delete(o: &mut Opts) -> CmdResult {
-    o.dataset(1)?;
-    if o.every == 0 {
+    let ds = o.dataset(1)?;
+    let every = o.every;
+    if every == 0 {
         return Err(Fail::usage("--every must be > 0"));
     }
-    Err(Fail::not_implemented("delete"))
+    let env = o.open_env(false)?;
+    let (mut keys, mut entries) = (0usize, 0usize);
+    let mut txns = 1u32;
+    let mut n = 0u32;
+    let mut txn = env.begin_rw_txn().check("mdb_txn_begin")?;
+    let dbi = txn
+        .create_db(ds.db.as_deref(), DatabaseFlags::empty())
+        .check("mdb_dbi_open")?;
+    let mut cur = txn.open_cursor(dbi).check("mdb_cursor_open")?;
+    let whole_key = if ds.is_dupsort() {
+        WriteFlags::NO_DUP_DATA
+    } else {
+        WriteFlags::empty()
+    };
+
+    for i in 0..ds.count {
+        let key = ds.key(i);
+        let nd = ds.ndups(i);
+        let mut left = (0..nd).filter(|&d| ds.present(i, d)).count();
+        if left == 0 {
+            continue; // already deleted by a previous delete
+        }
+
+        if delete_key(every, i) {
+            // Alternate between mdb_del() and a cursor delete of the whole
+            // key (all its values).
+            let found = if (i / every) % 2 == 0 {
+                txn.del(dbi, &key, None).check("delete key")?
+            } else {
+                match txn
+                    .cursor_get(cur, Some(&key), None, CursorOp::Set)
+                    .check("delete key")?
+                {
+                    Some(_) => {
+                        txn.cursor_del(cur, whole_key).check("delete key")?;
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if !found {
+                return Err(Fail::mismatch(format!("delete: key i={i} not found")));
+            }
+            keys += 1;
+            entries += left;
+        } else {
+            for d in 0..nd {
+                if !ds.present(i, d) || !delete_dup(&ds, every, i, d) {
+                    continue;
+                }
+                let value = ds.value(i, d);
+                // Alternate between mdb_del(key, data) and a cursor
+                // positioned with MDB_GET_BOTH.
+                let found = if (d / 2) % 2 == 0 {
+                    txn.del(dbi, &key, Some(&value)).check("delete value")?
+                } else {
+                    match txn
+                        .cursor_get(cur, Some(&key), Some(&value), CursorOp::GetBoth)
+                        .check("delete value")?
+                    {
+                        Some(_) => {
+                            txn.cursor_del(cur, WriteFlags::empty())
+                                .check("delete value")?;
+                            true
+                        }
+                        None => false,
+                    }
+                };
+                if !found {
+                    return Err(Fail::mismatch(format!(
+                        "delete: value {d} of key i={i} not found"
+                    )));
+                }
+                entries += 1;
+                left -= 1;
+                if left == 0 {
+                    keys += 1;
+                }
+            }
+        }
+        if o.per_txn != 0 && bump(&mut n) % o.per_txn == 0 && i + 1 < ds.count {
+            txn.close_cursor(cur);
+            txn.commit().check("mdb_txn_commit")?;
+            txn = env.begin_rw_txn().check("mdb_txn_begin")?;
+            txns += 1;
+            cur = txn.open_cursor(dbi).check("mdb_cursor_open")?;
+        }
+    }
+    txn.close_cursor(cur);
+    println!(
+        "deleted db={} keys={keys} entries={entries} txns={txns}",
+        ds.label()
+    );
+    txn.commit().check("mdb_txn_commit")
+}
+
+// ---- drop ------------------------------------------------------------------------------
+
+/// `drop <env> <db|-> [--delete]`: `mdb_drop`: empty the DB, or with
+/// `--delete` delete it from the environment (the main DB can only be
+/// emptied). Prints `dropped db=.. delete=0|1 entries=.. pages=..` (what
+/// it held).
+pub fn cmd_drop(o: &mut Opts) -> CmdResult {
+    let db = Some(o.pos[1].as_str()).filter(|d| *d != "-");
+    let label = db.unwrap_or("-");
+    let env = o.open_env(false)?;
+    let mut txn = env.begin_rw_txn().check("mdb_txn_begin")?;
+    let dbi = match txn.create_db(db, DatabaseFlags::empty()) {
+        Err(e) if e.not_found() => {
+            return Err(Fail::mismatch(format!("drop: database {label} not found")))
+        }
+        r => r.check("mdb_dbi_open")?,
+    };
+    let st = txn.stat(dbi).check("mdb_stat")?;
+    drop_db(&mut txn, dbi, o.delete)?;
+    println!(
+        "dropped db={label} delete={} entries={} pages={}",
+        u8::from(o.delete),
+        st.entries,
+        st.branch_pages + st.leaf_pages + st.overflow_pages
+    );
+    txn.commit().check("mdb_txn_commit")
+}
+
+/// `mdb_drop(txn, dbi, delete)`.
+fn drop_db(txn: &mut RwTxn<'_>, dbi: Dbi, delete: bool) -> CmdResult {
+    if delete {
+        txn.drop_db(dbi).check("mdb_drop(1)")
+    } else {
+        txn.clear_db(dbi).check("mdb_drop(0)")
+    }
 }
 
 // ---- verify ----------------------------------------------------------------------------
@@ -333,42 +582,41 @@ pub fn cmd_verify(o: &mut Opts) -> CmdResult {
 // ---- dump ----------------------------------------------------------------------------
 
 /// `is_subdb`: is `key` of the main DB the name of a named DB? Decided as
-/// `mdb_stat -a` does: no NUL byte, and opening it as a DB succeeds.
-///
-/// Limitation: `Transaction::open_db` takes `&str`, so a named DB whose
-/// name is not UTF-8 cannot be opened from Rust; such records dump as
-/// plain data (C would print `@db`). The data sets never produce those.
-pub fn subdb_name<'k>(txn: &RoTxn<'_>, key: &'k [u8]) -> Option<&'k str> {
+/// `mdb_stat -a` does: no NUL byte, and opening it as a DB succeeds (names
+/// are bytes, as in C, not necessarily UTF-8). Returns its handle.
+pub fn subdb(txn: &RoTxn<'_>, key: &[u8]) -> Option<Dbi> {
     if key.contains(&0) {
         return None;
     }
-    let name = std::str::from_utf8(key).ok()?;
-    txn.open_db(Some(name)).ok().map(|_| name)
+    txn.open_db_bytes(Some(key)).ok()
 }
 
 /// `dump_db`: print `db=<label>`, then `<hex key>=<hex value>` per item in
 /// cursor order. Named-DB records of the main DB print as `<hex key>=@db`
 /// (their value, an `MDB_db` with page numbers, differs between copies);
 /// their names are returned for `--all`.
-fn dump_db(out: &mut impl Write, txn: &RoTxn<'_>, db: Option<&str>) -> CmdResult<Vec<String>> {
-    let label = db.unwrap_or("-");
-    let dbi: Dbi = match txn.open_db(db) {
+fn dump_db(out: &mut impl Write, txn: &RoTxn<'_>, db: Option<&[u8]>) -> CmdResult<Vec<Vec<u8>>> {
+    let label = db.unwrap_or(b"-");
+    let dbi: Dbi = match txn.open_db_bytes(db) {
         Err(e) if e.not_found() => {
-            return Err(Fail::mismatch(format!("dump: database {label} not found")))
+            return Err(Fail::mismatch(format!(
+                "dump: database {} not found",
+                show(label)
+            )))
         }
         r => r.check("mdb_dbi_open")?,
     };
-    writeln!(out, "db={label}")?;
+    out.write_all(b"db=")?;
+    out.write_all(label)?;
+    out.write_all(b"\n")?;
     let mut names = Vec::new();
     let mut cur = txn.cursor(dbi).check("mdb_cursor_open")?;
     while let Some((key, data)) = cur.next().check("mdb_cursor_get")? {
         write_hex(out, key)?;
-        if db.is_none() {
-            if let Some(name) = subdb_name(txn, key) {
-                out.write_all(b"=@db\n")?;
-                names.push(name.to_owned());
-                continue;
-            }
+        if db.is_none() && subdb(txn, key).is_some() {
+            out.write_all(b"=@db\n")?;
+            names.push(key.to_vec());
+            continue;
         }
         out.write_all(b"=")?;
         write_hex(out, data)?;
@@ -404,8 +652,8 @@ pub fn cmd_dump(o: &mut Opts) -> CmdResult {
             dump_db(&mut out, &txn, Some(&name))?;
         }
     } else {
-        let db = o.pos[1].as_str();
-        dump_db(&mut out, &txn, (db != "-").then_some(db))?;
+        let db = o.pos[1].as_bytes();
+        dump_db(&mut out, &txn, (db != b"-").then_some(db))?;
     }
     out.flush()?;
     Ok(())

@@ -200,6 +200,7 @@ static const struct command commands[] = {
 	{ "fill", cmd_fill, 4, 4, "fill <env> <db|-> <count> <seed> [data options]" },
 	{ "verify", cmd_verify, 4, 4, "verify <env> <db|-> <count> <seed> [data options]" },
 	{ "delete", cmd_delete, 4, 4, "delete <env> <db|-> <count> <seed> [--every N] [data options]" },
+	{ "drop", cmd_drop, 2, 2, "drop <env> <db|-> [--delete]" },
 	{ "dump", cmd_dump, 1, 2, "dump <env> <db|-> | dump <env> --all" },
 	{ "stat", cmd_stat, 1, 1, "stat <env>" },
 	{ "readers", cmd_readers, 1, 1, "readers <env>" },
@@ -207,6 +208,7 @@ static const struct command commands[] = {
 	{ "hold-reader", cmd_hold_reader, 2, 5,
 		"hold-reader <env> <seconds> [--until-stdin] [<db|-> <count> <seed> [data options]]" },
 	{ "hold-env", cmd_hold_env, 2, 2, "hold-env <env> <seconds> [--until-stdin]" },
+	{ "hold-writer", cmd_hold_writer, 2, 2, "hold-writer <env> <seconds> [--until-stdin]" },
 	{ "writer-loop", cmd_writer_loop, 4, 4, "writer-loop <env> <db|-> <seconds> <seed> [--keys N] [--max-commits N]" },
 	{ "reader-loop", cmd_reader_loop, 3, 3, "reader-loop <env> <db|-> <seconds>" },
 	{ "check-freelist", cmd_check_freelist, 1, 1, "check-freelist <env>" },
@@ -307,6 +309,7 @@ parse_args(int argc, char **argv, struct opts *o)
 		else if (!strcmp(a, "--all")) o->all = 1;
 		else if (!strcmp(a, "--until-stdin")) o->until_stdin = 1;
 		else if (!strcmp(a, "--check")) o->check = 1;
+		else if (!strcmp(a, "--delete")) o->del = 1;
 		else die(EXIT_USAGE, "unknown option %s", a);
 	}
 }

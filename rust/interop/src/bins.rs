@@ -3,8 +3,15 @@
 //! They are plain C executables linked against `liblmdb` built from
 //! `../../libraries/liblmdb` with the upstream Makefile's flags, and are run as
 //! subprocesses.
+//!
+//! One more C program is linked at test time: [`cpeer_capi`], the C peer
+//! linked against the *Rust* `liblmdb.a` of `lmdb-capi`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+
+use crate::{Error, Result};
 
 /// The C peer (`c/cpeer*.c`), implementing the command protocol of `README.md`.
 pub fn cpeer() -> &'static Path {
@@ -62,4 +69,105 @@ pub fn bin_dir() -> &'static Path {
 /// The C library sources (`libraries/liblmdb`).
 pub fn lmdb_src() -> &'static Path {
     Path::new(env!("INTEROP_LMDB_SRC"))
+}
+
+/// System libraries a C program needs next to the Rust `liblmdb.a` (as
+/// `lmdb-capi/README.md` lists them; on macOS the compiler driver adds
+/// them).
+fn rust_native_libs() -> &'static [&'static str] {
+    if cfg!(target_os = "linux") {
+        &[
+            "-lgcc_s",
+            "-lutil",
+            "-lrt",
+            "-lpthread",
+            "-lm",
+            "-ldl",
+            "-lc",
+        ]
+    } else {
+        &[]
+    }
+}
+
+/// The Rust `liblmdb.a` built by cargo for `lmdb-capi` (a dev-dependency of
+/// this crate, so it is built before the tests): in `target/<profile>/deps`
+/// next to the running test executable, or one level up.
+pub fn rust_staticlib() -> Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let mut dirs = Vec::new();
+    if let Some(deps) = exe.parent() {
+        dirs.push(deps.to_path_buf());
+        if let Some(profile) = deps.parent() {
+            dirs.push(profile.to_path_buf());
+            dirs.push(profile.join("deps"));
+        }
+    }
+    dirs.iter()
+        .map(|d| d.join("liblmdb.a"))
+        .find(|p| p.is_file())
+        .ok_or_else(|| {
+            Error::new(format!(
+                "the Rust liblmdb.a (lmdb-capi) is not next to {}: build it with \
+                 `cargo test -p interop` (lmdb-capi is a dev-dependency)",
+                exe.display()
+            ))
+        })
+}
+
+/// Links `cpeer_capi` from the recipe `build.rs` wrote and the Rust
+/// `liblmdb.a`; returns its path. Written under a temporary name and
+/// renamed, so concurrent test processes never run a half-written file.
+fn link_cpeer_capi() -> Result<PathBuf> {
+    let recipe_path = env!("INTEROP_CPEER_CAPI_LINK");
+    let recipe = std::fs::read_to_string(recipe_path)?;
+    let (mut out, mut cc, mut args, mut objs) = (None, None, Vec::new(), Vec::new());
+    for line in recipe.lines() {
+        match line.split_once(' ') {
+            Some(("out", v)) => out = Some(PathBuf::from(v)),
+            Some(("cc", v)) => cc = Some(v.to_owned()),
+            Some(("arg", v)) => args.push(v.to_owned()),
+            Some(("obj", v)) => objs.push(v.to_owned()),
+            _ => return Err(Error::new(format!("{recipe_path}: bad line {line:?}"))),
+        }
+    }
+    let (Some(out), Some(cc)) = (out, cc) else {
+        return Err(Error::new(format!("{recipe_path}: incomplete recipe")));
+    };
+    let lib = rust_staticlib()?;
+    let tmp = out.with_extension(format!("tmp{}", std::process::id()));
+    let mut cmd = Command::new(&cc);
+    cmd.args(&args)
+        .args(&objs)
+        .arg(&lib)
+        .arg("-pthread")
+        .args(rust_native_libs())
+        .arg("-o")
+        .arg(&tmp);
+    let res = cmd
+        .output()
+        .map_err(|e| Error::new(format!("running {cc}: {e}")))?;
+    if !res.status.success() {
+        return Err(Error::new(format!(
+            "linking cpeer_capi failed: {cmd:?}\n{}{}",
+            String::from_utf8_lossy(&res.stdout),
+            String::from_utf8_lossy(&res.stderr)
+        )));
+    }
+    std::fs::rename(&tmp, &out)?;
+    Ok(out)
+}
+
+/// The C peer linked against the Rust `liblmdb.a` of `lmdb-capi`
+/// ([`crate::Peer::COnRust`]): the same C program as [`cpeer`], compiled
+/// against `lmdb-capi/include/lmdb.h`, with the library swapped.
+///
+/// Linked once per test process (the first call), so it always uses the
+/// `liblmdb.a` the tests were built with.
+pub fn cpeer_capi() -> Result<&'static Path> {
+    static PATH: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
+    match PATH.get_or_init(|| link_cpeer_capi().map_err(|e| e.message().to_owned())) {
+        Ok(p) => Ok(p),
+        Err(e) => Err(Error::new(e.clone())),
+    }
 }

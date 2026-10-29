@@ -9,8 +9,15 @@ environment and checking what each sees.
   `liblmdb` built from `../../libraries/liblmdb` (LMDB 0.9.36+) by `build.rs`
   with the upstream Makefile's flags and the platform's default lock mode.
 * `rpeer` (Rust, `src/bin/rpeer/`, on the `lmdb-core` crate) speaks the same
-  protocol. It implements the read side; the write-side commands exit with
-  status 4 until stage 3 (see "rpeer status" below).
+  protocol, with the same LMDB calls in the same order and the same output
+  (see "Peer status" below).
+* `cpeer_capi` is the C peer compiled against `../lmdb-capi/include/lmdb.h`
+  and linked against the Rust `liblmdb.a` of `lmdb-capi` instead of the C
+  library: the same C program on the Rust implementation (`Peer::COnRust`).
+  `build.rs` compiles its objects; `interop::bins::cpeer_capi()` links them
+  at test time (once per test process), because cargo builds `liblmdb.a`
+  (`lmdb-capi` is a dev-dependency of this crate) only after build scripts
+  run.
 * `layout_dump` (`c/layout_dump.c`) `#include`s `mdb.c` and prints
   `sizeof`/`offsetof`/`alignof` of every on-disk and lock-file struct.
 * The upstream tools `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` and
@@ -20,42 +27,65 @@ environment and checking what each sees.
 The C programs are compiled into `$OUT_DIR/bin` (`interop::bins` has the
 paths); `rpeer` is a normal `[[bin]]` of this crate.
 
+Three peers give nine ordered (writer, reader) pairs. Every scenario runs
+for every pair, so each implementation writes what each implementation
+reads, concurrently where the scenario says so; C always verifies and
+audits too.
+
 ## Running
 
 ```sh
-cargo test -p interop                       # everything: both pairs, layout, rpeer, unit tests
+cargo test -p interop                       # everything: 9 pairs, three peers, layout, rpeer (~1.5 min)
 cargo test -p interop --test c_vs_c         # every scenario with C on both sides
-cargo test -p interop --test c_writes_rust_reads   # every scenario, C writes, Rust reads
+cargo test -p interop --test rust_writes_c_reads   # every scenario, Rust writes, C reads
 cargo test -p interop --test rpeer          # rpeer vs cpeer outputs, checkers, exit codes
 cargo test -p interop --test c_vs_c -- --nocapture mvcc   # one scenario, with its log
+INTEROP_LOOP_SECS=20 cargo test -p interop --no-fail-fast  # stress: 20 s loops (~6 min)
 rust/scripts/linux-test.sh test -p interop  # the same on Linux (Docker)
 ```
 
 | test file | what |
 |---|---|
-| `tests/c_vs_c.rs` | `scenario_tests!(C, C)`: validates the harness and the C peer; negative tests of the C checkers |
+| `tests/c_vs_c.rs` | `scenario_tests!(C, C)`: validates the harness and the C peer; negative tests of the checkers (`verify`, `check-freelist`, `pagecmp`) |
 | `tests/c_writes_rust_reads.rs` | `scenario_tests!(C, Rust)` |
-| `tests/rpeer.rs` | `gen`, `stat`, `dump`, `verify`, `check-freelist` byte-identical to C (also failure reports); write commands exit 4; usage errors |
+| `tests/c_writes_conrust_reads.rs` | `scenario_tests!(C, COnRust)` |
+| `tests/rust_writes_c_reads.rs` | `scenario_tests!(Rust, C)` |
+| `tests/rust_vs_rust.rs` | `scenario_tests!(Rust, Rust)` |
+| `tests/rust_writes_conrust_reads.rs` | `scenario_tests!(Rust, COnRust)` |
+| `tests/conrust_writes_c_reads.rs` | `scenario_tests!(COnRust, C)` |
+| `tests/conrust_writes_rust_reads.rs` | `scenario_tests!(COnRust, Rust)` |
+| `tests/conrust_vs_conrust.rs` | `scenario_tests!(COnRust, COnRust)` |
+| `tests/three_peers.rs` | `scenarios::all_peers`: all three implementations at once |
+| `tests/rpeer.rs` | `gen`, `stat`, `dump`, `verify`, `check-freelist`, and `create`/`fill`/`delete` byte-identical to C (also failure reports); unimplemented commands exit 4; usage errors |
 | `tests/layout.rs` | the C struct layout against DESIGN.md, and every `layout_dump` value against `lmdb::consts`/`lmdb::format::layout` |
 
-A scenario step that needs a command the peer lacks prints
-`[interop] SKIPPED ...` on stderr (visible without `--nocapture`): either C
-runs that step instead, or the whole scenario is skipped (its test passes).
+A scenario step that needs something a peer lacks (none at the moment)
+prints
+`[interop] SKIPPED ...` on stderr (visible without `--nocapture`, never a
+silent pass): either C runs that step instead (`capable()`), or the whole
+scenario is skipped (its test passes). Three things count as lacking: the
+peer's `commands` list says `implemented=0` (exit status 4 if run anyway);
+an LMDB call fails with `ENOSYS` (`COnRust` while `lmdb-capi` has
+placeholders); or a peer completes a command but prints a
+`NOT-IMPLEMENTED` line on stderr for a part it left out (reported as
+`SKIPPED partly`).
 
 | variable | meaning |
 |---|---|
 | `INTEROP_LOOP_SECS` | duration of `writer-loop`/`reader-loop` runs in the scenarios (default 1.5) |
 | `INTEROP_TIMEOUT_SECS` | a peer running longer is killed and the test fails (default 120) |
 | `INTEROP_RPEER` | path of the Rust peer (else found via `CARGO_BIN_EXE_rpeer` or next to the test binary) |
+| `INTEROP_KEEP` | keep the temporary directories (`interop-*`) of the environments, to look at the files after a failure |
 
 The tests print the page size of each environment they create (`--nocapture`):
 16384 on Apple Silicon macOS, 4096 on Linux x86-64.
 
 ## Rust harness
 
-* `Peer::{C, Rust}`: `peer.on("fill", &env).args([...]).run()` runs a
-  command and requires exit 0 (exit 4 gives an error that
-  `is_not_implemented()`); `.output()` returns any status; `.spawn()`
+* `Peer::{C, Rust, COnRust}`: `peer.on("fill", &env).args([...]).run()`
+  runs a command and requires exit 0 (exit 4, or exit 3 with `ENOSYS`,
+  gives an error that `is_not_implemented()`); `.output()` returns any
+  status; `.spawn()`
   returns a `PeerProcess` for long-running commands (`wait_ready()`,
   `release()`, `finish()`, `kill()` for a SIGKILL; dropping it kills the
   process). `peer.supports(command)` tells whether the peer implements a
@@ -68,42 +98,50 @@ The tests print the page size of each environment they create (`--nocapture`):
   `Pair { writer, reader }`; `scenario_tests!(writer, reader)` turns them
   all into `#[test]`s. `tests/c_vs_c.rs` is just
   `interop::scenario_tests!(Peer::C, Peer::C)` plus self-tests showing the
-  checkers reject bad data and broken page accounting;
-  `tests/c_writes_rust_reads.rs` is the same line for `(C, Rust)`.
+  checkers reject bad data and broken page accounting; the other eight
+  pair files are the same line for their pair. `scenarios::bidir` holds
+  the scenarios in which both peers write; `scenarios::all_peers` those
+  that use all three peers at once.
+* `pagecmp::compare_data_files(a, b)`: do two data files hold the same
+  trees on the same pages? Compares a canonical form of every page
+  reachable from the newest meta page (headers, node pointers, nodes,
+  sub-pages, overflow values, `P_LEAF2` keys) and both meta pages, and
+  ignores bytes C leaves uninitialised (node padding, free space inside
+  pages and sub-pages, the tail of overflow runs) and stale free pages.
 
-### rpeer status
+### Peer status
 
 `rpeer` mirrors the C peer file by file (`args.rs` = `cpeer.c`, `dataset.rs`
 = `dataset.c`, `data.rs` = `cpeer_data.c`, `loops.rs` = `cpeer_loops.c`,
 `misc.rs` = `cpeer_misc.c`, `pagewalk.rs` = `cpeer_pagewalk.c`) and uses only
-the public API of the `lmdb-core` crate: `lmdb_core::core` for everything except
-`check-freelist`, which decodes the data file with `lmdb::format` alone.
+the public API of the `lmdb-core` crate (no `unsafe`): `lmdb_core::core`
+for everything except `check-freelist`, which decodes the data file with
+`lmdb_core::format` alone. `cpeer_capi` is `cpeer` itself; what it can do
+depends on what `lmdb-capi` implements.
 
-| command | rpeer | notes |
-|---|---|---|
-| `verify` | yes | all data options; output identical to C |
-| `dump`, `dump --all` | yes | identical to C |
-| `stat` | yes | identical to C |
-| `readers`, `reader-check` | yes | |
-| `hold-reader`, `hold-env` | yes | |
-| `reader-loop` | yes | |
-| `check-freelist` | yes | identical report and messages, also on corrupt files |
-| `gen` | yes | identical to C (`tests/rpeer.rs` compares ~1200 items) |
-| `nested-test --check` | yes | the write mode exits 4 |
-| `create`, `fill`, `delete`, `writer-loop`, `copy` | stage 3 | parse their arguments, then exit 4 |
+| command | C | Rust (`rpeer`) | COnRust (`cpeer_capi`) |
+|---|---|---|---|
+| `create`, `fill`, `delete`, `drop`, `verify`, `dump`, `stat`, `gen` | yes | yes, output identical to C (`tests/rpeer.rs`) | yes |
+| `readers`, `reader-check`, `hold-reader`, `hold-env`, `hold-writer`, `reader-loop`, `check-freelist` | yes | yes | yes |
+| `writer-loop`, `nested-test` | yes | yes (`RwTxn::begin_nested_txn`) | yes |
+| `copy` | yes | yes (`Environment::copy_to_path`) | yes |
 
-`rpeer commands` lists this (`command=<name> implemented=<0|1>`);
-`Peer::supports(command)` asks it once. To enable a command in stage 3,
-implement it and set `implemented: true` in `main.rs`; scenarios then use it
-automatically. The remaining pairs are one line each, e.g.
-`interop::scenario_tests!(interop::Peer::Rust, interop::Peer::C);` in
-`tests/rust_writes_c_reads.rs`, and the same for (Rust, Rust).
+All three implement everything; no scenario is skipped on macOS or Linux.
+Database names are bytes in all three (rpeer uses
+`Transaction::open_db_bytes`).
+
+`<peer> commands` lists what a peer implements (`command=<name>
+implemented=<0|1>`); `Peer::supports(command)` asks it once. To enable a
+command in rpeer, implement it and set `implemented: true` in `main.rs`;
+scenarios then use it automatically.
 
 In a pair the **writer** creates environments and writes; the **reader**
 verifies, holds snapshots and runs reader loops; page audits always run on
-the reader *and* on C (the reference). Some scenarios also run commands on
-both peers (two concurrent writer loops, one per peer; reader loops on
-both; `readers` both ways).
+the reader *and* on C (the reference), and data written by the writer is
+verified by the writer, the reader and C. Many scenarios also run commands
+on both peers (two concurrent writer loops, one per peer, with reader loops
+of all three peers; `readers` both ways), and the scenarios of
+`scenarios::bidir` have both peers write in turns.
 
 ## The peer command protocol
 
@@ -185,6 +223,12 @@ Items already gone per `--deleted-every` are skipped; a missing item is an
 error (exit 1). Verify afterwards with `--deleted-every N`.
 `deleted db=<db> keys=<keys gone> entries=<pairs deleted> txns=<n>`
 
+**`drop <env> <db|-> [--delete]`** — `mdb_drop`: empty the DB, or with
+`--delete` delete it from the environment (the main DB can only be
+emptied), in one transaction. `dropped db=<db> delete=0|1 entries=<n>
+pages=<branch+leaf+overflow pages it had>`. A missing DB is a check
+failure (exit 1).
+
 **`dump <env> <db|->`** or **`dump <env> --all`** — print `db=<db>`, then
 one line per key/value pair in cursor order: `<hex key>=<hex value>`.
 Records of named DBs in the main DB print as `<hex key>=@db` (their value,
@@ -229,6 +273,12 @@ read-only and wait like `hold-reader`, but without a read transaction:
 `READY pid=<pid>`, then `released held=<seconds>`. While it runs, other
 openers are not exclusive, so they do not reset the reader table (which
 would wipe the slots of dead processes before a reader check sees them).
+
+**`hold-writer <env> <seconds> [--until-stdin]`** — begin a write
+transaction (taking the writer lock), put `#held` = `<pid>` into the main
+DB without committing, print `READY txnid=<txnid> pid=<pid>`, wait like
+`hold-reader`, then abort: `released txnid=<n> held=<seconds>`. Tests kill
+it with SIGKILL to leave the writer lock held by a dead process.
 
 **`writer-loop <env> <db|-> <seconds> <seed> [--keys N] [--max-commits N]`**
 — commit small random write transactions until `<seconds>` pass (at least
@@ -369,11 +419,11 @@ gen 3 4 --intdup --dups 3   value0=000000005e89d359 value1=010000005f89d359 valu
 | scenario | what it shows |
 |---|---|
 | `create_stat` | new env: page size, data file = 2 meta pages, lock file = header + 126 × 64-byte slots, empty stats, `mdb_stat -e` |
-| `fill_verify_*` | plain/main DB, named DBs, `INTEGERKEY`, `REVERSEKEY`, `DUPSORT` (sub-pages, sub-DBs, `REVERSEDUP`), `DUPFIXED` (LEAF2), `INTEGERDUP` (4/8 bytes), overflow values (1 and many pages, `MDB_RESERVE`), `MDB_APPEND`/`APPENDDUP`; each verified by both peers and audited |
+| `fill_verify_*` | plain/main DB, named DBs, `INTEGERKEY`, `REVERSEKEY`, `DUPSORT` (sub-pages, sub-DBs, `REVERSEDUP`), `DUPFIXED` (LEAF2), `INTEGERDUP` (4/8 bytes), overflow values (1 and many pages, `MDB_RESERVE`), `MDB_APPEND`/`APPENDDUP`; each verified by the writer, the reader and C, and audited |
 | `delete_verify` | deleting keys, single dups, overflow values, sub-DB values, then everything |
 | `copy_dump_equal` | plain and compacting copies by both peers and `mdb_copy [-c]`: same dumps, valid page usage, compacted copy has no free pages and txnid 1 |
 | `mvcc_hold_reader` | a reader pins a snapshot, the writer deletes and rewrites everything and commits 2000 more txns; the snapshot still verifies the old data; reader table shows the holder |
-| `concurrent_writers_readers` | two writer loops (one per peer, synced and `--nosync`) and two reader loops at once; no lost updates, consistent snapshots |
+| `concurrent_writers_readers` | two writer loops (one per peer of the pair, synced and `--nosync`) and reader loops of all three peers at once; no lost updates, consistent snapshots |
 | `freelist_after_writer_loop` | many commits with nested txns and aborts; audit; `mdb_stat -ff` and `stat` agree with the walk |
 | `readers_list` | slots visible across processes both ways, also when the reader peer opened the lock file first; freed on exit |
 | `nested_txns` | `nested-test` twice, checked by both peers |
@@ -386,6 +436,14 @@ gen 3 4 --intdup --dups 3   value0=000000005e89d359 value1=010000005f89d359 valu
 | `reader_creates_lock_file` | the lock file is deleted; the reader peer opens first and creates it (reader table, semaphores/mutexes; size as C makes it); the writer then does all the writing (writer loop, delete) next to reader loops of both peers and the creator's held snapshot |
 | `reader_loop_during_nested` | reader loops of both peers while the writer runs `nested-test` twice and a writer loop |
 | `notls_readers` | `--notls` holder, reader loops and verify of both peers while the writer loops |
+| `alternating_writers` | both peers write the same DBs in turns (fill, delete a third, refill, delete half, delete the rest, refill with `MDB_APPEND`; plain, DUPSORT, overflow, DUPFIXED), verified by all after every turn; then writer loops of both in turns: `#commits` continues exactly |
+| `delete_heavy` | the reader deletes a third of six large DBs of every kind, the writer the rest, the reader refills and the writer deletes half; verified by the other peer and C, audited after every round; the refill reuses the freed pages |
+| `drop_clear_dbs` | the writer `mdb_drop`s two DBs empty and deletes two (one with sub-DBs); the others see empty DBs with their flags and no deleted ones, every page of the dropped trees is free; the reader refills them, reusing the pages |
+| `copy_cross` | plain and compacting copies of one snapshot by the writer, the reader and C, each verified, dumped and audited by the other implementations; plain copies byte-identical up to the last page, compacted copies too |
+| `map_full` | a 4 MiB map: a fill too big fails with `MDB_MAP_FULL` in both peers and leaves nothing behind; committed batches of a `--per-txn` fill stay; a writer loop on the full map fails cleanly or not at all; the reader grows the map with `--mapsize`, the writer then opens with the size recorded in the meta page |
+| `killed_writer` | `hold-writer` and writer loops of the writer SIGKILLed inside write transactions; the reader must get the writer lock and write (Linux: robust mutex, `EOWNERDEAD` recovery while another process keeps the env open; macOS: the next writer provably waits on the non-robust semaphore, then an exclusive re-open re-creates it); nothing of the killed transactions is visible; data, counters and pages consistent |
+| `same_writes_same_pages` | writer and reader run the same script of writes (every fill variant, deletes, drops, a commit-bounded writer loop with nested transactions, `nested-test`) on environments of their own; after every step both files hold the same pages (`pagecmp`) |
+| `three_writers` (`tests/three_peers.rs`) | writer loops of C, Rust and COnRust at once, reader loops of all three; `#commits` = 1 + the sum of their commits; audited by all three |
 
 ## C behaviour the Rust implementation must match (found by this harness)
 
@@ -438,6 +496,31 @@ gen 3 4 --intdup --dups 3   value0=000000005e89d359 value1=010000005f89d359 valu
   cursors and `mdb_stat` on DBI 0 work. The free DB's `md_flags` is
   `MDB_INTEGERKEY` (0x8).
 * `mtest6.c` calls `mdb_dkey()`, which exists only with `MDB_DEBUG`.
+* **Uninitialised bytes**: C writes pages from reused page buffers without
+  clearing them, so node padding bytes, the gap between `mp_lower` and
+  `mp_upper` and the free space of sub-pages hold stale bytes; Rust writes
+  zeros there. Files written by the same operations therefore differ in
+  those bytes only (`same_writes_same_pages` compares everything else and
+  finds no difference between C and Rust).
+* **A killed writer** (SIGKILL inside a write transaction) leaves the
+  writer lock held. On Linux the lock is a robust mutex: the next writer
+  (C or Rust) gets `EOWNERDEAD`, resets `mti_txnid` from the newest meta
+  page, runs a reader check, marks the mutex consistent and continues
+  (`mdb_mutex_failed`). On macOS the lock is a POSIX semaphore, which is
+  not robust: as long as any process keeps the environment open, every
+  later writer waits forever (in C and in Rust alike); once all processes
+  have closed it, the next opener is exclusive and re-creates the
+  semaphores (`sem_unlink` + `O_CREAT|O_EXCL`). A killed transaction leaves
+  nothing visible.
+* **`MDB_MAP_FULL`** fails the operation and the transaction; the
+  environment stays intact. A later opener with a larger `--mapsize` can
+  write, and its commit records the new size in the meta page, which later
+  openers without a map size use (`mdb_env_open`: no configured size means
+  the meta page's `mm_mapsize`).
+* **`mdb_drop`** puts every page of the dropped tree on the free list in the
+  same transaction; with large trees the free list itself grows overflow
+  pages, so the file can grow by a few pages even though the drop frees
+  hundreds.
 * Keys and values point into the map and are not NUL-terminated; `sscanf`
   on them can read past the end of the mapped file (`SIGBUS` on macOS).
   `cpeer` copies before parsing.

@@ -10,9 +10,11 @@
 //!   `README.md` (`fill`, `verify`, `writer-loop`, `check-freelist`, …).
 //!   [`Peer::C`] is `cpeer`, written in C against `liblmdb` (built from
 //!   `../../libraries/liblmdb` by `build.rs`); [`Peer::Rust`] is `rpeer`
-//!   (`src/bin/rpeer`), built on the `lmdb` crate. Commands a peer does not
-//!   implement yet exit with status 4; [`Peer::supports`] tells, and
-//!   scenarios skip or substitute the C peer for them.
+//!   (`src/bin/rpeer`), built on the `lmdb-core` crate; [`Peer::COnRust`]
+//!   is the same C program linked against the Rust `liblmdb.a` of
+//!   `lmdb-capi`. Commands a peer does not implement yet exit with status
+//!   4; [`Peer::supports`] tells, and scenarios skip or substitute the C
+//!   peer for them.
 //! * [`TestEnv`] is an environment in a temporary directory.
 //! * [`scenarios`] holds every test scenario, parameterised by a
 //!   [`scenarios::Pair`] of (writer, reader) peers. [`scenario_tests!`]
@@ -26,11 +28,14 @@
 //!   `mdb_copy`, `mtest*`) and parses their output; [`report`] parses the
 //!   output of peer commands.
 //! * [`bins`] has the paths of all the C programs built by `build.rs`.
+//! * [`pagecmp`] compares two data files structurally (same trees on the
+//!   same pages).
 #![warn(missing_docs, clippy::all)]
 #![forbid(unsafe_code)]
 
 pub mod bins;
 mod error;
+pub mod pagecmp;
 mod peer;
 pub mod report;
 pub mod scenarios;
@@ -38,5 +43,5 @@ mod testenv;
 pub mod tools;
 
 pub use error::{Error, Result};
-pub use peer::{register_rpeer, Output, Peer, PeerCmd, PeerProcess, EXIT_NOT_IMPLEMENTED};
+pub use peer::{register_rpeer, skipped, Output, Peer, PeerCmd, PeerProcess, EXIT_NOT_IMPLEMENTED};
 pub use testenv::TestEnv;

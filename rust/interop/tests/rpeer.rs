@@ -1,6 +1,7 @@
 //! The Rust peer on its own terms: its outputs are byte-identical to the C
-//! peer's where the harness compares them, its checkers reject bad data,
-//! and the commands it does not implement yet say so with exit status 4.
+//! peer's where the harness compares them (also for the writing commands
+//! and for non-UTF-8 database names), its checkers reject bad data, and it
+//! implements every command of the protocol.
 
 mod common;
 
@@ -80,50 +81,165 @@ fn gen_matches_c() -> interop::Result<()> {
     Ok(())
 }
 
-/// The write-side commands exit with status 4 and a message; the harness
-/// learns this from `rpeer commands`.
+/// rpeer implements every command of the protocol (the C peer's list), and
+/// says so in `rpeer commands`, which is what `Peer::supports` asks. (A
+/// command that needs a part of `lmdb-core` that does not exist yet would
+/// be listed with `implemented=0` and exit with status 4.)
 #[test]
-fn write_commands_are_not_implemented_yet() -> interop::Result<()> {
+fn rpeer_implements_every_command() -> interop::Result<()> {
     register();
-    let (env, ds) = common::filled_env()?;
-    let p = env.path().to_str().unwrap().to_owned();
-    let ds_args = ds.args();
-    let ds_args: Vec<&str> = ds_args.iter().map(String::as_str).collect();
-    let cases: Vec<Vec<&str>> = vec![
-        vec!["create", &p, "1048576", "4"],
-        [&["fill", &p][..], &ds_args].concat(),
-        [&["delete", &p][..], &ds_args].concat(),
-        vec!["writer-loop", &p, "-", "0", "1"],
-        vec!["nested-test", &p],
-        vec!["copy", &p, "/nonexistent/copy"],
+    let c = Peer::C.cmd("commands").run()?;
+    let r = Peer::Rust.cmd("commands").run()?;
+    let names = |out: &interop::Output| -> Vec<String> {
+        let mut v: Vec<String> = out
+            .lines()
+            .filter_map(|l| l.strip_prefix("command="))
+            .map(|l| l.split(' ').next().unwrap_or_default().to_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names(&c), names(&r), "the peers know different commands");
+    for name in names(&c) {
+        assert!(
+            Peer::Rust.supports(&name),
+            "rpeer does not implement {name}"
+        );
+    }
+    assert!(!r.stdout.contains("implemented=0"), "{r}");
+    assert_eq!(EXIT_NOT_IMPLEMENTED, 4);
+    Ok(())
+}
+
+/// `fill`, `delete` and `create` print exactly what the C peer prints for
+/// the same operations on fresh environments (the same transactions, the
+/// same entries, and the same tree shapes: depth and page counts).
+#[test]
+fn write_outputs_equal_c() -> interop::Result<()> {
+    register();
+    let steps: &[&[&str]] = &[
+        &["fill", "plain", "3000", "11", "--per-txn", "700"],
+        &[
+            "fill",
+            "dups",
+            "500",
+            "3",
+            "--dupsort",
+            "--dups",
+            "9",
+            "--per-txn",
+            "77",
+        ],
+        &[
+            "fill",
+            "sub",
+            "20",
+            "4",
+            "--dupsort",
+            "--dups",
+            "900",
+            "--valsize",
+            "40",
+        ],
+        &["fill", "fixed", "20", "5", "--dupfixed", "--dups", "900"],
+        &[
+            "fill",
+            "ints",
+            "800",
+            "6",
+            "--intkey",
+            "--big",
+            "20000",
+            "--per-txn",
+            "100",
+        ],
+        &["fill", "app", "1000", "7", "--append", "--per-txn", "300"],
+        &[
+            "fill", "appd", "200", "8", "--revdup", "--dups", "7", "--append",
+        ],
+        &["fill", "res", "100", "9", "--reserve", "--big", "9000"],
+        &["fill", "rev", "700", "10", "--revkey", "--valsize", "200"],
+        &[
+            "delete",
+            "dups",
+            "500",
+            "3",
+            "--dupsort",
+            "--dups",
+            "9",
+            "--every",
+            "3",
+            "--per-txn",
+            "50",
+        ],
+        &["delete", "plain", "3000", "11", "--every", "2"],
+        &[
+            "delete",
+            "sub",
+            "20",
+            "4",
+            "--dupsort",
+            "--dups",
+            "900",
+            "--valsize",
+            "40",
+            "--every",
+            "3",
+        ],
+        &[
+            "delete",
+            "fixed",
+            "20",
+            "5",
+            "--dupfixed",
+            "--dups",
+            "900",
+            "--every",
+            "2",
+        ],
+        &[
+            "delete",
+            "ints",
+            "800",
+            "6",
+            "--intkey",
+            "--big",
+            "20000",
+            "--every",
+            "1",
+            "--per-txn",
+            "99",
+        ],
     ];
-    for args in cases {
-        let out = Peer::Rust.cmd(args[0]).args(&args[1..]).output()?;
-        assert_eq!(out.code(), Some(EXIT_NOT_IMPLEMENTED), "{out}");
-        assert!(out.stderr.starts_with("rpeer: "), "{out}");
-        assert!(!Peer::Rust.supports(args[0]), "{}", args[0]);
-        let err = out.ok().unwrap_err();
-        assert!(err.is_not_implemented(), "{err}");
+    let envs: Vec<TestEnv> = (0..2)
+        .map(|_| TestEnv::new())
+        .collect::<interop::Result<_>>()?;
+    let peers = [Peer::C, Peer::Rust];
+    let mut outs = [String::new(), String::new()];
+    for (peer, env) in peers.iter().zip(&envs) {
+        let k = usize::from(*peer == Peer::Rust);
+        outs[k] += &peer
+            .on("create", env)
+            .args(["268435456", "64"])
+            .run()?
+            .stdout;
+        for step in steps {
+            outs[k] += &peer.on(step[0], env).args(&step[1..]).run()?.stdout;
+        }
+        outs[k] += &peer.on("stat", env).run()?.stdout;
     }
-    for cmd in [
-        "verify",
-        "dump",
-        "stat",
-        "readers",
-        "reader-check",
-        "hold-reader",
-        "reader-loop",
-        "check-freelist",
-        "gen",
-    ] {
-        assert!(Peer::Rust.supports(cmd), "{cmd}");
+    assert!(
+        outs[0] == outs[1],
+        "outputs differ:\n--- C ---\n{}\n--- Rust ---\n{}",
+        outs[0],
+        outs[1]
+    );
+    // And both environments are valid for both.
+    for env in &envs {
+        for peer in peers {
+            scenarios::check_freelist(peer, env)?;
+        }
     }
-    // The data is untouched; `nested-test --check` is read-only and works
-    // (here: the DB is missing, a check failure).
-    ds.verify(Peer::Rust, &env)?;
-    let out = Peer::Rust.on("nested-test", &env).arg("--check").output()?;
-    assert_eq!(out.code(), Some(1), "{out}");
-    assert!(out.stderr.contains("DB nested not found"), "{out}");
     Ok(())
 }
 
@@ -264,5 +380,30 @@ fn check_freelist_rejects_a_page_used_twice() -> interop::Result<()> {
         c.stderr.replace("cpeer: ", ""),
         r.stderr.replace("rpeer: ", "")
     );
+    Ok(())
+}
+
+/// Database names are bytes, not necessarily UTF-8: a DB that C creates
+/// with a non-UTF-8 name dumps and stats in rpeer exactly as in C.
+#[test]
+fn non_utf8_db_names_match_c() -> interop::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    register();
+    let env = TestEnv::new()?;
+    scenarios::create(Peer::C, &env, 64 << 20)?;
+    let name = std::ffi::OsStr::from_bytes(b"caf\xe9\xff");
+    Peer::C
+        .on("fill", &env)
+        .arg(name)
+        .args(["50", "3", "--dupsort"])
+        .run()?;
+    scenarios::DataSet::new("plain", 20, 4).fill(Peer::C, &env, &[])?;
+    for cmd in [&["dump", "--all"][..], &["stat"]] {
+        let c = Peer::C.on(cmd[0], &env).args(&cmd[1..]).run()?;
+        let r = Peer::Rust.on(cmd[0], &env).args(&cmd[1..]).run()?;
+        // The DB has its own section (dump) or line (stat).
+        assert!(c.stdout.contains("db=caf"), "{c}");
+        assert_eq!(c.stdout, r.stdout, "`{}` differs", cmd.join(" "));
+    }
     Ok(())
 }

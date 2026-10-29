@@ -22,6 +22,19 @@ pub struct TestEnv {
     nosubdir: bool,
 }
 
+/// A new temporary directory `interop-*`; kept after the test if
+/// `$INTEROP_KEEP` is set (to look at the files of a failed scenario: the
+/// paths are in the failure message).
+fn temp_root() -> Result<Arc<TempDir>> {
+    let keep = std::env::var_os("INTEROP_KEEP").is_some_and(|v| !v.is_empty() && v != "0");
+    Ok(Arc::new(
+        tempfile::Builder::new()
+            .prefix("interop-")
+            .disable_cleanup(keep)
+            .tempdir()?,
+    ))
+}
+
 impl TestEnv {
     /// An environment directory `env/` in a new temporary directory.
     pub fn new() -> Result<Self> {
@@ -31,7 +44,7 @@ impl TestEnv {
     /// An environment directory `<name>/` in a new temporary directory
     /// (the `mtest` programs insist on `./testdb`).
     pub fn with_name(name: &str) -> Result<Self> {
-        let root = Arc::new(tempfile::Builder::new().prefix("interop-").tempdir()?);
+        let root = temp_root()?;
         let path = root.path().join(name);
         std::fs::create_dir(&path)?;
         Ok(TestEnv {
@@ -44,7 +57,7 @@ impl TestEnv {
     /// A `MDB_NOSUBDIR` environment: data file `env.mdb`, lock file
     /// `env.mdb-lock`, in a new temporary directory.
     pub fn new_nosubdir() -> Result<Self> {
-        let root = Arc::new(tempfile::Builder::new().prefix("interop-").tempdir()?);
+        let root = temp_root()?;
         let path = root.path().join("env.mdb");
         Ok(TestEnv {
             root,

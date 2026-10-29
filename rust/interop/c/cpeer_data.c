@@ -1,4 +1,5 @@
-/* cpeer_data.c - fill, verify, delete and dump of the deterministic data set.
+/* cpeer_data.c - fill, verify, delete and dump of the deterministic data set,
+ * and drop of a whole DB.
  *
  * fill and delete write; verify proves that a DB holds exactly the data set
  * (as modified by a prior delete), using every read path a peer must get
@@ -462,6 +463,35 @@ cmd_delete(struct opts *o)
 	printf("deleted db=%s keys=%zu entries=%zu txns=%u\n", db_label(ds->db), keys, entries, txns);
 	commit_write(txn);
 	free(vbuf);
+	mdb_env_close(env);
+	return 0;
+}
+
+/* ---- drop --------------------------------------------------------------- */
+
+/* mdb_drop(): empty the DB, or with --delete delete it from the environment
+ * (the main DB can only be emptied). Prints what it held. */
+int
+cmd_drop(struct opts *o)
+{
+	const char *db = strcmp(o->pos[1], "-") ? o->pos[1] : NULL;
+	MDB_env *env;
+	MDB_txn *txn;
+	MDB_dbi dbi;
+	MDB_stat st;
+	int rc;
+
+	env = open_env(o, 0);
+	txn = begin_write(env);
+	rc = mdb_dbi_open(txn, db, 0, &dbi);
+	if (rc == MDB_NOTFOUND)
+		die(EXIT_MISMATCH, "drop: database %s not found", db_label(db));
+	check_rc(rc, "mdb_dbi_open");
+	CHECK(mdb_stat(txn, dbi, &st));
+	CHECK(mdb_drop(txn, dbi, o->del));
+	printf("dropped db=%s delete=%d entries=%zu pages=%zu\n", db_label(db), o->del,
+		st.ms_entries, st.ms_branch_pages + st.ms_leaf_pages + st.ms_overflow_pages);
+	commit_write(txn);
 	mdb_env_close(env);
 	return 0;
 }
