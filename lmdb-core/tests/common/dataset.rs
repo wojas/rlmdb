@@ -3,7 +3,7 @@
 //! write exactly what `cpeer verify` checks. Cross-checked against
 //! `cpeer gen` by the tests.
 
-use lmdb::consts::*;
+use lmdb_core::consts::*;
 
 /// `struct dataset` of `dataset.c`.
 #[derive(Debug, Clone)]
@@ -204,8 +204,8 @@ impl Dataset {
         buf
     }
 
-    /// The `lmdb::DatabaseFlags` of the set.
-    pub fn db_flags(&self) -> lmdb::DatabaseFlags {
-        lmdb::DatabaseFlags::from_bits_retain(self.flags)
+    /// The `lmdb_core::DatabaseFlags` of the set.
+    pub fn db_flags(&self) -> lmdb_core::DatabaseFlags {
+        lmdb_core::DatabaseFlags::from_bits_retain(self.flags)
     }
 }

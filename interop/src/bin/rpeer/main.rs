@@ -17,9 +17,9 @@
 //! | `misc` | `cpeer_misc.c` | `stat`, `readers`, `reader-check`, `gen`, `nested-test --check` (`create`, `copy`: stage 3) |
 //! | `pagewalk` | `cpeer_pagewalk.c` | `check-freelist` |
 //!
-//! It uses only the public API of the `lmdb` crate: `lmdb::core` for
+//! It uses only the public API of the `lmdb` crate: `lmdb_core::core` for
 //! everything except `check-freelist`, which decodes the data file itself
-//! with `lmdb::format`.
+//! with `lmdb_core::format`.
 //!
 //! Commands that need the write path (stage 3) parse their arguments and
 //! then exit with status 4 ("not implemented in rpeer yet"); `rpeer

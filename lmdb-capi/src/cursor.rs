@@ -16,8 +16,8 @@
 use std::os::raw::{c_int, c_uint};
 use std::ptr::{self, NonNull};
 
-use lmdb::consts::{FREE_DBI, MDB_DUPSORT};
-use lmdb::{CursorOp, Dbi, Transaction};
+use lmdb_core::consts::{FREE_DBI, MDB_DUPSORT};
+use lmdb_core::{CursorOp, Dbi, Transaction};
 
 use crate::handles::{MDB_cursor, MDB_txn};
 use crate::types::*;
@@ -26,7 +26,7 @@ use crate::SUCCESS;
 const EINVAL: c_int = libc::EINVAL;
 
 fn not_found() -> c_int {
-    lmdb::MdbError::NotFound.to_err_code()
+    lmdb_core::MdbError::NotFound.to_err_code()
 }
 
 /// `mdb_get`: get items from a database. For `MDB_DUPSORT` databases the
@@ -252,7 +252,7 @@ pub unsafe extern "C" fn mdb_cursor_count(cursor: *mut MDB_cursor, countp: *mut 
         _ => return EINVAL,
     };
     if c.db_flags() & MDB_DUPSORT == 0 {
-        return lmdb::MdbError::Incompatible.to_err_code();
+        return lmdb_core::MdbError::Incompatible.to_err_code();
     }
     let result = c.with_cursor(|rc| rc.count().map_err(|e| e.to_err_code()));
     match result {

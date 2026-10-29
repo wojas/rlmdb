@@ -9,8 +9,8 @@ use std::path::Path;
 
 use common::dataset::Dataset;
 use common::{hex, CTools};
-use lmdb::consts::*;
-use lmdb::{DatabaseFlags, Dbi, Environment, EnvironmentFlags, Transaction, WriteFlags};
+use lmdb_core::consts::*;
+use lmdb_core::{DatabaseFlags, Dbi, Environment, EnvironmentFlags, Transaction, WriteFlags};
 
 fn open_env(path: &Path) -> Environment {
     Environment::builder()
@@ -45,11 +45,12 @@ fn fill(env: &Environment, ds: &Dataset, per_txn: u32) -> Dbi {
 
 /// The data set in database order (key, values), as Rust's comparators sort.
 fn sorted_model(ds: &Dataset) -> Vec<(Vec<u8>, Vec<Vec<u8>>)> {
-    let kc = lmdb::Comparator::default_key(ds.flags);
-    let mut dc = lmdb::Comparator::default_dup(ds.flags).unwrap_or(lmdb::Comparator::Memn);
+    let kc = lmdb_core::Comparator::default_key(ds.flags);
+    let mut dc =
+        lmdb_core::Comparator::default_dup(ds.flags).unwrap_or(lmdb_core::Comparator::Memn);
     // C compares 8-byte INTEGERDUP|DUPFIXED items with mdb_cmp_clong.
     if dc.is_int() && ds.valsize == 8 {
-        dc = lmdb::Comparator::Clong;
+        dc = lmdb_core::Comparator::Clong;
     }
     let mut items: Vec<(Vec<u8>, Vec<Vec<u8>>)> = (0..ds.count)
         .map(|i| {

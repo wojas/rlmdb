@@ -7,7 +7,7 @@ mod common;
 use std::path::Path;
 
 use common::*;
-use lmdb::{Dbi, Environment, EnvironmentFlags, Error, MdbError, Transaction};
+use lmdb_core::{Dbi, Environment, EnvironmentFlags, Error, MdbError, Transaction};
 
 /// Parses `mdb_stat -r` output into (pid, txnid or None) pairs.
 fn parse_readers(text: &str) -> Vec<(i32, Option<u64>)> {

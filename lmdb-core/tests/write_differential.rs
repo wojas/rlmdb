@@ -13,8 +13,8 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use common::{hex, CTools, Rng};
-use lmdb::consts::*;
-use lmdb::{
+use lmdb_core::consts::*;
+use lmdb_core::{
     CursorId, CursorOp, DatabaseFlags, Environment, EnvironmentFlags, Error, RwTxn, WriteFlags,
 };
 
@@ -35,7 +35,7 @@ fn code<T>(r: &Result<T, Error>) -> i32 {
 /// `writeops.c`.
 fn rust_step(
     txn: &mut RwTxn<'_>,
-    db: lmdb::Dbi,
+    db: lmdb_core::Dbi,
     cur: &[CursorId],
     op: &str,
     dupsort: bool,

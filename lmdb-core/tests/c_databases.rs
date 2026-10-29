@@ -12,7 +12,7 @@ mod common;
 use std::path::Path;
 
 use common::{Pair, *};
-use lmdb::{DatabaseFlags, Dbi, Environment, Transaction};
+use lmdb_core::{DatabaseFlags, Dbi, Environment, Transaction};
 
 /// Compares env info, main/named DB stats and the free list with
 /// `mdb_stat -e -f -a`.
@@ -201,7 +201,7 @@ fn overflow_values() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("env");
     let ps = os_page_size().min(32768);
-    let nodemax = lmdb::format::node_max(ps);
+    let nodemax = lmdb_core::format::node_max(ps);
     let sizes = [
         0,
         1,
@@ -428,7 +428,7 @@ fn many_named_dbs_and_handles() {
         .collect();
     assert!(matches!(
         txn.open_db(Some("db3")),
-        Err(lmdb::Error::Mdb(lmdb::MdbError::DbsFull))
+        Err(lmdb_core::Error::Mdb(lmdb_core::MdbError::DbsFull))
     ));
     // Same name, same handle.
     assert_eq!(txn.open_db(Some("db1")).unwrap(), h[1]);
@@ -446,7 +446,7 @@ fn many_named_dbs_and_handles() {
     env.close_db(d3);
     assert!(matches!(
         txn.get(d3, b"k000"),
-        Err(lmdb::Error::Mdb(lmdb::MdbError::BadDbi))
+        Err(lmdb_core::Error::Mdb(lmdb_core::MdbError::BadDbi))
     ));
     // Handles opened in a read txn survive it and work in later ones.
     let d4 = env.open_db(Some("db4")).unwrap();

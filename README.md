@@ -8,7 +8,7 @@ See `DESIGN.md` for the architecture, the format specification, and the plan.
 
 Crates:
 
-* `lmdb` – the library with a safe Rust API.
+* `lmdb-core` – the library with a safe Rust API.
 * `lmdb-capi` – `liblmdb` C ABI on top of it, drop-in for C programs.
 * `lmdb-tools` – `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`, `mdb_drop`.
 * `interop` – cross-process compatibility tests against the C build.

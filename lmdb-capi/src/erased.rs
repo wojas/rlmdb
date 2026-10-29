@@ -1,7 +1,7 @@
 //! Lifetime erasure: the one place where Rust's borrow structure is
 //! replaced by C's "do not use X after Y" rules.
 //!
-//! In [`lmdb::core`] a [`RoTxn<'env>`] borrows its [`Environment`] and a
+//! In [`lmdb_core::core`] a [`RoTxn<'env>`] borrows its [`Environment`] and a
 //! [`RoCursor<'txn>`] borrows its transaction. In C all three are separate
 //! heap objects whose lifetimes the *caller* manages. This module stores
 //! the borrowing values with their lifetimes set to `'static` and states the
@@ -25,7 +25,7 @@
 //! Nothing here hands out `'static` references: values read through an
 //! erased transaction or cursor borrow the erased handle itself.
 
-use lmdb::{Dbi, Environment, InactiveTxn, RoCursor, RoTxn, Transaction};
+use lmdb_core::{Dbi, Environment, InactiveTxn, RoCursor, RoTxn, Transaction};
 use std::ptr::NonNull;
 
 /// An active read transaction, boxed at a stable address.
@@ -40,7 +40,7 @@ impl ErasedRoTxn {
     ///
     /// `env` must stay alive and must not move until the returned value
     /// (and anything derived from it) has been dropped.
-    pub(crate) unsafe fn begin(env: &Environment) -> lmdb::Result<ErasedRoTxn> {
+    pub(crate) unsafe fn begin(env: &Environment) -> lmdb_core::Result<ErasedRoTxn> {
         let txn = env.begin_ro_txn()?;
         // SAFETY: only the lifetime changes; the caller guarantees that the
         // environment outlives the transaction (rule 1).
@@ -67,7 +67,7 @@ impl ErasedRoTxn {
     ///
     /// The returned cursor must be dropped before `self` is dropped or
     /// [`reset`](Self::reset) (rule 3).
-    pub(crate) unsafe fn cursor(&self, dbi: Dbi) -> lmdb::Result<ErasedRoCursor> {
+    pub(crate) unsafe fn cursor(&self, dbi: Dbi) -> lmdb_core::Result<ErasedRoCursor> {
         let cursor = self.txn().cursor(dbi)?;
         // SAFETY: the cursor borrows the boxed transaction, which does not
         // move (rule 2) and, per the caller's guarantee, outlives it.
@@ -107,7 +107,7 @@ pub(crate) struct ErasedInactiveTxn {
 
 impl ErasedInactiveTxn {
     /// `mdb_txn_renew`. On failure the reader slot is released.
-    pub(crate) fn renew(self) -> lmdb::Result<ErasedRoTxn> {
+    pub(crate) fn renew(self) -> lmdb_core::Result<ErasedRoTxn> {
         // The environment is the one the transaction was begun on, still
         // alive by the contract of `ErasedRoTxn::begin`.
         self.txn.renew().map(ErasedRoTxn::boxed)
@@ -125,13 +125,13 @@ impl ErasedRoCursor {
         &'a mut self,
         key: Option<&[u8]>,
         data: Option<&[u8]>,
-        op: lmdb::CursorOp,
-    ) -> lmdb::Result<Option<(&'a [u8], &'a [u8])>> {
+        op: lmdb_core::CursorOp,
+    ) -> lmdb_core::Result<Option<(&'a [u8], &'a [u8])>> {
         self.cursor.get(key, data, op)
     }
 
     /// `mdb_cursor_count`.
-    pub(crate) fn count(&mut self) -> lmdb::Result<u64> {
+    pub(crate) fn count(&mut self) -> lmdb_core::Result<u64> {
         self.cursor.count()
     }
 }

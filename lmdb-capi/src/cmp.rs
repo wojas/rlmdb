@@ -19,7 +19,7 @@
 use std::cmp::Ordering;
 use std::sync::OnceLock;
 
-use lmdb::CmpFn;
+use lmdb_core::CmpFn;
 
 use crate::types::{MDB_cmp_func, MDB_val};
 

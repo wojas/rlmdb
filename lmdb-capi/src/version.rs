@@ -5,7 +5,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::sync::OnceLock;
 
-use lmdb::consts::{MDB_KEYEXIST, MDB_LAST_ERRCODE};
+use lmdb_core::consts::{MDB_KEYEXIST, MDB_LAST_ERRCODE};
 
 /// `MDB_VERSION_STRING` of the shipped `lmdb.h` (0.9.36).
 const VERSION_STRING: &CStr = c"LMDB 0.9.36: (Aug 6, 2026)";
@@ -20,7 +20,7 @@ pub unsafe extern "C" fn mdb_version(
     minor: *mut c_int,
     patch: *mut c_int,
 ) -> *mut c_char {
-    let (ma, mi, pa) = lmdb::lmdb_version();
+    let (ma, mi, pa) = lmdb_core::lmdb_version();
     for (out, value) in [(major, ma), (minor, mi), (patch, pa)] {
         // SAFETY: NULL or writable, per lmdb.h.
         if let Some(out) = unsafe { out.as_mut() } {
@@ -31,12 +31,12 @@ pub unsafe extern "C" fn mdb_version(
 }
 
 /// The messages of LMDB's own codes, `MDB_KEYEXIST..=MDB_LAST_ERRCODE`, as
-/// static C strings (texts from [`lmdb::strerror`], identical to C's).
+/// static C strings (texts from [`lmdb_core::strerror`], identical to C's).
 fn lmdb_messages() -> &'static [CString] {
     static MESSAGES: OnceLock<Vec<CString>> = OnceLock::new();
     MESSAGES.get_or_init(|| {
         (MDB_KEYEXIST..=MDB_LAST_ERRCODE)
-            .map(|code| CString::new(lmdb::strerror(code)).unwrap_or_default())
+            .map(|code| CString::new(lmdb_core::strerror(code)).unwrap_or_default())
             .collect()
     })
 }
@@ -74,7 +74,7 @@ mod tests {
             .unwrap()
             .trim()
             .trim_matches('"');
-        let (ma, mi, pa) = lmdb::lmdb_version();
+        let (ma, mi, pa) = lmdb_core::lmdb_version();
         let expected = format!("LMDB {ma}.{mi}.{pa}: ({date})");
         assert_eq!(VERSION_STRING.to_str().unwrap(), expected);
     }
@@ -95,7 +95,7 @@ mod tests {
         let s = |e| unsafe { CStr::from_ptr(mdb_strerror(e)) }.to_str().unwrap();
         assert_eq!(s(0), "Successful return: 0");
         assert_eq!(
-            s(lmdb::consts::MDB_NOTFOUND),
+            s(lmdb_core::consts::MDB_NOTFOUND),
             "MDB_NOTFOUND: No matching key/data pair found"
         );
         assert_eq!(
@@ -103,7 +103,7 @@ mod tests {
             "MDB_BAD_DBI: The specified DBI handle was closed/changed unexpectedly"
         );
         // MDB_PROBLEM is LMDB 1.0 only.
-        assert_eq!(s(lmdb::consts::MDB_PROBLEM), "Invalid error code");
+        assert_eq!(s(lmdb_core::consts::MDB_PROBLEM), "Invalid error code");
         assert_eq!(s(-1), "Invalid error code");
         assert_eq!(s(libc::ENOENT), "No such file or directory");
     }

@@ -1,4 +1,4 @@
-//! A data file assembled byte by byte with the `lmdb::format` writers, read
+//! A data file assembled byte by byte with the `lmdb_core::format` writers, read
 //! by both C (`mdb_dump`, `mdb_stat`, `mdb_cursor_get`) and Rust.
 //!
 //! This pins down the layout knowledge (meta pages, page headers, node
@@ -8,11 +8,11 @@
 mod common;
 
 use common::*;
-use lmdb::consts::{MDB_DUPSORT, P_INVALID};
-use lmdb::format::node::{F_DUPDATA, F_SUBDATA};
-use lmdb::format::page::{NodeData, P_DIRTY, P_LEAF, P_SUBP};
-use lmdb::format::{overflow_pages_for, Db, Meta, PageMut};
-use lmdb::{Dbi, Transaction};
+use lmdb_core::consts::{MDB_DUPSORT, P_INVALID};
+use lmdb_core::format::node::{F_DUPDATA, F_SUBDATA};
+use lmdb_core::format::page::{NodeData, P_DIRTY, P_LEAF, P_SUBP};
+use lmdb_core::format::{overflow_pages_for, Db, Meta, PageMut};
+use lmdb_core::{Dbi, Transaction};
 
 const PS: usize = 4096;
 

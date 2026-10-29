@@ -25,7 +25,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use lmdb::{Environment, Transaction};
+//! use lmdb_core::{Environment, Transaction};
 //!
 //! let env = Environment::builder().max_dbs(4).open("/path/to/env")?;
 //! let txn = env.begin_ro_txn()?;
@@ -37,7 +37,7 @@
 //! while let Some((key, value)) = cursor.next()? {
 //!     println!("{key:?} => {value:?}");
 //! }
-//! # Ok::<(), lmdb::Error>(())
+//! # Ok::<(), lmdb_core::Error>(())
 //! ```
 
 // No unsafe code outside `os` (which opts back in with

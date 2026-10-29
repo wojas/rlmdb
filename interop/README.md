@@ -8,7 +8,7 @@ environment and checking what each sees.
 * `cpeer` (C, `c/cpeer*.c`) speaks the protocol below, linked against
   `liblmdb` built from `../../libraries/liblmdb` (LMDB 0.9.36+) by `build.rs`
   with the upstream Makefile's flags and the platform's default lock mode.
-* `rpeer` (Rust, `src/bin/rpeer/`, on the `lmdb` crate) speaks the same
+* `rpeer` (Rust, `src/bin/rpeer/`, on the `lmdb-core` crate) speaks the same
   protocol. It implements the read side; the write-side commands exit with
   status 4 until stage 3 (see "rpeer status" below).
 * `layout_dump` (`c/layout_dump.c`) `#include`s `mdb.c` and prints
@@ -76,7 +76,7 @@ The tests print the page size of each environment they create (`--nocapture`):
 `rpeer` mirrors the C peer file by file (`args.rs` = `cpeer.c`, `dataset.rs`
 = `dataset.c`, `data.rs` = `cpeer_data.c`, `loops.rs` = `cpeer_loops.c`,
 `misc.rs` = `cpeer_misc.c`, `pagewalk.rs` = `cpeer_pagewalk.c`) and uses only
-the public API of the `lmdb` crate: `lmdb::core` for everything except
+the public API of the `lmdb-core` crate: `lmdb_core::core` for everything except
 `check-freelist`, which decodes the data file with `lmdb::format` alone.
 
 | command | rpeer | notes |

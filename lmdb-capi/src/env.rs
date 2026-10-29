@@ -13,10 +13,10 @@ use std::os::unix::fs::FileExt;
 use std::ptr;
 use std::sync::atomic::Ordering;
 
-use lmdb::consts::{CHANGEABLE, CHANGELESS, MDB_NOLOCK};
-use lmdb::format::layout::{META_SIZE, PAGE_HDR_SIZE};
-use lmdb::format::meta::{pick_newest, Meta};
-use lmdb::{Environment, EnvironmentFlags};
+use lmdb_core::consts::{CHANGEABLE, CHANGELESS, MDB_NOLOCK};
+use lmdb_core::format::layout::{META_SIZE, PAGE_HDR_SIZE};
+use lmdb_core::format::meta::{pick_newest, Meta};
+use lmdb_core::{Environment, EnvironmentFlags};
 
 use crate::handles::{lock, MDB_env};
 use crate::types::*;
@@ -155,7 +155,7 @@ pub unsafe extern "C" fn mdb_env_info(env: *mut MDB_env, info: *mut MDB_envinfo)
 /// meta page (non-zero only for environments a C program created with
 /// `MDB_FIXEDMAP`), read from the data file. 0 if the pages cannot be read.
 ///
-/// Stop-gap until `lmdb::Info` carries the recorded address itself.
+/// Stop-gap until `lmdb_core::Info` carries the recorded address itself.
 fn recorded_map_address(env: &Environment) -> usize {
     let read = |i: usize| {
         let mut page = [0u8; PAGE_HDR_SIZE + META_SIZE];
@@ -340,7 +340,7 @@ pub unsafe extern "C" fn mdb_env_set_maxdbs(env: *mut MDB_env, dbs: MDB_dbi) -> 
 /// data (511).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_env_get_maxkeysize(_env: *mut MDB_env) -> c_int {
-    lmdb::consts::MDB_MAXKEYSIZE as c_int
+    lmdb_core::consts::MDB_MAXKEYSIZE as c_int
 }
 
 /// `mdb_env_set_userctx`: set application information associated with the
@@ -398,7 +398,7 @@ pub unsafe extern "C" fn mdb_reader_list(
     };
     let text = match e.open_env() {
         Some(open) if open.flags().bits() & MDB_NOLOCK == 0 => match open.reader_list() {
-            Ok(readers) => lmdb::format_reader_list(&readers),
+            Ok(readers) => lmdb_core::format_reader_list(&readers),
             Err(err) => return err.to_err_code(),
         },
         // C: no lock table (MDB_NOLOCK, or not open yet).

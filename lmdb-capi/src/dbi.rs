@@ -10,8 +10,8 @@ use std::cmp::Ordering;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 
-use lmdb::consts::{FREE_DBI, MDB_CREATE, MDB_DUPSORT, MDB_INTEGERKEY, VALID_FLAGS};
-use lmdb::{Comparator, Dbi, Transaction};
+use lmdb_core::consts::{FREE_DBI, MDB_CREATE, MDB_DUPSORT, MDB_INTEGERKEY, VALID_FLAGS};
+use lmdb_core::{Comparator, Dbi, Transaction};
 
 use crate::cmp::trampoline_for;
 use crate::handles::{MDB_env, MDB_txn};
@@ -21,7 +21,7 @@ use crate::SUCCESS;
 const EINVAL: c_int = libc::EINVAL;
 
 fn bad_txn() -> c_int {
-    lmdb::MdbError::BadTxn.to_err_code()
+    lmdb_core::MdbError::BadTxn.to_err_code()
 }
 
 /// Turns `Result<(), code>` into a return code.
@@ -78,7 +78,7 @@ pub unsafe extern "C" fn mdb_dbi_open(
         // been created through it, nor be looked up yet.
         let result = match name.to_str() {
             Ok(name) => txn.open_db(Some(name)),
-            Err(_) => Err(lmdb::MdbError::NotFound.into()),
+            Err(_) => Err(lmdb_core::MdbError::NotFound.into()),
         };
         match result {
             Ok(db) => Ok(db),
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn mdb_dbi_open(
                 // C: a main DB with these flags cannot hold named DBs.
                 let main = txn.db_flags(Dbi::MAIN).map_err(|e| e.to_err_code())?;
                 if main.bits() & (MDB_DUPSORT | MDB_INTEGERKEY) != 0 {
-                    Err(lmdb::MdbError::Incompatible.to_err_code())
+                    Err(lmdb_core::MdbError::Incompatible.to_err_code())
                 } else {
                     // Creating a database needs a write transaction.
                     Err(libc::EACCES)
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn mdb_dbi_close(env: *mut MDB_env, dbi: MDB_dbi) {
     };
     if let Some(open) = e.open_env() {
         open.close_db(Dbi::from_raw(dbi));
-        if dbi >= lmdb::consts::CORE_DBS {
+        if dbi >= lmdb_core::consts::CORE_DBS {
             e.forget_c_comparators(dbi);
         }
     }
@@ -260,7 +260,7 @@ unsafe fn check_user_dbi(txn: *mut MDB_txn, dbi: MDB_dbi) -> c_int {
     code(t.with_read(EINVAL, |rt| {
         match rt.txn().db_flags(Dbi::from_raw(dbi)) {
             // C does not check for closed/reused handles here.
-            Ok(_) | Err(lmdb::Error::Mdb(lmdb::MdbError::BadDbi)) => Ok(()),
+            Ok(_) | Err(lmdb_core::Error::Mdb(lmdb_core::MdbError::BadDbi)) => Ok(()),
             Err(_) => Err(EINVAL),
         }
     }))

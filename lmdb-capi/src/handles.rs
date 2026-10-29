@@ -30,8 +30,8 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::AtomicPtr;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use lmdb::consts::DEFAULT_READERS;
-use lmdb::{Dbi, Environment};
+use lmdb_core::consts::DEFAULT_READERS;
+use lmdb_core::{Dbi, Environment};
 
 use crate::erased::{ErasedInactiveTxn, ErasedRoCursor, ErasedRoTxn};
 use crate::types::{MDB_assert_func, MDB_cmp_func, MDB_dbi};
@@ -196,7 +196,7 @@ impl MDB_txn {
     /// caller passed to `mdb_txn_begin`, kept as is because
     /// `mdb_txn_env` hands it back).
     pub(crate) fn new_read(env: NonNull<MDB_env>, txn: ErasedRoTxn) -> MDB_txn {
-        let txnid = lmdb::Transaction::id(txn.txn());
+        let txnid = lmdb_core::Transaction::id(txn.txn());
         MDB_txn {
             env,
             state: RefCell::new(TxnState::Read(txn)),
@@ -290,7 +290,7 @@ impl MDB_txn {
         };
         match renewed {
             Ok(txn) => {
-                self.txnid.set(lmdb::Transaction::id(txn.txn()));
+                self.txnid.set(lmdb_core::Transaction::id(txn.txn()));
                 *state = TxnState::Read(txn);
                 crate::SUCCESS
             }
@@ -416,7 +416,7 @@ impl MDB_cursor {
         f: impl FnOnce(&mut ErasedRoCursor) -> Result<T, c_int>,
     ) -> Result<T, c_int> {
         let txn = self.txn().ok_or(libc::EINVAL)?;
-        txn.with_read(lmdb::MdbError::BadTxn.to_err_code(), |rt| {
+        txn.with_read(lmdb_core::MdbError::BadTxn.to_err_code(), |rt| {
             let mut inner = self.inner.borrow_mut();
             if inner.is_none() {
                 // SAFETY: this cursor is registered with `txn`, which drops

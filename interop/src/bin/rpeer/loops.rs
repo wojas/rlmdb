@@ -24,7 +24,7 @@ use std::io::BufRead;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use lmdb::{CursorOp, Dbi, Environment, RoTxn, Transaction};
+use lmdb_core::{CursorOp, Dbi, Environment, RoTxn, Transaction};
 
 use crate::args::{
     now_seconds, parse_seconds, parse_u64, show, sleep_seconds, strtoull10, Check, CmdResult, Fail,

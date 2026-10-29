@@ -4,8 +4,8 @@
 
 mod common;
 
-use lmdb::consts::MDB_MAXKEYSIZE;
-use lmdb::{CursorOp, Dbi, Environment, EnvironmentFlags, Error, MdbError, Transaction};
+use lmdb_core::consts::MDB_MAXKEYSIZE;
+use lmdb_core::{CursorOp, Dbi, Environment, EnvironmentFlags, Error, MdbError, Transaction};
 
 fn tmp() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
@@ -245,7 +245,7 @@ fn reader_slots_lifecycle() {
     assert_eq!(env.info().unwrap().num_readers, 3);
     assert_eq!(env.reader_check().unwrap(), 0);
     assert_eq!(
-        lmdb::format_reader_list(&env.reader_list().unwrap()),
+        lmdb_core::format_reader_list(&env.reader_list().unwrap()),
         "(no active readers)\n"
     );
 }
@@ -301,6 +301,6 @@ fn assert_sync<T: Sync>() {}
 fn auto_traits() {
     assert_send::<Environment>();
     assert_sync::<Environment>();
-    assert_send::<lmdb::RoTxn<'static>>();
-    assert_send::<lmdb::InactiveTxn<'static>>();
+    assert_send::<lmdb_core::RoTxn<'static>>();
+    assert_send::<lmdb_core::InactiveTxn<'static>>();
 }

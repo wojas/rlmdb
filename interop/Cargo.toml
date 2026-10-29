@@ -14,7 +14,7 @@ name = "rpeer"
 path = "src/bin/rpeer/main.rs"
 
 [dependencies]
-lmdb = { path = "../lmdb" }
+lmdb-core = { path = "../lmdb-core" }
 tempfile = "3"
 
 [dev-dependencies]
