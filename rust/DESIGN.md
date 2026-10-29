@@ -53,7 +53,8 @@ Out of scope for now (leave the door open, do not design it away):
 * `../libraries/liblmdb/mtest*.c`: small C test programs; they must run
   unchanged against `lmdb-capi`.
 * `../libraries/liblmdb/mdb_stat.c`, `mdb_dump.c`, `mdb_load.c`,
-  `mdb_copy.c`, `mdb_drop.c`: the tools, reimplemented in `lmdb-tools`.
+  `mdb_copy.c`: the tools, reimplemented in `lmdb-tools` (`mdb_drop` does not
+  exist in 0.9.36; the Rust one is an extra modelled on 1.0's).
 
 ## On-disk format (what "compatible" means)
 
@@ -395,6 +396,35 @@ returns the C int; `from_err_code`; `Display` strings match `mdb_strerror`.
   integration tests in `lmdb/tests/` for API behaviour, and `interop/` for
   cross-process checks against the C build.
 * Do not commit. The coordinator commits between stages.
+
+## Findings from the interop harness (stage 1B)
+
+Facts about C 0.9.36 behaviour that implementers must honour; the harness in
+`interop/` tests them. See `interop/README.md` for details.
+
+* A DUPSORT DB's `md_branch_pages`/`md_leaf_pages` **include its sub-DB
+  pages** (ITS#9388); `mdb_stat` prints those totals. `check-freelist`
+  verifies depth/page counts/entries per DB against a full walk, so the Rust
+  writer must maintain them the same way.
+* Reader slots of a dead process stay in the table until `mdb_reader_check`
+  or an exclusive re-open; page reuse then stalls and the map fills. Same in
+  Rust (do not "fix" it unilaterally; `reader_check` is the fix).
+* Keys in the map are not NUL-terminated and the map may end exactly at the
+  last page: never read past a slice (SIGBUS in C, must be a bounds error in
+  Rust).
+* `mdb_env_copy`: plain copy holds the **write** lock while copying the meta
+  pages, then copies pages as they are. Compacting copy writes meta 0 with
+  txnid 0 and meta 1 with txnid 1, an empty free DB, renumbered pages, the
+  main root on the last page. Both create the target with `O_EXCL`.
+* A new data file is exactly 2 pages; the lock file is header +
+  maxreaders x 64 bytes (8192 on macOS with 126 readers) and persists.
+* `mdb_reader_list` line format: `"%10d %zx %zu\n"` (pid, tid hex, txnid) with
+  `-` for a slot not in a txn; header `"    pid     thread     txnid\n"`.
+* `mdb_dbi_flags` refuses DBI 0; the free DB's stored flags are
+  `MDB_INTEGERKEY`.
+* `mdb_load` in 0.9.36 drops the flags of the first DB in its input (the
+  `flags = 0;` from ITS#8662); the Rust tool must not copy that bug.
+* `mtest6` needs an `MDB_DEBUG` build; the harness does not build it.
 
 ## Staged plan
 
