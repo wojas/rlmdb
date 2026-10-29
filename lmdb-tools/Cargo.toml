@@ -4,6 +4,38 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop in Rust"
+publish = false
+
+[lib]
+name = "lmdb_tools"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mdb_stat"
+path = "src/bin/mdb_stat.rs"
+
+[[bin]]
+name = "mdb_dump"
+path = "src/bin/mdb_dump.rs"
+
+[[bin]]
+name = "mdb_load"
+path = "src/bin/mdb_load.rs"
+
+[[bin]]
+name = "mdb_copy"
+path = "src/bin/mdb_copy.rs"
+
+[[bin]]
+name = "mdb_drop"
+path = "src/bin/mdb_drop.rs"
 
 [dependencies]
+lmdb-core = { path = "../lmdb-core" }
+
+[dev-dependencies]
+# The tests build the C tools from libraries/liblmdb at test time.
+cc = "1"
+tempfile = "3"
