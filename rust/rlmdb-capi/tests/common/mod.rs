@@ -268,12 +268,29 @@ impl Builder {
     /// compiler, `-x c++`) and linked against the Rust library as
     /// `<name>_cxx`: a C++ program sees the C symbols only if the headers'
     /// `extern "C"` guards are right. The program must not need the C++
-    /// runtime (the C compiler driver links it).
-    pub fn cxx_test_program(&self, name: &str) -> PathBuf {
+    /// runtime (the C compiler driver links it). `None`, with a note on
+    /// stderr, when the C++ compiler (`CXX`, else the `cc` crate's default
+    /// such as `c++`) cannot be run: a machine with only a C compiler
+    /// skips the test instead of failing it.
+    pub fn cxx_test_program(&self, name: &str) -> Option<PathBuf> {
         let out_dir = self.dir.join("cxx");
         fs::create_dir_all(&out_dir).unwrap();
         let obj = out_dir.join(format!("{name}.o"));
-        let mut cmd = cc_build(&out_dir).cpp(true).get_compiler().to_command();
+        let compiler = match cc_build(&out_dir).cpp(true).try_get_compiler() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipped: no C++ compiler ({e})");
+                return None;
+            }
+        };
+        if let Err(e) = Command::new(compiler.path()).arg("--version").output() {
+            eprintln!(
+                "skipped: C++ compiler {} cannot be run: {e}",
+                compiler.path().display()
+            );
+            return None;
+        }
+        let mut cmd = compiler.to_command();
         cmd.arg("-I")
             .arg(crate_dir().join("include"))
             .arg("-I")
@@ -289,7 +306,7 @@ impl Builder {
             .arg(&obj)
             .arg(test_c_dir().join(format!("{name}.c")));
         run_ok(&mut cmd);
-        self.program(&format!("{name}_cxx"), &[obj], Lib::Rust)
+        Some(self.program(&format!("{name}_cxx"), &[obj], Lib::Rust))
     }
 
     /// One of the upstream `mtest*.c` programs, unmodified, built with
