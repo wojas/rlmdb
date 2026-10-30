@@ -105,7 +105,7 @@ deferred until the core has been validated through the C API.
 * Target: comparable to C. No allocations in the hot read path, binary
   search on pages, fixed-size cursor stacks, zero-copy values into the map.
 * Measure before and after with the interleaved A/B of `bench`
-  (`lmdb-bench --baseline <old binary> --rounds 3 --reps 3`); the machine
+  (`rlmdb-bench --baseline <old binary> --rounds 3 --reps 3`); the machine
   may be noisy, so never compare two separate runs. Keep a change only if
   it measurably helps; speculative complexity is reverted.
 * Performance changes must not add `unsafe` and must keep the invariants
