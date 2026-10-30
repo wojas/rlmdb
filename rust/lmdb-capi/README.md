@@ -132,8 +132,10 @@ point into the memory map or the transaction's dirty pages (zero copy).
 | Handles of existing databases opened in a transaction | Visible to other transactions only after that transaction commits; closed if it aborts (read or write transaction). | Published at once and kept after commit or abort. Handles of databases *created* by a write transaction follow C (published at commit, closed on abort). |
 | A parent transaction while its nested child is active | Most functions return `MDB_BAD_TXN`, but some check the DBI first (`EINVAL` for a bad one) and `mdb_dbi_flags`, `mdb_cmp`, `mdb_dcmp` still work. | Every function on the parent returns `MDB_BAD_TXN` (`mdb_txn_id`, `mdb_txn_env` work). |
 | `MDB_MULTIPLE` that fails after storing some items | `data[1].mv_size` = items stored, `data[0].mv_data` advanced to the failing one. | `data[1].mv_size` = 0, `data[0].mv_data` unchanged. Failures there leave the transaction unusable anyway. |
-| Keys and data that point into the transaction's own dirty pages | Read while the page is being changed (works in common cases, garbage or use-after-free in others). | Keys and data up to 16 KiB are copied before the write, so they are always read intact. |
+| Keys and data that point into the transaction's own dirty pages | Read while the page is being changed (works in common cases, garbage or use-after-free in others). | Keys and data up to 16 KiB, and `MDB_MULTIPLE` arrays up to 32 KiB (what `MDB_GET_MULTIPLE` returns), are copied before the write, so they are always read intact. Larger data must not point into the transaction's pages (see "Undefined behaviour" below). |
 | A C comparison function that calls back into the library with the transaction being written | Reads inconsistent state. | `EINVAL`. |
+| A C comparison function that frees a handle the running operation uses (`mdb_txn_abort`/`mdb_txn_commit` of its transaction or an ancestor, `mdb_cursor_close` of the cursor) | Use after free. | The process aborts with a message (`lmdb: ... called on a handle that is in use`). `mdb_txn_reset` there does nothing, `mdb_txn_renew` returns `EINVAL`. |
+| A callback that throws a C++ exception (comparison functions, the `mdb_reader_list` message function) | Unwinds through the library's C frames, leaving locks held and state half-changed. | The process aborts at the library boundary (the callback types are `extern "C-unwind"`; every exported function is `extern "C"`). |
 | `mdb_set_compare` / `mdb_set_dupsort` with NULL | Stores NULL, crashes on the next comparison. | Restores the default order. At most 64 distinct comparison functions per process (`ENOMEM` beyond). |
 | `mdb_dbi_open(txn, NULL, flags)` in a read transaction | ORs `flags` into the transaction's copy of the main DB record and resets a custom comparator of the main DB. | Ignores `flags`; keeps the comparator. |
 | `mdb_cmp` / `mdb_dcmp` | Return the comparator's raw value. | Built-in orders return exactly -1, 0 or 1 (C functions installed by the program are called directly). Return 0 for invalid arguments. |
@@ -145,6 +147,32 @@ point into the memory map or the transaction's dirty pages (zero copy).
 | `mdb_env_set_assert` | Calls the function on internal assertion failures. | Stored, never called: the Rust core returns errors instead of asserting. |
 | `mdb_set_relfunc` / `mdb_set_relctx` | Stored, never called. | Validated and ignored. |
 | C bugs not ported | See `../KNOWN_C_BUGS.md`. Visible through the C API: #4–#6 and #8 (`mdb_cursor_get`/`mdb_cursor_count` on cursors left past the end), #12 (`MDB_DUPFIXED` items of another size: `MDB_BAD_VALSIZE`), #13 (`MDB_CURRENT` on a cursor not on an item: `MDB_NOTFOUND`), #14 (stale duplicate counts of other cursors), #15 (`MDB_CURRENT` growing a duplicate on a full sub-page), #16 (`MDB_RESERVE` on `MDB_DUPSORT`: `EINVAL`), #17 (`MDB_DUPFIXED` without `MDB_DUPSORT`: `MDB_INCOMPATIBLE` on writes). | |
+
+## Undefined behaviour that remains
+
+These are the rules of `lmdb.h` whose violation is undefined behaviour in
+C; they stay undefined here (the library cannot detect them cheaply), and
+the safe Rust core cannot be used to break them:
+
+* Using a handle after it was freed: `mdb_env_close` while transactions or
+  cursors of the environment are alive (or from a callback), any call on
+  a closed environment, closing a handle twice, using or closing a cursor
+  of a write transaction after the transaction ended (it is freed with
+  it), using a transaction after `mdb_txn_commit`/`mdb_txn_abort`.
+* Using one transaction (or its cursors) from two threads at the same
+  time; ending a write transaction on another thread than the one that
+  began it.
+* A callback that leaves the library with `longjmp` (it skips Rust
+  frames).
+* Data larger than 16 KiB passed to `mdb_put`/`mdb_cursor_put` that points
+  into the transaction's own dirty pages (a value read earlier in the same
+  write transaction): the put may free those pages while it copies the
+  data, as C does.
+* Reading an `MDB_val` returned by a write transaction after the next
+  change in it, or one returned by a read transaction after it ended.
+* Another program truncating or rewriting the data file in place (outside
+  the LMDB protocol) while it is mapped: pages of a live snapshot are read
+  without copying; a shrunken file raises `SIGBUS`, as in C.
 
 ## Known gaps
 

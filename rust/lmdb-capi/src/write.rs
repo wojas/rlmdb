@@ -48,6 +48,10 @@ const CURSOR_PUT_FLAGS: c_uint = PUT_FLAGS | MDB_CURRENT | MDB_MULTIPLE;
 /// data of a node stored inline in a leaf page.
 const COPY_DATA_MAX: usize = lmdb_core::consts::MAX_PAGESIZE / 2;
 
+/// `MDB_MULTIPLE` items up to this size are copied before the put: a page,
+/// the most that `MDB_GET_MULTIPLE` / `MDB_NEXT_MULTIPLE` return.
+const MULTIPLE_COPY_MAX: usize = lmdb_core::consts::MAX_PAGESIZE;
+
 /// `TXN_DBI_EXIST(txn, dbi, DB_USRVALID)` of a read-only transaction:
 /// `false` unless `dbi` is a user database handle of the active
 /// transaction.
@@ -328,6 +332,11 @@ pub unsafe extern "C" fn mdb_cursor_put(
             // the product does not overflow (checked above).
             let items =
                 unsafe { std::slice::from_raw_parts(value.mv_data as *const u8, size * count) };
+            // The items may be what MDB_GET_MULTIPLE returned from a dirty
+            // page of this transaction, which the put changes: copy a
+            // page's worth or less (see the module documentation).
+            let items_copy = (items.len() <= MULTIPLE_COPY_MAX).then(|| items.to_vec());
+            let items = items_copy.as_deref().unwrap_or(items);
             let stored = w
                 .cursor_put_multiple(id, k, items, size, wflags)
                 .map_err(|e| e.to_err_code())?;

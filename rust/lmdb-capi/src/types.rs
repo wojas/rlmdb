@@ -4,6 +4,16 @@
 //! Callback parameters that C allows to be NULL are `Option<fn>` in the
 //! exported signatures (Rust guarantees the same representation as a
 //! nullable C function pointer).
+//!
+//! The callback types use the `"C-unwind"` ABI: the calling convention is
+//! C's, but an exception that a C++ callback throws may unwind through the
+//! library's Rust frames. Every exported function is `extern "C"`, so such
+//! an exception aborts the process at the library boundary instead of
+//! unwinding into the caller's C frames (with a plain `"C"` callback type it
+//! would be undefined behaviour). A callback that `longjmp`s out of the
+//! library skips Rust frames and is undefined behaviour. A callback that
+//! frees the transaction or a cursor it was called for aborts the process
+//! (see "Re-entrancy" in `crate::handles`).
 
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 
@@ -94,11 +104,11 @@ pub struct MDB_envinfo {
 
 /// `MDB_cmp_func`: a callback function used to compare two keys in a
 /// database.
-pub type MDB_cmp_func = unsafe extern "C" fn(a: *const MDB_val, b: *const MDB_val) -> c_int;
+pub type MDB_cmp_func = unsafe extern "C-unwind" fn(a: *const MDB_val, b: *const MDB_val) -> c_int;
 
 /// `MDB_rel_func`: a callback function used to relocate a position-dependent
 /// data item in a fixed-address database. Never called (as in C 0.9).
-pub type MDB_rel_func = unsafe extern "C" fn(
+pub type MDB_rel_func = unsafe extern "C-unwind" fn(
     item: *mut MDB_val,
     oldptr: *mut c_void,
     newptr: *mut c_void,
@@ -106,11 +116,11 @@ pub type MDB_rel_func = unsafe extern "C" fn(
 );
 
 /// `MDB_assert_func`: a callback function for most LMDB assert() failures.
-pub type MDB_assert_func = unsafe extern "C" fn(env: *mut MDB_env, msg: *const c_char);
+pub type MDB_assert_func = unsafe extern "C-unwind" fn(env: *mut MDB_env, msg: *const c_char);
 
 /// `MDB_msg_func`: a callback function used to print a message from the
 /// library (`mdb_reader_list`).
-pub type MDB_msg_func = unsafe extern "C" fn(msg: *const c_char, ctx: *mut c_void) -> c_int;
+pub type MDB_msg_func = unsafe extern "C-unwind" fn(msg: *const c_char, ctx: *mut c_void) -> c_int;
 
 /// The bytes an input `MDB_val` describes, or `None` for a NULL pointer.
 ///

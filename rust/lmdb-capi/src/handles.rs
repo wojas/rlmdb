@@ -33,8 +33,8 @@
 //! ancestor, `mdb_cursor_close` of a cursor that may be in use) aborts the
 //! process with a message: the alternative is a use after free, which is
 //! what C does. `mdb_txn_reset` of a transaction in use does nothing and
-//! `mdb_txn_renew` returns `EINVAL`. `mdb_env_close` cannot be guarded this way; as in
-//! C, it must not be called while transactions are alive.
+//! `mdb_txn_renew` returns `EINVAL`. `mdb_env_close` cannot be guarded
+//! this way; as in C, it must not be called while transactions are alive.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
