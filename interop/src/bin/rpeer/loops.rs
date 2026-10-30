@@ -581,7 +581,12 @@ fn wait_for_dbs(env: &Environment, db: Option<&str>, deadline: f64) -> CmdResult
 /// `reader-loop <env> <db|-> <seconds>`: check snapshot after snapshot
 /// (alternating reset/renew and abort/begin; every third one walks the main
 /// DB backwards) until `<seconds>` pass; at least one. Prints `READY` after
-/// the first, then `reads=.. first_commit=.. last_commit=..`.
+/// the first, then `reads=.. first_commit=.. last_commit=.. meta_races=0`.
+///
+/// Unlike `cpeer`, which tolerates C LMDB's reader meta race
+/// (`KNOWN_C_BUGS.md` #31) and counts it in `meta_races`, this fails on any
+/// step back of `#commits`: `rlmdb` re-checks `mti_txnid` after copying the
+/// meta page, so its snapshots cannot go back.
 pub fn cmd_reader_loop(o: &mut Opts) -> CmdResult {
     let db = Some(o.pos[1].as_str()).filter(|d| *d != "-");
     let deadline = now_seconds() + parse_seconds(o.pos.get(2).map(String::as_str))?;
@@ -617,7 +622,7 @@ pub fn cmd_reader_loop(o: &mut Opts) -> CmdResult {
         }
     }
     drop(txn);
-    println!("reads={reads} first_commit={first} last_commit={last}");
+    println!("reads={reads} first_commit={first} last_commit={last} meta_races=0");
     Ok(())
 }
 

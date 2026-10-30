@@ -5,8 +5,11 @@
 
 use std::fmt;
 
-use super::{audit, log, loop_secs, new_env, reader_check, readers, stat, DataSet, Pair, MIB};
-use crate::report::{HoldReady, ReaderLoopReport, WriterLoopReport};
+use super::{
+    audit, finish_reader_loop, log, loop_secs, new_env, reader_check, readers, stat, DataSet, Pair,
+    MIB,
+};
+use crate::report::{HoldReady, WriterLoopReport};
 use crate::{ensure, tools, Error, Peer, Result, TestEnv};
 
 /// Reader slots are visible across processes and implementations; the
@@ -273,7 +276,7 @@ pub fn reader_creates_lock_file(pair: Pair) -> Result<()> {
             .args(["loop", reader_secs.as_str()])
             .spawn()?;
         p.wait_ready()?;
-        loops.push(p);
+        loops.push((peer, p));
     }
     let wl = pair
         .writer
@@ -296,10 +299,8 @@ pub fn reader_creates_lock_file(pair: Pair) -> Result<()> {
         stat(pair.writer, &env)?.last_pgno
     ));
     ds.delete(pair.writer, &env, 2, &[])?;
-    for p in loops {
-        let out = p.finish()?.ok()?;
-        let r = ReaderLoopReport::parse(&out.stdout)?;
-        ensure!(r.reads > 1, "`{}` checked {} snapshots", out.label, r.reads);
+    for (peer, p) in loops {
+        finish_reader_loop(peer, p)?;
     }
 
     let table = readers(pair.writer, &env)?;
@@ -341,7 +342,7 @@ pub fn reader_loop_during_nested(pair: Pair) -> Result<()> {
             .args(["loop", reader_secs.as_str()])
             .spawn()?;
         p.wait_ready()?;
-        loops.push(p);
+        loops.push((peer, p));
     }
     let wl = pair
         .writer
@@ -352,11 +353,8 @@ pub fn reader_loop_during_nested(pair: Pair) -> Result<()> {
         pair.writer.on("nested-test", &env).run()?;
     }
     let wl = WriterLoopReport::parse(&wl.finish()?.ok()?.stdout)?;
-    for p in loops {
-        let out = p.finish()?.ok()?;
-        let r = ReaderLoopReport::parse(&out.stdout)?;
-        ensure!(r.reads > 1, "`{}` checked {} snapshots", out.label, r.reads);
-        log(format_args!("{}: {r:?}", out.label));
+    for (peer, p) in loops {
+        finish_reader_loop(peer, p)?;
     }
     log(format_args!("writer: {wl:?}"));
     for peer in pair.peers() {
@@ -395,7 +393,7 @@ pub fn notls_readers(pair: Pair) -> Result<()> {
             .args(["loop", reader_secs.as_str(), "--notls"])
             .spawn()?;
         p.wait_ready()?;
-        loops.push(p);
+        loops.push((peer, p));
     }
     // Bounded: the held snapshot keeps freed pages from reuse.
     pair.writer
@@ -411,10 +409,8 @@ pub fn notls_readers(pair: Pair) -> Result<()> {
         "{} does not list the --notls holder: {table:?}",
         pair.writer
     );
-    for p in loops {
-        let out = p.finish()?.ok()?;
-        let r = ReaderLoopReport::parse(&out.stdout)?;
-        ensure!(r.reads > 1, "`{}` checked {} snapshots", out.label, r.reads);
+    for (peer, p) in loops {
+        finish_reader_loop(peer, p)?;
     }
     holder.release()?;
     let out = holder.finish()?.ok()?;

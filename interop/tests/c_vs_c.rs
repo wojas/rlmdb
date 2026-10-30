@@ -6,7 +6,8 @@
 //! with the same line (`rust_writes_c_reads.rs`, ...).
 //!
 //! The tests after the macro check that the checkers are not vacuous: they
-//! must reject wrong data and broken page accounting.
+//! must reject wrong data, broken page accounting and a lasting step back
+//! of `#commits`.
 
 mod common;
 
@@ -60,6 +61,19 @@ fn verify_rejects_wrong_data() -> interop::Result<()> {
         );
         assert!(out.stderr.contains("verify db=d"), "{out}");
     }
+    Ok(())
+}
+
+/// A lasting step back of `#commits` fails the reader loop, although the
+/// C peer tolerates the transient one of C's reader meta race.
+#[test]
+fn reader_loop_rejects_a_step_back() -> interop::Result<()> {
+    let out = common::reader_loop_after_step_back(Peer::C)?;
+    assert_eq!(out.code(), Some(1), "{out}");
+    assert!(
+        out.stderr.contains("went back in time: #commits 2"),
+        "{out}"
+    );
     Ok(())
 }
 

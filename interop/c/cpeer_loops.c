@@ -540,13 +540,59 @@ out:
 	return rc;
 }
 
+/* A snapshot (txnid `t`, in *txn) showed fewer #commits than `max`, seen at
+ * txnid `n`. Tolerate this only as C LMDB's reader meta race
+ * (KNOWN_C_BUGS.md #31): mdb_txn_renew0 pins `n` in the reader slot, then
+ * copies the roots from meta page n & 1 without checking that it still holds
+ * n. A reader delayed there over two commits copies the roots of a commit
+ * m = n + 2 (or n + 4, ...) whose writer may not have published m yet; the
+ * next snapshot is then m - 1, older than the data just seen. So `t` must be
+ * an odd number of commits after `n`, and the first fresh snapshot after `t`
+ * (m, once published) must be back at `max`. A writer that committed stale
+ * data stays behind and fails here. The Rust library re-checks mti_txnid
+ * after the copy and cannot race: rpeer fails on any step back, and the
+ * scenarios fail if cpeer_capi counts one. On success *txn is the snapshot
+ * that is back, its #commits in *commits. */
+static int
+rl_meta_race(MDB_env *env, MDB_txn **txn, MDB_dbi mdbi, MDB_dbi ddbi, size_t n,
+	uint64_t max, uint64_t *commits, unsigned char *buf)
+{
+	size_t t = mdb_txn_id(*txn), id = t;
+	uint64_t low = *commits;
+	int tries = 0, rc;
+
+	/* The first fresh snapshot at once, then after 1 ms, 2 ms, ... (0.5 s
+	 * in all) for the writer of m to finish its meta sync and publish m. */
+	while (t > n && (t - n) % 2 && id == t && tries < 10) {
+		if (tries)
+			sleep_seconds(0.001 * (1 << (tries - 1)));
+		mdb_txn_abort(*txn);
+		CHECK(mdb_txn_begin(env, NULL, MDB_RDONLY, txn));
+		if ((rc = check_snapshot(*txn, mdbi, ddbi, 0, commits, buf)))
+			return rc;
+		tries++;
+		id = mdb_txn_id(*txn);
+	}
+	if (id > t && *commits >= max) {
+		fprintf(stderr, "cpeer: reader-loop: meta race: #commits %llu (txnid %zu) after %llu "
+			"(txnid %zu), back to %llu (txnid %zu)\n", (unsigned long long)low, t,
+			(unsigned long long)max, n, (unsigned long long)*commits, id);
+		return 0;
+	}
+	return rl_fail("snapshot went back in time: #commits %llu (txnid %zu) after %llu "
+		"(txnid %zu); %d fresh snapshots, the last #commits %llu (txnid %zu)",
+		(unsigned long long)low, t, (unsigned long long)max, n, tries,
+		(unsigned long long)*commits, id);
+}
+
 int
 cmd_reader_loop(struct opts *o)
 {
 	const char *db = strcmp(o->pos[1], "-") ? o->pos[1] : NULL;
 	double deadline = now_seconds() + parse_seconds(o->pos[2]);
-	unsigned long long reads = 0;
+	unsigned long long reads = 0, races = 0;
 	uint64_t first = 0, last = 0;
+	size_t last_id = 0;
 	unsigned char *buf = malloc(WL_BIG);
 	char dname[256];
 	MDB_env *env;
@@ -590,21 +636,23 @@ cmd_reader_loop(struct opts *o)
 		rc = check_snapshot(txn, mdbi, ddbi, (int)(reads % 3 == 2), &commits, buf);
 		if (rc)
 			break;
+		/* #commits never goes down, except in C's meta race (#31). */
 		if (commits < last) {
-			rc = rl_fail("snapshot went back in time: #commits %llu after %llu",
-				(unsigned long long)commits, (unsigned long long)last);
-			break;
+			if ((rc = rl_meta_race(env, &txn, mdbi, ddbi, last_id, last, &commits, buf)))
+				break;
+			races++;
 		}
 		if (reads++ == 0) {
 			first = commits;
 			printf("READY\n");
 		}
 		last = commits;
+		last_id = mdb_txn_id(txn);
 	} while (now_seconds() < deadline);
 	mdb_txn_abort(txn);
 	if (!rc)
-		printf("reads=%llu first_commit=%llu last_commit=%llu\n", reads,
-			(unsigned long long)first, (unsigned long long)last);
+		printf("reads=%llu first_commit=%llu last_commit=%llu meta_races=%llu\n", reads,
+			(unsigned long long)first, (unsigned long long)last, races);
 	free(buf);
 	mdb_env_close(env);
 	return rc;

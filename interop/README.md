@@ -51,7 +51,7 @@ rust/scripts/linux-test.sh test -p rlmdb-interop  # the same on Linux (Docker)
 
 | test file | what |
 |---|---|
-| `tests/c_vs_c.rs` | `scenario_tests!(C, C)`: validates the harness and the C peer; negative tests of the checkers (`verify`, `check-freelist`, `pagecmp`) |
+| `tests/c_vs_c.rs` | `scenario_tests!(C, C)`: validates the harness and the C peer; negative tests of the checkers (`verify`, `check-freelist`, `pagecmp`, `reader-loop`) |
 | `tests/c_writes_rust_reads.rs` | `scenario_tests!(C, Rust)` |
 | `tests/c_writes_conrust_reads.rs` | `scenario_tests!(C, COnRust)` |
 | `tests/rust_writes_c_reads.rs` | `scenario_tests!(Rust, C)` |
@@ -430,8 +430,25 @@ repeatedly take a snapshot (alternating `mdb_txn_reset`/`renew` and
 number of `w` keys equals `#count`; every dups value has a valid check
 word; per key `mdb_cursor_count` equals the values walked; their total
 equals `#dups` and the dups DB's `mdb_stat` entries; `#commits` never goes
-down. Every third snapshot walks the main DB backwards. Prints `READY` after
-the first snapshot, then `reads=<n> first_commit=<#commits> last_commit=<#commits>`.
+down (but see below). Every third snapshot walks the main DB backwards.
+Prints `READY` after the first snapshot, then `reads=<n>
+first_commit=<#commits> last_commit=<#commits> meta_races=<n>`.
+
+C LMDB's reader can see `#commits` go down (`KNOWN_C_BUGS.md` #31):
+`mdb_txn_renew0` copies the roots from meta page `txnid & 1` without
+checking that it still holds that txnid, so a reader delayed over two
+commits gets the roots of a commit `m` later than the txnid it pins, and
+its next snapshot, `m - 1` while `m`'s writer is still syncing the meta
+page, is older. `cpeer` accepts a step back only with that signature: the
+snapshot that went back is an odd number of txnids after the one that
+showed the maximum, and the first fresh snapshot with a higher txnid (up
+to 10 tries in 0.5 s) is back at the maximum. It counts these in
+`meta_races` and prints each on stderr (`cpeer: reader-loop: meta race:
+...`, with the txnids); anything else, such as a writer that committed stale data,
+fails. `rpeer` fails on any step back and always prints `meta_races=0`:
+`rlmdb` re-checks `mti_txnid` after the copy and cannot race. The scenarios
+print `[interop] NOTE ...` on stderr for races of `cpeer` and fail on races
+of `cpeer_capi`, which runs the same C code on `rlmdb`.
 
 **`check-freelist <env>`** — audit the page usage of a snapshot, like
 `mdb_audit()` (mdb.c) but stricter. Pins a snapshot with a read txn, picks

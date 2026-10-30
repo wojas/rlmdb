@@ -2,8 +2,8 @@
 //! on the Rust library. They do not take a pair; `tests/three_peers.rs`
 //! runs them.
 
-use super::{audit, loop_secs, new_env, Pair, MIB};
-use crate::report::{ReaderLoopReport, WriterLoopReport};
+use super::{audit, finish_reader_loop, loop_secs, new_env, Pair, MIB};
+use crate::report::WriterLoopReport;
 use crate::{ensure, Peer, Result};
 
 /// Writer loops of all three implementations at once (one `--nosync`),
@@ -26,7 +26,7 @@ pub fn three_writers() -> Result<()> {
             .args(["three", reader_secs.as_str()])
             .spawn()?;
         p.wait_ready()?;
-        readers.push(p);
+        readers.push((peer, p));
     }
     let mut writers = Vec::new();
     for (k, peer) in Peer::ALL.into_iter().enumerate() {
@@ -43,10 +43,8 @@ pub fn three_writers() -> Result<()> {
         let out = w.finish()?.ok()?;
         reports.push(WriterLoopReport::parse(&out.stdout)?);
     }
-    for p in readers {
-        let out = p.finish()?.ok()?;
-        let r = ReaderLoopReport::parse(&out.stdout)?;
-        ensure!(r.reads > 1, "`{}` checked {} snapshots", out.label, r.reads);
+    for (peer, p) in readers {
+        finish_reader_loop(peer, p)?;
     }
     let total: u64 = reports.iter().map(|r| r.commits).sum();
     let last = reports.iter().map(|r| r.last_commit).max().unwrap_or(0);

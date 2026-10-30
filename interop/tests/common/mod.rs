@@ -86,3 +86,21 @@ pub fn wrong_data_sets() -> Vec<DataSet> {
         DataSet::new("d", 2000, 1).with(&["--deleted-every", "2", "--dupsort"]),
     ]
 }
+
+/// Start `peer`'s `reader-loop` on writer-loop data at `#commits` 4, then
+/// commit an older `#commits` (2) with C's `mdb_load`, consistent with the
+/// rest of the data, and no commit after it; the reader loop's output. It
+/// must fail: only a step back that C's reader meta race explains and that
+/// the next snapshot repairs is tolerated (`KNOWN_C_BUGS.md` #31).
+pub fn reader_loop_after_step_back(peer: Peer) -> interop::Result<interop::Output> {
+    let env = TestEnv::new()?;
+    scenarios::create(Peer::C, &env, 64 << 20)?;
+    Peer::C
+        .on("writer-loop", &env)
+        .args(["loop", "30", "1", "--max-commits", "4"])
+        .run()?;
+    let mut rl = peer.on("reader-loop", &env).args(["loop", "10"]).spawn()?;
+    rl.wait_ready()?;
+    interop::tools::mdb_load(&env, &["-T", "-s", "loop"], "#commits\n2\n")?.ok()?;
+    rl.finish()
+}
