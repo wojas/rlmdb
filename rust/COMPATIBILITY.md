@@ -64,7 +64,11 @@ with `MDB_USE_POSIX_SEM`).
   time: readers of both see consistent snapshots, and writers of both are
   serialised by the shared writer lock (a write transaction of either
   waits for the other's). MVCC holds across implementations: a snapshot a
-  reader of either pins is never overwritten by a writer of either.
+  reader of either pins is never overwritten by a writer of either. A C
+  reader that races a commit in `mdb_txn_renew0` can see a snapshot newer
+  than the txnid it pins, and its next snapshot is then older
+  (`KNOWN_C_BUGS.md` #31); readers on `rlmdb` re-check the meta page and
+  never go back.
 * A process that dies holding the writer lock: on Linux the robust mutex
   lets the next writer (C or Rust) recover, as between C processes. On
   macOS semaphores are not robust; C has the same limitation.

@@ -434,7 +434,10 @@ strings match `mdb_strerror`.
   volatile reads (`ptr::read_volatile` in `os`) into an owned `Meta` value and
   validate (`magic`, `version`), re-reading as C does at txn begin
   (`mdb_txn_renew0`; the Rust reader additionally re-checks `mti_txnid`
-  after the copy and retries, where C accepts a torn read).
+  after the copy and retries, where C accepts a torn read). The re-check
+  also keeps a process's snapshots monotonic: a delayed C reader can copy
+  the meta page of a commit two later than the txnid it pins, and its next
+  snapshot is then older (`KNOWN_C_BUGS.md` #31).
 * Dirty pages in a write txn are owned `Box<[u8]>` buffers (one per page or
   overflow run), kept in a sorted list by pgno (`ID2L` semantics). Readers in
   the same txn resolve a pgno first in the dirty list, then parent txns'

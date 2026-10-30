@@ -418,6 +418,9 @@ pub struct ReaderLoopReport {
     pub first_commit: u64,
     /// `#commits` of the last snapshot.
     pub last_commit: u64,
+    /// Steps back of `#commits` tolerated as C LMDB's reader meta race
+    /// (`KNOWN_C_BUGS.md` #31; `cpeer` only, `rpeer` prints 0).
+    pub meta_races: u64,
 }
 
 impl ReaderLoopReport {
@@ -428,6 +431,7 @@ impl ReaderLoopReport {
             reads: kv.num("reads")?,
             first_commit: kv.num("first_commit")?,
             last_commit: kv.num("last_commit")?,
+            meta_races: kv.num("meta_races")?,
         })
     }
 }

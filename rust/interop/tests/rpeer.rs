@@ -348,6 +348,21 @@ fn verify_rejects_wrong_data() -> interop::Result<()> {
     Ok(())
 }
 
+/// Any step back of `#commits` fails rpeer's reader loop (`rlmdb` readers
+/// cannot see C's reader meta race).
+#[test]
+fn reader_loop_rejects_a_step_back() -> interop::Result<()> {
+    register();
+    let out = common::reader_loop_after_step_back(Peer::Rust)?;
+    assert_eq!(out.code(), Some(1), "{out}");
+    assert!(
+        out.stderr
+            .contains("snapshot went back in time: #commits 2 after 4"),
+        "{out}"
+    );
+    Ok(())
+}
+
 #[test]
 fn check_freelist_rejects_a_leaked_page() -> interop::Result<()> {
     register();

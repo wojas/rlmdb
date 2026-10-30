@@ -32,12 +32,13 @@ pub use bidir::*;
 pub use readers::*;
 
 use std::fmt;
+use std::io::Write;
 
 use crate::report::{
     CreateReport, FreelistReport, HoldReady, ReaderLoopReport, ReadersReport, StatReport,
     VerifyReport, WriteReport, WriterLoopReport,
 };
-use crate::{bail, bins, ensure, tools, Error, Output, Peer, Result, TestEnv};
+use crate::{bail, bins, ensure, tools, Error, Output, Peer, PeerProcess, Result, TestEnv};
 
 /// The two peers of a scenario.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +121,46 @@ const MIB: u64 = 1 << 20;
 
 fn log(msg: impl fmt::Display) {
     println!("[interop] {msg}");
+}
+
+/// Something worth seeing in a passing run, on the real stderr like
+/// [`skipped`]: `[interop] NOTE ...`.
+fn note(msg: impl fmt::Display) {
+    let _ = writeln!(std::io::stderr().lock(), "[interop] NOTE {msg}");
+}
+
+/// Wait for a `reader-loop` of `peer` started in the background and check
+/// its report: it checked more than one snapshot, and only C LMDB's reader
+/// raced. That reader can copy the meta page of a later commit than the
+/// txnid it pins, and its next snapshot is then older (`KNOWN_C_BUGS.md`
+/// #31); `cpeer` tolerates a step back of `#commits` with that signature
+/// and counts it in `meta_races`, noted here. `rlmdb` re-checks the meta
+/// page, so on it (`rpeer`, `cpeer_capi`) a race is an error.
+fn finish_reader_loop(peer: Peer, p: PeerProcess) -> Result<ReaderLoopReport> {
+    let out = p.finish()?.ok()?;
+    let r = ReaderLoopReport::parse(&out.stdout)?;
+    ensure!(r.reads > 1, "`{}` checked {} snapshots", out.label, r.reads);
+    if r.meta_races > 0 {
+        ensure!(
+            peer == Peer::C,
+            "`{}` runs on rlmdb, which cannot race, but #commits went back: {r:?}",
+            out.label
+        );
+        let races: Vec<&str> = out
+            .stderr
+            .lines()
+            .filter(|l| l.contains("meta race"))
+            .collect();
+        note(format_args!(
+            "`{}`: #commits went back {} time(s) and came back at once: C's reader meta race \
+             (KNOWN_C_BUGS.md #31): {}",
+            out.label,
+            r.meta_races,
+            races.join("; ")
+        ));
+    }
+    log(format_args!("{}: {r:?}", out.label));
+    Ok(r)
 }
 
 pub use crate::peer::skipped;
@@ -865,7 +906,7 @@ pub fn concurrent_writers_readers(pair: Pair) -> Result<()> {
             .args(["loop", reader_secs.as_str()])
             .spawn()?;
         p.wait_ready()?;
-        rl.push(p);
+        rl.push((peer, p));
     }
     let w1 = pair
         .writer
@@ -878,11 +919,8 @@ pub fn concurrent_writers_readers(pair: Pair) -> Result<()> {
         .spawn()?;
     let w1 = WriterLoopReport::parse(&w1.finish()?.ok()?.stdout)?;
     let w2 = WriterLoopReport::parse(&w2.finish()?.ok()?.stdout)?;
-    for p in rl {
-        let out = p.finish()?.ok()?;
-        let r = ReaderLoopReport::parse(&out.stdout)?;
-        ensure!(r.reads > 1, "reader loop checked {} snapshots", r.reads);
-        log(format_args!("{}: {r:?}", out.label));
+    for (peer, p) in rl {
+        finish_reader_loop(peer, p)?;
     }
     log(format_args!("writers: {w1:?} {w2:?}"));
     ensure!(w1.commits > 0 && w2.commits > 0, "a writer did not commit");
