@@ -7,8 +7,16 @@
 //! in [`readers`](mod@readers) are about the reader table and the lock file.
 //! [`scenario_tests!`](crate::scenario_tests) turns all of them into
 //! `#[test]`s for one pair; `tests/` has one file per ordered pair of the
-//! three peers (`c_vs_c.rs`, `rust_writes_c_reads.rs`, ...). The scenarios
-//! in [`all_peers`] use all three peers at once and do not take a pair.
+//! three peers of each format (`c_vs_c.rs`, `rust_writes_c_reads.rs`, ...,
+//! and for LMDB 1.0 `c10_vs_c10.rs`, `rust_writes_c10_reads.rs`,
+//! `rust_vs_rust10.rs`, ...). The scenarios in [`all_peers`] use all three
+//! peers of a format at once and do not take a pair; those in [`mixed`]
+//! have environments of both formats open at once.
+//!
+//! A pair has a format ([`Pair::format`]): its environments are created
+//! in it, and the C peer of that release ([`Pair::reference`]: `cpeer` for
+//! 0.9, `cpeer10` for 1.0) is the reference that verifies and audits
+//! everything, as do the C tools of that release ([`crate::tools`]).
 //!
 //! To add a scenario: write the function here (or in [`bidir`] or
 //! [`readers`](mod@readers)) and add its name to the list in
@@ -21,11 +29,13 @@
 //! lacks a feature, `COnRust` while `rlmdb-capi` returns `ENOSYS`) are
 //! handled in two ways, both reported with a `[interop] SKIPPED` line on
 //! the real stderr (visible without `--nocapture`): a step that some other
-//! peer could do just as well runs on C instead ([`capable`]); otherwise
+//! peer could do just as well runs on the pair's C peer instead
+//! ([`Pair::capable`]); otherwise
 //! the scenario stops and the test passes as skipped.
 
 pub mod all_peers;
 pub mod bidir;
+pub mod mixed;
 pub mod readers;
 
 pub use bidir::*;
@@ -38,27 +48,129 @@ use crate::report::{
     CreateReport, FreelistReport, HoldReady, ReaderLoopReport, ReadersReport, StatReport,
     VerifyReport, WriteReport, WriterLoopReport,
 };
-use crate::{bail, bins, ensure, tools, Error, Output, Peer, PeerProcess, Result, TestEnv};
+use crate::{bail, bins, ensure, tools, Error, Format, Output, Peer, PeerProcess, Result, TestEnv};
 
-/// The two peers of a scenario.
+/// The two peers of a scenario, and the format of its environments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pair {
     /// Creates environments, writes data, runs writer loops.
     pub writer: Peer,
     /// Reads and verifies, holds readers, runs reader loops.
     pub reader: Peer,
+    /// The data-file format of the environments the scenario creates.
+    pub format: Format,
+    /// Their page size (LMDB 1.0 only); `None` is the OS page size.
+    pub page_size: Option<u32>,
 }
 
 impl fmt::Display for Pair {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "writer={} reader={}", self.writer, self.reader)
+        write!(
+            f,
+            "writer={} reader={} format={}",
+            self.writer,
+            self.reader,
+            self.format.name()
+        )?;
+        if let Some(ps) = self.page_size {
+            write!(f, " pagesize={ps}")?;
+        }
+        Ok(())
     }
 }
 
 impl Pair {
-    /// A (writer, reader) pair.
+    /// A (writer, reader) pair on LMDB 0.9 environments.
     pub fn new(writer: Peer, reader: Peer) -> Pair {
-        Pair { writer, reader }
+        Pair::with_format(writer, reader, Format::V09)
+    }
+
+    /// A (writer, reader) pair on environments of `format`.
+    ///
+    /// # Panics
+    ///
+    /// If a peer cannot open such environments ([`Peer::handles`]: `C`
+    /// is 0.9 only, `C10` 1.0 only).
+    pub fn with_format(writer: Peer, reader: Peer, format: Format) -> Pair {
+        for peer in [writer, reader] {
+            assert!(
+                peer.handles(format),
+                "peer {peer} cannot open LMDB {} environments",
+                format.name()
+            );
+        }
+        Pair {
+            writer,
+            reader,
+            format,
+            page_size: None,
+        }
+    }
+
+    /// The same pair on environments with pages of `page_size` bytes.
+    ///
+    /// # Panics
+    ///
+    /// For LMDB 0.9, whose page size is the OS page size.
+    pub fn with_page_size(self, page_size: u32) -> Pair {
+        assert_eq!(self.format, Format::V10, "only LMDB 1.0 sets the page size");
+        Pair {
+            page_size: Some(page_size),
+            ..self
+        }
+    }
+
+    /// The C peer of the pair's format: the reference implementation, which
+    /// verifies and audits in every scenario ([`Peer::reference`]).
+    pub fn reference(&self) -> Peer {
+        Peer::reference(self.format)
+    }
+
+    /// A new, not yet created environment location in the pair's format
+    /// and page size.
+    pub fn env(&self) -> Result<TestEnv> {
+        Ok(self.configure(TestEnv::new()?))
+    }
+
+    /// `env` in the pair's format and page size.
+    pub fn configure(&self, env: TestEnv) -> TestEnv {
+        env.with_format(self.format).with_page_size(self.page_size)
+    }
+
+    /// A value size of at least `n` bytes that needs overflow pages: `n`,
+    /// which does at the OS page size, or more than half of a larger page
+    /// size the pair asks for (64 KiB pages hold values of 32 KB inline).
+    fn overflowing(&self, n: u32) -> u32 {
+        match self.page_size {
+            Some(ps) if n <= ps / 2 => ps / 2 + 1,
+            _ => n,
+        }
+    }
+
+    /// At least `n` duplicates of `valsize` bytes per key, enough for keys
+    /// with many of them to need a sub-DB: `n` at the OS page size, more
+    /// on a larger page size the pair asks for (a sub-page grows to half a
+    /// page).
+    fn subdb_dups(&self, n: u32, valsize: u32) -> u32 {
+        match self.page_size {
+            Some(ps) => n.max(ps / valsize),
+            None => n,
+        }
+    }
+
+    /// `peer` if it implements `command`, else the reference C peer (which
+    /// implements everything), with a SKIPPED note. For steps whose point
+    /// is not which peer runs them.
+    pub fn capable(&self, peer: Peer, command: &str) -> Peer {
+        if peer.supports(command) {
+            peer
+        } else {
+            let reference = self.reference();
+            skipped(format_args!(
+                "{peer} {command}: not implemented by this peer yet, {reference} runs it instead"
+            ));
+            reference
+        }
     }
 
     /// The distinct peers: writer, then reader if different.
@@ -70,28 +182,31 @@ impl Pair {
         v
     }
 
-    /// The peers that audit page usage: the reader and always C, the
-    /// reference implementation.
+    /// The peers that audit page usage: the reader and always the
+    /// reference C peer.
     pub fn auditors(&self) -> Vec<Peer> {
-        let mut v = vec![Peer::C];
-        if self.reader != Peer::C {
+        let reference = self.reference();
+        let mut v = vec![reference];
+        if self.reader != reference {
             v.push(self.reader);
         }
         v
     }
 
-    /// The peers that verify written data: writer, reader and always C.
+    /// The peers that verify written data: writer, reader and always the
+    /// reference C peer.
     pub fn verifiers(&self) -> Vec<Peer> {
         let mut v = self.peers();
-        if !v.contains(&Peer::C) {
-            v.push(Peer::C);
+        if !v.contains(&self.reference()) {
+            v.push(self.reference());
         }
         v
     }
 
-    /// The peers not in the pair (they run extra reader loops).
+    /// The peers of the format not in the pair (they run extra reader
+    /// loops).
     pub fn others(&self) -> Vec<Peer> {
-        Peer::ALL
+        Peer::all(self.format)
             .into_iter()
             .filter(|p| *p != self.writer && *p != self.reader)
             .collect()
@@ -133,16 +248,17 @@ fn note(msg: impl fmt::Display) {
 /// its report: it checked more than one snapshot, and only C LMDB's reader
 /// raced. That reader can copy the meta page of a later commit than the
 /// txnid it pins, and its next snapshot is then older (`KNOWN_C_BUGS.md`
-/// #31); `cpeer` tolerates a step back of `#commits` with that signature
-/// and counts it in `meta_races`, noted here. `rlmdb` re-checks the meta
-/// page, so on it (`rpeer`, `cpeer_capi`) a race is an error.
+/// #31; `mdb_txn_renew0` of C 1.0 does the same); `cpeer` and `cpeer10`
+/// tolerate a step back of `#commits` with that signature and count it in
+/// `meta_races`, noted here. `rlmdb` re-checks the meta page, so on it
+/// (`rpeer`, `cpeer_capi`) a race is an error.
 fn finish_reader_loop(peer: Peer, p: PeerProcess) -> Result<ReaderLoopReport> {
     let out = p.finish()?.ok()?;
     let r = ReaderLoopReport::parse(&out.stdout)?;
     ensure!(r.reads > 1, "`{}` checked {} snapshots", out.label, r.reads);
     if r.meta_races > 0 {
         ensure!(
-            peer == Peer::C,
+            !peer.is_rust(),
             "`{}` runs on rlmdb, which cannot race, but #commits went back: {r:?}",
             out.label
         );
@@ -164,20 +280,6 @@ fn finish_reader_loop(peer: Peer, p: PeerProcess) -> Result<ReaderLoopReport> {
 }
 
 pub use crate::peer::skipped;
-
-/// `peer` if it implements `command`, else the C peer (which implements
-/// everything), with a SKIPPED note. For steps whose point is not which
-/// peer runs them.
-pub fn capable(peer: Peer, command: &str) -> Peer {
-    if peer.supports(command) {
-        peer
-    } else {
-        skipped(format_args!(
-            "{peer} {command}: not implemented by this peer yet, C runs it instead"
-        ));
-        Peer::C
-    }
-}
 
 // ---- Data sets ---------------------------------------------------------------
 
@@ -287,9 +389,9 @@ pub fn create(peer: Peer, env: &TestEnv, mapsize: u64) -> Result<CreateReport> {
     Ok(r)
 }
 
-/// A new environment created by the pair's writer.
+/// A new environment in the pair's format, created by the pair's writer.
 fn new_env(pair: &Pair, mapsize: u64) -> Result<TestEnv> {
-    let env = TestEnv::new()?;
+    let env = pair.env()?;
     create(pair.writer, &env, mapsize)?;
     Ok(env)
 }
@@ -452,10 +554,23 @@ fn subdbs(report: &FreelistReport, db: &str) -> Result<u64> {
 /// A new environment: page size, meta pages, lock file size, empty stats,
 /// as seen by the reader and by `mdb_stat -e`.
 pub fn create_stat(pair: Pair) -> Result<()> {
-    let env = TestEnv::new()?;
+    let env = pair.env()?;
     let c = create(pair.writer, &env, 64 * MIB)?;
+    let layout = tools::c_layout_for(pair.format)?;
     ensure!(c.last_txnid == 0, "new env has txnid {}", c.last_txnid);
-    ensure!(c.maxkeysize == 511, "maxkeysize {}", c.maxkeysize);
+    if let Some(ps) = pair.page_size {
+        ensure!(c.psize == ps, "page size {}, asked for {ps}", c.psize);
+    }
+    // 511 in 0.9; in 1.0 it depends on the page size, as `layout_dump10`
+    // measures for some (`me_nodemax - 56`, DUAL_FORMAT.md §1, for others).
+    let maxkeysize = match (pair.format, pair.page_size) {
+        (Format::V09, _) => 511,
+        (Format::V10, None) => layout.get("mdb_env_get_maxkeysize(os_page_size)")? as u32,
+        (Format::V10, Some(ps)) => layout
+            .get(&format!("mdb_env_get_maxkeysize({ps})"))
+            .map_or((((ps - 24) / 2) & !1) - 2 - 56, |k| k as u32),
+    };
+    ensure!(c.maxkeysize == maxkeysize, "maxkeysize {}", c.maxkeysize);
     ensure!(c.mapsize == 64 * MIB, "mapsize {}", c.mapsize);
 
     // A new data file is exactly the two meta pages.
@@ -466,7 +581,6 @@ pub fn create_stat(pair: Pair) -> Result<()> {
         c.psize
     );
     // The lock file is the reader table: header + maxreaders slots.
-    let layout = tools::c_layout()?;
     let lock_len = std::fs::metadata(env.lock_file())?.len();
     let want = layout.get("offsetof(MDB_txninfo.mti_readers)")?
         + 126 * layout.get("sizeof(MDB_reader)")?;
@@ -481,6 +595,11 @@ pub fn create_stat(pair: Pair) -> Result<()> {
         ensure!(
             (st.last_pgno, st.last_txnid, st.maxreaders, st.free_pages) == (1, 0, 126, 0),
             "{peer}: unexpected stat of an empty env: {st:?}"
+        );
+        ensure!(
+            st.maxkeysize == maxkeysize,
+            "{peer}: maxkeysize {}",
+            st.maxkeysize
         );
         let main = st.db("-")?;
         ensure!(
@@ -613,10 +732,11 @@ pub fn fill_verify_dupsort(pair: Pair) -> Result<()> {
 /// `MDB_DUPFIXED`: `P_LEAF2` sub-pages and sub-DBs, `MDB_GET_MULTIPLE`.
 pub fn fill_verify_dupfixed(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 256 * MIB)?;
+    let dups = pair.subdb_dups(2000, 16).to_string();
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("df", 40, 12).with(&["--dupfixed", "--dups", "2000", "--valsize", "16"]),
+        &DataSet::new("df", 40, 12).with(&["--dupfixed", "--dups", &dups, "--valsize", "16"]),
         &[],
     )?;
     fill_verify(
@@ -652,10 +772,11 @@ pub fn fill_verify_intdup(pair: Pair) -> Result<()> {
 /// Values on overflow pages: one-page, many-page, written with `MDB_RESERVE`.
 pub fn fill_verify_overflow(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 512 * MIB)?;
+    let big = pair.overflowing(20000).to_string();
     let f = fill_verify(
         &pair,
         &env,
-        &DataSet::new("ov", 300, 16).with(&["--big", "20000"]),
+        &DataSet::new("ov", 300, 16).with(&["--big", &big]),
         &["--per-txn", "50"],
     )?;
     ensure!(
@@ -766,7 +887,7 @@ pub fn copy_dump_equal(pair: Pair) -> Result<()> {
     let copy = env.derived("copy");
     pair.writer.on("copy", &env).arg(copy.path()).run()?;
     let compact = env.derived("compact");
-    capable(pair.reader, "copy")
+    pair.capable(pair.reader, "copy")
         .on("copy", &env)
         .arg(compact.path())
         .arg("--compact")
@@ -913,7 +1034,8 @@ pub fn concurrent_writers_readers(pair: Pair) -> Result<()> {
         .on("writer-loop", &env)
         .args(["loop", &secs.to_string(), "11", "--nosync"])
         .spawn()?;
-    let w2 = capable(pair.reader, "writer-loop")
+    let w2 = pair
+        .capable(pair.reader, "writer-loop")
         .on("writer-loop", &env)
         .args(["loop", &secs.to_string(), "12"])
         .spawn()?;
@@ -995,7 +1117,7 @@ pub fn nested_txns(pair: Pair) -> Result<()> {
 
 /// `MDB_NOSUBDIR`: data file and `-lock` file side by side; copies too.
 pub fn nosubdir(pair: Pair) -> Result<()> {
-    let env = TestEnv::new_nosubdir()?;
+    let env = pair.configure(TestEnv::new_nosubdir()?);
     create(pair.writer, &env, 64 * MIB)?;
     ensure!(
         env.data_file().is_file(),
@@ -1038,8 +1160,9 @@ pub fn nosubdir(pair: Pair) -> Result<()> {
 ///
 /// Upstream bug: `mdb_load` loses the flags (`dupsort=1`, …) of the *first*
 /// database in its input: `readhdr()` parses them before the load loop,
-/// whose first statement is `flags = 0;` (since ITS#8662, 2017). So the DB
-/// that sorts first here, `a_plain`, has no flags.
+/// whose first statement is `flags = 0;` (since ITS#8662, 2017; C 1.0's
+/// `mdb_load` too, `KNOWN_C_BUGS.md` #1). So the DB that sorts first here,
+/// `a_plain`, has no flags. The tools are those of the pair's release.
 pub fn dump_load_roundtrip(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 256 * MIB)?;
     let sets = [
@@ -1067,16 +1190,19 @@ pub fn dump_load_roundtrip(pair: Pair) -> Result<()> {
 
 /// The databases written by the upstream `mtest*` programs (random data,
 /// `MDB_FIXEDMAP`, named and DUPSORT DBs, cursor deletes) are valid for the
-/// reader, and it dumps them like C does.
+/// reader, and it dumps them like C does. For 1.0 these are C 1.0's
+/// `mtest`…`mtest5` (1 KiB pages; not `mtest_enc*`, whose files are
+/// encrypted, nor `mtest_remap`).
 pub fn mtest_databases(pair: Pair) -> Result<()> {
     for name in bins::MTESTS {
-        let env = TestEnv::with_name("testdb")?;
-        tools::run_mtest(name, env.root())?;
+        let env = pair.configure(TestEnv::with_name("testdb")?);
+        tools::run_mtest_in(pair.format, name, env.root())?;
         let a = audit(&pair, &env)?;
         ensure!(
-            dump_all(pair.reader, &env)? == dump_all(Peer::C, &env)?,
-            "{name}: dump differs between {} and C",
-            pair.reader
+            dump_all(pair.reader, &env)? == dump_all(pair.reference(), &env)?,
+            "{name}: dump differs between {} and {}",
+            pair.reader,
+            pair.reference()
         );
         log(format_args!(
             "{name}: {} pages, {} trees",
@@ -1208,29 +1334,44 @@ macro_rules! __scenario_list {
     };
 }
 
-/// Instantiate every scenario as a `#[test]` for one (writer, reader) pair:
+/// Instantiate every scenario as a `#[test]` for one (writer, reader) pair,
+/// on LMDB 0.9 environments unless a format is given, and for LMDB 1.0
+/// optionally with a page size:
 ///
 /// ```ignore
-/// mod c_writes_rust_reads {
-///     interop::scenario_tests!(interop::Peer::C, interop::Peer::Rust);
-/// }
+/// interop::scenario_tests!(interop::Peer::C, interop::Peer::Rust);
+/// interop::scenario_tests!(interop::Peer::C10, interop::Peer::Rust, interop::Format::V10);
+/// interop::scenario_tests!(interop::Peer::C10, interop::Peer::Rust, interop::Format::V10, 1024);
 /// ```
 #[macro_export]
 macro_rules! scenario_tests {
     ($writer:expr, $reader:expr $(,)?) => {
-        $crate::__scenario_list!(__scenario_tests_impl!(($writer, $reader)));
+        $crate::__scenario_list!(__scenario_tests_impl!(
+            ($crate::scenarios::Pair::new($writer, $reader))
+        ));
+    };
+    ($writer:expr, $reader:expr, $format:expr $(,)?) => {
+        $crate::__scenario_list!(__scenario_tests_impl!(
+            ($crate::scenarios::Pair::with_format($writer, $reader, $format))
+        ));
+    };
+    ($writer:expr, $reader:expr, $format:expr, $page_size:expr $(,)?) => {
+        $crate::__scenario_list!(__scenario_tests_impl!(
+            ($crate::scenarios::Pair::with_format($writer, $reader, $format)
+                .with_page_size($page_size))
+        ));
     };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __scenario_tests_impl {
-    (($writer:expr, $reader:expr) $($name:ident)*) => {
+    (($pair:expr) $($name:ident)*) => {
         $(
             #[test]
             fn $name() {
                 $crate::register_rpeer(option_env!("CARGO_BIN_EXE_rpeer"));
-                let pair = $crate::scenarios::Pair::new($writer, $reader);
+                let pair = $pair;
                 match $crate::scenarios::$name(pair) {
                     Ok(()) => {}
                     // A peer lacks a command the scenario cannot do without.

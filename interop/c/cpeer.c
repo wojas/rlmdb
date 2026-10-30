@@ -173,6 +173,15 @@ open_env(const struct opts *o, unsigned int extra_flags)
 		flags |= MDB_NOMETASYNC;
 
 	CHECK(mdb_env_create(&env));
+#ifdef LMDB_RUST
+	if (o->format)
+		CHECK(rlmdb_env_set_format(env, o->format == 10 ? RLMDB_FORMAT_10 : RLMDB_FORMAT_09));
+	if (o->pagesize)
+		CHECK(rlmdb_env_set_pagesize(env, o->pagesize));
+#elif MDB_VERSION_MAJOR >= 1
+	if (o->pagesize)
+		CHECK(mdb_env_set_pagesize(env, (int)o->pagesize));
+#endif
 	if (o->mapsize)
 		CHECK(mdb_env_set_mapsize(env, o->mapsize));
 	CHECK(mdb_env_set_maxdbs(env, o->maxdbs));
@@ -184,9 +193,76 @@ open_env(const struct opts *o, unsigned int extra_flags)
 	return env;
 }
 
+int
+env_is_10(MDB_env *env)
+{
+#if MDB_VERSION_MAJOR >= 1
+	(void)env;
+	return 1;
+#elif defined(LMDB_RUST)
+	unsigned int format;
+	CHECK(rlmdb_env_get_format(env, &format));
+	return format == RLMDB_FORMAT_10;
+#else
+	(void)env;
+	return 0;
+#endif
+}
+
+char *
+subdb_name(int v10, const MDB_val *key)
+{
+	size_t len = key->mv_size;
+	char *name;
+
+	if (v10) {
+		/* "<name>\0" */
+		if (len == 0 || ((const char *)key->mv_data)[len - 1] != '\0')
+			return NULL;
+		len--;
+	}
+	if (memchr(key->mv_data, '\0', len))
+		return NULL;
+	name = malloc(len + 1);
+	memcpy(name, key->mv_data, len);
+	name[len] = '\0';
+	return name;
+}
+
+/* --format 0.9|1.0: what this program can open. cpeer (LMDB 0.9) and cpeer10
+ * (LMDB 1.0) open their own release's format only; cpeer_capi (C on rlmdb)
+ * asks for either with rlmdb_env_set_format(). */
+static int
+parse_format(const char *s)
+{
+	int f;
+
+	if (!strcmp(s, "0.9"))
+		f = 9;
+	else if (!strcmp(s, "1.0"))
+		f = 10;
+	else
+		die(EXIT_USAGE, "bad --format '%s' (0.9 or 1.0)", s);
+#if !defined(LMDB_RUST)
+	if (f != (MDB_VERSION_MAJOR >= 1 ? 10 : 9))
+		die(EXIT_USAGE, "--format %s: this peer is built against LMDB %d.%d and opens"
+			" only its format", s, MDB_VERSION_MAJOR, MDB_VERSION_MINOR);
+#endif
+	return f;
+}
+
 /* ---- Command table ------------------------------------------------------ */
 
 static int cmd_commands(struct opts *o);
+
+/* formats-loop: an LMDB 0.9 and an LMDB 1.0 environment in one process.
+ * rpeer only: a C library handles one format (cpeer_capi could, through
+ * rlmdb_env_set_format(), but nothing needs it). */
+static int
+cmd_formats_loop(struct opts *o)
+{
+	die(EXIT_NOT_IMPLEMENTED, "formats-loop: not implemented by this peer (rpeer only)");
+}
 
 struct command {
 	const char	*name;
@@ -211,6 +287,8 @@ static const struct command commands[] = {
 	{ "hold-writer", cmd_hold_writer, 2, 2, "hold-writer <env> <seconds> [--until-stdin]" },
 	{ "writer-loop", cmd_writer_loop, 4, 4, "writer-loop <env> <db|-> <seconds> <seed> [--keys N] [--max-commits N]" },
 	{ "reader-loop", cmd_reader_loop, 3, 3, "reader-loop <env> <db|-> <seconds>" },
+	{ "formats-loop", cmd_formats_loop, 5, 5, "formats-loop <env 0.9> <env 1.0> <db|-> <seconds>"
+		" <seed> [--keys N] [--max-commits N]" },
 	{ "check-freelist", cmd_check_freelist, 1, 1, "check-freelist <env>" },
 	{ "nested-test", cmd_nested_test, 1, 1, "nested-test <env> [--check]" },
 	{ "copy", cmd_copy, 2, 2, "copy <env> <dest> [--compact]" },
@@ -219,15 +297,15 @@ static const struct command commands[] = {
 	{ NULL, NULL, 0, 0, NULL }
 };
 
-/* "command=<name> implemented=1" for every command: the harness asks peers
- * what they implement (the Rust peer lacks the write side before stage 3). */
+/* "command=<name> implemented=<0|1>" for every command: the harness asks
+ * peers what they implement. */
 static int
 cmd_commands(struct opts *o)
 {
 	const struct command *c;
 
 	for (c = commands; c->name; c++)
-		printf("command=%s implemented=1\n", c->name);
+		printf("command=%s implemented=%d\n", c->name, c->run != cmd_formats_loop);
 	return 0;
 }
 
@@ -241,7 +319,7 @@ usage(void)
 		fprintf(stderr, "  %s\n", c->usage);
 	fprintf(stderr,
 		"env options: --nosubdir --notls --nosync --nometasync --mapsize N"
-		" --maxdbs N --maxreaders N\n"
+		" --maxdbs N --maxreaders N --format 0.9|1.0 --pagesize N\n"
 		"data options: --dupsort --dupfixed --intkey --intdup --revkey --revdup"
 		" --valsize N --big N --dups N --deleted-every N --per-txn N --append --reserve\n");
 	exit(EXIT_USAGE);
@@ -284,6 +362,13 @@ parse_args(int argc, char **argv, struct opts *o)
 		else if (!strcmp(a, "--mapsize")) o->mapsize = parse_u64(optval(argc, argv, &k), a);
 		else if (!strcmp(a, "--maxdbs")) o->maxdbs = parse_u32(optval(argc, argv, &k), a);
 		else if (!strcmp(a, "--maxreaders")) o->maxreaders = parse_u32(optval(argc, argv, &k), a);
+		else if (!strcmp(a, "--format")) o->format = parse_format(optval(argc, argv, &k));
+		else if (!strcmp(a, "--pagesize")) {
+			o->pagesize = parse_u32(optval(argc, argv, &k), a);
+#if !defined(LMDB_RUST) && MDB_VERSION_MAJOR < 1
+			die(EXIT_USAGE, "--pagesize: LMDB 0.9 has no mdb_env_set_pagesize");
+#endif
+		}
 		/* data set options */
 		else if (!strcmp(a, "--dupsort")) o->ds.dbflags |= MDB_DUPSORT;
 		else if (!strcmp(a, "--dupfixed")) o->ds.dbflags |= MDB_DUPSORT | MDB_DUPFIXED;

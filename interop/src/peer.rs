@@ -11,19 +11,25 @@ use std::sync::OnceLock;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::{bins, Error, Result, TestEnv};
+use crate::{bins, Error, Format, Result, TestEnv};
 
 /// One implementation of the peer command protocol (see `README.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Peer {
-    /// `cpeer`: C, linked against `liblmdb` built from `libraries/liblmdb`.
+    /// `cpeer`: C, linked against `liblmdb` built from `libraries/liblmdb`
+    /// (LMDB 0.9; opens 0.9 environments only).
     C,
-    /// `rpeer`: Rust, built on the `rlmdb` crate (`src/bin/rpeer`).
+    /// `rpeer`: Rust, built on the `rlmdb` crate (`src/bin/rpeer`). Both
+    /// formats.
     Rust,
     /// `cpeer_capi`: the same C program as [`Peer::C`], linked against the
     /// Rust `liblmdb.a` of `rlmdb-capi` instead of the C library (see
-    /// [`bins::cpeer_capi`]).
+    /// [`bins::cpeer_capi`]). Both formats (`rlmdb_env_set_format`).
     COnRust,
+    /// `cpeer10`: the same C program as [`Peer::C`], linked against the C
+    /// library of LMDB 1.0 ([`bins::cpeer10`]): the reference for 1.0
+    /// environments, which are the only ones it opens.
+    C10,
 }
 
 impl fmt::Display for Peer {
@@ -32,6 +38,7 @@ impl fmt::Display for Peer {
             Peer::C => "C",
             Peer::Rust => "Rust",
             Peer::COnRust => "COnRust",
+            Peer::C10 => "C10",
         })
     }
 }
@@ -134,8 +141,33 @@ pub(crate) fn default_timeout() -> Duration {
 }
 
 impl Peer {
-    /// All three peers.
+    /// The three peers of LMDB 0.9 environments ([`Peer::all`] of 0.9).
     pub const ALL: [Peer; 3] = [Peer::C, Peer::Rust, Peer::COnRust];
+
+    /// The three peers that open environments of `format`: the C peer of
+    /// that release ([`Peer::reference`]), Rust and COnRust.
+    pub fn all(format: Format) -> [Peer; 3] {
+        [Peer::reference(format), Peer::Rust, Peer::COnRust]
+    }
+
+    /// The C peer of `format`'s release, the oracle of scenarios on such
+    /// environments: [`Peer::C`] for 0.9, [`Peer::C10`] for 1.0.
+    pub fn reference(format: Format) -> Peer {
+        match format {
+            Format::V09 => Peer::C,
+            Format::V10 => Peer::C10,
+        }
+    }
+
+    /// Can this peer open environments of `format`? The C peers only open
+    /// their own release's; the peers on rlmdb open both.
+    pub fn handles(&self, format: Format) -> bool {
+        match self {
+            Peer::C => format == Format::V09,
+            Peer::C10 => format == Format::V10,
+            Peer::Rust | Peer::COnRust => true,
+        }
+    }
 
     /// Does this peer implement `command`? Asks the peer once per process
     /// (`<peer> commands`) and caches the answer.
@@ -147,10 +179,12 @@ impl Peer {
         static C: OnceLock<CommandTable> = OnceLock::new();
         static RUST: OnceLock<CommandTable> = OnceLock::new();
         static CONRUST: OnceLock<CommandTable> = OnceLock::new();
+        static C10: OnceLock<CommandTable> = OnceLock::new();
         let cell = match self {
             Peer::C => &C,
             Peer::Rust => &RUST,
             Peer::COnRust => &CONRUST,
+            Peer::C10 => &C10,
         };
         match cell.get_or_init(|| query_commands(*self)) {
             None => true,
@@ -164,13 +198,14 @@ impl Peer {
             Peer::C => Ok(bins::cpeer().to_path_buf()),
             Peer::Rust => rpeer_path(),
             Peer::COnRust => Ok(bins::cpeer_capi()?.to_path_buf()),
+            Peer::C10 => Ok(bins::cpeer10().to_path_buf()),
         }
     }
 
     /// Is this peer built on the Rust library (`rpeer`, or `cpeer` on
     /// `rlmdb-capi`)?
     pub fn is_rust(&self) -> bool {
-        *self != Peer::C
+        matches!(self, Peer::Rust | Peer::COnRust)
     }
 
     /// A command without an environment argument (e.g. `gen`).
@@ -184,11 +219,17 @@ impl Peer {
     }
 
     /// `<command> <env path> ... <env options>`: a command on `env`. The
-    /// environment's options (e.g. `--nosubdir`) are appended last.
+    /// environment's options (e.g. `--nosubdir`, `--format 1.0`) are
+    /// appended last. [`Peer::C10`] on a 0.9 environment gets `--format
+    /// 0.9`, which it refuses with a usage error (exit 2) instead of
+    /// re-initialising the environment's lock file for 1.0.
     pub fn on(self, command: &str, env: &TestEnv) -> PeerCmd {
         let mut cmd = self.cmd(command);
         cmd.args.push(env.path().into());
         cmd.env_args = env.peer_options();
+        if self == Peer::C10 && env.format() == Format::V09 {
+            cmd.env_args.extend(["--format".into(), "0.9".into()]);
+        }
         cmd
     }
 }

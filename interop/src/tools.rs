@@ -1,7 +1,8 @@
 //! The upstream C tools (`mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`) and
 //! test programs (`mtest*`), run as subprocesses, with parsers for their
-//! output. The helpers run the LMDB 0.9 builds; [`run_tool_any_status`] runs
-//! any of them, the LMDB 1.0 ones of [`bins`] included.
+//! output. The helpers that take a [`TestEnv`] run the build of the
+//! environment's release (`mdb_stat` for a 0.9 environment, `mdb_stat10`
+//! for a 1.0 one); [`run_tool_any_status`] runs any program of [`bins`].
 //!
 //! The parsers document the exact output formats, which the Rust
 //! reimplementations in `rlmdb-tools` must reproduce.
@@ -11,7 +12,23 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::peer::{default_timeout, run_command};
-use crate::{bins, Error, Output, Result, TestEnv};
+use crate::{bins, Error, Format, Output, Result, TestEnv};
+
+/// The C tool `name` (`mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`) of
+/// the release that writes `format`.
+fn tool_for(format: Format, name: &str) -> &'static Path {
+    match (format, name) {
+        (Format::V09, "mdb_stat") => bins::mdb_stat(),
+        (Format::V09, "mdb_dump") => bins::mdb_dump(),
+        (Format::V09, "mdb_load") => bins::mdb_load(),
+        (Format::V09, "mdb_copy") => bins::mdb_copy(),
+        (Format::V10, "mdb_stat") => bins::mdb_stat10(),
+        (Format::V10, "mdb_dump") => bins::mdb_dump10(),
+        (Format::V10, "mdb_load") => bins::mdb_load10(),
+        (Format::V10, "mdb_copy") => bins::mdb_copy10(),
+        _ => unreachable!("no C tool {name}"),
+    }
+}
 
 /// Run a C program with arguments and optional stdin; require success.
 fn run_tool(
@@ -308,14 +325,20 @@ fn parse_reader_line(line: &str, readers: &mut Vec<ReaderEntry>) -> Result<()> {
     }
 }
 
-/// Run `mdb_stat <flags> <env>` and parse the output.
+/// Run `mdb_stat <flags> <env>` (`mdb_stat10` for a 1.0 environment) and
+/// parse the output.
 ///
 /// Quirk: `mdb_stat -r` without `-a`, `-s` or `-f` exits with status 1 on
 /// success, because it returns the last `fputs()` result of
 /// `mdb_reader_list()` (a positive number) as its error code. That case is
 /// accepted here when nothing was printed to stderr.
 pub fn mdb_stat(env: &TestEnv, flags: &[&str]) -> Result<MdbStat> {
-    let out = run_tool_any_status(bins::mdb_stat(), &tool_args(env, flags), None, None)?;
+    let out = run_tool_any_status(
+        tool_for(env.format(), "mdb_stat"),
+        &tool_args(env, flags),
+        None,
+        None,
+    )?;
     let readers_only = flags.iter().any(|f| f.starts_with("-r"))
         && !flags
             .iter()
@@ -422,33 +445,37 @@ pub fn parse_dump(text: &str) -> Result<Vec<DumpedDb>> {
     Ok(dbs)
 }
 
-/// Run `mdb_dump <flags> <env>`; returns the raw text.
+/// Run `mdb_dump <flags> <env>` (`mdb_dump10` for a 1.0 environment);
+/// returns the raw text.
 pub fn mdb_dump_text(env: &TestEnv, flags: &[&str]) -> Result<String> {
-    Ok(run_tool(bins::mdb_dump(), &tool_args(env, flags), None, None)?.stdout)
+    let bin = tool_for(env.format(), "mdb_dump");
+    Ok(run_tool(bin, &tool_args(env, flags), None, None)?.stdout)
 }
 
-/// Run `mdb_dump <flags> <env>` and parse the output.
+/// Run `mdb_dump <flags> <env>` (`mdb_dump10` for a 1.0 environment) and
+/// parse the output.
 pub fn mdb_dump(env: &TestEnv, flags: &[&str]) -> Result<Vec<DumpedDb>> {
     parse_dump(&mdb_dump_text(env, flags)?)
 }
 
-/// Run `mdb_load <flags> <env>` with `input` on stdin. For a directory
-/// environment, the directory is created first.
+/// Run `mdb_load <flags> <env>` (`mdb_load10` for a 1.0 environment) with
+/// `input` on stdin. For a directory environment, the directory is created
+/// first.
 pub fn mdb_load(env: &TestEnv, flags: &[&str], input: &str) -> Result<Output> {
     if !env.is_nosubdir() {
         std::fs::create_dir_all(env.path())?;
     }
     run_tool(
-        bins::mdb_load(),
+        tool_for(env.format(), "mdb_load"),
         &tool_args(env, flags),
         None,
         Some(input.as_bytes()),
     )
 }
 
-/// Run `mdb_copy [-c] <src> <dst>`. For a directory environment, `dst` is
-/// created first (mdb_copy requires it to exist; the data file inside must
-/// not).
+/// Run `mdb_copy [-c] <src> <dst>` (`mdb_copy10` for a 1.0 environment).
+/// For a directory environment, `dst` is created first (mdb_copy requires
+/// it to exist; the data file inside must not).
 pub fn mdb_copy(src: &TestEnv, dst: &TestEnv, compact: bool) -> Result<Output> {
     if !dst.is_nosubdir() {
         std::fs::create_dir_all(dst.path())?;
@@ -459,7 +486,7 @@ pub fn mdb_copy(src: &TestEnv, dst: &TestEnv, compact: bool) -> Result<Output> {
     }
     args.push(src.path().into());
     args.push(dst.path().into());
-    run_tool(bins::mdb_copy(), &args, None, None)
+    run_tool(tool_for(src.format(), "mdb_copy"), &args, None, None)
 }
 
 /// The output of `layout_dump`: sizes, offsets and constants of the C build.
@@ -526,10 +553,29 @@ pub fn c_layout10() -> Result<&'static Layout> {
     Ok(LAYOUT.get_or_init(|| l))
 }
 
+/// `layout_dump` of the release that writes `format`: [`c_layout`] or
+/// [`c_layout10`].
+pub fn c_layout_for(format: Format) -> Result<&'static Layout> {
+    match format {
+        Format::V09 => c_layout(),
+        Format::V10 => c_layout10(),
+    }
+}
+
 /// Run the upstream test program `name` (`mtest`, `mtest2`, …) in `dir`;
 /// it creates/uses `dir/testdb`.
 pub fn run_mtest(name: &str, dir: &Path) -> Result<Output> {
-    let bin = bins::mtest(name).ok_or_else(|| Error::new(format!("unknown mtest {name}")))?;
+    run_mtest_in(Format::V09, name, dir)
+}
+
+/// [`run_mtest`] with the build of the release that writes `format`:
+/// `mtest*10` for 1.0 ([`bins::mtest10`], 1 KiB pages).
+pub fn run_mtest_in(format: Format, name: &str, dir: &Path) -> Result<Output> {
+    let bin = match format {
+        Format::V09 => bins::mtest(name),
+        Format::V10 => bins::mtest10(name),
+    }
+    .ok_or_else(|| Error::new(format!("unknown mtest {name}")))?;
     run_tool(bin, &[], Some(dir), None)
 }
 

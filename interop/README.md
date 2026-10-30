@@ -12,8 +12,9 @@ environment and checking what each sees.
   protocol, with the same LMDB calls in the same order and the same output
   (see "Peer status" below).
 * `cpeer_capi` is the C peer compiled against `../rlmdb-capi/include/lmdb.h`
-  and linked against the Rust `liblmdb.a` of `rlmdb-capi` instead of the C
-  library: the same C program on the Rust implementation (`Peer::COnRust`).
+  (and `rlmdb.h`, with `-DLMDB_RUST`) and linked against the Rust
+  `liblmdb.a` of `rlmdb-capi` instead of the C library: the same C program
+  on the Rust implementation (`Peer::COnRust`).
   `build.rs` compiles its objects; `interop::bins::cpeer_capi()` links them
   at test time (once per test process), because cargo builds `liblmdb.a`
   (`rlmdb-capi` is a dev-dependency of this crate) only after build scripts
@@ -28,9 +29,10 @@ environment and checking what each sees.
   1.0 differential tests here can run the same harness against C 1.0.
 * The same once more for LMDB 1.0, the second oracle: `mdb_stat10`,
   `mdb_dump10`, `mdb_load10`, `mdb_copy10`, `mdb_drop10`, `mtest10`,
-  `mtest2_10`…, `layout_dump10`, `cpeer10` and `writeops10` (its optional
-  sixth argument sets the page size), built from 1.0 sources that
-  `build.rs` takes from git (see "The LMDB 1.0 oracle" below).
+  `mtest2_10`…, `layout_dump10`, `cpeer10` (the fourth peer, `Peer::C10`)
+  and `writeops10` (its optional sixth argument sets the page size), built
+  from 1.0 sources that `build.rs` takes from git (see "The LMDB 1.0
+  oracle" below).
 
 * `rtools` (`src/bin/rtools.rs`) is the Rust tools of `../rlmdb-tools` in
   one executable (`rtools mdb_stat -a env` runs `mdb_stat` with `argv[0]`
@@ -40,21 +42,29 @@ environment and checking what each sees.
 The C programs are compiled into `$OUT_DIR/bin` (`interop::bins` has the
 paths); `rpeer` and `rtools` are normal `[[bin]]`s of this crate.
 
-Three peers give nine ordered (writer, reader) pairs. Every scenario runs
-for every pair, so each implementation writes what each implementation
-reads, concurrently where the scenario says so; C always verifies and
-audits too.
+Each data-file format has three peers: the C peer of its release (`cpeer`
+for LMDB 0.9, `cpeer10` for 1.0), `rpeer` and `cpeer_capi`, which open
+both formats (`--format 1.0`). That gives nine ordered (writer, reader)
+pairs per format. Every scenario runs for every pair, so each
+implementation writes what each implementation reads, concurrently where
+the scenario says so; the C peer of the format always verifies and audits
+too. The 1.0 pairs also run at 256 B, 1 KiB and 64 KiB pages
+(`--pagesize`), and one scenario has environments of both formats open in
+one process (`rpeer formats-loop`).
 
 ## Running
 
 ```sh
-cargo test -p rlmdb-interop                       # everything: 9 pairs, three peers, layout, rpeer (~1.5 min)
+cargo test -p rlmdb-interop                       # everything: 9 pairs per format, three peers, layout, rpeer, the 1.0 tests (~5 min)
 cargo test -p rlmdb-interop --test c_vs_c         # every scenario with C on both sides
 cargo test -p rlmdb-interop --test rust_writes_c_reads   # every scenario, Rust writes, C reads
+cargo test -p rlmdb-interop --test rust_writes_c10_reads # the same on LMDB 1.0 environments, C 1.0 reads
+cargo test -p rlmdb-interop --test pagesize10 -- _1k::   # C 1.0 and Rust on 1 KiB pages
+cargo test -p rlmdb-interop --test mixed_formats  # both formats in one process
 cargo test -p rlmdb-interop --test rpeer          # rpeer vs cpeer outputs, checkers, exit codes
 cargo test -p rlmdb-interop --test oracle10       # the LMDB 1.0 oracle: version, layout, refusals
 cargo test -p rlmdb-interop --test c_vs_c -- --nocapture mvcc   # one scenario, with its log
-INTEROP_LOOP_SECS=20 cargo test -p rlmdb-interop --no-fail-fast  # stress: 20 s loops (~6 min)
+INTEROP_LOOP_SECS=20 cargo test -p rlmdb-interop --no-fail-fast  # stress: 20 s loops (~20 min)
 rust/scripts/linux-test.sh test -p rlmdb-interop  # the same on Linux (Docker)
 ```
 
@@ -70,6 +80,13 @@ rust/scripts/linux-test.sh test -p rlmdb-interop  # the same on Linux (Docker)
 | `tests/conrust_writes_rust_reads.rs` | `scenario_tests!(COnRust, Rust)` |
 | `tests/conrust_vs_conrust.rs` | `scenario_tests!(COnRust, COnRust)` |
 | `tests/three_peers.rs` | `scenarios::all_peers`: all three implementations at once |
+| `tests/c10_vs_c10.rs` | `scenario_tests!(C10, C10, Format::V10)`: every scenario on LMDB 1.0 environments, C 1.0 on both sides |
+| `tests/c10_writes_rust_reads.rs`, `tests/rust_writes_c10_reads.rs` | `scenario_tests!(C10, Rust, Format::V10)` and `(Rust, C10, ...)` |
+| `tests/c10_writes_conrust_reads.rs`, `tests/conrust_writes_c10_reads.rs` | `(C10, COnRust, ...)` and `(COnRust, C10, ...)` |
+| `tests/rust_vs_rust10.rs`, `tests/conrust_vs_conrust10.rs`, `tests/rust_writes_conrust_reads10.rs`, `tests/conrust_writes_rust_reads10.rs` | the pairs of peers on rlmdb on 1.0 environments, C 1.0 verifying and auditing |
+| `tests/pagesize10.rs` | `scenario_tests!(C10, Rust, Format::V10, <page size>)` and `(Rust, C10, ...)` at 256 B, 1 KiB and 64 KiB pages (test names `<pair>_<size>::<scenario>`) |
+| `tests/three_peers10.rs` | `scenarios::all_peers` on a 1.0 environment: C 1.0, Rust and COnRust at once |
+| `tests/mixed_formats.rs` | `scenarios::mixed`: one rlmdb process (`rpeer formats-loop`) with a 0.9 and a 1.0 environment open, next to C 0.9 and C 1.0 on theirs |
 | `tests/rpeer.rs` | `gen`, `stat`, `dump`, `verify`, `check-freelist`, and `create`/`fill`/`delete` byte-identical to C (also failure reports); unimplemented commands exit 4; usage errors |
 | `tests/layout.rs` | the C struct layout against DESIGN.md, and every `layout_dump` value against `lmdb::consts`/`lmdb::format::layout` |
 | `tests/oracle10.rs` | the LMDB 1.0 build: tool versions, the `layout_dump10` numbers (page header, `MDB_ovpage`, lock-file header, the `MDB_LOCK_FORMAT` formula, maximum key size), the two dumps lining up, 0.9 and 1.0 refusing each other's environments, `cpeer10`, every 1.0 `mtest*` |
@@ -77,7 +94,8 @@ rust/scripts/linux-test.sh test -p rlmdb-interop  # the same on Linux (Docker)
 | `tests/write_differential10.rs` | the write path of the 1.0 format against C 1.0: the lock-step harness of `rlmdb/tests/common/differential.rs` with `writeops10` at 1, 4, 16 and 64 KiB pages (plain, integer, reverse, DUPSORT, DUPFIXED, deep trees, overwrites, nested transactions, drops, Rust-side spills; `diff10_spill_full_size` `#[ignore]`d), every step compared, then `mdb_dump10`, `cpeer10 check-freelist` and `pagecmp` (page by page, `mp_txnid` included) |
 | `tests/capi10.rs` | the C API with 1.0 environments against C 1.0: `cpeer_capi` creates one with `RLMDB_DEFAULT_FORMAT=1.0` (and a 0.9 one without), fills 1.0 files of 1 KiB and 64 KiB pages that `mdb_load10` created (opened without a format request; inline values of 20000 bytes on 64 KiB pages), and `cpeer10 verify`, the C 1.0 page audit, `mdb_dump10` and `mdb_stat10` agree; the reverse with `cpeer10` writing and `cpeer_capi verify`/`dump` reading, keys over 511 bytes from `mdb_load10` included |
 | `tests/tools10.rs` | the Rust tools (`rtools`) on 1.0 files against `mdb_load10` (`-F 1.0` and `RLMDB_DEFAULT_FORMAT=1.0`: same messages, same pages; empty keys), `mdb_stat10` and `mdb_dump10` (every option both have, on `mdb_load10` files at 1, 4, 64 KiB pages and on `mtest*10` environments), `mdb_drop10` (same files, also emptying the main DB), `mdb_copy10` (byte-identical copies); C 1.0's process map address is normalised (`KNOWN_C_BUGS.md`, "LMDB 1.0") |
-| `tests/format10.rs` | rlmdb reading C 1.0's files (`mdb_load10` at 512 B to 64 KiB pages, `mtest*10`) against `mdb_dump10`/`mdb_stat10`; rlmdb loading what `mdb_load10` loads (same pages); copies byte-identical to `mdb_copy10 [-c]`; C 1.0 and rlmdb writing one environment in turns; the concurrent scenarios, `#[ignore]`d until rlmdb writes the 1.0 lock file (`DUAL_FORMAT.md` stage 3) |
+| `tests/format10.rs` | rlmdb reading C 1.0's files (`mdb_load10` at 512 B to 64 KiB pages, `mtest*10`) against `mdb_dump10`/`mdb_stat10`; rlmdb loading what `mdb_load10` loads (same pages); copies byte-identical to `mdb_copy10 [-c]`; C 1.0 and rlmdb writing one environment in turns; a C 1.0 reader pinning pages against an rlmdb writer and the reverse, both writing an environment both keep open |
+| `tests/lockfile10.rs` | the lock-file descriptors of both versions against `layout_dump` and `layout_dump10`; an rlmdb `Environment` attaching to C 1.0's version 2 table and C 1.0 attaching to rlmdb's (header, readers both ways, writer lock both ways, dead readers cleared); held tables of the other version refused by rlmdb, C 0.9 and C 1.0, stale ones re-initialised by both |
 
 A scenario step that needs something a peer lacks (none at the moment)
 prints
@@ -142,10 +160,13 @@ sources are not copied into the tree: `build.rs` extracts them from git.
   `mtest_enc2` and `mtest_enc4` (they load the libsodium module
   `crypto.lm`), `mplay` (a log replayer, not a test).
 * **`cpeer10`** is `c/cpeer*.c` compiled against the 1.0 `lmdb.h` and
-  library. `c/cpeer_pagewalk.c` takes the page layout from
-  `MDB_VERSION_MAJOR`, so `cpeer10 check-freelist` audits 1.0 files (and
-  `cpeer` 0.9 files; a meta page of the other format stops it with a
-  message naming both). For 1.0 it also checks that every page reachable
+  library: `Peer::C10`, the reference peer of the 1.0 matrix. It opens 1.0
+  environments only (`--format 0.9` is a usage error, as `--format 1.0` is
+  for `cpeer`), and `--pagesize N` calls `mdb_env_set_pagesize`.
+  `c/cpeer_pagewalk.c` takes the page layout from `MDB_VERSION_MAJOR`
+  (`cpeer_capi`, built with `LMDB_RUST`, from the meta page), so `cpeer10
+  check-freelist` audits 1.0 files (and `cpeer` 0.9 files; a meta page of
+  the other format stops it with a message naming both). For 1.0 it also checks that every page reachable
   from the snapshot has `mp_txnid` in `1..=` the snapshot's txnid (meta
   pages and sub-pages excepted: C 1.0's compacting copy stamps pages 1 but
   leaves sub-pages as they were), that the `MDB_ovpage` of each
@@ -219,9 +240,14 @@ readers at 128. The test runs do not cover x86-64.
 
 `tests/lockfile10.rs` compares rlmdb's lock-file descriptors with every
 lock-file line of both `layout_dump`s, and shares a version 2 lock file
-between rlmdb and C 1.0 processes in both directions (rlmdb attaches to
-C's table, C attaches to rlmdb's), through `rlmdb::core::reader::LockFile`
-because an rlmdb `Environment` cannot open a 1.0 data file yet.
+between rlmdb and C 1.0 processes in both directions (an rlmdb
+`Environment` attaches to C's table, C attaches to rlmdb's). It reads the
+header with a descriptor of its own that it closes only after the
+environment: closing a descriptor of the lock file drops every record
+lock the process holds on it. A held table of the other version is
+reached through `Environment` by replacing the data file under a live
+process with one of the other format (restoring a backup of the other
+format), which the open's sniff then picks.
 
 ### 0.9 and 1.0 refuse each other
 
@@ -241,7 +267,7 @@ Neither version opens the other's environment (`versions_refuse_each_other`):
 
 ## Rust harness
 
-* `Peer::{C, Rust, COnRust}`: `peer.on("fill", &env).args([...]).run()`
+* `Peer::{C, Rust, COnRust, C10}`: `peer.on("fill", &env).args([...]).run()`
   runs a command and requires exit 0 (exit 4, or exit 3 with `ENOSYS`,
   gives an error that `is_not_implemented()`); `.output()` returns any
   status; `.spawn()`
@@ -249,18 +275,32 @@ Neither version opens the other's environment (`versions_refuse_each_other`):
   `release()`, `finish()`, `kill()` for a SIGKILL; dropping it kills the
   process). `peer.supports(command)` tells whether the peer implements a
   command.
+* `Peer::all(format)` (the three peers of a format), `Peer::reference(format)`
+  (`C` or `C10`), `peer.handles(format)`.
 * `TestEnv`: an environment in a temp dir (`new()`, `new_nosubdir()`,
   `with_name()`, `derived(name)` for copy targets).
+* `TestEnv::with_format(Format::V10)` and `with_page_size(Some(1024))`: a
+  1.0 environment of that page size; every peer command on it gets
+  `--format 1.0` (and `--pagesize`), and the helpers of `interop::tools`
+  (`mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`, `run_mtest_in`,
+  `c_layout_for`) run the C tools of the environment's release.
 * `report`: parsers for every command's output. `tools`: runs and parses
   the C tools. `tools::c_layout()`: the parsed `layout_dump`.
 * `scenarios`: every scenario as `fn(Pair) -> Result<()>` with
-  `Pair { writer, reader }`; `scenario_tests!(writer, reader)` turns them
-  all into `#[test]`s. `tests/c_vs_c.rs` is just
+  `Pair { writer, reader, format, page_size }` (`Pair::new` is 0.9,
+  `Pair::with_format`, `with_page_size`; `pair.reference()` is the C peer
+  that verifies and audits, `pair.env()` a new environment in the pair's
+  format, `pair.capable(peer, command)` the fallback to the reference
+  peer); `scenario_tests!(writer, reader[, format[, page size]])` turns
+  them all into `#[test]`s. `tests/c_vs_c.rs` is just
   `interop::scenario_tests!(Peer::C, Peer::C)` plus self-tests showing the
   checkers reject bad data and broken page accounting; the other eight
-  pair files are the same line for their pair. `scenarios::bidir` holds
-  the scenarios in which both peers write; `scenarios::all_peers` those
-  that use all three peers at once.
+  0.9 pair files are the same line for their pair, the nine 1.0 pair
+  files the same with `Format::V10`, and `pagesize10.rs` the 1.0 pairs of
+  C 1.0 and Rust with a page size. `scenarios::bidir` holds the scenarios
+  in which both peers write; `scenarios::all_peers` those that use all
+  three peers of a format at once; `scenarios::mixed` those with
+  environments of both formats.
 * `pagecmp::compare_data_files(a, b)`: do two data files hold the same
   trees on the same pages? Compares a canonical form of every page
   reachable from the newest meta page (headers, node pointers, nodes,
@@ -275,17 +315,20 @@ Neither version opens the other's environment (`versions_refuse_each_other`):
 `misc.rs` = `cpeer_misc.c`, `pagewalk.rs` = `cpeer_pagewalk.c`) and uses only
 the public API of the `rlmdb` crate (no `unsafe`): `rlmdb::core`
 for everything except `check-freelist`, which decodes the data file with
-`rlmdb::format` alone. `cpeer_capi` is `cpeer` itself; what it can do
-depends on what `rlmdb-capi` implements.
+`rlmdb::format` alone. `cpeer_capi` and `cpeer10` are `cpeer` itself; what
+`cpeer_capi` can do depends on what `rlmdb-capi` implements.
 
-| command | C | Rust (`rpeer`) | COnRust (`cpeer_capi`) |
+| command | C, C10 | Rust (`rpeer`) | COnRust (`cpeer_capi`) |
 |---|---|---|---|
 | `create`, `fill`, `delete`, `drop`, `verify`, `dump`, `stat`, `gen` | yes | yes, output identical to C (`tests/rpeer.rs`) | yes |
 | `readers`, `reader-check`, `hold-reader`, `hold-env`, `hold-writer`, `reader-loop`, `check-freelist` | yes | yes | yes |
 | `writer-loop`, `nested-test` | yes | yes (`RwTxn::begin_nested_txn`) | yes |
 | `copy` | yes | yes (`Environment::copy_to_path`) | yes |
+| `formats-loop` | no (one format per C library; exit 4) | yes | no (exit 4) |
 
-All three implement everything; no scenario is skipped on macOS or Linux.
+All implement everything the pair scenarios use; no scenario is skipped on
+macOS or Linux. `formats-loop` is the one command only `rpeer` has
+(`scenarios::mixed` runs it on `Peer::Rust` directly).
 Database names are bytes in all three (rpeer uses
 `Transaction::open_db_bytes`).
 
@@ -326,6 +369,8 @@ with `cpeer: ` (or `rpeer: `).
 | `--mapsize N` | `mdb_env_set_mapsize` (default: keep the environment's) |
 | `--maxdbs N` | `mdb_env_set_maxdbs` (default 64) |
 | `--maxreaders N` | `mdb_env_set_maxreaders` (default: LMDB's, 126) |
+| `--format 0.9\|1.0` | the data-file format to create or open: `rlmdb_env_set_format` (`cpeer_capi`), `EnvironmentBuilder::format` (`rpeer`); `cpeer` accepts only `0.9`, `cpeer10` only `1.0` (usage error otherwise). Without it an existing file is opened in its format and a new one is 0.9 (`cpeer10`: 1.0) |
+| `--pagesize N` | the page size of a new LMDB 1.0 environment: `mdb_env_set_pagesize` (`cpeer10`), `rlmdb_env_set_pagesize` (`cpeer_capi`), `EnvironmentBuilder::page_size` (`rpeer`); an existing environment keeps its own; `cpeer` (0.9) refuses it |
 
 Commands that only read open the environment with `MDB_RDONLY`: `verify`,
 `dump`, `stat`, `readers`, `reader-check`, `hold-reader`, `hold-env`,
@@ -391,7 +436,10 @@ failure (exit 1).
 **`dump <env> <db|->`** or **`dump <env> --all`** — print `db=<db>`, then
 one line per key/value pair in cursor order: `<hex key>=<hex value>`.
 Records of named DBs in the main DB print as `<hex key>=@db` (their value,
-an `MDB_db` with page numbers, differs between copies). `--all` dumps the
+an `MDB_db` with page numbers, differs between copies). A key of the main
+DB is a named DB's if it is a name (no NUL byte; in an LMDB 1.0
+environment the name and its terminating NUL) that opens as a DB; `stat`
+decides the same way. `--all` dumps the
 main DB, then every named DB in main-DB order. Two environments with the
 same content dump the same, whoever wrote them.
 
@@ -539,8 +587,19 @@ exist. The 40000 bytes are SplitMix64 words (little-endian) from state 5.
 **`gen <seed> <i> [data options]`** — print the generated item:
 `key=<hex>`, `ndups=<n>`, `value<d>=<hex>` per value, in generation order.
 
+**`formats-loop <env 0.9> <env 1.0> <db|-> <seconds> <seed> [--keys N]
+[--max-commits N]`** (`rpeer` only) — both formats in one process: opens
+the first environment as LMDB 0.9 and the second as 1.0 and keeps both
+open; runs the transactions of `writer-loop` on each in a thread of its
+own (seeds `seed` and `seed + 1`) while the main thread checks snapshots
+of both in turn as `reader-loop` does, until `<seconds>` pass. `READY`
+once both writers have committed, then per environment `writer format=<f>
+commits=.. aborts=.. nested_commits=.. nested_aborts=.. last_commit=..`
+and `reader format=<f> reads=.. first_commit=.. last_commit=..
+meta_races=0`. `--format` does not apply.
+
 **`commands`** — `command=<name> implemented=<0|1>` for every command of
-the peer (C: all 1).
+the peer (C: all 1 but `formats-loop`).
 
 ## Deterministic data set
 
@@ -619,7 +678,8 @@ gen 3 4 --intdup --dups 3   value0=000000005e89d359 value1=010000005f89d359 valu
 | `map_full` | a 4 MiB map: a fill too big fails with `MDB_MAP_FULL` in both peers and leaves nothing behind; committed batches of a `--per-txn` fill stay; a writer loop on the full map fails cleanly or not at all; the reader grows the map with `--mapsize`, the writer then opens with the size recorded in the meta page |
 | `killed_writer` | `hold-writer` and writer loops of the writer SIGKILLed inside write transactions; the reader must get the writer lock and write (Linux: robust mutex, `EOWNERDEAD` recovery while another process keeps the env open; macOS: the next writer provably waits on the non-robust semaphore, then an exclusive re-open re-creates it); nothing of the killed transactions is visible; data, counters and pages consistent |
 | `same_writes_same_pages` | writer and reader run the same script of writes (every fill variant, deletes, drops, a commit-bounded writer loop with nested transactions, `nested-test`) on environments of their own; after every step both files hold the same pages (`pagecmp`) |
-| `three_writers` (`tests/three_peers.rs`) | writer loops of C, Rust and COnRust at once, reader loops of all three; `#commits` = 1 + the sum of their commits; audited by all three |
+| `three_writers` (`tests/three_peers.rs`, `tests/three_peers10.rs`) | writer loops of C (C 1.0 on a 1.0 environment), Rust and COnRust at once, reader loops of all three; `#commits` = 1 + the sum of their commits; audited by all three |
+| `formats_in_one_process` (`tests/mixed_formats.rs`) | `rpeer formats-loop` on a 0.9 and a 1.0 environment (a writer thread on each, snapshot checks of both) while C 0.9 runs a writer loop on the first and C 1.0 on the second, with reader loops of the C peer and COnRust on each; per environment `#commits` = 1 + the C and the Rust commits, the file keeps its format, audited by its C release, Rust and COnRust |
 
 ## C behaviour the Rust implementation must match (found by this harness)
 

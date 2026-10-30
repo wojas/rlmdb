@@ -13,7 +13,9 @@
 
 use std::io::{self, BufWriter, Write};
 
-use rlmdb::{CursorOp, DatabaseFlags, Dbi, RoCursor, RoTxn, RwTxn, Transaction, WriteFlags};
+use rlmdb::{
+    CursorOp, DatabaseFlags, Dbi, Format, RoCursor, RoTxn, RwTxn, Transaction, WriteFlags,
+};
 
 use crate::args::{found, short_hex, show, Check, CmdResult, Fail, Opts};
 use crate::dataset::{delete_dup, delete_key, DataSet, Model, ModelItem};
@@ -581,21 +583,37 @@ pub fn cmd_verify(o: &mut Opts) -> CmdResult {
 
 // ---- dump ----------------------------------------------------------------------------
 
+/// `subdb_name`: the name of the named DB whose record in the main DB of
+/// an environment of `format` has key `key`, if it can be one: names have
+/// no NUL byte, and in LMDB 1.0 the key is the name with its terminating
+/// NUL (0.9: without).
+pub fn subdb_name(format: Format, key: &[u8]) -> Option<&[u8]> {
+    let name = match format {
+        Format::V09 => key,
+        Format::V10 => key.strip_suffix(b"\0")?,
+    };
+    (!name.contains(&0)).then_some(name)
+}
+
 /// `is_subdb`: is `key` of the main DB the name of a named DB? Decided as
-/// `mdb_stat -a` does: no NUL byte, and opening it as a DB succeeds (names
-/// are bytes, as in C, not necessarily UTF-8). Returns its handle.
-pub fn subdb(txn: &RoTxn<'_>, key: &[u8]) -> Option<Dbi> {
-    if key.contains(&0) {
-        return None;
-    }
-    txn.open_db_bytes(Some(key)).ok()
+/// `mdb_stat -a` does: a name ([`subdb_name`]), and opening it as a DB
+/// succeeds (names are bytes, as in C, not necessarily UTF-8). Returns the
+/// name and the handle.
+pub fn subdb<'k>(txn: &RoTxn<'_>, format: Format, key: &'k [u8]) -> Option<(&'k [u8], Dbi)> {
+    let name = subdb_name(format, key)?;
+    Some((name, txn.open_db_bytes(Some(name)).ok()?))
 }
 
 /// `dump_db`: print `db=<label>`, then `<hex key>=<hex value>` per item in
 /// cursor order. Named-DB records of the main DB print as `<hex key>=@db`
 /// (their value, an `MDB_db` with page numbers, differs between copies);
 /// their names are returned for `--all`.
-fn dump_db(out: &mut impl Write, txn: &RoTxn<'_>, db: Option<&[u8]>) -> CmdResult<Vec<Vec<u8>>> {
+fn dump_db(
+    out: &mut impl Write,
+    txn: &RoTxn<'_>,
+    format: Format,
+    db: Option<&[u8]>,
+) -> CmdResult<Vec<Vec<u8>>> {
     let label = db.unwrap_or(b"-");
     let dbi: Dbi = match txn.open_db_bytes(db) {
         Err(e) if e.not_found() => {
@@ -613,9 +631,9 @@ fn dump_db(out: &mut impl Write, txn: &RoTxn<'_>, db: Option<&[u8]>) -> CmdResul
     let mut cur = txn.cursor(dbi).check("mdb_cursor_open")?;
     while let Some((key, data)) = cur.next().check("mdb_cursor_get")? {
         write_hex(out, key)?;
-        if db.is_none() && subdb(txn, key).is_some() {
+        if let Some((name, _)) = db.is_none().then(|| subdb(txn, format, key)).flatten() {
             out.write_all(b"=@db\n")?;
-            names.push(key.to_vec());
+            names.push(name.to_vec());
             continue;
         }
         out.write_all(b"=")?;
@@ -645,15 +663,16 @@ pub fn cmd_dump(o: &mut Opts) -> CmdResult {
         ));
     }
     let env = o.open_env(true)?;
+    let format = env.format();
     let txn = env.begin_ro_txn().check("mdb_txn_begin")?;
     let mut out = BufWriter::new(io::stdout().lock());
     if o.all {
-        for name in dump_db(&mut out, &txn, None)? {
-            dump_db(&mut out, &txn, Some(&name))?;
+        for name in dump_db(&mut out, &txn, format, None)? {
+            dump_db(&mut out, &txn, format, Some(&name))?;
         }
     } else {
         let db = o.pos[1].as_bytes();
-        dump_db(&mut out, &txn, (db != b"-").then_some(db))?;
+        dump_db(&mut out, &txn, format, (db != b"-").then_some(db))?;
     }
     out.flush()?;
     Ok(())

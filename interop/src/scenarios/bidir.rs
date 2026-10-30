@@ -8,9 +8,7 @@
 
 use std::time::Duration;
 
-use super::{
-    audit, capable, create, drop_db, dump_all, log, new_env, stat, verify_by, DataSet, Pair, MIB,
-};
+use super::{audit, create, drop_db, dump_all, log, new_env, stat, verify_by, DataSet, Pair, MIB};
 use crate::report::{HoldReady, WriterLoopReport};
 use crate::{bail, ensure, Output, Peer, Result, TestEnv};
 
@@ -103,14 +101,14 @@ pub fn delete_heavy(pair: Pair) -> Result<()> {
 
     for ds in &sets {
         ds.delete(r, &env, 3, &["--per-txn", "500"])?;
-        verify_by(&[w, Peer::C], &env, &ds.after_delete(3))?;
+        verify_by(&[w, pair.reference()], &env, &ds.after_delete(3))?;
     }
     audit(&pair, &env)?;
 
     for ds in &sets {
         ds.after_delete(3)
             .delete(w, &env, 1, &["--per-txn", "2000"])?;
-        verify_by(&[r, Peer::C], &env, &ds.after_delete(1))?;
+        verify_by(&[r, pair.reference()], &env, &ds.after_delete(1))?;
     }
     let empty = audit(&pair, &env)?;
     for ds in &sets {
@@ -129,7 +127,7 @@ pub fn delete_heavy(pair: Pair) -> Result<()> {
     for ds in &sets {
         ds.fill(r, &env, &[])?;
         ds.delete(w, &env, 2, &["--per-txn", "700"])?;
-        verify_by(&[r, Peer::C], &env, &ds.after_delete(2))?;
+        verify_by(&[r, pair.reference()], &env, &ds.after_delete(2))?;
     }
     let refilled = audit(&pair, &env)?;
     log(format_args!(
@@ -176,7 +174,7 @@ pub fn drop_clear_dbs(pair: Pair) -> Result<()> {
     }
     let full = audit(&pair, &env)?;
 
-    let dropper = capable(pair.writer, "drop");
+    let dropper = pair.capable(pair.writer, "drop");
     for ((ds, delete), n) in sets.iter().zip(&entries) {
         let out = drop_db(dropper, &env, &ds.db, *delete)?;
         ensure!(
@@ -212,10 +210,13 @@ pub fn drop_clear_dbs(pair: Pair) -> Result<()> {
         "drop: tree pages {} -> {}, free pages {} -> {}",
         full.pages_tree, dropped.pages_tree, full.pages_free, dropped.pages_free
     ));
-    // Only the main DB (records of the emptied DBs) is left; the drops may
-    // take a few new pages for the grown free list.
+    // Only the main DB (records of the emptied DBs) is left: one leaf, or
+    // with 256-byte pages a small tree. The drops may take a few new pages
+    // for the grown free list, which lists every page of the dropped trees
+    // (with 1 KiB pages one overflow page per 128).
     ensure!(
-        dropped.pages_tree <= 2 && dropped.last_pgno <= full.last_pgno + 16,
+        dropped.pages_tree == dropped.db("-")?.pages()
+            && dropped.last_pgno <= full.last_pgno + 16 + dropped.pages_freedb,
         "pages after the drops: {dropped:?}, before: {full:?}"
     );
     ensure!(
@@ -225,7 +226,7 @@ pub fn drop_clear_dbs(pair: Pair) -> Result<()> {
 
     for (ds, _) in &sets {
         ds.fill(pair.reader, &env, &[])?;
-        verify_by(&[pair.writer, Peer::C], &env, ds)?;
+        verify_by(&[pair.writer, pair.reference()], &env, ds)?;
     }
     let refilled = audit(&pair, &env)?;
     ensure!(
@@ -279,10 +280,10 @@ pub fn copy_cross(pair: Pair) -> Result<()> {
     ];
     for ds in &sets {
         ds.fill(pair.writer, &env, &[])?;
-        ds.delete(capable(pair.reader, "delete"), &env, 4, &[])?;
+        ds.delete(pair.capable(pair.reader, "delete"), &env, 4, &[])?;
     }
     let orig = audit(&pair, &env)?;
-    let original = dump_all(Peer::C, &env)?;
+    let original = dump_all(pair.reference(), &env)?;
 
     // Every copier copies the same snapshot: nobody writes meanwhile.
     let mut copies: Vec<(Peer, bool, TestEnv)> = Vec::new();
@@ -292,7 +293,10 @@ pub fn copy_cross(pair: Pair) -> Result<()> {
                 "{peer}-{}",
                 if compact { "compact" } else { "plain" }
             ));
-            let mut cmd = capable(peer, "copy").on("copy", &env).arg(target.path());
+            let mut cmd = pair
+                .capable(peer, "copy")
+                .on("copy", &env)
+                .arg(target.path());
             if compact {
                 cmd = cmd.arg("--compact");
             }
@@ -374,11 +378,13 @@ fn expect_map_full(out: Output) -> Result<()> {
 /// reader grows the map (`--mapsize`), the fill succeeds, and the writer
 /// opens with the new size recorded in the meta page.
 pub fn map_full(pair: Pair) -> Result<()> {
-    let env = TestEnv::new()?;
+    let env = pair.env()?;
     create(pair.writer, &env, 4 * MIB)?;
     let base = DataSet::new("base", 500, 101);
     base.fill(pair.writer, &env, &[])?;
-    let big = DataSet::new("huge", 200, 102).with(&["--big", "60000"]);
+    // 100 values of 60000 bytes: more than the map at every page size
+    // (with 16 KiB pages each takes 64 KiB, with 1 KiB pages 59 KiB).
+    let big = DataSet::new("huge", 300, 102).with(&["--big", "60000"]);
 
     for peer in pair.peers() {
         expect_map_full(peer.on("fill", &env).args(big.args()).output()?)?;
@@ -491,14 +497,16 @@ pub fn killed_writer(pair: Pair) -> Result<()> {
 
     // Keeps the environment open, so that the next opener is not exclusive
     // (an exclusive opener re-initialises the lock file).
-    let mut keeper = Peer::C
+    let mut keeper = pair
+        .reference()
         .on("hold-env", &env)
         .args(["120", "--until-stdin"])
         .spawn()?;
     keeper.wait_ready()?;
     let mut keeper = Some(keeper);
 
-    let mut holder = capable(pair.writer, "hold-writer")
+    let mut holder = pair
+        .capable(pair.writer, "hold-writer")
         .on("hold-writer", &env)
         .args(["120", "--until-stdin"])
         .spawn()?;
@@ -547,7 +555,7 @@ pub fn killed_writer(pair: Pair) -> Result<()> {
     check_loop_data(&pair, &env, "kw")?;
     verify_all(&pair, &env, &ds)?;
     // "#held" in hex, as `dump` prints keys.
-    let main = Peer::C.on("dump", &env).arg("-").run()?.stdout;
+    let main = pair.reference().on("dump", &env).arg("-").run()?.stdout;
     ensure!(
         !main.lines().any(|l| l.starts_with("2368656c64=")),
         "the killed transaction's #held is visible:\n{main}"
@@ -688,7 +696,7 @@ const SAME_WRITES: &[&[&str]] = &[
 /// reuse, split points, free-list records, sub-page growth, overflow
 /// placement.
 pub fn same_writes_same_pages(pair: Pair) -> Result<()> {
-    let envs = [TestEnv::new()?, TestEnv::new()?];
+    let envs = [pair.env()?, pair.env()?];
     let peers = [pair.writer, pair.reader];
     for (peer, env) in peers.iter().zip(&envs) {
         create(*peer, env, 256 * MIB)?;

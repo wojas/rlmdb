@@ -59,9 +59,10 @@ cmd_stat(struct opts *o)
 	MDB_val key, data;
 	MDB_dbi main;
 	size_t free_pages = 0;
-	int rc;
+	int rc, v10;
 
 	env = open_env(o, MDB_RDONLY);
+	v10 = env_is_10(env);
 	CHECK(mdb_env_stat(env, &st));
 	CHECK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
 	CHECK(mdb_env_info(env, &info));
@@ -89,12 +90,9 @@ cmd_stat(struct opts *o)
 	CHECK(mdb_cursor_open(txn, main, &cur));
 	while ((rc = mdb_cursor_get(cur, &key, &data, MDB_NEXT_NODUP)) == 0) {
 		MDB_dbi dbi;
-		char *name;
-		if (memchr(key.mv_data, '\0', key.mv_size))
+		char *name = subdb_name(v10, &key);
+		if (!name)
 			continue;
-		name = malloc(key.mv_size + 1);
-		memcpy(name, key.mv_data, key.mv_size);
-		name[key.mv_size] = '\0';
 		if (mdb_dbi_open(txn, name, 0, &dbi) == 0)
 			print_stat_line(txn, dbi, name);
 		free(name);

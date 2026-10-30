@@ -22,12 +22,16 @@
 #include <stdio.h>
 
 #include "lmdb.h"
+#ifdef LMDB_RUST
+/* cpeer_capi: rlmdb's own functions (data-file formats). */
+#include "rlmdb.h"
+#endif
 
 /* Exit codes of every command. */
 #define EXIT_MISMATCH	1	/* data or invariant check failed */
 #define EXIT_USAGE	2	/* bad command line */
 #define EXIT_LMDB	3	/* an LMDB call failed unexpectedly */
-/* 4 is "command not implemented by this peer" (rpeer before stage 3). */
+#define EXIT_NOT_IMPLEMENTED	4	/* command not implemented by this peer */
 
 /* ---- Deterministic data set (dataset.c) -------------------------------- */
 
@@ -98,6 +102,8 @@ struct opts {
 	int		nosubdir, notls, nosync, nometasync;
 	size_t		mapsize;	/* 0: keep the environment's size */
 	unsigned int	maxdbs, maxreaders;
+	int		format;		/* --format: 0 (not given), 9 (0.9) or 10 (1.0) */
+	unsigned int	pagesize;	/* --pagesize (LMDB 1.0): 0, or a new env's page size */
 
 	/* data set and command options */
 	struct dataset	ds;
@@ -127,6 +133,14 @@ void parse_dataset_args(struct opts *o, int first);
 
 /* Open the environment named by o->pos[0] (path) with the global options. */
 MDB_env *open_env(const struct opts *o, unsigned int extra_flags);
+/* Is `env` (open) an LMDB 1.0 environment? cpeer: never, cpeer10: always,
+ * cpeer_capi: as rlmdb_env_get_format() says. */
+int env_is_10(MDB_env *env);
+/* The name of the named DB whose record in the main DB has key `key`, as
+ * a malloc'd C string, or NULL if `key` cannot be a DB name: a name has no
+ * NUL byte, and in LMDB 1.0 the key is the name with its terminating NUL
+ * (0.9: without). */
+char *subdb_name(int v10, const MDB_val *key);
 /* Parse an unsigned number, or die with a usage error. */
 uint64_t parse_u64(const char *s, const char *what);
 uint32_t parse_u32(const char *s, const char *what);

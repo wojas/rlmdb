@@ -19,7 +19,8 @@
  *
  * The format is the one of the library this file is compiled against
  * (cpeer: LMDB 0.9, cpeer10: LMDB 1.0), checked at run time in the meta
- * pages. A 1.0 snapshot is also checked for what only 1.0 records: every
+ * pages. cpeer_capi (built with LMDB_RUST, on rlmdb, which opens both)
+ * takes it from meta page 0 instead. A 1.0 snapshot is also checked for what only 1.0 records: every
  * page reachable from it carries the txnid of the transaction that wrote
  * it (mp_txnid in 1..snapshot; not meta pages, which carry 0, nor
  * sub-pages, which the compacting copy leaves as they were while it
@@ -62,7 +63,8 @@ static const struct layout layouts[2] = {
 	{ "LMDB 1.0", 3, 24, 24, 1, 1, 24, 0 },
 };
 
-/* The format of the lmdb.h this file is compiled against. */
+/* The format of the lmdb.h this file is compiled against; on rlmdb
+ * (LMDB_RUST) the one meta page 0 is in (choose_format()). */
 #if MDB_VERSION_MAJOR == 0
 #define FORMAT		0
 #elif MDB_VERSION_MAJOR == 1
@@ -70,8 +72,8 @@ static const struct layout layouts[2] = {
 #else
 #error "cpeer_pagewalk.c decodes the data files of LMDB 0.9 and 1.0 only"
 #endif
-static const struct layout *const fmt = &layouts[FORMAT];
-static const struct layout *const other_fmt = &layouts[1 - FORMAT];
+static const struct layout *fmt = &layouts[FORMAT];
+static const struct layout *other_fmt = &layouts[1 - FORMAT];
 
 #define MAX_PAGEHDRSZ	24
 #define NODESIZE	8
@@ -636,6 +638,26 @@ wrong_format(int k, const unsigned char *buf)
 		fmt->name, META_MAGIC, fmt->version);
 }
 
+#ifdef LMDB_RUST
+/* rlmdb opens environments of both formats: decode the one whose meta page
+ * is at its place in page 0 (`buf`). */
+static void
+choose_format(const unsigned char *buf)
+{
+	struct meta m;
+	int k;
+
+	for (k = 0; k < 2; k++) {
+		read_meta(buf, &layouts[k], &m);
+		if (m.magic == META_MAGIC && m.version == layouts[k].version) {
+			fmt = &layouts[k];
+			other_fmt = &layouts[1 - k];
+			return;
+		}
+	}
+}
+#endif
+
 /* Read both meta pages and return the one of snapshot `txnid`. */
 static int
 pick_meta(int fd, uint64_t txnid, struct meta *out, unsigned int *psize)
@@ -648,6 +670,10 @@ pick_meta(int fd, uint64_t txnid, struct meta *out, unsigned int *psize)
 		off_t off = k == 0 ? 0 : (off_t)*psize;
 		if (pread(fd, buf, sizeof(buf), off) != (ssize_t)sizeof(buf))
 			die(EXIT_LMDB, "check-freelist: cannot read meta page %d", k);
+#ifdef LMDB_RUST
+		if (k == 0)
+			choose_format(buf);
+#endif
 		read_meta(buf, fmt, &m);
 		if (m.magic != META_MAGIC || m.version != fmt->version)
 			wrong_format(k, buf);
