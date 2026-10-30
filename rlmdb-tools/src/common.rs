@@ -7,7 +7,7 @@ use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
-use rlmdb::{Dbi, Error, RwTxn, Transaction};
+use rlmdb::{Dbi, Environment, Error, Format, RoCursor, RwTxn, Stat, Transaction};
 
 use crate::cfmt::{err_code, io_errno, strerror};
 use crate::output::{eprint_bytes, Output};
@@ -123,6 +123,50 @@ pub fn create_db(
     flags: rlmdb::DatabaseFlags,
 ) -> Result<Dbi, Error> {
     txn.create_db_bytes(name.map(c_name), flags)
+}
+
+// ---------------------------------------------------------------------------
+// What differs between the LMDB 0.9 and 1.0 tools
+// ---------------------------------------------------------------------------
+//
+// The tools work on environments of both formats. Where the C tools of the
+// two releases print or decide differently, the tools behave like the
+// release whose format the environment has: each C release is the oracle
+// for its own format.
+
+/// The name `mdb_stat` and `mdb_dump` give `mdb_dbi_open` in their message
+/// when opening the database fails: C 0.9's tools call it through its old
+/// name `mdb_open`, C 1.0's as `mdb_dbi_open`.
+pub fn dbi_open_name(env: &Environment) -> &'static str {
+    match env.format() {
+        Format::V09 => "mdb_open",
+        Format::V10 => "mdb_dbi_open",
+    }
+}
+
+/// For `-a`: the name of the named database whose record `cursor` (on the
+/// main DB) is on, as the C tools of the environment's format find it, or
+/// `None` to skip the record. C 0.9 tries every key without a NUL byte
+/// (`mdb_dbi_open` then decides). C 1.0 takes the records of named
+/// databases (`mdb_cursor_is_db`), whose key is the name and its NUL, and
+/// uses the key as a C string.
+pub fn db_name_of<'k>(format: Format, cursor: &RoCursor<'_>, key: &'k [u8]) -> Option<&'k [u8]> {
+    match format {
+        Format::V09 => (!key.contains(&0)).then_some(key),
+        Format::V10 => cursor.current_is_db().then(|| c_name(key)),
+    }
+}
+
+/// `prstat()` of `mdb_stat.c`: the statistics block of a database. C 1.0's
+/// starts with the page size (0.9 has that line under `#if 0`).
+pub fn print_db_stat(out: &mut Output, format: Format, st: &Stat) {
+    if format == Format::V10 {
+        out.print(format_args!("  Page size: {}\n", st.page_size));
+    }
+    out.print(format_args!(
+        "  Tree depth: {}\n  Branch pages: {}\n  Leaf pages: {}\n  Overflow pages: {}\n  Entries: {}\n",
+        st.depth, st.branch_pages, st.leaf_pages, st.overflow_pages, st.entries
+    ));
 }
 
 #[cfg(test)]

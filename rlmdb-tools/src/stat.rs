@@ -5,15 +5,20 @@
 //! mdb_stat [-V] [-n] [-e] [-r[r]] [-f[f[f]]] [-a|-s subdb] dbpath
 //! ```
 //!
-//! Output and messages are those of the C tool. One deliberate difference
-//! (`KNOWN_C_BUGS.md` #2): `mdb_stat -r` without `-a`, `-s` or `-f` exits
-//! with 0 on success; C exits with 1 because it returns the value of the
-//! last `fputs` call.
+//! Output and messages are those of the C tool of the environment's format:
+//! for an LMDB 1.0 environment those of 1.0's `mdb_stat` (a `Page size` line
+//! in every database's block, `mdb_dbi_open` in the message, `-a` lists the
+//! records of named databases, whose keys end with a NUL). One deliberate
+//! difference (`KNOWN_C_BUGS.md` #2): `mdb_stat -r` without `-a`, `-s` or
+//! `-f` exits with 0 on success; C exits with 1 because it returns the
+//! value of the last `fputs` call.
 
-use rlmdb::{format_reader_list, Dbi, Environment, EnvironmentFlags, Stat, Transaction};
+use rlmdb::{format_reader_list, Dbi, Environment, EnvironmentFlags, Format, Transaction};
 
 use crate::cfmt::{err_code, pointer};
-use crate::common::{open_db, path_of, report_failed, Tool, EXIT_FAILURE};
+use crate::common::{
+    db_name_of, dbi_open_name, open_db, path_of, print_db_stat, report_failed, Tool, EXIT_FAILURE,
+};
 use crate::getopt::{GetOpt, Opt};
 use crate::output::{eprint_bytes, Output};
 
@@ -37,14 +42,6 @@ struct Options {
     no_sub_dir: bool,
     /// `-s subdb`.
     subname: Option<Vec<u8>>,
-}
-
-/// `prstat()`: the statistics block of a database.
-fn print_stat(out: &mut Output, st: &Stat) {
-    out.print(format_args!(
-        "  Tree depth: {}\n  Branch pages: {}\n  Leaf pages: {}\n  Overflow pages: {}\n  Entries: {}\n",
-        st.depth, st.branch_pages, st.leaf_pages, st.overflow_pages, st.entries
-    ));
 }
 
 /// The `main` of `mdb_stat`; returns the exit code.
@@ -113,6 +110,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
 /// Everything after `mdb_env_open`. Returns C's final `rc`.
 fn stat_env(tool: &mut Tool, env: &Environment, o: &Options) -> i32 {
     let out = &mut tool.out;
+    let format = env.format();
     if o.env_info > 0 {
         if let Err(rc) = print_env_info(out, env) {
             return rc;
@@ -143,7 +141,7 @@ fn stat_env(tool: &mut Tool, env: &Environment, o: &Options) -> i32 {
     };
 
     if o.free_info > 0 {
-        if let Err(rc) = print_freelist(out, &txn, o.free_info) {
+        if let Err(rc) = print_freelist(out, format, &txn, o.free_info) {
             return rc;
         }
     }
@@ -151,7 +149,7 @@ fn stat_env(tool: &mut Tool, env: &Environment, o: &Options) -> i32 {
     let dbi = match open_db(&txn, o.subname.as_deref()) {
         Ok(d) => d,
         Err(e) => {
-            report_failed("mdb_open", &e);
+            report_failed(dbi_open_name(env), &e);
             return err_code(&e);
         }
     };
@@ -165,7 +163,7 @@ fn stat_env(tool: &mut Tool, env: &Environment, o: &Options) -> i32 {
     out.write(b"Status of ");
     out.write(o.subname.as_deref().unwrap_or(b"Main DB"));
     out.write(b"\n");
-    print_stat(out, &st);
+    print_db_stat(out, format, &st);
 
     let mut rc = 0;
     if o.all_dbs > 0 {
@@ -182,17 +180,17 @@ fn stat_env(tool: &mut Tool, env: &Environment, o: &Options) -> i32 {
                 Ok(None) => break NOTFOUND,
                 Err(e) => break err_code(&e),
             };
-            if key.contains(&0) {
+            let Some(name) = db_name_of(format, &cursor, key) else {
                 continue;
-            }
-            let Ok(db2) = open_db(&txn, Some(key)) else {
+            };
+            let Ok(db2) = open_db(&txn, Some(name)) else {
                 continue;
             };
             out.write(b"Status of ");
-            out.write(key);
+            out.write(name);
             out.write(b"\n");
             match txn.stat(db2) {
-                Ok(st) => print_stat(out, &st),
+                Ok(st) => print_db_stat(out, format, &st),
                 Err(e) => {
                     report_failed("mdb_stat", &e);
                     return err_code(&e);
@@ -248,7 +246,12 @@ fn print_reader_table(out: &mut Output, env: &Environment) {
 
 /// `-f`: the "Freelist Status" block; `-ff` adds a summary line per free
 /// list record, `-fff` its page numbers.
-fn print_freelist<T: Transaction>(out: &mut Output, txn: &T, level: u32) -> Result<(), i32> {
+fn print_freelist<T: Transaction>(
+    out: &mut Output,
+    format: Format,
+    txn: &T,
+    level: u32,
+) -> Result<(), i32> {
     out.write(b"Freelist Status\n");
     let mut cursor = txn.cursor(Dbi::FREE).map_err(|e| {
         report_failed("mdb_cursor_open", &e);
@@ -258,7 +261,7 @@ fn print_freelist<T: Transaction>(out: &mut Output, txn: &T, level: u32) -> Resu
         report_failed("mdb_stat", &e);
         err_code(&e)
     })?;
-    print_stat(out, &st);
+    print_db_stat(out, format, &st);
     let mut pages = 0u64;
     // As in C, an error while walking the free DB just ends the walk.
     while let Ok(Some((key, data))) = cursor.next() {
