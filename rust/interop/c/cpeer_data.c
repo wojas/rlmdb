@@ -498,18 +498,16 @@ cmd_drop(struct opts *o)
 
 /* ---- dump --------------------------------------------------------------- */
 
-/* Is `key` of the main DB the name of a named DB? (as mdb_stat -a decides) */
+/* Is `key` of the main DB the name of a named DB? (as mdb_stat -a decides;
+ * in LMDB 1.0 the key is the name with its NUL) */
 static int
 is_subdb(MDB_txn *txn, const MDB_val *key, char **name)
 {
 	MDB_dbi dbi;
-	char *s;
+	char *s = subdb_name(env_is_10(mdb_txn_env(txn)), key);
 
-	if (memchr(key->mv_data, '\0', key->mv_size))
+	if (!s)
 		return 0;
-	s = malloc(key->mv_size + 1);
-	memcpy(s, key->mv_data, key->mv_size);
-	s[key->mv_size] = '\0';
 	if (mdb_dbi_open(txn, s, 0, &dbi)) {
 		free(s);
 		return 0;

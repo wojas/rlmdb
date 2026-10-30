@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use rlmdb::consts::MDB_REVERSEKEY;
 use rlmdb::consts::{MDB_DUPFIXED, MDB_DUPSORT, MDB_INTEGERDUP, MDB_INTEGERKEY, MDB_REVERSEDUP};
-use rlmdb::{Environment, EnvironmentFlags};
+use rlmdb::{Environment, EnvironmentFlags, Format};
 
 use crate::dataset::DataSet;
 
@@ -161,6 +161,13 @@ pub struct Opts {
     pub maxdbs: u32,
     /// `--maxreaders N`; 0 keeps LMDB's default (126).
     pub maxreaders: u32,
+    /// `--format 0.9|1.0`: the data-file format asked for
+    /// (`EnvironmentBuilder::format`); `None` takes the file's, or rlmdb's
+    /// default for a new environment.
+    pub format: Option<Format>,
+    /// `--pagesize N` (LMDB 1.0, `EnvironmentBuilder::page_size`): the page
+    /// size of a new environment; an existing one keeps its own.
+    pub pagesize: usize,
 
     // Data set and command options.
     /// The data set options (`--dupsort`, `--valsize`, ...); the positional
@@ -223,6 +230,14 @@ impl Opts {
                 "--mapsize" => o.mapsize = parse_u64(value(a)?, a)?,
                 "--maxdbs" => o.maxdbs = parse_u32(value(a)?, a)?,
                 "--maxreaders" => o.maxreaders = parse_u32(value(a)?, a)?,
+                "--pagesize" => o.pagesize = parse_u32(value(a)?, a)? as usize,
+                "--format" => {
+                    let v = value(a)?;
+                    o.format =
+                        Some(Format::from_name(v.as_bytes()).ok_or_else(|| {
+                            Fail::usage(format!("bad --format '{v}' (0.9 or 1.0)"))
+                        })?);
+                }
                 // data set options
                 "--dupsort" => o.ds.flags |= MDB_DUPSORT,
                 "--dupfixed" => o.ds.flags |= MDB_DUPSORT | MDB_DUPFIXED,
@@ -272,6 +287,17 @@ impl Opts {
     /// `open_env`: open the environment named by `pos[0]` with the global
     /// options, read-only if `read_only`.
     pub fn open_env(&self, read_only: bool) -> CmdResult<Environment> {
+        self.open_env_at(self.env_path(), self.format, read_only)
+    }
+
+    /// [`Opts::open_env`] for the environment at `path`, asking for
+    /// `format` (`None`: the file's, or rlmdb's default for a new one).
+    pub fn open_env_at(
+        &self,
+        path: &str,
+        format: Option<Format>,
+        read_only: bool,
+    ) -> CmdResult<Environment> {
         let mut flags = EnvironmentFlags::empty();
         flags.set(EnvironmentFlags::READ_ONLY, read_only);
         flags.set(EnvironmentFlags::NO_SUB_DIR, self.nosubdir);
@@ -291,7 +317,12 @@ impl Opts {
         if self.maxreaders != 0 {
             builder.max_readers(self.maxreaders);
         }
-        let path = self.env_path();
+        if let Some(format) = format {
+            builder.format(format);
+        }
+        if self.pagesize != 0 {
+            builder.page_size(self.pagesize);
+        }
         builder
             .open_with_permissions(path, 0o664)
             .check(&format!("mdb_env_open({path})"))

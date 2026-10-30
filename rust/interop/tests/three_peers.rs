@@ -1,5 +1,5 @@
-//! Scenarios with all three peers at once: C, Rust, and C on the Rust
-//! library (`interop::scenarios::all_peers`).
+//! Scenarios with all three peers at once on an LMDB 0.9 environment: C,
+//! Rust, and C on the Rust library (`interop::scenarios::all_peers`).
 
 use interop::scenarios::all_peers;
 
@@ -22,5 +22,8 @@ fn run(name: &str, r: interop::Result<()>) {
 #[test]
 fn three_writers() {
     register();
-    run("three_writers", all_peers::three_writers());
+    run(
+        "three_writers",
+        all_peers::three_writers(interop::Format::V09),
+    );
 }

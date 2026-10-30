@@ -13,7 +13,7 @@
 //! | `args` | `cpeer.c` | option parsing, exit codes, env open |
 //! | `dataset` | `dataset.c` | the deterministic data set |
 //! | `data` | `cpeer_data.c` | `fill`, `verify`, `delete`, `drop`, `dump` |
-//! | `loops` | `cpeer_loops.c` | `hold-reader`, `hold-env`, `hold-writer`, `writer-loop`, `reader-loop` |
+//! | `loops` | `cpeer_loops.c` | `hold-reader`, `hold-env`, `hold-writer`, `writer-loop`, `reader-loop`, `formats-loop` (rpeer only) |
 //! | `misc` | `cpeer_misc.c` | `create`, `stat`, `readers`, `reader-check`, `copy`, `nested-test`, `gen` |
 //! | `pagewalk` | `cpeer_pagewalk.c` | `check-freelist` |
 //!
@@ -167,6 +167,15 @@ const COMMANDS: &[Command] = &[
         implemented: true,
     },
     Command {
+        name: "formats-loop",
+        run: loops::cmd_formats_loop,
+        min_pos: 5,
+        max_pos: 5,
+        usage: "formats-loop <env 0.9> <env 1.0> <db|-> <seconds> <seed> [--keys N] \
+                [--max-commits N]",
+        implemented: true,
+    },
+    Command {
         name: "check-freelist",
         run: pagewalk::cmd_check_freelist,
         min_pos: 1,
@@ -225,7 +234,8 @@ fn usage() -> Fail {
         s.push('\n');
     }
     s.push_str(
-        "env options: --nosubdir --notls --nosync --nometasync --mapsize N --maxdbs N --maxreaders N\n\
+        "env options: --nosubdir --notls --nosync --nometasync --mapsize N --maxdbs N \
+         --maxreaders N --format 0.9|1.0 --pagesize N\n\
          data options: --dupsort --dupfixed --intkey --intdup --revkey --revdup --valsize N --big N \
          --dups N --deleted-every N --per-txn N --append --reserve\n\
          command options: --every N --keys N --max-commits N --compact --all --until-stdin \

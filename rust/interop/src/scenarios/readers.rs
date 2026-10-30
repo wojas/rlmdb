@@ -257,7 +257,7 @@ pub fn reader_creates_lock_file(pair: Pair) -> Result<()> {
         .args(ds.args())
         .spawn()?;
     let ready = HoldReady::parse(&holder.wait_ready()?)?;
-    let layout = tools::c_layout()?;
+    let layout = tools::c_layout_for(pair.format)?;
     let want = layout.get("offsetof(MDB_txninfo.mti_readers)")?
         + 126 * layout.get("sizeof(MDB_reader)")?;
     let len = std::fs::metadata(env.lock_file())?.len();

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use crate::Result;
+use crate::{Format, Result};
 
 /// An environment location in a fresh temporary directory, removed when the
 /// last `TestEnv` sharing the directory is dropped.
@@ -15,11 +15,18 @@ use crate::Result;
 /// `<path>/lock.mdb`); with [`new_nosubdir`](Self::new_nosubdir) it is a file
 /// (`<path>`, `<path>-lock`) and every peer command and tool gets the
 /// "no subdir" option.
+///
+/// It also has a data-file format, LMDB 0.9 unless
+/// [`with_format`](Self::with_format) says otherwise: peers create and open
+/// a 1.0 environment with `--format 1.0`, and [`crate::tools`] runs the C
+/// tools of the environment's release (`mdb_stat10` … for 1.0).
 #[derive(Clone, Debug)]
 pub struct TestEnv {
     root: Arc<TempDir>,
     path: PathBuf,
     nosubdir: bool,
+    format: Format,
+    page_size: Option<u32>,
 }
 
 /// A new temporary directory `interop-*`; kept after the test if
@@ -51,6 +58,8 @@ impl TestEnv {
             root,
             path,
             nosubdir: false,
+            format: Format::V09,
+            page_size: None,
         })
     }
 
@@ -63,18 +72,49 @@ impl TestEnv {
             root,
             path,
             nosubdir: true,
+            format: Format::V09,
+            page_size: None,
         })
     }
 
+    /// This environment location in data-file format `format` (the
+    /// environment is not created yet: the first peer to open it creates
+    /// it in that format).
+    pub fn with_format(mut self, format: Format) -> TestEnv {
+        self.format = format;
+        self
+    }
+
+    /// This environment location with pages of `page_size` bytes if a peer
+    /// creates it (`--pagesize`; LMDB 1.0 only: `None` is the OS page size).
+    pub fn with_page_size(mut self, page_size: Option<u32>) -> TestEnv {
+        self.page_size = page_size;
+        self
+    }
+
     /// Another environment location `<name>` in the same temporary directory
-    /// and with the same subdir mode, not created: a target for copies and
-    /// loads. (`cpeer copy` creates the directory, [`crate::tools`] too.)
+    /// and with the same subdir mode and format, not created: a target for
+    /// copies and loads. (`cpeer copy` creates the directory, [`crate::tools`]
+    /// too.)
     pub fn derived(&self, name: &str) -> TestEnv {
         TestEnv {
             root: Arc::clone(&self.root),
             path: self.root.path().join(name),
             nosubdir: self.nosubdir,
+            format: self.format,
+            page_size: self.page_size,
         }
+    }
+
+    /// The data-file format of this environment.
+    pub fn format(&self) -> Format {
+        self.format
+    }
+
+    /// The page size a peer creates this environment with (`None`: the OS
+    /// page size).
+    pub fn page_size(&self) -> Option<u32> {
+        self.page_size
     }
 
     /// The environment path given to `mdb_env_open`.
@@ -112,13 +152,22 @@ impl TestEnv {
         }
     }
 
-    /// Options every peer command on this environment gets.
+    /// Options every peer command on this environment gets: `--nosubdir`,
+    /// `--format 1.0` for a 1.0 environment (none for 0.9, the default of
+    /// every peer that can open it) and `--pagesize N` if set (an existing
+    /// environment keeps its page size, so every command can get it).
     pub fn peer_options(&self) -> Vec<OsString> {
+        let mut v = Vec::new();
         if self.nosubdir {
-            vec!["--nosubdir".into()]
-        } else {
-            Vec::new()
+            v.push("--nosubdir".into());
         }
+        if self.format == Format::V10 {
+            v.extend(["--format".into(), "1.0".into()]);
+        }
+        if let Some(ps) = self.page_size {
+            v.extend(["--pagesize".into(), ps.to_string().into()]);
+        }
+        v
     }
 
     /// Options every C tool (`mdb_stat`, `mdb_dump`, …) gets.

@@ -168,14 +168,20 @@ fn main() {
         link(&bin_dir, "writeops", &objs, &lib_objs),
     ));
 
-    // cpeer against the Rust library's header, linked at test time.
+    // cpeer against the Rust library's headers, linked at test time.
+    // `LMDB_RUST` lets it use `rlmdb.h` (`--format`, both page layouts).
     let capi_include = manifest_dir.join("../rlmdb-capi/include");
     let capi_include = capi_include.canonicalize().unwrap_or(capi_include);
-    println!(
-        "cargo:rerun-if-changed={}",
-        capi_include.join("lmdb.h").display()
+    for h in ["lmdb.h", "rlmdb.h"] {
+        println!("cargo:rerun-if-changed={}", capi_include.join(h).display());
+    }
+    let capi_objs = compile_with(
+        &out_dir,
+        "cpeer_capi",
+        &capi_include,
+        &peer_srcs,
+        &["LMDB_RUST"],
     );
-    let capi_objs = compile(&out_dir, "cpeer_capi", &capi_include, &peer_srcs);
     let recipe = out_dir.join("cpeer_capi.link");
     write_link_recipe(&recipe, &bin_dir.join("cpeer_capi"), &capi_objs);
     println!(
@@ -417,9 +423,23 @@ fn c_build(lmdb_dir: &Path) -> cc::Build {
 
 /// Compiles `srcs` into object files under `$OUT_DIR/obj/<tag>`.
 fn compile(out_dir: &Path, tag: &str, lmdb_dir: &Path, srcs: &[PathBuf]) -> Vec<PathBuf> {
+    compile_with(out_dir, tag, lmdb_dir, srcs, &[])
+}
+
+/// [`compile`] with preprocessor macros defined (`-D<name>`).
+fn compile_with(
+    out_dir: &Path,
+    tag: &str,
+    lmdb_dir: &Path,
+    srcs: &[PathBuf],
+    defines: &[&str],
+) -> Vec<PathBuf> {
     let obj_dir = out_dir.join("obj").join(tag);
     std::fs::create_dir_all(&obj_dir).expect("create obj dir");
     let mut b = c_build(lmdb_dir);
+    for d in defines {
+        b.define(d, None);
+    }
     b.out_dir(&obj_dir).files(srcs);
     b.compile_intermediates()
 }

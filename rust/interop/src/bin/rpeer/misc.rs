@@ -120,8 +120,8 @@ pub fn cmd_stat(o: &mut Opts) -> CmdResult {
     print_stat_line(&mut out, &txn, main, b"-")?;
     let mut cur = txn.cursor(main).check("mdb_cursor_open")?;
     while let Some((key, _)) = cur.next_nodup().check("mdb_cursor_get(main)")? {
-        if let Some(dbi) = subdb(&txn, key) {
-            print_stat_line(&mut out, &txn, dbi, key)?;
+        if let Some((name, dbi)) = subdb(&txn, env.format(), key) {
+            print_stat_line(&mut out, &txn, dbi, name)?;
         }
     }
     out.flush()?;

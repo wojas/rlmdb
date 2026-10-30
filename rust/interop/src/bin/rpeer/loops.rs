@@ -8,6 +8,8 @@
 //!   that every committed state of `writer-loop` satisfies.
 //! * `writer-loop` commits many small random write transactions, with
 //!   nested transactions and aborts mixed in.
+//! * `formats-loop` (rpeer only) runs both loops in one process on an
+//!   LMDB 0.9 and an LMDB 1.0 environment at once.
 //!
 //! writer-loop data (README.md), in DB `<db>` (or the main DB):
 //!
@@ -22,11 +24,13 @@
 //! `"d%04u" (r) -> t: u64 LE, fmix32(lo32(t) ^ hi32(t) ^ r): u32 LE`.
 
 use std::io::BufRead;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use rlmdb::{
-    CursorOp, DatabaseFlags, Dbi, Environment, MdbError, RoTxn, RwTxn, Transaction, WriteFlags,
+    CursorOp, DatabaseFlags, Dbi, Environment, Format, MdbError, RoTxn, RwTxn, Transaction,
+    WriteFlags,
 };
 
 use crate::args::{
@@ -322,6 +326,27 @@ impl WriterLoop {
     }
 }
 
+/// What a writer loop did: the counts of `writer-loop`'s last line.
+#[derive(Debug, Default)]
+struct WriterStats {
+    commits: u64,
+    aborts: u64,
+    nested_commits: u64,
+    nested_aborts: u64,
+    /// The `#commits` value of the last commit.
+    last_commit: u64,
+}
+
+impl std::fmt::Display for WriterStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "commits={} aborts={} nested_commits={} nested_aborts={} last_commit={}",
+            self.commits, self.aborts, self.nested_commits, self.nested_aborts, self.last_commit
+        )
+    }
+}
+
 /// `writer-loop <env> <db|-> <seconds> <seed> [--keys N] [--max-commits N]`:
 /// commit small random write transactions until `<seconds>` pass (at least
 /// one) or `N` commits. Each: read the counters, 1-8 random operations,
@@ -334,7 +359,21 @@ pub fn cmd_writer_loop(o: &mut Opts) -> CmdResult {
     let deadline = now_seconds() + parse_seconds(o.pos.get(2).map(String::as_str))?;
     let seed = parse_u64(o.pos.get(3).map(String::as_str).unwrap_or_default(), "seed")?;
     let env = o.open_env(false)?;
+    let stats = writer_loop(&env, db, deadline, seed, o, || println!("READY"))?;
+    println!("{stats}");
+    Ok(())
+}
 
+/// The loop of `writer-loop` on `env` until `deadline` (at least one
+/// commit) or `--max-commits`; `first_commit` runs after the first commit.
+fn writer_loop(
+    env: &Environment,
+    db: Option<&str>,
+    deadline: f64,
+    seed: u64,
+    o: &Opts,
+    mut first_commit: impl FnMut(),
+) -> CmdResult<WriterStats> {
     let mut txn = env.begin_rw_txn().check("mdb_txn_begin")?;
     let main = txn
         .create_db(db, DatabaseFlags::CREATE)
@@ -353,11 +392,10 @@ pub fn cmd_writer_loop(o: &mut Opts) -> CmdResult {
         rng: seed,
         keys: o.keys.max(1),
     };
-    let (mut commits, mut aborts, mut ncommits, mut naborts) = (0u64, 0u64, 0u64, 0u64);
-    let mut last = 0u64;
+    let mut st = WriterStats::default();
     // Always commit at least once, so "0 seconds" initialises the DBs.
-    while commits == 0
-        || (now_seconds() < deadline && (o.max_commits == 0 || commits < o.max_commits))
+    while st.commits == 0
+        || (now_seconds() < deadline && (o.max_commits == 0 || st.commits < o.max_commits))
     {
         let mut txn = env.begin_rw_txn().check("mdb_txn_begin")?;
         let version = get_counter(&txn, w.main, "#commits")? + 1;
@@ -365,29 +403,25 @@ pub fn cmd_writer_loop(o: &mut Opts) -> CmdResult {
         if w.rnd(6) == 0 {
             // A nested transaction on top, committed or aborted.
             if nested_ops(&mut w, &mut txn, version)? {
-                ncommits += 1;
+                st.nested_commits += 1;
             } else {
-                naborts += 1;
+                st.nested_aborts += 1;
             }
         }
-        if commits > 0 && w.rnd(10) == 0 {
+        if st.commits > 0 && w.rnd(10) == 0 {
             txn.abort();
-            aborts += 1;
+            st.aborts += 1;
             continue;
         }
         put_counter(&mut txn, w.main, "#commits", version)?;
         txn.commit().check("mdb_txn_commit")?;
-        last = version;
-        if commits == 0 {
-            println!("READY");
+        st.last_commit = version;
+        if st.commits == 0 {
+            first_commit();
         }
-        commits += 1;
+        st.commits += 1;
     }
-    println!(
-        "commits={commits} aborts={aborts} nested_commits={ncommits} nested_aborts={naborts} \
-         last_commit={last}"
-    );
-    Ok(())
+    Ok(st)
 }
 
 /// The nested transaction of a writer-loop step: `wl_ops` in a child of
@@ -624,6 +658,142 @@ pub fn cmd_reader_loop(o: &mut Opts) -> CmdResult {
     drop(txn);
     println!("reads={reads} first_commit={first} last_commit={last} meta_races=0");
     Ok(())
+}
+
+// ---- formats-loop ----------------------------------------------------------------------
+
+/// What the snapshot checks of `formats-loop` saw in one environment: the
+/// counts of `reader-loop`'s last line.
+#[derive(Debug, Default)]
+struct ReaderStats {
+    reads: u64,
+    first_commit: u64,
+    last_commit: u64,
+}
+
+/// `formats-loop <env 0.9> <env 1.0> <db|-> <seconds> <seed> [--keys N]
+/// [--max-commits N]` (rpeer only): both data-file formats in one process.
+/// Opens the first environment as LMDB 0.9 and the second as LMDB 1.0 (each
+/// must be in that format, or not exist yet) and keeps both open; runs the
+/// loop of `writer-loop` on each in a thread of its own (seeds `seed` and
+/// `seed + 1`), while the main thread checks snapshots of both in turn as
+/// `reader-loop` does (also that `#commits` never goes back), until
+/// `<seconds>` pass. Prints `READY` once both writers have committed, then
+/// per environment `writer format=<f> commits=.. aborts=.. nested_commits=..
+/// nested_aborts=.. last_commit=..` and `reader format=<f> reads=..
+/// first_commit=.. last_commit=.. meta_races=0`.
+///
+/// The C peers cannot do this (each C library has one format), so they
+/// list the command as not implemented.
+pub fn cmd_formats_loop(o: &mut Opts) -> CmdResult {
+    if o.format.is_some() {
+        return Err(Fail::usage(
+            "formats-loop: --format does not apply, the first environment is 0.9, the second 1.0",
+        ));
+    }
+    let db = Some(o.pos[2].as_str()).filter(|d| *d != "-");
+    let deadline = now_seconds() + parse_seconds(o.pos.get(3).map(String::as_str))?;
+    let seed = parse_u64(o.pos.get(4).map(String::as_str).unwrap_or_default(), "seed")?;
+    let formats = [Format::V09, Format::V10];
+    let envs = [
+        o.open_env_at(&o.pos[0], Some(Format::V09), false)?,
+        o.open_env_at(&o.pos[1], Some(Format::V10), false)?,
+    ];
+    let committed = [AtomicBool::new(false), AtomicBool::new(false)];
+    let opts: &Opts = o;
+    let (writers, readers) = std::thread::scope(|s| {
+        let handles: Vec<_> = envs
+            .iter()
+            .zip(&committed)
+            .zip(0u64..)
+            .map(|((env, committed), k)| {
+                s.spawn(move || {
+                    writer_loop(env, db, deadline, seed.wrapping_add(k), opts, || {
+                        committed.store(true, Ordering::SeqCst);
+                    })
+                })
+            })
+            .collect();
+        let readers = formats_reader(&envs, db, deadline, &committed, &handles);
+        let writers: Vec<CmdResult<WriterStats>> = handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(Fail::mismatch("formats-loop: a writer panicked")))
+            })
+            .collect();
+        (writers, readers)
+    });
+    let mut lines = Vec::new();
+    for ((format, w), r) in formats.iter().zip(writers).zip(readers?) {
+        let w = w?;
+        lines.push(format!("writer format={} {w}", format.name()));
+        lines.push(format!(
+            "reader format={} reads={} first_commit={} last_commit={} meta_races=0",
+            format.name(),
+            r.reads,
+            r.first_commit,
+            r.last_commit
+        ));
+    }
+    for l in lines {
+        println!("{l}");
+    }
+    Ok(())
+}
+
+/// The main thread of `formats-loop`: once both writers have committed
+/// (`committed[k]`), check snapshots of `envs` in turn until `deadline`;
+/// at least one of each.
+fn formats_reader<T>(
+    envs: &[Environment; 2],
+    db: Option<&str>,
+    deadline: f64,
+    committed: &[AtomicBool; 2],
+    writers: &[std::thread::ScopedJoinHandle<'_, T>],
+) -> CmdResult<[ReaderStats; 2]> {
+    while !committed.iter().all(|c| c.load(Ordering::SeqCst)) {
+        // A writer only stops before its first commit if it failed; its
+        // error is reported when it is joined.
+        let failed = committed
+            .iter()
+            .zip(writers)
+            .any(|(c, w)| w.is_finished() && !c.load(Ordering::SeqCst));
+        if failed {
+            return Ok(Default::default());
+        }
+        sleep_seconds(0.001);
+    }
+    println!("READY");
+    let dbis = [
+        wait_for_dbs(&envs[0], db, deadline)?,
+        wait_for_dbs(&envs[1], db, deadline)?,
+    ];
+    let mut stats: [ReaderStats; 2] = Default::default();
+    loop {
+        for ((env, (mdbi, ddbi)), st) in envs.iter().zip(dbis).zip(&mut stats) {
+            let txn = env.begin_ro_txn().check("mdb_txn_begin")?;
+            let commits = check_snapshot(&txn, mdbi, ddbi, st.reads % 3 == 2).map_err(|e| {
+                let msg = e.message.unwrap_or_default();
+                Fail::mismatch(format!("format {}: {msg}", env.format().name()))
+            })?;
+            if commits < st.last_commit {
+                return Err(rl_fail(format!(
+                    "format {}: snapshot went back in time: #commits {commits} after {}",
+                    env.format().name(),
+                    st.last_commit
+                )));
+            }
+            if st.reads == 0 {
+                st.first_commit = commits;
+            }
+            st.reads += 1;
+            st.last_commit = commits;
+        }
+        if now_seconds() >= deadline {
+            return Ok(stats);
+        }
+    }
 }
 
 #[cfg(test)]
