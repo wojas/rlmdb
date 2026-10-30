@@ -218,3 +218,11 @@ rust/
     linux-test.sh     cargo in a Linux (Debian glibc) container
     check-all.sh      fmt, clippy, doc, tests on host and Linux
 ```
+
+## License
+
+Copyright 2026 Konrad Wojas. This is a derivative work of the LMDB C
+library, copyright 2011-2021 Howard Chu, Symas Corp. Both are distributed
+under the [OpenLDAP Public License, Version 2.8](LICENSE); see
+[COPYRIGHT](COPYRIGHT) for the notices. The `Cargo.toml` files declare the
+same license (`OLDAP-2.8`).
