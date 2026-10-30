@@ -6,7 +6,14 @@ symbols of LMDB 0.9.36 with the same ABI, error codes and flag values, so
 existing C programs compile against `include/lmdb.h` (the unmodified 0.9.36
 header, with one comment added on top) and link against the Rust library
 unchanged. `include/rlmdb.h` declares the few functions rlmdb has beyond
-`lmdb.h` (see "`rlmdb.h`: version and capabilities" below).
+`lmdb.h` and the LMDB 1.0 constants (see "`rlmdb.h`" below).
+
+The library opens environments of both data-file formats rlmdb handles,
+LMDB 0.9 and LMDB 1.0 (`../DUAL_FORMAT.md`), through the same `mdb_*`
+functions: an existing file in its format, a new one as LMDB 0.9 unless
+1.0 is asked for (`rlmdb_env_set_format`, `rlmdb_set_default_format`, or
+the experimental `RLMDB_DEFAULT_FORMAT=1.0`; see "`rlmdb.h`: data-file
+formats").
 
 Status (stage 4): every function of `lmdb.h` is implemented, read and
 write side. The unmodified upstream programs `mtest.c` .. `mtest6.c`,
@@ -60,12 +67,15 @@ All 56 functions of `lmdb.h` are implemented (module in parentheses):
 never calls the function; `mdb_env_set_assert` stores the callback, which
 is never called (the core reports errors instead of asserting).
 
-## `rlmdb.h`: version and capabilities
+## `rlmdb.h`
 
-`include/rlmdb.h` includes `lmdb.h` and declares rlmdb's own functions
-(module `version`), for programs that want to know which library they run
-on and what it supports. C LMDB does not have them, so a program that calls
-them needs this library.
+`include/rlmdb.h` includes `lmdb.h` and declares rlmdb's own functions:
+the version and capabilities (module `version`) and the data-file formats
+(module `format`), plus the LMDB 1.0 constants. C LMDB does not have the
+functions, so a program that calls them needs this library. The header's
+comments are their reference documentation.
+
+### Version and capabilities
 
 ```c
 #include "rlmdb.h"
@@ -75,7 +85,7 @@ typedef struct rlmdb_version_info {
 	int		rlmdb_major, rlmdb_minor, rlmdb_patch;	/* the rlmdb version */
 	int		lmdb_major, lmdb_minor, lmdb_patch;	/* what mdb_version() reports: 0, 9, 85 */
 	int		v09_major, v09_minor, v09_patch;	/* C release the 0.9 format and API match: 0, 9, 36 */
-	int		v10_major, v10_minor, v10_patch;	/* C release the 1.0 format matches: 0, 0, 0 for now */
+	int		v10_major, v10_minor, v10_patch;	/* C release the 1.0 format matches: 1, 0, 2 */
 	const char *const *capabilities;		/* sorted, NULL-terminated */
 } rlmdb_version_info;
 
@@ -88,16 +98,16 @@ int rlmdb_has_capability(const char *name);	/* 1 or 0; 0 for NULL */
   appended; `size` tells a program compiled against a newer header which
   fields the library has.
 * `rlmdb_version_string()` returns everything in one line, for logs and
-  bug reports:
-  `rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; caps: format-0.9)`.
-  Once the 1.0 format exists, `; format 1.0 = LMDB 1.0.2` follows the 0.9
-  part.
+  bug reports: `rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36;
+  format 1.0 = LMDB 1.0.2; caps: default-format-env format-0.9
+  format-1.0)`.
 * `rlmdb_has_capability(name)` tests for one capability token. Tokens are
   short lower-case names, added when a feature lands and kept while it
-  exists. Today there is one, `format-0.9`; planned are `format-1.0`,
-  `split-freelist`, `convert-copy`, `prevsnapshot`, `txn-prepare`,
-  `checksum`, `encrypt` and `default-format-env`. `v10_*` stays 0, 0, 0
-  until `format-1.0` is there.
+  exists. Today: `default-format-env` (the experimental
+  `RLMDB_DEFAULT_FORMAT` is honoured), `format-0.9`, `format-1.0`; planned
+  are `split-freelist`, `convert-copy`, `prevsnapshot`, `txn-prepare`,
+  `checksum` and `encrypt`. `v10_*` are 0, 0, 0 in a library without
+  `format-1.0`.
 
 The Rust side is `rlmdb::version_info()`, from which the C structure and
 strings are filled once, at first use.
@@ -112,6 +122,60 @@ and a run-time patch level above the header's is the normal case for LMDB
 (a program built against an older 0.9 header runs with a newer 0.9
 library); `mdb_version()` is what programs are told to check. Major and
 minor agree with the header.
+
+### Data-file formats
+
+```c
+#define RLMDB_FORMAT_UNKNOWN 0
+#define RLMDB_FORMAT_09      9
+#define RLMDB_FORMAT_10     10
+
+int rlmdb_env_set_format(MDB_env *env, unsigned format);    /* before mdb_env_open; 0 removes the request */
+int rlmdb_env_get_format(MDB_env *env, unsigned *format);   /* requested before the open, actual after */
+int rlmdb_sniff_format(const char *path, unsigned flags, unsigned *format); /* MDB_NOSUBDIR honoured */
+int rlmdb_set_default_format(unsigned format);              /* process-wide; RLMDB_FORMAT_UNKNOWN resets */
+int rlmdb_env_set_pagesize(MDB_env *env, unsigned size);    /* LMDB 1.0's mdb_env_set_pagesize */
+```
+
+* An existing data file is opened in its format, whatever the defaults say;
+  a request for the other format (`rlmdb_env_set_format`) makes
+  `mdb_env_open` fail with `MDB_VERSION_MISMATCH`, before the lock file is
+  touched. A file that is no LMDB data file is `MDB_INVALID`.
+* A new environment gets the requested format, else the process default
+  (`rlmdb_set_default_format`), else the format the environment variable
+  `RLMDB_DEFAULT_FORMAT` names (`0.9` or `1.0`; other values are ignored),
+  else LMDB 0.9. **The variable is experimental**: it may be removed or
+  restricted in a later release (capability `default-format-env` says
+  whether it is honoured). It is read at every open; programs should use
+  the functions.
+* `rlmdb_env_set_pagesize` (a power of two from 256 to 65536, as in C 1.0)
+  applies to a new 1.0 environment; `mdb_env_open` fails with `EINVAL` if
+  the environment turns out to be LMDB 0.9, which has no such setting.
+* `rlmdb.h` also defines LMDB 1.0's `MDB_PREVSNAPSHOT`, `MDB_ENCRYPT` and
+  error codes `MDB_PROBLEM` .. `MDB_ADDR_BUSY` (-30779 .. -30769), with
+  1.0's values, each only if no other header defined it, so a program can
+  also include upstream 1.0's `lmdb.h`. `mdb_strerror` returns 1.0's
+  messages for them.
+
+What changes with an LMDB 1.0 environment:
+
+* `mdb_env_get_maxkeysize` returns the environment's limit after the open
+  (1978 on 4 KiB pages, 32698 on 64 KiB); before it, 511 unless 1.0 was
+  requested with `rlmdb_env_set_format`, then the 1.0 limit for the page
+  size a new environment would get. (C 1.0 returns 0 before the open.)
+* Keys and `MDB_DUPSORT` items up to that limit, inline data up to half a
+  page (64 KiB pages: 32 KiB); named databases are stored under their name
+  and its NUL, as C 1.0 does (`mdb_dbi_open` takes the name as before).
+* `mdb_drop` of the main DB follows C 1.0: if it records named databases,
+  they are deleted first (their pages are freed), and it fails with
+  `MDB_DBIS_BUSY` while a handle of a named database is open (0.9 leaves
+  their pages behind, `../KNOWN_C_BUGS.md` #21).
+* Not implemented: `MDB_PREVSNAPSHOT` (`mdb_env_open` gives `EINVAL`, for
+  both formats), `MDB_ENCRYPT` (`EINVAL` from `mdb_env_open` and
+  `mdb_env_set_flags`), encrypted or checksummed 1.0 files
+  (`MDB_ENV_ENCRYPTION`, `MDB_BAD_CHECKSUM`), and the rest of 1.0's API.
+* Return codes stay `lmdb.h`'s (0.9's): a write in a read-only transaction
+  is `EACCES` where C 1.0 says `MDB_IS_READONLY`.
 
 ## Write side
 
@@ -141,7 +205,8 @@ same return codes:
   item under the cursor; `MDB_APPEND`/`MDB_APPENDDUP` return
   `MDB_KEYEXIST` for out-of-order input. `mdb_cursor_put` ignores unknown
   flag bits, as C. Size limits: keys 1..511 bytes, `MDB_DUPSORT` data
-  1..511 bytes (`MDB_BAD_VALSIZE`).
+  1..511 bytes (`MDB_BAD_VALSIZE`); in an LMDB 1.0 environment up to
+  `mdb_env_get_maxkeysize`.
 * `mdb_del` with or without `data`, `mdb_cursor_del` with `MDB_NODUPDATA`,
   `mdb_cursor_count`: as C; other cursors on the same database are moved
   as C moves them (a cursor on a deleted item goes to the next one).
@@ -180,14 +245,16 @@ point into the memory map or the transaction's dirty pages (zero copy).
 
 | Area | C LMDB | This library |
 |---|---|---|
-| `mdb_version()` | The header's version: 0, 9, 36 and `MDB_VERSION_STRING`, `LMDB 0.9.36: (Aug 6, 2026)`. | 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)` (see "`rlmdb.h`: version and capabilities"); `lmdb.h` still says 0.9.36. |
+| `mdb_version()` | The header's version: 0, 9, 36 and `MDB_VERSION_STRING`, `LMDB 0.9.36: (Aug 6, 2026)`. | 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)` (see "`rlmdb.h`"); `lmdb.h` still says 0.9.36. |
+| Data-file formats | LMDB 0.9 only; a 1.0 file is `MDB_INVALID`. | LMDB 0.9 and 1.0 (see "`rlmdb.h`: data-file formats"); new environments are 0.9 by default. |
+| `mdb_strerror` of LMDB 1.0's codes (-30779 .. -30769) | "Invalid error code". | 1.0's messages. |
 | Threads | Without `MDB_NOTLS` a thread may hold one read transaction at a time (`MDB_BAD_RSLOT` otherwise) and a read transaction is tied to its thread. | Always behaves like `MDB_NOTLS`: any number of read transactions per thread, usable from any thread (one at a time). `MDB_NOTLS` is accepted. A superset of C. |
 | Opening one environment twice in a process | Allowed but unsafe (closing one handle drops the other's locks). | `mdb_env_open` fails with `EBUSY`. |
 | `MDB_FIXEDMAP`, `MDB_WRITEMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT` | Honoured. | Accepted and ignored (`mdb_env_get_flags` reports them). A new environment records map address 0 (`KNOWN_C_BUGS.md` #9); a C-created `MDB_FIXEDMAP` environment's recorded address is reported by `mdb_env_info`. |
 | Handles of existing databases opened in a transaction | Visible to other transactions only after that transaction commits; closed if it aborts (read or write transaction). | Published at once and kept after commit or abort. Handles of databases *created* by a write transaction follow C (published at commit, closed on abort). |
 | A parent transaction while its nested child is active | Most functions return `MDB_BAD_TXN`, but some check the DBI first (`EINVAL` for a bad one) and `mdb_dbi_flags`, `mdb_cmp`, `mdb_dcmp` still work. | Every function on the parent returns `MDB_BAD_TXN` (`mdb_txn_id`, `mdb_txn_env` work). |
 | `MDB_MULTIPLE` that fails after storing some items | `data[1].mv_size` = items stored, `data[0].mv_data` advanced to the failing one. | `data[1].mv_size` = 0, `data[0].mv_data` unchanged. Failures there leave the transaction unusable anyway. |
-| Keys and data that point into the transaction's own dirty pages | Read while the page is being changed (works in common cases, garbage or use-after-free in others). | Keys and data up to 16 KiB, and `MDB_MULTIPLE` arrays up to 32 KiB (what `MDB_GET_MULTIPLE` returns), are copied before the write, so they are always read intact. Larger data must not point into the transaction's pages (see "Undefined behaviour" below). |
+| Keys and data that point into the transaction's own dirty pages | Read while the page is being changed (works in common cases, garbage or use-after-free in others). | Keys (up to the environment's maximum key size) and data up to 16 KiB, and `MDB_MULTIPLE` arrays up to 32 KiB (what `MDB_GET_MULTIPLE` returns), are copied before the write, so they are always read intact; in an LMDB 1.0 environment with 64 KiB pages the data limits are 32 and 64 KiB (half a page, a page). Names given to `mdb_dbi_open` in a write transaction are copied too (a 1.0 key of the main DB ends with the name's NUL). Larger data must not point into the transaction's pages (see "Undefined behaviour" below). |
 | A C comparison function that calls back into the library with the transaction being written | Reads inconsistent state. | `EINVAL`. |
 | A C comparison function that frees a handle the running operation uses (`mdb_txn_abort`/`mdb_txn_commit` of its transaction or an ancestor, `mdb_cursor_close` of the cursor) | Use after free. | The process aborts with a message (`lmdb: ... called on a handle that is in use`). `mdb_txn_reset` there does nothing, `mdb_txn_renew` returns `EINVAL`. |
 | A callback that throws a C++ exception (comparison functions, the `mdb_reader_list` message function) | Unwinds through the library's C frames, leaving locks held and state half-changed. | The process aborts at the library boundary (the callback types are `extern "C-unwind"`; every exported function is `extern "C"`). |
@@ -219,10 +286,11 @@ the safe Rust core cannot be used to break them:
   began it.
 * A callback that leaves the library with `longjmp` (it skips Rust
   frames).
-* Data larger than 16 KiB passed to `mdb_put`/`mdb_cursor_put` that points
-  into the transaction's own dirty pages (a value read earlier in the same
-  write transaction): the put may free those pages while it copies the
-  data, as C does.
+* Data larger than 16 KiB (half of 1.0's 64 KiB page in such an
+  environment) passed to `mdb_put`/`mdb_cursor_put` that points into the
+  transaction's own dirty pages (a value read earlier in the same write
+  transaction): the put may free those pages while it copies the data, as
+  C does.
 * Reading an `MDB_val` returned by a write transaction after the next
   change in it, or one returned by a read transaction after it ended.
 * Another program truncating or rewriting the data file in place (outside
@@ -320,6 +388,21 @@ environments.
   `rlmdb_version_string()` equal to the Rust `Display` line and
   `mdb_version`'s string. The same program is compiled as C++ and linked,
   which checks the header's `extern "C"` guards.
+* `tests/capi_format.rs`: `tests/c/capi_format.c` checks the format
+  functions and constants of `rlmdb.h` against the Rust library (no C
+  oracle): `rlmdb_env_set_format`/`get_format` before and after the open,
+  `rlmdb_sniff_format` (no file, empty file, both formats, `MDB_NOSUBDIR`,
+  junk, version 2), `rlmdb_set_default_format` and the
+  `RLMDB_DEFAULT_FORMAT` variable (set and unset in the program's own
+  process) in their order, `rlmdb_env_set_pagesize`'s checks,
+  `mdb_env_get_maxkeysize` before and after the open, 1.0 environments of
+  1, 4 and 64 KiB pages with the longest keys and `MDB_DUPSORT` items,
+  inline data above 16 KiB, `MDB_RESERVE`, `MDB_CURRENT`, `MDB_MULTIPLE`
+  of a page of items, `mdb_del`, and inputs (keys, data, a database name)
+  that point into the transaction's dirty pages; a 1.0 file reopened
+  without a request; `MDB_VERSION_MISMATCH` both ways; `mdb_strerror` of
+  every 1.0 code; `MDB_PREVSNAPSHOT` and `MDB_ENCRYPT` refused. That C 1.0
+  reads and writes what the C API writes is `../interop/tests/capi10.rs`.
 * `tests/capi_write.rs`: `tests/c/capi_write.c` checks every write-side
   function and its error codes against both libraries: transactions
   (visibility, empty commits, read-only environments), database handles

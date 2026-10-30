@@ -9,7 +9,7 @@ use std::os::raw::{c_char, c_int, c_uint};
 use std::ptr;
 use std::sync::OnceLock;
 
-use rlmdb::consts::{MDB_KEYEXIST, MDB_LAST_ERRCODE};
+use rlmdb::consts::{MDB_KEYEXIST, MDB_LAST_ERRCODE_V10};
 
 /// `rlmdb_version_info` of `rlmdb.h`: what [`rlmdb_version`] returns, the
 /// C form of [`rlmdb::VersionInfo`]. Fields are only ever appended.
@@ -161,12 +161,14 @@ pub unsafe extern "C" fn rlmdb_has_capability(name: *const c_char) -> c_int {
     )
 }
 
-/// The messages of LMDB's own codes, `MDB_KEYEXIST..=MDB_LAST_ERRCODE`, as
-/// static C strings (texts from [`rlmdb::strerror`], identical to C's).
+/// The messages of LMDB's own codes as static C strings: those of LMDB 0.9
+/// (`MDB_KEYEXIST..=MDB_BAD_DBI`) and those LMDB 1.0 adds (`MDB_PROBLEM
+/// ..=MDB_ADDR_BUSY`, declared in `rlmdb.h`), with the texts of
+/// [`rlmdb::strerror`], identical to C 0.9's and C 1.0's.
 fn lmdb_messages() -> &'static [CString] {
     static MESSAGES: OnceLock<Vec<CString>> = OnceLock::new();
     MESSAGES.get_or_init(|| {
-        (MDB_KEYEXIST..=MDB_LAST_ERRCODE)
+        (MDB_KEYEXIST..=MDB_LAST_ERRCODE_V10)
             .map(|code| CString::new(rlmdb::strerror(code)).unwrap_or_default())
             .collect()
     })
@@ -174,13 +176,14 @@ fn lmdb_messages() -> &'static [CString] {
 
 /// `mdb_strerror`: return a string describing a given error code.
 ///
-/// LMDB's codes map to static strings; other positive values are passed
-/// to the C library's `strerror`, as C LMDB does on Unix.
+/// LMDB's codes map to static strings, LMDB 1.0's codes (`rlmdb.h`)
+/// included, where C 0.9 says "Invalid error code"; other positive values
+/// are passed to the C library's `strerror`, as C LMDB does on Unix.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_strerror(err: c_int) -> *mut c_char {
     let text: &CStr = if err == 0 {
         c"Successful return: 0"
-    } else if (MDB_KEYEXIST..=MDB_LAST_ERRCODE).contains(&err) {
+    } else if (MDB_KEYEXIST..=MDB_LAST_ERRCODE_V10).contains(&err) {
         &lmdb_messages()[(err - MDB_KEYEXIST) as usize]
     } else if err < 0 {
         c"Invalid error code"
@@ -301,11 +304,24 @@ mod tests {
             "MDB_NOTFOUND: No matching key/data pair found"
         );
         assert_eq!(
-            s(MDB_LAST_ERRCODE),
+            s(rlmdb::consts::MDB_LAST_ERRCODE),
             "MDB_BAD_DBI: The specified DBI handle was closed/changed unexpectedly"
         );
-        // MDB_PROBLEM is LMDB 1.0 only.
-        assert_eq!(s(rlmdb::consts::MDB_PROBLEM), "Invalid error code");
+        // LMDB 1.0's codes, with 1.0's texts.
+        assert_eq!(
+            s(rlmdb::consts::MDB_PROBLEM),
+            "MDB_PROBLEM: Unexpected problem - txn should abort"
+        );
+        assert_eq!(
+            s(rlmdb::consts::MDB_ENV_ENCRYPTION),
+            "MDB_ENV_ENCRYPTION: Environment encryption mismatch"
+        );
+        assert_eq!(
+            s(MDB_LAST_ERRCODE_V10),
+            "MDB_ADDR_BUSY: Requested map address is unavailable"
+        );
+        assert_eq!(s(MDB_LAST_ERRCODE_V10 + 1), "Invalid error code");
+        assert_eq!(s(MDB_KEYEXIST - 1), "Invalid error code");
         assert_eq!(s(-1), "Invalid error code");
         assert_eq!(s(libc::ENOENT), "No such file or directory");
     }

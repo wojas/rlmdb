@@ -44,7 +44,7 @@ use std::sync::atomic::AtomicPtr;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use rlmdb::consts::DEFAULT_READERS;
-use rlmdb::{CursorId, Dbi, Environment, RwTxn, Transaction};
+use rlmdb::{CursorId, Dbi, Environment, Format, RwTxn, Transaction};
 
 use crate::erased::{ErasedInactiveTxn, ErasedRoCursor, ErasedRoTxn, ErasedRwTxn};
 use crate::types::{MDB_assert_func, MDB_cmp_func, MDB_dbi};
@@ -64,6 +64,10 @@ pub(crate) struct EnvConfig {
     pub(crate) max_dbs: MDB_dbi,
     /// Flags set with `mdb_env_set_flags` before the open.
     pub(crate) flags: c_uint,
+    /// `rlmdb_env_set_format`: the format requested for the open.
+    pub(crate) format: Option<Format>,
+    /// `rlmdb_env_set_pagesize`: the page size of a new 1.0 environment.
+    pub(crate) page_size: Option<usize>,
 }
 
 /// The C comparison functions installed on one DBI slot, remembered for
@@ -98,6 +102,8 @@ impl MDB_env {
                 max_readers: DEFAULT_READERS,
                 max_dbs: 0,
                 flags: 0,
+                format: None,
+                page_size: None,
             }),
             env: OnceLock::new(),
             path: OnceLock::new(),

@@ -20,6 +20,7 @@ use rlmdb::{Comparator, DatabaseFlags, Dbi, Transaction};
 use crate::cmp::trampoline_for;
 use crate::handles::{bad_txn, MDB_env, MDB_txn};
 use crate::types::*;
+use crate::write::KeyCopy;
 use crate::SUCCESS;
 
 const EINVAL: c_int = libc::EINVAL;
@@ -73,6 +74,13 @@ pub unsafe extern "C" fn mdb_dbi_open(
     let opened = if t.is_read_only() {
         t.with_read(bad_txn(), |rt| open_in_read_txn(rt.txn(), name, flags))
     } else {
+        // The name may point into a page of this transaction (an LMDB 1.0
+        // key in the main DB ends with the name's NUL, so its address is a
+        // valid name), which creating the database changes: copy it first,
+        // as the puts of `write.rs` copy their keys.
+        let max_key = t.env().open_env().map_or(0, |e| e.max_key_size());
+        let copy = name.map(|n| KeyCopy::new(n, max_key));
+        let name = name.zip(copy.as_ref()).map(|(n, c)| c.get(n));
         t.with_write(|w| {
             w.create_db_bytes(name, DatabaseFlags::from_bits_retain(flags))
                 .map_err(|e| e.to_err_code())

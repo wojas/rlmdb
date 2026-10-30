@@ -121,7 +121,16 @@ static void test_version(void)
 		"MDB_MAP_RESIZED: Database contents grew beyond environment mapsize"));
 	CHECK(!strcmp(mdb_strerror(MDB_BAD_DBI),
 		"MDB_BAD_DBI: The specified DBI handle was closed/changed unexpectedly"));
+#ifdef LMDB_RUST
+	/* rlmdb also knows the codes LMDB 1.0 adds after MDB_BAD_DBI
+	 * (MDB_PROBLEM .. MDB_ADDR_BUSY, declared in rlmdb.h). */
+	CHECK(!strcmp(mdb_strerror(MDB_LAST_ERRCODE + 1),
+		"MDB_PROBLEM: Unexpected problem - txn should abort"));
+#else
 	CHECK(!strcmp(mdb_strerror(MDB_LAST_ERRCODE + 1), "Invalid error code"));
+#endif
+	/* After MDB_ADDR_BUSY, LMDB 1.0's last code. */
+	CHECK(!strcmp(mdb_strerror(MDB_LAST_ERRCODE + 12), "Invalid error code"));
 	CHECK(!strcmp(mdb_strerror(-1), "Invalid error code"));
 	snprintf(e, sizeof(e), "%s", strerror(ENOENT));
 	CHECK(!strcmp(mdb_strerror(ENOENT), e));
