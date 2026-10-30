@@ -10,11 +10,22 @@
  * writer meeting such a file would sooner or later corrupt data.
  *
  * The walk reads the data file with pread() and decodes the on-disk format
- * at the offsets documented in rust/DESIGN.md, independently of LMDB's own
- * code, so it doubles as a check of that documentation. The snapshot is
- * pinned with an LMDB read transaction, which keeps writers from reusing
- * its pages while we read them. It also checks every B-tree descriptor
- * (MDB_db) against what the walk found: depth, page counts, entries.
+ * at the offsets documented in rust/DESIGN.md (LMDB 0.9) and
+ * rust/DUAL_FORMAT.md (LMDB 1.0), independently of LMDB's own code, so it
+ * doubles as a check of that documentation. The snapshot is pinned with an
+ * LMDB read transaction, which keeps writers from reusing its pages while
+ * we read them. It also checks every B-tree descriptor (MDB_db) against
+ * what the walk found: depth, page counts, entries.
+ *
+ * The format is the one of the library this file is compiled against
+ * (cpeer: LMDB 0.9, cpeer10: LMDB 1.0), checked at run time in the meta
+ * pages. A 1.0 snapshot is also checked for what only 1.0 records: every
+ * page reachable from it carries the txnid of the transaction that wrote
+ * it (mp_txnid in 1..snapshot; not meta pages, which carry 0, nor
+ * sub-pages, which the compacting copy leaves as they were while it
+ * stamps every page 1), and the MDB_ovpage of an F_BIGDATA node agrees
+ * with its overflow run (op_pages == mp_pages, op_txnid in 1..mp_txnid:
+ * an in-place overwrite restamps the page but not the reference).
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -27,7 +38,42 @@
 
 /* ---- On-disk format (host byte order; see DESIGN.md) -------------------- */
 
-#define PAGEHDRSZ	16
+/* What differs between the two data-file formats (rust/DUAL_FORMAT.md §1).
+ * The node header, MDB_db and MDB_meta are the same in both; so are the
+ * last 8 bytes of the page header (mp_pad, mp_flags, mp_lower/mp_upper or
+ * mp_pages), which 1.0 moves up by the 8 bytes of mp_txnid. */
+struct layout {
+	const char	*name;		/* the release that writes it */
+	uint32_t	version;	/* mm_version: MDB_DATA_VERSION */
+	unsigned int	hdr;		/* PAGEHDRSZ; the MDB_meta of pages 0 and 1 follows it */
+	unsigned int	base;		/* PAGEBASE: what mp_lower, mp_upper, mp_ptrs[] count from */
+	unsigned int	has_txnid;	/* mp_txnid (u64) at offset 8 */
+	unsigned int	even_keys;	/* NODEDATA pads the key to an even length */
+	unsigned int	ovpage;		/* F_BIGDATA node data: pgno_t, or MDB_ovpage */
+	uint16_t	subp_dirty;	/* P_DIRTY, which 0.9 leaves in sub-page flags */
+};
+
+static const struct layout layouts[2] = {
+	/* LMDB 0.9, MDB_DATA_VERSION 1 */
+	{ "LMDB 0.9", 1, 16, 0, 0, 0, 8, 0x10 },
+	/* LMDB 1.0, MDB_DATA_VERSION 3: mp_txnid after mp_pgno, offsets in the
+	 * page relative to the end of the header (ITS#7713), MDB_ovpage
+	 * {pgno, txnid, pages}, no P_DIRTY */
+	{ "LMDB 1.0", 3, 24, 24, 1, 1, 24, 0 },
+};
+
+/* The format of the lmdb.h this file is compiled against. */
+#if MDB_VERSION_MAJOR == 0
+#define FORMAT		0
+#elif MDB_VERSION_MAJOR == 1
+#define FORMAT		1
+#else
+#error "cpeer_pagewalk.c decodes the data files of LMDB 0.9 and 1.0 only"
+#endif
+static const struct layout *const fmt = &layouts[FORMAT];
+static const struct layout *const other_fmt = &layouts[1 - FORMAT];
+
+#define MAX_PAGEHDRSZ	24
 #define NODESIZE	8
 #define P_BRANCH	0x01
 #define P_LEAF		0x02
@@ -40,21 +86,30 @@
 #define F_DUPDATA	0x04
 #define P_INVALID	(~(uint64_t)0)
 #define DB_SIZE		48	/* MDB_db */
+#define META_SIZE	136	/* MDB_meta */
 #define META_MAGIC	0xBEEFC0DEu
 
 static uint16_t rd16(const unsigned char *p) { uint16_t v; memcpy(&v, p, 2); return v; }
 static uint32_t rd32(const unsigned char *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static uint64_t rd64(const unsigned char *p) { uint64_t v; memcpy(&v, p, 8); return v; }
 
-/* Page header */
+/* Page header. mp_lower, mp_upper and mp_ptrs[] are read as stored, that
+ * is relative to PAGEBASE. */
+#define PAGEHDRSZ	fmt->hdr
+#define PAGEBASE	fmt->base
+#define EMPTY_LOWER	(PAGEHDRSZ - PAGEBASE)	/* mp_lower of a page without nodes */
 #define PG_PGNO(p)	rd64((p) + 0)
-#define PG_PAD(p)	rd16((p) + 8)
-#define PG_FLAGS(p)	rd16((p) + 10)
-#define PG_LOWER(p)	rd16((p) + 12)
-#define PG_UPPER(p)	rd16((p) + 14)
-#define PG_PAGES(p)	rd32((p) + 12)	/* overflow pages: page count */
-#define PG_NUMKEYS(p)	((PG_LOWER(p) - PAGEHDRSZ) >> 1)
-#define PG_PTR(p, i)	rd16((p) + PAGEHDRSZ + 2 * (i))
+#define PG_TXNID(p)	rd64((p) + 8)		/* 1.0 only */
+#define PG_PAD(p)	(unsigned)rd16((p) + PAGEHDRSZ - 8)
+#define PG_FLAGS(p)	(unsigned)rd16((p) + PAGEHDRSZ - 6)
+#define PG_LOWER(p)	(unsigned)rd16((p) + PAGEHDRSZ - 4)
+#define PG_UPPER(p)	(unsigned)rd16((p) + PAGEHDRSZ - 2)
+#define PG_PAGES(p)	rd32((p) + PAGEHDRSZ - 4)	/* overflow pages: page count */
+#define PG_NUMKEYS(p)	((PG_LOWER(p) - EMPTY_LOWER) >> 1)
+/* Offset of node i from the page start: mp_ptrs[i] + PAGEBASE. */
+#define PG_PTR(p, i)	((size_t)rd16((p) + PAGEHDRSZ + 2 * (i)) + PAGEBASE)
+/* NODEDATA(node) - node: the key is padded to an even length in 1.0. */
+#define NODE_DATA_OFF(ksize)	(NODESIZE + (fmt->even_keys ? ((ksize) + 1U) & ~1U : (ksize)))
 
 /* MDB_db, decoded */
 struct db {
@@ -84,10 +139,11 @@ struct meta {
 	uint64_t	last_pg, txnid;
 };
 
+/* The MDB_meta of meta page `page` in the format `l`. */
 static void
-read_meta(const unsigned char *page, struct meta *m)
+read_meta(const unsigned char *page, const struct layout *l, struct meta *m)
 {
-	const unsigned char *p = page + PAGEHDRSZ;
+	const unsigned char *p = page + l->hdr;
 	m->magic = rd32(p);
 	m->version = rd32(p + 4);
 	m->mapsize = rd64(p + 16);
@@ -108,6 +164,7 @@ enum { USE_NONE = 0, USE_META, USE_FREE_LISTED, USE_FREE_DB, USE_DB };
 struct walker {
 	int		fd;
 	unsigned int	psize;
+	uint64_t	txnid;		/* the snapshot */
 	uint64_t	last_pg;
 	uint32_t	*use;		/* per page: USE_* */
 	const char	*names[MAX_DBS];	/* DB k's label, for messages */
@@ -199,6 +256,24 @@ load(struct walker *w, uint64_t pgno, uint64_t n)
 	return buf;
 }
 
+/* 1.0: a page reachable from the snapshot was written by a transaction of
+ * it, so 1 <= mp_txnid <= snapshot txnid (mdb_page_flush stamps the
+ * writer's txnid, the compacting copy 1). C 1.0 writers rely on it: a page
+ * with a too large mp_txnid looks like their own and is changed in place. */
+static void
+check_txnid(struct walker *w, uint64_t pgno, const unsigned char *page)
+{
+	uint64_t txnid;
+
+	if (!fmt->has_txnid)
+		return;
+	txnid = PG_TXNID(page);
+	if (txnid == 0 || txnid > w->txnid)
+		fail(w, "page %llu: mp_txnid %llu is not in 1..%llu (the snapshot)",
+			(unsigned long long)pgno, (unsigned long long)txnid,
+			(unsigned long long)w->txnid);
+}
+
 /* A node of a branch/leaf page; returns 0 if it does not fit in the page. */
 struct node {
 	uint16_t	flags, ksize;
@@ -223,8 +298,15 @@ read_node(const unsigned char *page, size_t page_len, unsigned int i, struct nod
 	n->dsize = lo | ((uint32_t)hi << 16);
 	n->child = lo | ((uint64_t)hi << 16) | ((uint64_t)n->flags << 32);
 	n->key = p + NODESIZE;
-	n->data = n->key + n->ksize;
+	n->data = p + NODE_DATA_OFF(n->ksize);
 	return off + NODESIZE + n->ksize <= page_len;
+}
+
+/* The bytes the data part of leaf node n takes in its page. */
+static size_t
+node_data_len(const struct node *n)
+{
+	return n->flags & F_BIGDATA ? fmt->ovpage : n->dsize;
 }
 
 enum tree_kind { TREE_FREE, TREE_MAIN, TREE_NAMED, TREE_DUPSUB };
@@ -244,6 +326,26 @@ struct tree {
 
 static void walk_db(struct walker *w, const char *label, const struct db *db,
 	enum tree_kind kind, uint32_t use, struct counts *out);
+
+/* 1.0: the MDB_ovpage {op_pgno, op_txnid, op_pages} of an F_BIGDATA node
+ * against the first page `ov` of its run (op_pgno is its page number). */
+static void
+check_ovpage(struct walker *w, const struct node *n, const unsigned char *ov)
+{
+	uint64_t pg = rd64(n->data), op_txnid, op_pages;
+
+	if (!fmt->has_txnid)
+		return;
+	op_txnid = rd64(n->data + 8);
+	op_pages = rd64(n->data + 16);
+	if (op_pages != PG_PAGES(ov))
+		fail(w, "overflow page %llu: op_pages %llu in the node, mp_pages %u in the page",
+			(unsigned long long)pg, (unsigned long long)op_pages, PG_PAGES(ov));
+	if (op_txnid == 0 || op_txnid > PG_TXNID(ov))
+		fail(w, "overflow page %llu: op_txnid %llu is not in 1..%llu (its mp_txnid)",
+			(unsigned long long)pg, (unsigned long long)op_txnid,
+			(unsigned long long)PG_TXNID(ov));
+}
 
 /* The data of a leaf node, following F_BIGDATA to its overflow pages.
  * Returns a malloc'd buffer the caller frees, or NULL on error. */
@@ -266,6 +368,8 @@ node_data(struct tree *t, const struct node *n, uint64_t *ovpages)
 			free(ov);
 			return NULL;
 		}
+		check_txnid(w, pg, ov);
+		check_ovpage(w, n, ov);
 		free(ov);
 		if (npages == 0 || (uint64_t)n->dsize + PAGEHDRSZ > npages * w->psize) {
 			fail(w, "overflow page %llu: %llu pages for %u bytes",
@@ -341,11 +445,12 @@ leaf_node(struct tree *t, const struct node *n)
 		t->c.entries += sc.entries;
 		t->c.subdbs++;
 	} else if (f == F_DUPDATA) {
-		/* DUPSORT values in a sub-page inside the node */
+		/* DUPSORT values in a sub-page inside the node: P_LEAF|P_SUBP
+		 * (|P_LEAF2), and in 0.9 maybe P_DIRTY, which C 0.9 sets */
 		const unsigned char *sp = n->data;
-		uint16_t want = P_LEAF | P_SUBP | (t->dupfixed ? P_LEAF2 : 0);
-		if (n->dsize < PAGEHDRSZ || (PG_FLAGS(sp) & ~0x10) != want ||
-			PG_LOWER(sp) < PAGEHDRSZ || PG_LOWER(sp) > n->dsize) {
+		unsigned int want = P_LEAF | P_SUBP | (t->dupfixed ? P_LEAF2 : 0);
+		if (n->dsize < PAGEHDRSZ || (PG_FLAGS(sp) & ~(unsigned)fmt->subp_dirty) != want ||
+			PG_LOWER(sp) < EMPTY_LOWER || PG_LOWER(sp) + PAGEBASE > n->dsize) {
 			fail(w, "bad sub-page in DB %s (flags 0x%x, %u bytes)",
 				w->names[t->use - USE_DB], PG_FLAGS(sp), n->dsize);
 			return;
@@ -391,8 +496,9 @@ walk_page(struct tree *t, uint64_t pgno, unsigned int level)
 			(unsigned long long)PG_PGNO(page));
 		goto out;
 	}
-	if (PG_LOWER(page) < PAGEHDRSZ || PG_LOWER(page) > PG_UPPER(page) ||
-		PG_UPPER(page) > w->psize) {
+	check_txnid(w, pgno, page);
+	if (PG_LOWER(page) < EMPTY_LOWER || PG_LOWER(page) > PG_UPPER(page) ||
+		PG_UPPER(page) + PAGEBASE > w->psize) {
 		fail(w, "page %llu: bad lower/upper %u/%u", (unsigned long long)pgno,
 			PG_LOWER(page), PG_UPPER(page));
 		goto out;
@@ -428,7 +534,7 @@ walk_page(struct tree *t, uint64_t pgno, unsigned int level)
 		for (i = 0; i < nkeys; i++) {
 			struct node n;
 			if (!read_node(page, w->psize, i, &n) ||
-				(!(n.flags & F_BIGDATA) && n.data + n.dsize > page + w->psize)) {
+				n.data + node_data_len(&n) > page + w->psize) {
 				fail(w, "leaf page %llu: node %u out of bounds", (unsigned long long)pgno, i);
 				break;
 			}
@@ -510,11 +616,31 @@ walk_db(struct walker *w, const char *label, const struct db *db, enum tree_kind
 	free(t.sub_dbs);
 }
 
+/* Stop with a clear message: meta page k (its first bytes in `buf`) is not
+ * a meta page of the format this program decodes. */
+static void wrong_format(int k, const unsigned char *buf) __attribute__((noreturn));
+
+static void
+wrong_format(int k, const unsigned char *buf)
+{
+	struct meta m, o;
+
+	read_meta(buf, fmt, &m);
+	read_meta(buf, other_fmt, &o);
+	if (o.magic == META_MAGIC && o.version == other_fmt->version)
+		die(EXIT_MISMATCH, "check-freelist: meta page %d is in the %s format (data version %u),"
+			" but this program decodes %s files (data version %u)", k, other_fmt->name,
+			o.version, fmt->name, fmt->version);
+	die(EXIT_MISMATCH, "check-freelist: meta page %d: magic 0x%x version %u at offset %u,"
+		" not an %s meta page (magic 0x%x version %u)", k, m.magic, m.version, fmt->hdr,
+		fmt->name, META_MAGIC, fmt->version);
+}
+
 /* Read both meta pages and return the one of snapshot `txnid`. */
 static int
 pick_meta(int fd, uint64_t txnid, struct meta *out, unsigned int *psize)
 {
-	unsigned char buf[PAGEHDRSZ + 136];
+	unsigned char buf[MAX_PAGEHDRSZ + META_SIZE];
 	struct meta m;
 	int k;
 
@@ -522,10 +648,9 @@ pick_meta(int fd, uint64_t txnid, struct meta *out, unsigned int *psize)
 		off_t off = k == 0 ? 0 : (off_t)*psize;
 		if (pread(fd, buf, sizeof(buf), off) != (ssize_t)sizeof(buf))
 			die(EXIT_LMDB, "check-freelist: cannot read meta page %d", k);
-		read_meta(buf, &m);
-		if (m.magic != META_MAGIC || m.version != 1)
-			die(EXIT_MISMATCH, "check-freelist: meta page %d: magic 0x%x version %u", k,
-				m.magic, m.version);
+		read_meta(buf, fmt, &m);
+		if (m.magic != META_MAGIC || m.version != fmt->version)
+			wrong_format(k, buf);
 		if (PG_PGNO(buf) != (uint64_t)k || !(PG_FLAGS(buf) & P_META))
 			die(EXIT_MISMATCH, "check-freelist: page %d is not a meta page", k);
 		if (k == 0)
@@ -576,6 +701,7 @@ cmd_check_freelist(struct opts *o)
 	if (w.psize != st.ms_psize)
 		fail(&w, "meta psize %u, mdb_env_stat says %u", w.psize, st.ms_psize);
 
+	w.txnid = txnid;
 	w.last_pg = m.last_pg;
 	w.use = calloc(m.last_pg + 1, sizeof(*w.use));
 	w.use[0] = w.use[1] = USE_META;

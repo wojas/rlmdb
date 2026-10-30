@@ -68,11 +68,21 @@ pub fn mtest(name: &str) -> Option<&'static Path> {
 /// Names of the upstream test programs that [`mtest`] knows.
 pub const MTESTS: &[&str] = &["mtest", "mtest2", "mtest3", "mtest4", "mtest5"];
 
-/// The C peer built against the LMDB 1.0 header and library.
-///
-/// Its `check-freelist` command decodes pages with the 0.9 layout
-/// (`c/cpeer_pagewalk.c`), so it is only meaningful on 0.9 files; every other
-/// command uses the public API alone.
+/// `rlmdb/tests/c/writeops.c` built against LMDB 0.9: the C side of the
+/// write-path differential harness (`rlmdb/tests/common/differential.rs`).
+pub fn writeops() -> &'static Path {
+    Path::new(env!("INTEROP_WRITEOPS"))
+}
+
+/// [`writeops`] built against LMDB 1.0; its optional sixth argument sets
+/// the page size of a new environment (`mdb_env_set_pagesize`).
+pub fn writeops10() -> &'static Path {
+    Path::new(env!("INTEROP_WRITEOPS10"))
+}
+
+/// The C peer built against the LMDB 1.0 header and library. Its
+/// `check-freelist` decodes the 1.0 layout (`c/cpeer_pagewalk.c` picks the
+/// layout from `MDB_VERSION_MAJOR`).
 pub fn cpeer10() -> &'static Path {
     Path::new(env!("INTEROP_CPEER10"))
 }

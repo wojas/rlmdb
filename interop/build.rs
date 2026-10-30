@@ -14,10 +14,12 @@
 //!   `#include`s `mdb.c` to see the static definitions.
 //! * The upstream tools (`mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`) and
 //!   the `mtest*` programs.
+//! * `writeops`: the script runner of the write-path differential tests
+//!   (`../rlmdb/tests/c/writeops.c`, see `rlmdb/tests/common/differential.rs`).
 //! * The LMDB 1.0 oracle: the 1.0 sources are extracted from git (the pinned
 //!   commit [`LMDB10_REF`] of `mdb.RE/1.0`, see [`extract_lmdb10`]) into
 //!   `$OUT_DIR/lmdb10/`, and the library, the tools, the `mtest*` programs,
-//!   `layout_dump` and `cpeer` are built from them once more, with the same
+//!   `layout_dump`, `cpeer` and `writeops` are built from them once more, with the same
 //!   flags, under names ending in `10` (`mdb_stat10`, `mtest2_10`, see
 //!   [`name10`]).
 //!
@@ -129,6 +131,9 @@ fn main() {
         );
     }
     println!("cargo:rerun-if-changed={}", peer_dir.display());
+    let writeops_src = manifest_dir.join("../rlmdb/tests/c/writeops.c");
+    let writeops_src = writeops_src.canonicalize().unwrap_or(writeops_src);
+    println!("cargo:rerun-if-changed={}", writeops_src.display());
 
     // The library: mdb.o + midl.o, the equivalent of liblmdb.a.
     let midl_obj = compile(&out_dir, "midl", &lmdb_dir, &[lmdb_dir.join("midl.c")]);
@@ -150,6 +155,18 @@ fn main() {
     let peer_srcs: Vec<PathBuf> = CPEER_SOURCES.iter().map(|f| peer_dir.join(f)).collect();
     let objs = compile(&out_dir, "cpeer", &lmdb_dir, &peer_srcs);
     exported.push(("cpeer".into(), link(&bin_dir, "cpeer", &objs, &lib_objs)));
+
+    // The write-path differential tests' script runner.
+    let objs = compile(
+        &out_dir,
+        "writeops",
+        &lmdb_dir,
+        std::slice::from_ref(&writeops_src),
+    );
+    exported.push((
+        "writeops".into(),
+        link(&bin_dir, "writeops", &objs, &lib_objs),
+    ));
 
     // cpeer against the Rust library's header, linked at test time.
     let capi_include = manifest_dir.join("../rlmdb-capi/include");
@@ -184,6 +201,7 @@ fn main() {
         &lmdb10_dir,
         &peer_dir,
         &peer_srcs,
+        &writeops_src,
         &bin_dir,
     ));
 
@@ -221,6 +239,7 @@ fn build_lmdb10(
     lmdb10_dir: &Path,
     peer_dir: &Path,
     peer_srcs: &[PathBuf],
+    writeops_src: &Path,
     bin_dir: &Path,
 ) -> Vec<(String, PathBuf)> {
     let src = |f: &str| lmdb10_dir.join(f);
@@ -255,6 +274,18 @@ fn build_lmdb10(
     // The C peer against the 1.0 API (a superset of 0.9's).
     let objs = compile(out_dir, "lmdb10_cpeer", lmdb10_dir, peer_srcs);
     let name = name10("cpeer");
+    let exe = link_with(bin_dir, &name, &objs, &lib_objs, &["-ldl"]);
+    exported.push((name, exe));
+
+    // writeops against 1.0 (it sets the page size with 1.0's
+    // mdb_env_set_pagesize).
+    let objs = compile(
+        out_dir,
+        "lmdb10_writeops",
+        lmdb10_dir,
+        &[writeops_src.to_path_buf()],
+    );
+    let name = name10("writeops");
     let exe = link_with(bin_dir, &name, &objs, &lib_objs, &["-ldl"]);
     exported.push((name, exe));
 

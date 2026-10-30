@@ -23,9 +23,13 @@ environment and checking what each sees.
 * The upstream tools `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` and
   `mtest`…`mtest5` are built too. (`mdb_drop` does not exist in 0.9, and
   `mtest6` needs an `MDB_DEBUG` build, as upstream.)
+* `writeops` (`../rlmdb/tests/c/writeops.c`, the C side of the write-path
+  differential harness `rlmdb/tests/common/differential.rs`), so that the
+  1.0 differential tests here can run the same harness against C 1.0.
 * The same once more for LMDB 1.0, the second oracle: `mdb_stat10`,
   `mdb_dump10`, `mdb_load10`, `mdb_copy10`, `mdb_drop10`, `mtest10`,
-  `mtest2_10`…, `layout_dump10` and `cpeer10`, built from 1.0 sources that
+  `mtest2_10`…, `layout_dump10`, `cpeer10` and `writeops10` (its optional
+  sixth argument sets the page size), built from 1.0 sources that
   `build.rs` takes from git (see "The LMDB 1.0 oracle" below).
 
 The C programs are compiled into `$OUT_DIR/bin` (`interop::bins` has the
@@ -64,6 +68,9 @@ rust/scripts/linux-test.sh test -p rlmdb-interop  # the same on Linux (Docker)
 | `tests/rpeer.rs` | `gen`, `stat`, `dump`, `verify`, `check-freelist`, and `create`/`fill`/`delete` byte-identical to C (also failure reports); unimplemented commands exit 4; usage errors |
 | `tests/layout.rs` | the C struct layout against DESIGN.md, and every `layout_dump` value against `lmdb::consts`/`lmdb::format::layout` |
 | `tests/oracle10.rs` | the LMDB 1.0 build: tool versions, the `layout_dump10` numbers (page header, `MDB_ovpage`, lock-file header, the `MDB_LOCK_FORMAT` formula, maximum key size), the two dumps lining up, 0.9 and 1.0 refusing each other's environments, `cpeer10`, every 1.0 `mtest*` |
+| `tests/audit10.rs` | `cpeer10 check-freelist` and `pagecmp` on 1.0 files written by the C 1.0 programs (page sizes 256 to 65536, copies, `mtest*`): good files pass, broken copies (leaked page, page used twice, bad `mp_txnid`, `MDB_ovpage`, sub-page flags) fail; `pagecmp` refuses 0.9 against 1.0 |
+| `tests/write_differential10.rs` | the write path of the 1.0 format against C 1.0: the lock-step harness of `rlmdb/tests/common/differential.rs` with `writeops10` at 1, 4, 16 and 64 KiB pages (plain, integer, reverse, DUPSORT, DUPFIXED, deep trees, overwrites, nested transactions, drops, Rust-side spills; `diff10_spill_full_size` `#[ignore]`d), every step compared, then `mdb_dump10`, `cpeer10 check-freelist` and `pagecmp` (page by page, `mp_txnid` included) |
+| `tests/format10.rs` | rlmdb reading C 1.0's files (`mdb_load10` at 512 B to 64 KiB pages, `mtest*10`) against `mdb_dump10`/`mdb_stat10`; rlmdb loading what `mdb_load10` loads (same pages); copies byte-identical to `mdb_copy10 [-c]`; C 1.0 and rlmdb writing one environment in turns; the concurrent scenarios, `#[ignore]`d until rlmdb writes the 1.0 lock file (`DUAL_FORMAT.md` stage 3) |
 
 A scenario step that needs something a peer lacks (none at the moment)
 prints
@@ -124,13 +131,29 @@ sources are not copied into the tree: `build.rs` extracts them from git.
   underscore when the name ends in a digit: `mdb_stat10`, `mdb_drop10`
   (1.0 only), `mtest10`, `mtest2_10`…`mtest5_10`, `mtest_remap10`,
   `mtest_enc10`, `mtest_enc3_10` (chacha8, built from `chacha8.c`),
-  `layout_dump10`, `cpeer10`. Not built: `mtest6` (needs `MDB_DEBUG`),
+  `layout_dump10`, `cpeer10`, `writeops10`. Not built: `mtest6` (needs `MDB_DEBUG`),
   `mtest_enc2` and `mtest_enc4` (they load the libsodium module
   `crypto.lm`), `mplay` (a log replayer, not a test).
 * **`cpeer10`** is `c/cpeer*.c` compiled against the 1.0 `lmdb.h` and
-  library; it compiles unchanged. Its `check-freelist` decodes pages with
-  the 0.9 layout, so only the commands that use the public API alone are
-  meaningful on 1.0 files.
+  library. `c/cpeer_pagewalk.c` takes the page layout from
+  `MDB_VERSION_MAJOR`, so `cpeer10 check-freelist` audits 1.0 files (and
+  `cpeer` 0.9 files; a meta page of the other format stops it with a
+  message naming both). For 1.0 it also checks that every page reachable
+  from the snapshot has `mp_txnid` in `1..=` the snapshot's txnid (meta
+  pages and sub-pages excepted: C 1.0's compacting copy stamps pages 1 but
+  leaves sub-pages as they were), that the `MDB_ovpage` of each
+  `F_BIGDATA` node matches its run (`op_pages == mp_pages`, `op_txnid` in
+  `1..=mp_txnid` of the run's first page), and that sub-pages are `0x42`
+  (`0x62` with `P_LEAF2`): 1.0 has no `P_DIRTY`. `rpeer check-freelist`
+  reads the format from the meta page and runs the same checks with the
+  same messages. `pagecmp` tells the formats apart the same way
+  (`pagecmp::data_format`), refuses to compare a 0.9 file with a 1.0 file,
+  and for 1.0 also compares the `mp_txnid` of every reachable page and
+  sub-page and the whole `MDB_ovpage` (`op_pgno`, `op_txnid`, `op_pages`)
+  of overflow references. `tests/audit10.rs` runs both checkers on files of
+  the C 1.0 programs with pages of 256 to 65536 bytes (`mdb_load10` takes
+  the page size from `db_pagesize=` in its input; `cpeer10 create` uses the
+  OS page size, `mtest10` 1 KiB).
 * **`layout_dump10`** is `c/layout_dump.c` compiled against the 1.0
   `mdb.c`: the same lines in the same order as `layout_dump`, with 1.0's
   field names where they changed, plus the 1.0-only values (`mp_txnid`,
