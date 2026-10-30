@@ -23,6 +23,10 @@ environment and checking what each sees.
 * The upstream tools `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` and
   `mtest`…`mtest5` are built too. (`mdb_drop` does not exist in 0.9, and
   `mtest6` needs an `MDB_DEBUG` build, as upstream.)
+* The same once more for LMDB 1.0, the second oracle: `mdb_stat10`,
+  `mdb_dump10`, `mdb_load10`, `mdb_copy10`, `mdb_drop10`, `mtest10`,
+  `mtest2_10`…, `layout_dump10` and `cpeer10`, built from 1.0 sources that
+  `build.rs` takes from git (see "The LMDB 1.0 oracle" below).
 
 The C programs are compiled into `$OUT_DIR/bin` (`interop::bins` has the
 paths); `rpeer` is a normal `[[bin]]` of this crate.
@@ -39,6 +43,7 @@ cargo test -p rlmdb-interop                       # everything: 9 pairs, three p
 cargo test -p rlmdb-interop --test c_vs_c         # every scenario with C on both sides
 cargo test -p rlmdb-interop --test rust_writes_c_reads   # every scenario, Rust writes, C reads
 cargo test -p rlmdb-interop --test rpeer          # rpeer vs cpeer outputs, checkers, exit codes
+cargo test -p rlmdb-interop --test oracle10       # the LMDB 1.0 oracle: version, layout, refusals
 cargo test -p rlmdb-interop --test c_vs_c -- --nocapture mvcc   # one scenario, with its log
 INTEROP_LOOP_SECS=20 cargo test -p rlmdb-interop --no-fail-fast  # stress: 20 s loops (~6 min)
 rust/scripts/linux-test.sh test -p rlmdb-interop  # the same on Linux (Docker)
@@ -58,6 +63,7 @@ rust/scripts/linux-test.sh test -p rlmdb-interop  # the same on Linux (Docker)
 | `tests/three_peers.rs` | `scenarios::all_peers`: all three implementations at once |
 | `tests/rpeer.rs` | `gen`, `stat`, `dump`, `verify`, `check-freelist`, and `create`/`fill`/`delete` byte-identical to C (also failure reports); unimplemented commands exit 4; usage errors |
 | `tests/layout.rs` | the C struct layout against DESIGN.md, and every `layout_dump` value against `lmdb::consts`/`lmdb::format::layout` |
+| `tests/oracle10.rs` | the LMDB 1.0 build: tool versions, the `layout_dump10` numbers (page header, `MDB_ovpage`, lock-file header, the `MDB_LOCK_FORMAT` formula, maximum key size), the two dumps lining up, 0.9 and 1.0 refusing each other's environments, `cpeer10`, every 1.0 `mtest*` |
 
 A scenario step that needs something a peer lacks (none at the moment)
 prints
@@ -79,6 +85,119 @@ placeholders); or a peer completes a command but prints a
 
 The tests print the page size of each environment they create (`--nocapture`):
 16384 on Apple Silicon macOS, 4096 on Linux x86-64.
+
+## The LMDB 1.0 oracle
+
+The 1.0 format (`MDB_DATA_VERSION 3`, `MDB_LOCK_VERSION 2`) gets its own C
+oracle, next to the 0.9 one; `../DUAL_FORMAT.md` is the design. The 1.0
+sources are not copied into the tree: `build.rs` extracts them from git.
+
+* **Pinned commit.** `LMDB10_REF` in `build.rs` is commit `4865523ff0e1` of
+  the `mdb.RE/1.0` branch: the `LMDB_1.0.2` release plus the DUPSORT
+  page-count fixes of ITS#10642 and ITS#10643. Do not pin the `LMDB_1.0.2`
+  tag: it still has that bug, which would be baked into the oracle.
+* **Extraction.** `build.rs` finds the repository with `git rev-parse
+  --show-toplevel` (a linked worktree works: its objects are the main
+  repository's), resolves the ref, and writes `git show
+  <commit>:libraries/liblmdb/<file>` for the library (`mdb.c`, `midl.[ch]`,
+  `lmdb.h`, `module.c`, `chacha8.[ch]`), the tools and the `mtest*`
+  programs into `$OUT_DIR/lmdb10/`. `lmdb10/.commit` records the commit;
+  while it is unchanged nothing is extracted again
+  (`interop::bins::lmdb10_src()` has the directory).
+* **The commit must be present.** If it is not, the build fails and says to
+  run `git fetch origin mdb.RE/1.0`. Git is needed at build time.
+* **Override.** `RLMDB_LMDB10_REF=<commit-ish>` builds against another
+  commit, tag or branch (`cargo:rerun-if-env-changed`, so changing it
+  rebuilds). A branch name is resolved when the build script runs; cargo
+  does not notice the branch moving, so prefer a hash.
+* **Bumping the pin.** `git fetch origin mdb.RE/1.0`, read the new commits
+  (`git log <old>..origin/mdb.RE/1.0 -- libraries/liblmdb`), put the new
+  hash and what it contains into `LMDB10_REF` and its comment, and adjust
+  `UPSTREAM10_PROGRAMS` if programs were added or removed. Then run this
+  crate's tests on macOS and Linux: `tests/oracle10.rs` pins the layout
+  numbers below and fails if the new commit changes them.
+* **Build.** The same flags as for 0.9 (the 1.0 `Makefile` has the same
+  `CFLAGS`). Like 1.0's `liblmdb.a`, the library is `mdb.o midl.o
+  module.o`, and programs link `-ldl` (`module.c` loads crypto modules
+  with `dlopen`). Defaults are left alone, so `MDB_RPAGE_CACHE` is 1.
+  Programs are named after the 0.9 ones with `10` appended, after an
+  underscore when the name ends in a digit: `mdb_stat10`, `mdb_drop10`
+  (1.0 only), `mtest10`, `mtest2_10`…`mtest5_10`, `mtest_remap10`,
+  `mtest_enc10`, `mtest_enc3_10` (chacha8, built from `chacha8.c`),
+  `layout_dump10`, `cpeer10`. Not built: `mtest6` (needs `MDB_DEBUG`),
+  `mtest_enc2` and `mtest_enc4` (they load the libsodium module
+  `crypto.lm`), `mplay` (a log replayer, not a test).
+* **`cpeer10`** is `c/cpeer*.c` compiled against the 1.0 `lmdb.h` and
+  library; it compiles unchanged. Its `check-freelist` decodes pages with
+  the 0.9 layout, so only the commands that use the public API alone are
+  meaningful on 1.0 files.
+* **`layout_dump10`** is `c/layout_dump.c` compiled against the 1.0
+  `mdb.c`: the same lines in the same order as `layout_dump`, with 1.0's
+  field names where they changed, plus the 1.0-only values (`mp_txnid`,
+  `MDB_ovpage`, `MDB_LOCK_TYPE` and `MDB_lock_desc`, `me_psize`,
+  `me_nodemax` and `mdb_env_get_maxkeysize` of new environments with the
+  OS page size, 4096 and 16384). The 0.9 output is unchanged.
+* **Containers.** `scripts/linux-test.sh` bind-mounts the checkout at
+  `/work`. In a linked worktree `.git` is a file that names the main
+  repository's `.git/worktrees/<name>` by absolute path, outside that
+  mount, so the script also mounts the common git directory (`git rev-parse
+  --git-common-dir`) read-only at the same path, and disables git's
+  ownership check inside the container (`safe.directory`). The
+  `rust:1-bookworm` image has git.
+
+### Layout numbers
+
+From `layout_dump` and `layout_dump10` (offsets and sizes in bytes). macOS
+is arm64 with 16 KiB pages and named POSIX semaphores; Linux is the arm64
+`rust:1-bookworm` container of `scripts/linux-test.sh` (glibc, 4 KiB pages,
+robust process-shared mutexes, `sizeof(pthread_mutex_t)` 48).
+
+| value | 0.9 macOS | 1.0 macOS | 0.9 Linux | 1.0 Linux |
+|---|---|---|---|---|
+| `MDB_DATA_VERSION` | 1 | 3 | 1 | 3 |
+| `MDB_LOCK_VERSION` | 1 | 2 | 1 | 2 |
+| `MDB_LOCK_FORMAT` | `0x10001` | `0x28570002` | `0x10001` | `0x2cd82002` |
+| `MDB_LOCK_TYPE`, `MDB_lock_desc` | - | 5, 165232 | - | 73, 183682 |
+| `PAGEHDRSZ`, `PAGEBASE` | 16, 0 | 24, 24 | 16, 0 | 24, 24 |
+| `MAX_PAGESIZE` | 32768 | 65536 | 32768 | 65536 |
+| page header: `pgno`, `txnid`, `pad`, `flags`, `lower`/`pages`, `upper` | 0, -, 8, 10, 12, 14 | 0, 8, 16, 18, 20, 22 | 0, -, 8, 10, 12, 14 | 0, 8, 16, 18, 20, 22 |
+| `F_BIGDATA` node data | `pgno_t`, 8 | `MDB_ovpage {pgno, txnid, pages}`, 24 | `pgno_t`, 8 | `MDB_ovpage`, 24 |
+| `sizeof(MDB_meta)`, offset in page | 136, 16 | 136, 24 | 136, 16 | 136, 24 |
+| `MDB_MAXKEYSIZE` | 511 | 0 (computed at open) | 511 | 0 |
+| `mdb_env_get_maxkeysize`: OS page size, 4096, 16384 | 511 | 8122, 1978, 8122 | 511 | 1978, 1978, 8122 |
+| `MNAME_LEN` | 32 | 64 (not in the lock file) | 48 | 48 |
+| `MDB_txbody`: `magic`, `format`, `txnid`, `numreaders` | 0, 4, 40, 48 | 0, 4, 8, 16 | 0, 4, 56, 64 | 0, 4, 8, 16 |
+| `MDB_txbody` reader lock: offset, size | `mtb_rmname` 8, 32 | `mtb_mutexid` 24, 8 | `mtb_rmutex` 8, 48 | `mtb_rmutex` 24, 48 |
+| `sizeof(MDB_txbody)` | 56 | 32 | 72 | 72 |
+| writer lock (`mt2`): offset | `mt2_wmname` 64 | none | `mt2_wmutex` 128 | `mt2_wmutex` 128 |
+| `offsetof(MDB_txninfo, mti_readers)` | 128 | 64 | 192 | 192 |
+| `sizeof(MDB_reader)` | 64 | 64 | 64 | 64 |
+
+`MDB_LOCK_FORMAT` in 1.0 is `2 + (MDB_lock_desc << 12)`, and
+`MDB_lock_desc` is computed from the lock type and the sizes of `pid_t`,
+`pthread_t`, `MDB_txbody`, `txnid_t` and `MDB_reader`
+(`tests/oracle10.rs` recomputes it). The lock type is
+`4 + alignof(mdb_hash_t) / 8 % 2` for named semaphores and
+`10 + LOG2_MOD(alignof(pthread_mutex_t), 5) + sizeof(pthread_mutex_t) / 4 %
+22 * 5` for POSIX mutexes, so the value depends on the mutex size: on
+x86-64 glibc (40-byte mutex, `MDB_txbody` 64 bytes) the formula gives
+`0x2c2f6002`, not measured here.
+
+### 0.9 and 1.0 refuse each other
+
+Neither version opens the other's environment (`versions_refuse_each_other`):
+
+* **Closed environment.** The opener is alone, so it re-initialises the
+  lock file for its own version (the format word changes, e.g. from
+  `0x28570002` to `0x10001`) and then reads the meta page after its own
+  page header. The other version's meta page is 8 bytes off, the header
+  check fails before the version word is read, and the error is
+  `MDB_INVALID` ("File is not an LMDB file"), not `MDB_VERSION_MISMATCH`.
+  The data file is not touched; the right version still reads it and
+  re-initialises the lock file again.
+* **Environment held open by the other version.** The opener is not alone,
+  so it checks the lock file's format word and fails with
+  `MDB_VERSION_MISMATCH`.
 
 ## Rust harness
 

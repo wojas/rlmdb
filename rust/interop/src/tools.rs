@@ -1,6 +1,7 @@
 //! The upstream C tools (`mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`) and
 //! test programs (`mtest*`), run as subprocesses, with parsers for their
-//! output.
+//! output. The helpers run the LMDB 0.9 builds; [`run_tool_any_status`] runs
+//! any of them, the LMDB 1.0 ones of [`bins`] included.
 //!
 //! The parsers document the exact output formats, which the Rust
 //! reimplementations in `rlmdb-tools` must reproduce.
@@ -22,8 +23,9 @@ fn run_tool(
     run_tool_any_status(bin, args, cwd, stdin)?.ok()
 }
 
-/// Run a C program with arguments and optional stdin, whatever its status.
-fn run_tool_any_status(
+/// Run a C program (`cwd`: its working directory) with arguments and
+/// optional stdin, whatever its exit status; times out like the peers.
+pub fn run_tool_any_status(
     bin: &Path,
     args: &[OsString],
     cwd: Option<&Path>,
@@ -469,6 +471,18 @@ pub fn c_layout() -> Result<&'static Layout> {
         return Ok(l);
     }
     let out = run_tool(bins::layout_dump(), &[], None, None)?;
+    let l = Layout::parse(&out.stdout)?;
+    Ok(LAYOUT.get_or_init(|| l))
+}
+
+/// Run `layout_dump10`, the LMDB 1.0 build of `layout_dump` (once per
+/// process), and parse it.
+pub fn c_layout10() -> Result<&'static Layout> {
+    static LAYOUT: std::sync::OnceLock<Layout> = std::sync::OnceLock::new();
+    if let Some(l) = LAYOUT.get() {
+        return Ok(l);
+    }
+    let out = run_tool(bins::layout_dump10(), &[], None, None)?;
     let l = Layout::parse(&out.stdout)?;
     Ok(LAYOUT.get_or_init(|| l))
 }
