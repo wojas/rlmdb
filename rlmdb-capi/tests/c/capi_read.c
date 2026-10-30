@@ -101,10 +101,19 @@ static void test_version(void)
 	int ma = -1, mi = -1, pa = -1;
 	char *s = mdb_version(&ma, &mi, &pa), e[256];
 
-	CHECK(ma == 0 && mi == 9 && pa == 36);
-	CHECK(!strcmp(s, MDB_VERSION_STRING));
-	CHECK(mdb_version(NULL, NULL, NULL) == s);
+	/* Both builds use a 0.9.36 lmdb.h. C reports the header's version at
+	 * run time; rlmdb reports 0.9.85 (README.md, "Differences from C LMDB
+	 * 0.9.36"), which capi_version.c checks in detail. */
 	CHECK(MDB_VERSION_FULL == MDB_VERINT(0, 9, 36));
+	CHECK(ma == MDB_VERSION_MAJOR && mi == MDB_VERSION_MINOR);
+#ifdef LMDB_RUST
+	CHECK(pa == 85);
+	CHECK(!strncmp(s, "LMDB 0.9.85: (rlmdb ", strlen("LMDB 0.9.85: (rlmdb ")));
+#else
+	CHECK(pa == MDB_VERSION_PATCH);
+	CHECK(!strcmp(s, MDB_VERSION_STRING));
+#endif
+	CHECK(mdb_version(NULL, NULL, NULL) == s);
 	CHECK(!strcmp(mdb_strerror(0), "Successful return: 0"));
 	CHECK(!strcmp(mdb_strerror(MDB_KEYEXIST), "MDB_KEYEXIST: Key/data pair already exists"));
 	CHECK(!strcmp(mdb_strerror(MDB_NOTFOUND), "MDB_NOTFOUND: No matching key/data pair found"));

@@ -264,6 +264,34 @@ impl Builder {
         self.program(name, &[test_c_dir().join(format!("{name}.c"))], lib)
     }
 
+    /// Program `name` from `tests/c/<name>.c` compiled as C++ (with the C++
+    /// compiler, `-x c++`) and linked against the Rust library as
+    /// `<name>_cxx`: a C++ program sees the C symbols only if the headers'
+    /// `extern "C"` guards are right. The program must not need the C++
+    /// runtime (the C compiler driver links it).
+    pub fn cxx_test_program(&self, name: &str) -> PathBuf {
+        let out_dir = self.dir.join("cxx");
+        fs::create_dir_all(&out_dir).unwrap();
+        let obj = out_dir.join(format!("{name}.o"));
+        let mut cmd = cc_build(&out_dir).cpp(true).get_compiler().to_command();
+        cmd.arg("-I")
+            .arg(crate_dir().join("include"))
+            .arg("-I")
+            .arg(test_c_dir())
+            .args([
+                "-DLMDB_RUST",
+                "-fno-exceptions",
+                "-fno-rtti",
+                "-Wall",
+                "-Werror",
+            ])
+            .args(["-x", "c++", "-c", "-o"])
+            .arg(&obj)
+            .arg(test_c_dir().join(format!("{name}.c")));
+        run_ok(&mut cmd);
+        self.program(&format!("{name}_cxx"), &[obj], Lib::Rust)
+    }
+
     /// One of the upstream `mtest*.c` programs, unmodified, built with
     /// `tests/c/mtest_shim.{h,c}`: a fixed `rand()` seed (`$MTEST_SEED`)
     /// and the `mdb_dkey()` that `mtest6.c` needs.

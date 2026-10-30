@@ -254,16 +254,62 @@ pub fn both(tool: &str, argv: &[Vec<u8>], stdin: &[u8], cwd: &Path) -> (Run, Run
 }
 
 /// Asserts that the C and the Rust tool give identical stdout, stderr and
-/// exit code; returns the result.
+/// exit code (apart from the version line, see [`assert_runs_equal`]);
+/// returns the result.
 pub fn assert_same(tool: &str, argv: &[Vec<u8>], stdin: &[u8], cwd: &Path) -> Run {
     let (c, r) = both(tool, argv, stdin, cwd);
     assert_runs_equal(tool, argv, &c, &r);
     r
 }
 
-/// Asserts that two runs are identical, with a readable diff.
+/// The line `-V` prints. The one intended difference between the tools:
+/// the C tools print `MDB_VERSION_STRING` of `libraries/liblmdb/lmdb.h`
+/// (`LMDB 0.9.36: (<date>)`), the Rust tools the string rlmdb's
+/// `mdb_version` returns (`LMDB 0.9.85: (rlmdb <version>)`).
+pub fn version_line(imp: Impl) -> Vec<u8> {
+    let line = match imp {
+        Impl::C => {
+            let h = fs::read_to_string(c_src().join("lmdb.h")).unwrap();
+            let field = |name: &str| {
+                h.lines()
+                    .find_map(|l| l.strip_prefix(&format!("#define {name}")))
+                    .unwrap()
+                    .trim()
+                    .trim_matches('"')
+                    .to_owned()
+            };
+            format!(
+                "LMDB {}.{}.{}: ({})",
+                field("MDB_VERSION_MAJOR"),
+                field("MDB_VERSION_MINOR"),
+                field("MDB_VERSION_PATCH"),
+                field("MDB_VERSION_DATE")
+            )
+        }
+        Impl::Rust => rlmdb::version_info().mdb_version_string(),
+    };
+    format!("{line}\n").into_bytes()
+}
+
+/// `c` as the Rust tool should print it: each standard output line that is
+/// the C version line becomes the Rust one ([`version_line`]).
+fn expected_of_rust(c: &Run) -> Run {
+    let (c_line, rust_line) = (version_line(Impl::C), version_line(Impl::Rust));
+    let mut stdout = Vec::with_capacity(c.stdout.len());
+    for line in c.stdout.split_inclusive(|&b| b == b'\n') {
+        stdout.extend_from_slice(if line == c_line { &rust_line } else { line });
+    }
+    Run {
+        stdout,
+        ..c.clone()
+    }
+}
+
+/// Asserts that two runs are identical, with a readable diff. The version
+/// line is the exception: where C prints its version line, Rust must print
+/// its own ([`version_line`]).
 pub fn assert_runs_equal(tool: &str, argv: &[Vec<u8>], c: &Run, r: &Run) {
-    if c != r {
+    if expected_of_rust(c) != *r {
         let cmd: Vec<String> = argv
             .iter()
             .map(|a| String::from_utf8_lossy(a).into_owned())
