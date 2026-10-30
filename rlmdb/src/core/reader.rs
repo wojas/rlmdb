@@ -40,10 +40,8 @@ use std::sync::Mutex;
 
 use crate::consts::MDB_MAGIC;
 use crate::error::{Error, MdbError, Result};
-use crate::format::layout::Format;
 use crate::format::lockfile::{
-    self, LockLayout, TxnInfoSnapshot, READER_PID, READER_TID, READER_TXNID, TXNINFO_FORMAT,
-    TXNINFO_MAGIC,
+    self, LockLayout, READER_PID, READER_TID, READER_TXNID, TXNINFO_FORMAT, TXNINFO_MAGIC,
 };
 use crate::os::shared_lock::{LockStatus, SharedLocks, SharedMutex};
 use crate::os::{self, LockKind, LockMap};
@@ -261,6 +259,7 @@ impl LockRegion {
     }
 
     /// `mti_format` as stored.
+    #[cfg(test)]
     fn lock_format(&self) -> u32 {
         self.map.load_u32(TXNINFO_FORMAT)
     }
@@ -269,8 +268,9 @@ impl LockRegion {
     /// table), read through the mapping. (Reading the file through another
     /// descriptor would drop this process's record locks when that
     /// descriptor is closed.)
-    fn header(&self) -> Option<TxnInfoSnapshot> {
-        TxnInfoSnapshot::read(&self.map.read_bytes(0, self.layout.readers), self.layout)
+    #[cfg(test)]
+    fn header(&self) -> Option<lockfile::TxnInfoSnapshot> {
+        lockfile::TxnInfoSnapshot::read(&self.map.read_bytes(0, self.layout.readers), self.layout)
     }
 
     /// `mti_numreaders`, clamped to the slots we have mapped so that a
@@ -528,119 +528,6 @@ struct ReaderTableGuard<'a> {
 impl Drop for ReaderTableGuard<'_> {
     fn drop(&mut self) {
         let _ = self.mutex.unlock();
-    }
-}
-
-/// Not part of the API: the lock file of an environment on its own, without
-/// the data file, in the lock-file version of a given data [`Format`].
-///
-/// For the cross-process tests in `interop`, which attach rlmdb's lock-file
-/// code to a lock file a C LMDB 1.0 process uses (and let C attach to one
-/// rlmdb created) while [`Environment`](crate::Environment) cannot open a
-/// 1.0 environment yet. Everything goes through the same `LockRegion` an
-/// environment uses; only the meta pages are missing, so a writer whose
-/// predecessor died keeps the `mti_txnid` it finds.
-#[doc(hidden)]
-pub struct LockFile {
-    region: LockRegion,
-}
-
-#[doc(hidden)]
-impl LockFile {
-    /// Opens (creating if needed) the lock file at `path` as a writable
-    /// environment of format `format` would (`mdb_env_setup_locks`), with
-    /// room for `max_readers` slots if we create the table. If we are the
-    /// only user we initialise the table and stay exclusive until
-    /// [`LockFile::downgrade`].
-    pub fn open(path: &Path, format: Format, max_readers: u32) -> Result<LockFile> {
-        let layout = LockLayout::of(format);
-        let region = LockRegion::open(path, 0o644, max_readers, false, layout)?
-            .ok_or_else(|| Error::errno(libc::EROFS))?;
-        Ok(LockFile { region })
-    }
-
-    /// The layout the file was opened with.
-    pub fn layout(&self) -> &'static LockLayout {
-        self.region.layout
-    }
-
-    /// `true` if we initialised the table and still hold the file
-    /// exclusively.
-    pub fn is_exclusive(&self) -> bool {
-        self.region.is_exclusive()
-    }
-
-    /// `mdb_env_share_locks`: publish `txnid` and let other openers in.
-    pub fn downgrade(&self, txnid: u64) -> Result<()> {
-        self.region.downgrade(txnid)
-    }
-
-    /// `mti_format` as stored.
-    pub fn lock_format(&self) -> u32 {
-        self.region.lock_format()
-    }
-
-    /// The header as stored, decoded with [`LockFile::layout`]. Use this,
-    /// not a read of the file, while the `LockFile` is open: closing
-    /// another descriptor of the file drops this process's record locks.
-    pub fn header(&self) -> TxnInfoSnapshot {
-        // The mapping is never shorter than the header.
-        self.region.header().expect("lock file header")
-    }
-
-    /// `mti_txnid`.
-    pub fn txnid(&self) -> u64 {
-        self.region.txnid()
-    }
-
-    /// `mti_numreaders` as stored.
-    pub fn num_readers(&self) -> u32 {
-        self.region.raw_num_readers()
-    }
-
-    /// `me_maxreaders`: the slots in the table.
-    pub fn max_readers(&self) -> u32 {
-        self.region.max_readers()
-    }
-
-    /// `mdb_reader_list`.
-    pub fn reader_list(&self) -> Vec<ReaderInfo> {
-        self.region.reader_list()
-    }
-
-    /// `mdb_reader_check`.
-    pub fn reader_check(&self) -> Result<usize> {
-        self.region.reader_check()
-    }
-
-    /// What a read transaction does with the table: claim a slot under the
-    /// reader mutex and publish the current `mti_txnid` in it. Returns the
-    /// slot and the txnid.
-    pub fn begin_read(&self) -> Result<(usize, u64)> {
-        let slot = self.region.acquire_slot()?;
-        Ok((slot, self.region.publish_current_txnid(slot)))
-    }
-
-    /// Ends a read transaction begun with [`LockFile::begin_read`] and frees
-    /// its slot.
-    pub fn end_read(&self, slot: usize) {
-        self.region.release_slot(slot);
-    }
-
-    /// Locks the writer mutex, blocking (on Linux it must be unlocked on
-    /// the same thread).
-    pub fn lock_writer(&self) -> Result<()> {
-        self.region.lock_writer(|| Ok(self.region.txnid()))
-    }
-
-    /// Unlocks the writer mutex.
-    pub fn unlock_writer(&self) {
-        self.region.unlock_writer()
-    }
-
-    /// What a writer publishes after a commit: `mti_txnid`.
-    pub fn set_txnid(&self, txnid: u64) {
-        self.region.set_txnid(txnid)
     }
 }
 

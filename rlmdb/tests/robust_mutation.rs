@@ -2,7 +2,9 @@
 //! data files.
 //!
 //! Valid environments written by the C peer (`rust/interop/c/cpeer`, or by
-//! the Rust writer when the C tools cannot be built) are copied, damaged
+//! the Rust writer when the C tools cannot be built), and LMDB 1.0
+//! environments written by the Rust writer with pages of 1 KiB, 4 KiB and
+//! 64 KiB (the `*10` bases), are copied, damaged
 //! with random byte-level and structure-aware mutations (bit flips, zeroed
 //! and random ranges, swapped and duplicated pages, truncation, bogus
 //! `mp_lower`/`mp_upper`/`mp_ptrs`, child and overflow page numbers that
@@ -124,12 +126,15 @@ fn build_with_rust(name: &str, dir: &Path, v10_page_size: Option<usize>) -> Vec<
         builder.format(rlmdb::Format::V10).page_size(ps);
     }
     let env = builder.open(dir).unwrap();
+    // Values that need overflow pages at every page size (at 64 KiB pages
+    // a node holds up to about 32 KiB).
+    let big = 17000.max(env.page_size() * 2 / 3);
     let mut txn = env.begin_rw_txn().unwrap();
     let names: Vec<String> = match name {
         "big" => {
             for i in 0..240u32 {
                 let v = if i % 3 == 0 {
-                    vec![7u8; 17000]
+                    vec![7u8; big]
                 } else {
                     vec![i as u8; 100]
                 };
@@ -230,6 +235,10 @@ fn base(name: &'static str) -> &'static Base {
         ("main10", _) => build_with_rust("main", dir.path(), Some(1024)),
         ("named10", _) => build_with_rust("named", dir.path(), Some(1024)),
         ("big10", _) => build_with_rust("big", dir.path(), Some(4096)),
+        // And the largest pages 1.0 allows: offsets near the 16-bit limit
+        // (an empty page's `mp_upper` is 65512), large sub-pages.
+        ("named10_64k", _) => build_with_rust("named", dir.path(), Some(65536)),
+        ("big10_64k", _) => build_with_rust("big", dir.path(), Some(65536)),
         (_, Some(c)) => build_with_c(c, name, dir.path()),
         (_, None) => build_with_rust(name, dir.path(), None),
     };
@@ -1390,6 +1399,17 @@ fn robust_mutation_named_dbs_v10() {
 #[test]
 fn robust_mutation_overflow_values_v10() {
     run_base("big10", 6_000_000);
+}
+
+/// LMDB 1.0 files with 64 KiB pages.
+#[test]
+fn robust_mutation_named_dbs_v10_64k() {
+    run_base("named10_64k", 7_000_000);
+}
+
+#[test]
+fn robust_mutation_overflow_values_v10_64k() {
+    run_base("big10_64k", 8_000_000);
 }
 
 /// The data file is valid but the meta pages lie about the map size: the
