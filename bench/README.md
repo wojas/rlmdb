@@ -30,7 +30,7 @@ sides. Results and analysis: [`RESULTS.md`](RESULTS.md).
 
 ```sh
 cd rust
-cargo run --release -p rlmdb-bench               # everything, both sides (20-30 min)
+cargo run --release -p rlmdb-bench               # everything, both sides (about 10 min on an M1 Pro)
 cargo run --release -p rlmdb-bench -- --check-data   # C and Rust generate the same data?
 cargo run --release -p rlmdb-bench -- --only read,dupsort --reps 9
 cargo run --release -p rlmdb-bench -- --impl rust --only rand_put --raw
@@ -64,7 +64,8 @@ cargo run --release -p rlmdb-bench -- --baseline /tmp/rlmdb-bench-old --rounds 3
 
 The machine this was developed on was shared with other heavy jobs, so
 interleaved rounds were much more repeatable than two separate runs;
-`RESULTS.md` reports both.
+the per-change numbers in `RESULTS.md` and `results/` are all
+interleaved A/B runs.
 
 The largest data set is the `ls` group's, about 1.3 GB with 16 KiB
 pages and 1.15 GB with 4 KiB pages at the default `--n`; the others are
