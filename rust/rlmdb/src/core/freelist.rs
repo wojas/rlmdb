@@ -31,7 +31,6 @@
 use crate::consts::*;
 use crate::core::cursor::{corrupted, cursor_first, cursor_next, cursor_set, Cursor, CursorOp};
 use crate::core::cursor_put::PutData;
-use crate::core::dirty::alloc_pages;
 use crate::core::txn_rw::{RwTxn, TXN_ERROR};
 use crate::core::wcursor::CRef;
 use crate::error::{MdbError, Result};
@@ -116,9 +115,9 @@ impl<'env> RwTxn<'env> {
         let mut buf = match init {
             Some(src) => {
                 debug_assert_eq!(src.len(), self.psize() * num);
-                Box::<[u8]>::from(src)
+                self.core.dirty.alloc_copy(src)
             }
-            None => alloc_pages(self.psize(), num),
+            None => self.core.dirty.alloc_zeroed(self.psize() * num),
         };
         crate::core::page_ops::set_pgno(&mut buf, pgno);
         // mdb_page_dirty
@@ -278,7 +277,7 @@ impl<'env> RwTxn<'env> {
                 self.core.spilled.remove(&pgno);
             } else {
                 // Remove from dirty list.
-                if self.core.dirty.remove(pgno).is_none() {
+                if !self.core.dirty.remove(pgno) {
                     self.w.flags |= TXN_ERROR;
                     return Err(MdbError::Corrupted.into());
                 }

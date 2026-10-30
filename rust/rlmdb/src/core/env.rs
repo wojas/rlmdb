@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use crate::cmp::CmpFn;
 use crate::consts::*;
 use crate::core::dbi::{Dbi, DbiRegistry};
+use crate::core::dirty::PagePool;
 use crate::core::reader::{LockRegion, ReaderInfo};
 use crate::core::txn::{RoTxn, Transaction};
 use crate::core::txn_rw::RwTxn;
@@ -237,6 +238,9 @@ pub(crate) struct WriterState {
     /// looked (`mdb_page_alloc`). Only grows; refreshed when it is in the
     /// way.
     pub(crate) pg_oldest: u64,
+    /// `me_dpages`: spare page buffers, kept between write transactions
+    /// (a write transaction's dirty list holds them while it runs).
+    pub(crate) pages: PagePool,
 }
 
 impl std::fmt::Debug for Environment {
@@ -351,7 +355,10 @@ impl Environment {
             dbis: DbiRegistry::new(opts.max_dbs),
             flags: AtomicU32::new(flags),
             fatal: AtomicBool::new(false),
-            writer: Mutex::new(WriterState::default()),
+            writer: Mutex::new(WriterState {
+                pg_oldest: 0,
+                pages: PagePool::new(page_size),
+            }),
             page_size,
             map_size: AtomicUsize::new(map_size),
             dirty_limit: AtomicUsize::new(MDB_IDL_UM_MAX),

@@ -42,10 +42,16 @@ impl<'env> RwTxn<'env> {
         nflags: u32,
     ) -> Result<()> {
         let mut mn = None;
-        let rc = self.page_split0(mc, newkey, newdata, newpgno, nflags, &mut mn);
+        let mut bufs = SplitBufs {
+            src: self.take_scratch(),
+            copy: self.take_scratch(),
+        };
+        let rc = self.page_split0(mc, newkey, newdata, newpgno, nflags, &mut mn, &mut bufs);
         if let Some(mn) = mn {
             self.close_slot(mn);
         }
+        self.give_scratch(bufs.src);
+        self.give_scratch(bufs.copy);
         if rc.is_err() {
             self.w.flags |= TXN_ERROR;
         }
@@ -61,6 +67,7 @@ impl<'env> RwTxn<'env> {
         newpgno: u64,
         nflags: u32,
         mn_slot: &mut Option<usize>,
+        bufs: &mut SplitBufs,
     ) -> Result<()> {
         let ps = self.psize();
         let nodemax = self.core.env.node_max();
@@ -128,24 +135,24 @@ impl<'env> RwTxn<'env> {
             w.ki[ptop] = mc_ki_ptop + 1;
         }
 
-        // The page as it was, the temporary page holding the left half, and
-        // the offsets of mp's nodes with a slot for the new one (C keeps
-        // those in copy->mp_ptrs).
-        let mut copy: Vec<u8> = Vec::new();
+        // The page as it was (`src`), the temporary page holding the left
+        // half (`copy`), and the offsets of mp's nodes with a slot for the
+        // new one (C keeps those in copy->mp_ptrs).
+        let SplitBufs { src, copy } = bufs;
         let mut copy_ptrs: Vec<usize> = Vec::new();
-        let src: Vec<u8> = self.top_page(mc)?.bytes().to_vec();
         let split_indx;
-        let sepkey: Vec<u8>;
+        let sepkey: &[u8];
         if nflags & MDB_APPEND != 0 {
             let t = self.cur(mn).top;
             self.cur_mut(mn).ki[t] = 0;
-            sepkey = newkey.to_vec();
+            sepkey = newkey;
             split_indx = newindx;
             nkeys = 0;
         } else {
+            src.extend_from_slice(self.top_page(mc)?.bytes());
             let mut si = nkeys.div_ceil(2);
             if is_leaf2 {
-                sepkey = self.split_leaf2(mc, mp, rp, &src, newkey, newindx, si, nkeys)?;
+                sepkey = self.split_leaf2(mc, mp, rp, src, newkey, newindx, si, nkeys)?;
             } else {
                 // Maximum free space in an empty page.
                 let pmax = ps - PAGE_HDR_SIZE;
@@ -158,12 +165,13 @@ impl<'env> RwTxn<'env> {
                 };
                 let nsize = page_ops::even(nsize);
 
-                // Grab a page to hold a temporary copy.
-                copy = vec![0u8; ps];
+                // Grab a page to hold a temporary copy (zero-filled: node
+                // padding bytes are not written but end up in mp).
+                copy.resize(ps, 0);
                 copy[..PAGE_HDR_SIZE].copy_from_slice(&src[..PAGE_HDR_SIZE]);
-                page_ops::set_lower(&mut copy, PAGE_HDR_SIZE);
-                page_ops::set_upper(&mut copy, ps);
-                put_u16(&mut copy, PAGE_PAD, 0);
+                page_ops::set_lower(copy, PAGE_HDR_SIZE);
+                page_ops::set_upper(copy, ps);
+                put_u16(copy, PAGE_PAD, 0);
 
                 // Prepare to insert.
                 copy_ptrs = Vec::with_capacity(nkeys + 1);
@@ -171,7 +179,7 @@ impl<'env> RwTxn<'env> {
                     if i == newindx {
                         copy_ptrs.push(0);
                     }
-                    copy_ptrs.push(page_ops::ptr(&src, i).ok_or_else(corrupted)?);
+                    copy_ptrs.push(page_ops::ptr(src, i).ok_or_else(corrupted)?);
                 }
                 if newindx >= nkeys {
                     copy_ptrs.push(0);
@@ -209,7 +217,7 @@ impl<'env> RwTxn<'env> {
                             // A corrupt page can be "full" with too few
                             // keys for the scan (C reads garbage here).
                             let ptr = *copy_ptrs.get(i as usize).ok_or_else(corrupted)?;
-                            let node = node_at(&src, ptr)?;
+                            let node = node_at(src, ptr)?;
                             psize += NODE_SIZE + node.key_size() + 2;
                             if is_leaf {
                                 psize += if node.flags() & F_BIGDATA != 0 {
@@ -228,11 +236,11 @@ impl<'env> RwTxn<'env> {
                     }
                 }
                 sepkey = if si == newindx {
-                    newkey.to_vec()
+                    newkey
                 } else {
                     let ptr = *copy_ptrs.get(si).ok_or_else(corrupted)?;
-                    let node = node_at(&src, ptr)?;
-                    node.key().ok_or_else(corrupted)?.to_vec()
+                    let node = node_at(src, ptr)?;
+                    node.key().ok_or_else(corrupted)?
                 };
             }
             split_indx = si;
@@ -255,7 +263,7 @@ impl<'env> RwTxn<'env> {
                 .slot_mut(mn.slot)
                 .ok_or_else(corrupted)?
                 .tracked = true;
-            let rc = self.page_split(mn, &sepkey, None, rp, 0);
+            let rc = self.page_split(mn, sepkey, None, rp, 0);
             if let Some(s) = self.w.cursors.slot_mut(mn.slot) {
                 s.tracked = false;
             }
@@ -290,7 +298,7 @@ impl<'env> RwTxn<'env> {
         } else {
             self.cur_mut(mn).top -= 1;
             let ki = usize::from(self.cur(mn).ki[ptop]);
-            let rc = self.node_add(mn, ki, &sepkey, None, rp, 0);
+            let rc = self.node_add(mn, ki, sepkey, None, rp, 0);
             self.cur_mut(mn).top += 1;
             rc?;
         }
@@ -324,7 +332,7 @@ impl<'env> RwTxn<'env> {
                     // Update index for the new key.
                     self.cur_mut(mc).ki[top] = j as u16;
                 } else {
-                    let node = node_at(&src, copy_ptrs[i])?;
+                    let node = node_at(src, copy_ptrs[i])?;
                     node_key = node.key().ok_or_else(corrupted)?;
                     rkey = node_key;
                     if is_leaf {
@@ -343,7 +351,7 @@ impl<'env> RwTxn<'env> {
                 // First branch index doesn't need key data.
                 let rkey = if !is_leaf && j == 0 { &[][..] } else { rkey };
                 if to_copy {
-                    self.node_add_to(mc, Some(&mut copy), j, rkey, rdata, pgno, flags)?;
+                    self.node_add_to(mc, Some(copy), j, rkey, rdata, pgno, flags)?;
                 } else {
                     self.node_add(mc, j, rkey, rdata, pgno, flags)?;
                 }
@@ -360,8 +368,8 @@ impl<'env> RwTxn<'env> {
                 }
             }
             // Write the left half back into mp.
-            let n = page_ops::num_keys(&copy);
-            let cu = page_ops::upper(&copy);
+            let n = page_ops::num_keys(copy);
+            let cu = page_ops::upper(copy);
             let page = self.dirty_mut(mp)?;
             page[crate::format::layout::PAGE_LOWER..PAGE_HDR_SIZE]
                 .copy_from_slice(&copy[crate::format::layout::PAGE_LOWER..PAGE_HDR_SIZE]);
@@ -409,21 +417,21 @@ impl<'env> RwTxn<'env> {
         Ok(())
     }
 
-    /// The `P_LEAF2` split: move keys `split_indx..` of `mp` to `rp`,
-    /// inserting the new key on the side it belongs to. Returns the
-    /// separator key.
+    /// The `P_LEAF2` split: move keys `split_indx..` of `mp` (a copy of
+    /// which is `src`) to `rp`, inserting the new key on the side it belongs
+    /// to. Returns the separator key.
     #[allow(clippy::too_many_arguments)]
-    fn split_leaf2(
+    fn split_leaf2<'k>(
         &mut self,
         mc: CRef,
         mp: u64,
         rp: u64,
-        src: &[u8],
-        newkey: &[u8],
+        src: &'k [u8],
+        newkey: &'k [u8],
         newindx: usize,
         split_indx: usize,
         nkeys: usize,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<&'k [u8]> {
         let ksize = self.db_of(mc).pad as usize;
         if newkey.len() != ksize {
             return Err(crate::error::MdbError::BadValSize.into());
@@ -432,14 +440,11 @@ impl<'env> RwTxn<'env> {
         let split = PAGE_HDR_SIZE + split_indx * ksize;
         let rsize = (nkeys - split_indx) * ksize;
         let lsize = (nkeys - split_indx) * 2;
-        let keys = src
-            .get(split..split + rsize)
-            .ok_or_else(corrupted)?
-            .to_vec();
+        let keys = src.get(split..split + rsize).ok_or_else(corrupted)?;
         let sepkey = if newindx == split_indx {
-            newkey.to_vec()
+            newkey
         } else {
-            keys.get(..ksize).ok_or_else(corrupted)?.to_vec()
+            keys.get(..ksize).ok_or_else(corrupted)?
         };
         {
             let page = self.dirty_mut(mp)?;
@@ -455,7 +460,7 @@ impl<'env> RwTxn<'env> {
             // The new key goes left: all keys from split_indx move right.
             {
                 let page = self.dirty_mut(rp)?;
-                page[PAGE_HDR_SIZE..PAGE_HDR_SIZE + rsize].copy_from_slice(&keys);
+                page[PAGE_HDR_SIZE..PAGE_HDR_SIZE + rsize].copy_from_slice(keys);
             }
             let page = self.dirty_mut(mp)?;
             let ins = PAGE_HDR_SIZE + newindx * ksize;
@@ -561,6 +566,14 @@ impl<'env> RwTxn<'env> {
     pub(crate) fn page_of_pgno(&self, pgno: u64) -> Result<PageRef<'_>> {
         self.core.page(pgno)
     }
+}
+
+/// The scratch buffers of a split (C uses the source page itself and one
+/// page from `mdb_page_malloc`): a copy of the page being split, and the
+/// temporary page its left half is built in.
+struct SplitBufs {
+    src: Vec<u8>,
+    copy: Vec<u8>,
 }
 
 /// The node at offset `off` of page bytes `src`.

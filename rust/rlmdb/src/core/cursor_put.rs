@@ -18,9 +18,10 @@
 //! 5. for duplicates, store the data item(s) through the sub-cursor
 //!    ([`RwTxn::put_sub`]) and write the sub-DB record back into the node.
 //!
-//! The DUPSORT stage reproduces C's scratch page (`me_pbuf`) as an owned
-//! buffer: `fp` is the old sub-page (or a header faking one), `mp` the new
-//! (sub-)page, `xdata` the new node data.
+//! The DUPSORT stage reproduces C's scratch page (`me_pbuf`) with the write
+//! state's scratch buffers ([`RwTxn::take_scratch`]): `fp` is the old
+//! sub-page (or a header faking one), `mp` the new (sub-)page, `xdata` the
+//! new node data.
 
 use std::cmp::Ordering;
 
@@ -430,8 +431,8 @@ impl<'env> RwTxn<'env> {
         let db = self.db_of(mc);
         let dupsort = u32::from(db.flags) & MDB_DUPSORT != 0;
         let mut do_sub = None;
-        let rdata: Vec<u8>;
-        let mut node_val = item;
+        // The node data a `DupStep::NewSub` built (a scratch buffer).
+        let mut new_data = None;
 
         if insert_key {
             // The key does not exist.
@@ -444,11 +445,7 @@ impl<'env> RwTxn<'env> {
                         sub_root,
                         dkey,
                     } => {
-                        rdata = xdata;
-                        node_val = NodeVal {
-                            size: rdata.len(),
-                            bytes: &rdata,
-                        };
+                        new_data = Some(xdata);
                         do_sub = Some((sub_root, dkey));
                     }
                     _ => return Err(corrupted()),
@@ -487,11 +484,7 @@ impl<'env> RwTxn<'env> {
                         sub_root,
                         dkey,
                     } => {
-                        rdata = xdata;
-                        node_val = NodeVal {
-                            size: rdata.len(),
-                            bytes: &rdata,
-                        };
+                        new_data = Some(xdata);
                         do_sub = Some((sub_root, dkey));
                     }
                 }
@@ -509,7 +502,18 @@ impl<'env> RwTxn<'env> {
         }
 
         // new_sub:
-        if let Err(e) = self.insert_leaf_node(mc, key, node_val, *flags, insert_key) {
+        let node_val = match &new_data {
+            Some(xdata) => NodeVal {
+                size: xdata.len(),
+                bytes: xdata,
+            },
+            None => item,
+        };
+        let rc = self.insert_leaf_node(mc, key, node_val, *flags, insert_key);
+        if let Some(xdata) = new_data {
+            self.give_scratch(xdata);
+        }
+        if let Err(e) = rc {
             self.w.flags |= TXN_ERROR;
             return Ok((Some(Err(e)), insert_data));
         }
@@ -662,7 +666,8 @@ impl<'env> RwTxn<'env> {
 
     /// The DUPSORT stage of `mdb_cursor_put` ("DB has dups?"): prepare the
     /// node that will hold the duplicates. With `big_new`, a new key whose
-    /// item does not fit a node goes straight to a sub-DB.
+    /// item does not fit a node goes straight to a sub-DB. The buffers of a
+    /// [`DupStep::NewSub`] are scratch buffers ([`RwTxn::take_scratch`]).
     fn dup_prepare(
         &mut self,
         mc: CRef,
@@ -670,6 +675,23 @@ impl<'env> RwTxn<'env> {
         flags: &mut u32,
         insert_key: bool,
         big_new: bool,
+    ) -> Result<DupStep> {
+        // The current node's data is copied here (C reads it in place); a
+        // step that keeps it takes it out, else it is given back.
+        let mut olddata = self.take_scratch();
+        let step = self.dup_prepare0(mc, item, flags, insert_key, big_new, &mut olddata);
+        self.give_scratch(olddata);
+        step
+    }
+
+    fn dup_prepare0(
+        &mut self,
+        mc: CRef,
+        item: NodeVal<'_>,
+        flags: &mut u32,
+        insert_key: bool,
+        big_new: bool,
+        olddata: &mut Vec<u8>,
     ) -> Result<DupStep> {
         let ps = self.psize();
         let nodemax = self.core.env.node_max();
@@ -688,7 +710,8 @@ impl<'env> RwTxn<'env> {
         if big_new {
             // Set up an empty "old sub-page" for prep_subDB to expand to a
             // full page.
-            let mut h = vec![0u8; PAGE_HDR_SIZE];
+            let mut h = self.take_scratch();
+            h.resize(PAGE_HDR_SIZE, 0);
             page_ops::set_flags(&mut h, P_LEAF | P_DIRTY);
             put_u16(&mut h, crate::format::layout::PAGE_PAD, item.size as u16);
             page_ops::set_lower(&mut h, PAGE_HDR_SIZE);
@@ -696,11 +719,11 @@ impl<'env> RwTxn<'env> {
             fp = h;
             xsize = 0;
         } else {
-            let (nflags, ksize, olddata) = {
+            let (nflags, ksize) = {
                 let page = self.top_page(mc)?;
                 let n = page.node(ki).ok_or_else(corrupted)?;
-                let d = n.inline_data().ok_or_else(corrupted)?;
-                (n.flags(), n.key_size(), d.to_vec())
+                olddata.extend_from_slice(n.inline_data().ok_or_else(corrupted)?);
+                (n.flags(), n.key_size())
             };
             if nflags & F_DUPDATA == 0 {
                 // Was a single item before, must convert now.
@@ -712,7 +735,7 @@ impl<'env> RwTxn<'env> {
                     dcmp = Comparator::Clong;
                 }
                 // Does data match?
-                if dcmp.compare(item.bytes, &olddata) == Ordering::Equal {
+                if dcmp.compare(item.bytes, olddata) == Ordering::Equal {
                     if *flags & (MDB_NODUPDATA | MDB_APPENDDUP) != 0 {
                         return Err(MdbError::KeyExist.into());
                     }
@@ -730,7 +753,8 @@ impl<'env> RwTxn<'env> {
                 } else {
                     size += 2 * (2 + NODE_SIZE) + (olddata.len() & 1) + (item.size & 1);
                 }
-                let mut h = vec![0u8; size];
+                let mut h = self.take_scratch();
+                h.resize(size, 0);
                 page_ops::set_pgno(&mut h, leaf_pgno);
                 put_u16(&mut h, crate::format::layout::PAGE_PAD, pad as u16);
                 page_ops::set_flags(&mut h, pflags);
@@ -738,7 +762,7 @@ impl<'env> RwTxn<'env> {
                 page_ops::set_upper(&mut h, size);
                 fp = h;
                 xsize = size;
-                dkey = Some(olddata);
+                dkey = Some(std::mem::take(olddata));
                 // mp == fp here: the fake page is the new node data.
                 if NODE_SIZE + ksize + xsize > nodemax {
                     to_subdb = true;
@@ -750,7 +774,7 @@ impl<'env> RwTxn<'env> {
             } else {
                 // Data is on sub-page.
                 let mut fits = *flags == MDB_CURRENT;
-                if fits && !self.current_dup_fits(mc, &olddata, item.size) {
+                if fits && !self.current_dup_fits(mc, olddata, item.size) {
                     // C writes the new item in place and, if it does not fit,
                     // splits the sub-page as if it were a page (leaking pages
                     // and losing the item). Do what lmdb.h promises instead:
@@ -759,17 +783,17 @@ impl<'env> RwTxn<'env> {
                 }
                 if !fits {
                     if !dupfixed {
-                        let left = page_ops::size_left(&olddata);
+                        let left = page_ops::size_left(olddata);
                         offset = even(NODE_SIZE + 2 + item.size);
                         // If there's enough space, just use it, else grow
                         // by whatever we need.
                         offset = offset.saturating_sub(left);
                     } else {
                         offset = usize::from(
-                            crate::format::get_u16(&olddata, crate::format::layout::PAGE_PAD)
+                            crate::format::get_u16(olddata, crate::format::layout::PAGE_PAD)
                                 .unwrap_or(0),
                         );
-                        if page_ops::size_left(&olddata) < offset {
+                        if page_ops::size_left(olddata) < offset {
                             offset *= 4; // space for 4 more
                         } else {
                             // Big enough MDB_DUPFIXED sub-page.
@@ -793,7 +817,7 @@ impl<'env> RwTxn<'env> {
                 if NODE_SIZE + ksize + xsize > nodemax {
                     to_subdb = true;
                 }
-                fp = olddata;
+                fp = std::mem::take(olddata);
             }
         }
         let olddata_size = if big_new { PAGE_HDR_SIZE } else { fp.len() };
@@ -824,16 +848,21 @@ impl<'env> RwTxn<'env> {
             let page = self.dirty_mut(mp)?;
             build_subpage(&mut page[..ps], &fp, olddata_size, fp_flags, fp_pad, offset)
                 .ok_or_else(corrupted)?;
-            (dummy.to_bytes().to_vec(), Some(mp))
+            self.give_scratch(fp);
+            let mut rec = self.take_scratch();
+            rec.extend_from_slice(&dummy.to_bytes());
+            (rec, Some(mp))
         } else if dkey.is_some() {
             // Converting a single item: the fake sub-page is the data.
             (fp, None)
         } else {
             // Grow the sub-page into a new buffer.
-            let mut mp = vec![0u8; xsize];
+            let mut mp = self.take_scratch();
+            mp.resize(xsize, 0);
             page_ops::set_pgno(&mut mp, leaf_pgno);
             build_subpage(&mut mp, &fp, olddata_size, fp_flags, fp_pad, offset)
                 .ok_or_else(corrupted)?;
+            self.give_scratch(fp);
             (mp, None)
         };
         *flags |= u32::from(F_DUPDATA);
@@ -957,7 +986,9 @@ impl<'env> RwTxn<'env> {
         let new_dupdata = dkey.is_some();
         // Converted, write the original data first.
         if let Some(dk) = dkey {
-            if let Err(e) = self.put_at(mx, &dk, PutData::empty(), xflags) {
+            let rc = self.put_at(mx, &dk, PutData::empty(), xflags);
+            self.give_scratch(dk);
+            if let Err(e) = rc {
                 let e = if matches!(e, Error::Mdb(MdbError::KeyExist)) {
                     MdbError::Corrupted.into()
                 } else {
