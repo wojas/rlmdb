@@ -28,7 +28,7 @@ use crate::cmp::{CmpFn, Comparator};
 use crate::consts::*;
 use crate::core::cursor::{self, Cursor, RoCursor};
 use crate::core::dbi::{init_txn_dbs, Dbi, TxnDb, DB_USRVALID, DB_VALID};
-use crate::core::dirty::{DirtyPages, Layer, SpillSet};
+use crate::core::dirty::{DirtyPages, Layer, PageSlot, SpillSet};
 use crate::core::env::Environment;
 use crate::core::Stat;
 use crate::error::{Error, MdbError, Result};
@@ -180,11 +180,20 @@ impl<'env> TxnCore<'env> {
     /// is read from the map even if a parent still has an older dirty copy.
     #[inline]
     pub(crate) fn locate(&self, pgno: u64) -> PageSource<'_> {
+        self.locate_in(pgno, true)
+    }
+
+    /// [`TxnCore::locate`], searching this transaction's own dirty list
+    /// only if `own_dirty`.
+    #[inline]
+    fn locate_in(&self, pgno: u64, own_dirty: bool) -> PageSource<'_> {
         if !self.spilled.is_empty() && self.spilled.contains(&pgno) {
             return PageSource::Spilled(1);
         }
-        if let Some(buf) = self.dirty.get(pgno) {
-            return PageSource::Dirty(buf, 1);
+        if own_dirty {
+            if let Some(buf) = self.dirty.get(pgno) {
+                return PageSource::Dirty(buf, 1);
+            }
         }
         for (i, layer) in self.parents.iter().enumerate() {
             if !layer.spilled.is_empty() && layer.spilled.contains(&pgno) {
@@ -244,6 +253,33 @@ impl<'env> TxnCore<'env> {
             self.mapped_page(pgno)
         } else {
             self.written_or_mapped_page(pgno)
+        }
+    }
+
+    /// [`TxnCore::page`] for a page of a write cursor, whose slot in this
+    /// transaction's dirty list may be known (`slot`, a hint checked
+    /// against `pgno`; see `super::dirty`). A page found there is the one
+    /// `mdb_page_get` returns: a page in a transaction's own dirty list is
+    /// never in its spill set.
+    #[inline]
+    pub(crate) fn page_by_slot(&self, pgno: u64, slot: PageSlot) -> Result<PageRef<'_>> {
+        match self.dirty.at(slot, pgno) {
+            Some(buf) => {
+                PageRef::new(&buf[..self.page_size]).ok_or_else(|| MdbError::Corrupted.into())
+            }
+            None => self.page(pgno),
+        }
+    }
+
+    /// [`TxnCore::page`] in a write transaction for a page the caller
+    /// already looked for in this transaction's own dirty list, and did not
+    /// find: the same page, without searching that list again.
+    pub(crate) fn page_not_dirty_here(&self, pgno: u64) -> Result<PageRef<'_>> {
+        match self.locate_in(pgno, false) {
+            PageSource::Dirty(buf, _) => {
+                PageRef::new(&buf[..self.page_size]).ok_or_else(|| MdbError::Corrupted.into())
+            }
+            _ => self.mapped_page(pgno),
         }
     }
 

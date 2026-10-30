@@ -2,17 +2,60 @@
 //!
 //! C keeps `malloc`ed page copies in a list sorted by page number and finds
 //! them with `mdb_mid2l_search` in `mdb_page_get` before falling back to the
-//! map. Here each dirty page (or overflow run) is an owned, zero-filled
-//! `Box<[u8]>` of `n * psize` bytes keyed by its first page number, in an
-//! [`Id2List`]. `TxnCore::page` consults this list first, so every read
-//! operation sees the transaction's own changes.
+//! map. Here each dirty page (or overflow run) is an owned buffer of
+//! `n * psize` bytes, and the list sorted by page number maps each page to
+//! the *slot* that holds its buffer (see below). `TxnCore::page` consults
+//! this list first, so every read operation sees the transaction's own
+//! changes.
 //!
-//! Buffers are never handed out across mutations: write code looks pages up
-//! by number every time it needs them (see `wcursor`), so a `Vec` move or a
-//! page being freed can never leave a dangling reference. Unlike C, new
+//! Nothing hands out references into the buffers across mutations: write
+//! code names pages by number (see `wcursor`), so a page being added,
+//! freed or written out can never leave a dangling reference. Unlike C, new
 //! buffers are always zeroed (as with C's default `!MDB_NOMEMINIT`, plus the
 //! parts C leaves uninitialised), which only changes bytes no reader ever
 //! looks at.
+//!
+//! # Slots
+//!
+//! The buffers live in a slab: a vector of slots that only grows while the
+//! transaction runs (it is emptied with the list), with a free list of
+//! empty slots. A page keeps its slot, and so its buffer, for as long as it
+//! stays in the list, however many pages are added or removed meanwhile;
+//! only the sorted index of `(page number, slot)` pairs, the part C
+//! searches, shifts. That lets the write path remember where a page is:
+//! a [`PageSlot`] reaches the buffer in O(1), without the binary search
+//! (and without the parent and spill-list checks of `TxnCore::page`). Write
+//! cursors keep the slot of every page on their stack next to its number,
+//! and `mdb_page_touch` learns from it at once that a page is already
+//! dirty.
+//!
+//! A slot is only ever used as a **hint**. Every access by slot
+//! ([`DirtyPages::at`], [`DirtyPages::lookup`], ...) names the page number
+//! it expects and checks it against the page the slot holds *now*; on a
+//! mismatch (or [`PageSlot::NONE`]) the caller falls back to the search.
+//! A hint that went stale therefore costs one search and never yields the
+//! wrong buffer, and nothing has to be invalidated explicitly:
+//!
+//! * a page that leaves the list (written out by a spill or at commit,
+//!   freed, or the whole list cleared when the transaction ends) empties
+//!   its slot, which then fails every check until it is reused, and a
+//!   reused slot holds another page number, or the same page again, which
+//!   is then exactly the buffer the search would find;
+//! * slots are per list. A nested transaction has its own list (see below)
+//!   while its parent's waits unchanged, so a slot the parent recorded is
+//!   checked against the child's list and simply misses there (or hits the
+//!   child's own copy of that very page, which is what the child must
+//!   use). When the child commits, the
+//!   parent's pages that it replaced keep their slots in the parent's list
+//!   (the child's buffer moves into the parent's slot) and its other pages
+//!   get new slots in the parent's list; slots the child recorded in
+//!   cursors miss there and are looked up again. When it aborts, the
+//!   parent's list comes back unchanged, and so do the parent's cursors.
+//!
+//! Hints are refreshed where the slot is known anyway: when a page is
+//! made dirty or found dirty (`mdb_page_touch`, which runs over a cursor's
+//! whole stack before every change) and when a page is written through a
+//! cursor.
 //!
 //! # Recycled buffers
 //!
@@ -43,7 +86,9 @@
 //! recorded in the transaction's spill set ([`SpillSet`], C's
 //! `mt_spill_pgs`); they are read back from the map. C keeps that list as
 //! `pgno << 1` values with the low bit marking deleted entries; a set of
-//! page numbers has the same meaning.
+//! page numbers has the same meaning. A page is never both in a list and in
+//! the spill set of the same transaction, so a page found through a slot of
+//! the transaction's own list is the one `mdb_page_get` would return.
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
@@ -143,16 +188,43 @@ impl PagePool {
     }
 }
 
+/// Where a dirty page's buffer is in its [`DirtyPages`] list: an index into
+/// the list's slab. Only a hint (see the module documentation): accesses by
+/// slot also name the page they expect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PageSlot(u32);
+
+impl PageSlot {
+    /// No slot known: an access through it always falls back to the search.
+    pub(crate) const NONE: PageSlot = PageSlot(u32::MAX);
+}
+
+impl Default for PageSlot {
+    fn default() -> PageSlot {
+        PageSlot::NONE
+    }
+}
+
+/// One slot of the slab: a dirty page's number and buffer, or nothing.
+#[derive(Debug, Default)]
+struct Entry {
+    pgno: u64,
+    buf: Option<Box<[u8]>>,
+}
+
 /// The dirty-page list of a write transaction.
 #[derive(Debug, Default)]
 pub(crate) struct DirtyPages {
-    list: Id2List<Box<[u8]>>,
-    /// Where pages were last found in `list`, by `pgno % HINTS`. Only a
-    /// hint: the page number stored at the position is checked before use
-    /// (inserts and removals shift positions), so a stale hint just means
-    /// a binary search. The write path looks up the same few pages (root,
-    /// branch, leaf) many times per operation; this spares most searches.
-    hint: [Cell<u32>; HINTS],
+    /// `mt_u.dirty_list`: page number to slot, ascending by page number.
+    index: Id2List<PageSlot>,
+    /// The buffers, by slot.
+    slots: Vec<Entry>,
+    /// Empty slots, reused before the slab grows.
+    vacant: Vec<PageSlot>,
+    /// Where pages were last found, by `pgno % HINTS`. Checked like any
+    /// slot; lookups by number go to the same few pages (root, branch,
+    /// leaf) many times per operation, and this spares most searches.
+    hint: [Cell<PageSlot>; HINTS],
     /// Where buffers come from and go to (see the module documentation).
     pool: PagePool,
 }
@@ -165,45 +237,97 @@ impl DirtyPages {
 
     /// Number of dirty pages (runs count once, `dl[0].mid`).
     pub(crate) fn len(&self) -> usize {
-        self.list.len()
+        self.index.len()
     }
 
     /// `true` if there are no dirty pages.
     pub(crate) fn is_empty(&self) -> bool {
-        self.list.is_empty()
+        self.index.is_empty()
+    }
+
+    /// The buffer of `slot` if it holds page `pgno` (the whole run for
+    /// overflow pages), without a search.
+    #[inline]
+    pub(crate) fn at(&self, slot: PageSlot, pgno: u64) -> Option<&[u8]> {
+        match self.slots.get(slot.0 as usize) {
+            Some(Entry {
+                pgno: p,
+                buf: Some(buf),
+            }) if *p == pgno => Some(buf),
+            _ => None,
+        }
+    }
+
+    /// The slot of dirty page `pgno` by binary search (`mdb_mid2l_search`),
+    /// remembered for the next lookup of a page with the same hint index.
+    fn search(&self, pgno: u64) -> Option<PageSlot> {
+        let slot = *self.index.get_at(self.index.search(pgno), pgno)?;
+        self.hint[pgno as usize % HINTS].set(slot);
+        Some(slot)
+    }
+
+    /// The slot of dirty page `pgno`.
+    #[inline]
+    pub(crate) fn find(&self, pgno: u64) -> Option<PageSlot> {
+        let hint = self.hint[pgno as usize % HINTS].get();
+        if self.at(hint, pgno).is_some() {
+            return Some(hint);
+        }
+        self.search(pgno)
+    }
+
+    /// The slot and buffer of dirty page `pgno`: through `hint` if it
+    /// still holds the page, else as [`DirtyPages::find`] finds it.
+    #[inline]
+    pub(crate) fn lookup(&self, hint: PageSlot, pgno: u64) -> Option<(PageSlot, &[u8])> {
+        if let Some(buf) = self.at(hint, pgno) {
+            return Some((hint, buf));
+        }
+        let slot = self.find(pgno)?;
+        Some((slot, self.at(slot, pgno)?))
     }
 
     /// The buffer of dirty page `pgno` (the whole run for overflow pages).
     #[inline]
     pub(crate) fn get(&self, pgno: u64) -> Option<&[u8]> {
-        if self.list.is_empty() {
-            return None;
+        if let Some(buf) = self.at(self.hint[pgno as usize % HINTS].get(), pgno) {
+            return Some(buf);
         }
-        let hint = &self.hint[pgno as usize % HINTS];
-        if let Some(b) = self.list.get_at(hint.get() as usize, pgno) {
-            return Some(b);
+        self.at(self.search(pgno)?, pgno)
+    }
+
+    /// Mutable [`DirtyPages::at`].
+    #[inline]
+    pub(crate) fn at_mut(&mut self, slot: PageSlot, pgno: u64) -> Option<&mut [u8]> {
+        match self.slots.get_mut(slot.0 as usize) {
+            Some(Entry {
+                pgno: p,
+                buf: Some(buf),
+            }) if *p == pgno => Some(buf),
+            _ => None,
         }
-        let i = self.list.search(pgno);
-        let b = self.list.get_at(i, pgno)?;
-        hint.set(i as u32);
-        Some(b)
+    }
+
+    /// The slot of dirty page `pgno`: `hint` if it still holds the page,
+    /// else by search.
+    #[inline]
+    pub(crate) fn resolve(&self, hint: PageSlot, pgno: u64) -> Option<PageSlot> {
+        if self.at(hint, pgno).is_some() {
+            return Some(hint);
+        }
+        self.find(pgno)
     }
 
     /// Mutable access to the buffer of dirty page `pgno`.
     #[inline]
     pub(crate) fn get_mut(&mut self, pgno: u64) -> Option<&mut [u8]> {
-        let hint = &self.hint[pgno as usize % HINTS];
-        let mut i = hint.get() as usize;
-        if self.list.get_at(i, pgno).is_none() {
-            i = self.list.search(pgno);
-            hint.set(i as u32);
-        }
-        self.list.get_at_mut(i, pgno).map(|b| &mut b[..])
+        let slot = self.find(pgno)?;
+        self.at_mut(slot, pgno)
     }
 
     /// `true` if `pgno` is dirty.
     pub(crate) fn contains(&self, pgno: u64) -> bool {
-        self.get(pgno).is_some()
+        self.find(pgno).is_some()
     }
 
     /// `mdb_page_malloc` for a new page: a zero-filled buffer of `len`
@@ -232,24 +356,46 @@ impl DirtyPages {
         }
     }
 
-    /// `mdb_page_dirty`: add a page buffer. Returns `false` (and recycles
-    /// the buffer) if the page is already dirty, which would be a bug.
-    pub(crate) fn insert(&mut self, pgno: u64, buf: Box<[u8]>) -> bool {
-        match self.list.insert(pgno, buf) {
-            Ok(()) => true,
-            Err(buf) => {
-                self.pool.put(buf);
-                false
+    /// Puts `buf` into an empty slot for page `pgno` (not yet indexed).
+    fn occupy(&mut self, pgno: u64, buf: Box<[u8]>) -> PageSlot {
+        let entry = Entry {
+            pgno,
+            buf: Some(buf),
+        };
+        match self.vacant.pop() {
+            Some(slot) => {
+                self.slots[slot.0 as usize] = entry;
+                slot
+            }
+            None => {
+                // A dirty list holds at most `MDB_IDL_UM_MAX` pages, far
+                // below `u32::MAX`.
+                let slot = PageSlot(self.slots.len() as u32);
+                self.slots.push(entry);
+                slot
             }
         }
+    }
+
+    /// `mdb_page_dirty`: add a page buffer and return its slot. Returns
+    /// `None` (and recycles the buffer) if the page is already dirty, which
+    /// would be a bug.
+    pub(crate) fn insert(&mut self, pgno: u64, buf: Box<[u8]>) -> Option<PageSlot> {
+        let slot = self.occupy(pgno, buf);
+        if self.index.insert(pgno, slot).is_err() {
+            vacate(&mut self.slots, &mut self.vacant, &mut self.pool, slot);
+            return None;
+        }
+        self.hint[pgno as usize % HINTS].set(slot);
+        Some(slot)
     }
 
     /// Removes a page from the list (its buffer is recycled). Returns
     /// `false` if it was not there.
     pub(crate) fn remove(&mut self, pgno: u64) -> bool {
-        match self.list.remove(pgno) {
-            Some(buf) => {
-                self.pool.put(buf);
+        match self.index.remove(pgno) {
+            Some(slot) => {
+                vacate(&mut self.slots, &mut self.vacant, &mut self.pool, slot);
                 true
             }
             None => false,
@@ -258,47 +404,84 @@ impl DirtyPages {
 
     /// The page numbers in ascending order.
     pub(crate) fn pgnos(&self) -> impl Iterator<Item = u64> + '_ {
-        self.list.as_slice().iter().map(|(p, _)| *p)
+        self.index.as_slice().iter().map(|(p, _)| *p)
     }
 
     /// `mdb_dlist_free`: removes all pages (their buffers are recycled).
     pub(crate) fn clear(&mut self) {
-        let pool = &mut self.pool;
-        self.list.retain(|_, buf| {
-            pool.put(std::mem::take(buf));
-            false
-        });
+        for (_, slot) in self.index.as_slice() {
+            if let Some(buf) = self.slots[slot.0 as usize].buf.take() {
+                self.pool.put(buf);
+            }
+        }
+        self.index.clear();
+        self.slots.clear();
+        self.vacant.clear();
     }
 
-    /// Keeps the pages for which `keep` returns `true` (one pass); the
-    /// buffers of the others are recycled.
+    /// Keeps the pages for which `keep` returns `true` (one pass, in page
+    /// order); the buffers of the others are recycled.
     pub(crate) fn retain(&mut self, mut keep: impl FnMut(u64, &mut [u8]) -> bool) {
-        let pool = &mut self.pool;
-        self.list.retain(|pgno, buf| {
+        let DirtyPages {
+            index,
+            slots,
+            vacant,
+            pool,
+            ..
+        } = self;
+        index.retain(|pgno, slot| {
+            let Some(buf) = slots[slot.0 as usize].buf.as_deref_mut() else {
+                return false;
+            };
             if keep(pgno, buf) {
                 return true;
             }
-            pool.put(std::mem::take(buf));
+            vacate(slots, vacant, pool, *slot);
             false
         });
     }
 
-    /// Merges `other` in; its buffers replace ours for the same page (ours
-    /// are recycled), and its spare buffers join ours.
+    /// Merges `other` (a committing child's list) in: its buffers replace
+    /// ours for the same page, in the slot that page has here (ours are
+    /// recycled), its other pages get slots here, and its spare buffers
+    /// join ours.
     pub(crate) fn merge(&mut self, other: DirtyPages) {
-        let DirtyPages { list, pool, .. } = other;
+        let DirtyPages {
+            index: theirs,
+            slots: mut their_slots,
+            pool,
+            ..
+        } = other;
         self.pool.merge(pool);
-        if list.is_empty() {
+        if theirs.is_empty() {
             return;
         }
-        // Both lists are ascending: drop our copies of the pages `other`
-        // replaces in one pass, so the merge sees no duplicates.
-        let mut theirs = list.as_slice().iter().map(|(p, _)| *p).peekable();
-        self.retain(|pgno, _| {
-            while theirs.next_if(|&p| p < pgno).is_some() {}
-            theirs.peek() != Some(&pgno)
-        });
-        self.list.merge(list);
+        let mine = std::mem::take(&mut self.index);
+        let mut merged = Id2List::new();
+        let mut a = mine.as_slice().iter().copied().peekable();
+        for &(pgno, slot) in theirs.as_slice() {
+            while let Some((p, s)) = a.next_if(|&(p, _)| p < pgno) {
+                merged.append(p, s);
+            }
+            let Some(buf) = their_slots[slot.0 as usize].buf.take() else {
+                continue;
+            };
+            let slot = match a.next_if(|&(p, _)| p == pgno) {
+                Some((_, s)) => {
+                    let old = self.slots[s.0 as usize].buf.replace(buf);
+                    if let Some(old) = old {
+                        self.pool.put(old);
+                    }
+                    s
+                }
+                None => self.occupy(pgno, buf),
+            };
+            merged.append(pgno, slot);
+        }
+        for (p, s) in a {
+            merged.append(p, s);
+        }
+        self.index = merged;
     }
 
     /// Takes the spare buffers (for the environment to keep until the next
@@ -314,6 +497,14 @@ impl DirtyPages {
     }
 }
 
+/// Empties `slot` of a slab, recycling its buffer.
+fn vacate(slots: &mut [Entry], vacant: &mut Vec<PageSlot>, pool: &mut PagePool, slot: PageSlot) {
+    if let Some(buf) = slots[slot.0 as usize].buf.take() {
+        pool.put(buf);
+        vacant.push(slot);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,13 +514,13 @@ mod tests {
         let mut d = DirtyPages::new();
         assert!(d.is_empty());
         let b = d.alloc_zeroed(64);
-        assert!(d.insert(9, b));
+        assert!(d.insert(9, b).is_some());
         let b = d.alloc_zeroed(128);
-        assert!(d.insert(3, b));
+        assert!(d.insert(3, b).is_some());
         let b = d.alloc_zeroed(64);
-        assert!(d.insert(5, b));
+        assert!(d.insert(5, b).is_some());
         let b = d.alloc_zeroed(64);
-        assert!(!d.insert(5, b));
+        assert!(d.insert(5, b).is_none());
         assert_eq!(d.pgnos().collect::<Vec<_>>(), [3, 5, 9]);
         assert_eq!(d.get(3).map(<[u8]>::len), Some(128));
         d.get_mut(9).unwrap()[0] = 7;
@@ -348,11 +539,11 @@ mod tests {
         d.give_pool(PagePool::new(64));
         let mut b = d.alloc_zeroed(64);
         b.fill(0xaa);
-        assert!(d.insert(1, b));
+        assert!(d.insert(1, b).is_some());
         let b = d.alloc_copy(&[0xbb; 64]);
-        assert!(d.insert(2, b));
+        assert!(d.insert(2, b).is_some());
         let b = d.alloc_zeroed(192);
-        assert!(d.insert(3, b));
+        assert!(d.insert(3, b).is_some());
         d.clear();
         // The single pages come back, the overflow run does not.
         assert_eq!(d.pool.free.len(), 2);
@@ -362,7 +553,7 @@ mod tests {
         // A pool without a page size keeps nothing.
         let mut pool = d.take_pool();
         let b = d.alloc_zeroed(64);
-        assert!(d.insert(1, b));
+        assert!(d.insert(1, b).is_some());
         d.clear();
         assert_eq!(d.pool.free.len(), 0);
         pool.merge(d.take_pool());
@@ -375,7 +566,7 @@ mod tests {
         d.give_pool(PagePool::new(8));
         for p in 0..5 {
             let b = d.alloc_zeroed(8);
-            assert!(d.insert(p, b));
+            assert!(d.insert(p, b).is_some());
         }
         d.clear();
         let mut pool = d.take_pool();
@@ -386,7 +577,7 @@ mod tests {
         d.give_pool(pool);
         for p in 0..2 {
             let b = d.alloc_copy(&[1; 8]);
-            assert!(d.insert(p, b));
+            assert!(d.insert(p, b).is_some());
         }
         d.clear();
         let mut pool = d.take_pool();
@@ -401,13 +592,13 @@ mod tests {
         parent.give_pool(PagePool::new(8));
         for p in [2, 4, 6] {
             let b = parent.alloc_copy(&[p as u8; 8]);
-            assert!(parent.insert(p, b));
+            assert!(parent.insert(p, b).is_some());
         }
         let mut child = DirtyPages::new();
         child.give_pool(parent.take_pool());
         for p in [1, 4, 7] {
             let b = child.alloc_copy(&[10 + p as u8; 8]);
-            assert!(child.insert(p, b));
+            assert!(child.insert(p, b).is_some());
         }
         parent.merge(child);
         assert_eq!(parent.pgnos().collect::<Vec<_>>(), [1, 2, 4, 6, 7]);
@@ -415,5 +606,89 @@ mod tests {
         assert_eq!(parent.get(2).unwrap()[0], 2);
         // The parent's old page 4 went to the pool.
         assert_eq!(parent.pool.free.len(), 1);
+    }
+
+    /// A page keeps its slot while others come and go; a slot that no
+    /// longer holds the page it was recorded for never matches.
+    #[test]
+    fn slots_are_stable_hints() {
+        let mut d = DirtyPages::new();
+        let slot = |d: &mut DirtyPages, p: u64| {
+            let b = d.alloc_copy(&[p as u8; 32]);
+            d.insert(p, b).unwrap()
+        };
+        let s7 = slot(&mut d, 7);
+        let s3 = slot(&mut d, 3);
+        let s9 = slot(&mut d, 9);
+        assert_eq!(d.at(s7, 7).unwrap()[0], 7);
+        assert!(d.at(s7, 3).is_none() && d.at(PageSlot::NONE, 7).is_none());
+        // Inserting below and removing others moves the index, not slots.
+        for p in [1, 2, 4, 5, 6] {
+            slot(&mut d, p);
+        }
+        assert!(d.remove(3) && d.remove(5));
+        assert_eq!(d.at(s7, 7).unwrap()[0], 7);
+        assert_eq!(d.at(s9, 9).unwrap()[0], 9);
+        assert!(d.at(s3, 3).is_none());
+        assert_eq!(d.lookup(s3, 7).map(|(s, b)| (s, b[0])), Some((s7, 7)));
+        assert!(d.lookup(s7, 3).is_none());
+        // An emptied slot is reused: for another page it does not match
+        // the old one, for the same page again it is just right.
+        let s5 = slot(&mut d, 5);
+        assert!(d.remove(5));
+        let s10 = slot(&mut d, 10);
+        assert_eq!(s10, s5, "the last emptied slot is reused first");
+        assert!(d.at(s5, 5).is_none());
+        assert_eq!(d.at(s10, 10).unwrap()[0], 10);
+        assert!(d.remove(10));
+        let s5b = slot(&mut d, 5);
+        assert_eq!(s5b, s5);
+        assert_eq!(d.at(s5, 5).unwrap()[0], 5);
+        assert!(d.remove(5));
+        d.at_mut(s7, 7).unwrap()[1] = 70;
+        assert_eq!(d.get(7).unwrap()[1], 70);
+        assert_eq!(d.resolve(PageSlot::NONE, 9), Some(s9));
+        // Empty slots match no page number, not even P_INVALID.
+        assert!(d.get(u64::MAX).is_none() && d.find(u64::MAX).is_none());
+        assert_eq!(d.pgnos().collect::<Vec<_>>(), [1, 2, 4, 6, 7, 9]);
+        d.retain(|p, _| p != 9);
+        assert!(d.at(s9, 9).is_none() && d.find(9).is_none());
+        d.clear();
+        assert!(d.at(s7, 7).is_none() && d.find(7).is_none());
+    }
+
+    /// A child's commit: the parent's pages that the child replaced keep
+    /// their slots (holding the child's buffers), the child's new pages
+    /// get slots of the parent's list.
+    #[test]
+    fn merge_keeps_the_parents_slots() {
+        let mut parent = DirtyPages::new();
+        let mut slots = Vec::new();
+        for p in [2u64, 4, 6] {
+            let b = parent.alloc_copy(&[p as u8; 8]);
+            slots.push(parent.insert(p, b).unwrap());
+        }
+        let mut child = DirtyPages::new();
+        let mut child_slots = Vec::new();
+        for p in [1u64, 4, 7, 8] {
+            let b = child.alloc_copy(&[10 + p as u8; 8]);
+            child_slots.push(child.insert(p, b).unwrap());
+        }
+        parent.merge(child);
+        assert_eq!(parent.pgnos().collect::<Vec<_>>(), [1, 2, 4, 6, 7, 8]);
+        assert_eq!(parent.at(slots[0], 2).unwrap()[0], 2);
+        assert_eq!(parent.at(slots[1], 4).unwrap()[0], 14);
+        assert_eq!(parent.at(slots[2], 6).unwrap()[0], 6);
+        for p in [1u64, 7, 8] {
+            let (s, b) = parent.lookup(PageSlot::NONE, p).unwrap();
+            assert_eq!(b[0], 10 + p as u8);
+            assert_eq!(parent.at(s, p).unwrap()[0], 10 + p as u8);
+        }
+        // Slots the child handed out are only hints in the parent's list.
+        for (&s, p) in child_slots.iter().zip([1u64, 4, 7, 8]) {
+            if let Some(b) = parent.at(s, p) {
+                assert_eq!(b[0], 10 + p as u8);
+            }
+        }
     }
 }

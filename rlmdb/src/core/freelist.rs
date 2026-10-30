@@ -31,6 +31,7 @@
 use crate::consts::*;
 use crate::core::cursor::{corrupted, cursor_first, cursor_next, cursor_set, Cursor, CursorOp};
 use crate::core::cursor_put::PutData;
+use crate::core::dirty::PageSlot;
 use crate::core::txn_rw::{RwTxn, TXN_ERROR};
 use crate::core::wcursor::CRef;
 use crate::error::{MdbError, Result};
@@ -58,28 +59,35 @@ impl<'env> RwTxn<'env> {
     /// 3. new pages at the end of the file (`MDB_MAP_FULL` if the map is
     ///    too small).
     pub(crate) fn page_alloc(&mut self, num: usize) -> Result<u64> {
-        self.page_alloc_init(num, None)
+        self.page_alloc_init(num, None).map(|(pgno, _)| pgno)
     }
 
     /// [`RwTxn::page_alloc`] of one page whose contents start as a copy of
     /// `src` (a whole page), for `mdb_page_touch`: a new buffer is made by
     /// copying `src` instead of zero-filling it first and copying after
     /// (the same bytes; the zero fill was a sizeable part of every write).
-    pub(crate) fn page_alloc_copy(&mut self, src: &[u8]) -> Result<u64> {
+    /// Also returns the page's slot in the dirty list.
+    pub(crate) fn page_alloc_copy(&mut self, src: &[u8]) -> Result<(u64, PageSlot)> {
         self.page_alloc_init(1, Some(src))
     }
 
-    fn page_alloc_init(&mut self, num: usize, init: Option<&[u8]>) -> Result<u64> {
+    /// The page number and its slot in the dirty list ([`PageSlot::NONE`]
+    /// for a reused loose page that is not initialised here).
+    fn page_alloc_init(&mut self, num: usize, init: Option<&[u8]>) -> Result<(u64, PageSlot)> {
         // If there are any loose pages, just use them.
         if num == 1 {
             if let Some(pgno) = self.w.loose.pop() {
+                let mut slot = PageSlot::NONE;
                 if let Some(src) = init {
-                    self.dirty_mut(pgno)?
-                        .get_mut(..src.len())
+                    slot = self.core.dirty.find(pgno).ok_or_else(corrupted)?;
+                    self.core
+                        .dirty
+                        .at_mut(slot, pgno)
+                        .and_then(|page| page.get_mut(..src.len()))
                         .ok_or_else(corrupted)?
                         .copy_from_slice(src);
                 }
-                return Ok(pgno);
+                return Ok((pgno, slot));
             }
         }
         // If our dirty list is already full, we can't do anything.
@@ -120,12 +128,12 @@ impl<'env> RwTxn<'env> {
         };
         crate::core::page_ops::set_pgno(&mut buf, pgno);
         // mdb_page_dirty
-        if !self.core.dirty.insert(pgno, buf) {
+        let Some(slot) = self.core.dirty.insert(pgno, buf) else {
             self.w.flags |= TXN_ERROR;
             return Err(MdbError::Corrupted.into());
-        }
+        };
         self.w.dirty_room -= 1;
-        Ok(pgno)
+        Ok((pgno, slot))
     }
 
     /// The search loop of `mdb_page_alloc`: find `num` contiguous pages in

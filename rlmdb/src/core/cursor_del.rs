@@ -70,7 +70,8 @@ impl<'env> RwTxn<'env> {
             return Err(MdbError::NotFound.into());
         }
         if flags & MDB_NOSPILL == 0 {
-            self.spill_check(mc, None)?;
+            let depth = self.db_of(mc).depth;
+            self.spill_check(mc, depth, None)?;
         }
         self.cursor_touch(mc)?;
         let (is_leaf, is_leaf2) = {

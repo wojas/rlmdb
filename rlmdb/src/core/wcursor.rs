@@ -13,11 +13,33 @@
 //! *numbers*, which identify pages exactly as C's pointers do within one
 //! transaction (a touched page gets a new number, just as it gets a new
 //! pointer in C), and every access looks the page up again: the dirty list
-//! first, then the map (`TxnCore::page`). The one page without a number is a
+//! first (directly through the page's slot there, if the cursor knows it;
+//! see below), then the map (`TxnCore::page`). The one page without a
+//! number is a
 //! `P_SUBP` sub-page stored inside a leaf node; a sub-cursor on it records
 //! [`SUBPAGE`] and the page is found through its main cursor's current
 //! node. That makes C's `XCURSOR_REFRESH` (re-pointing a sub-cursor after
 //! its node moved) implicit.
+//!
+//! # Dirty-list slots
+//!
+//! Next to each page number a write cursor keeps the page's slot in the
+//! dirty list (`WCursor::pg_slot`, a [`PageSlot`]): the stable place of the
+//! page's buffer in the transaction's list (see `super::dirty`). The
+//! accessors here ([`RwTxn::page_of`], [`RwTxn::page_mut_of`],
+//! [`RwTxn::page_touch`], the reload of read cursors) try that slot first
+//! and reach a page of the transaction's own list in O(1); C follows a
+//! pointer there. The slot is a hint, checked against the page number on
+//! every use, so it needs no upkeep for correctness: wherever a page number
+//! changes without the slot (a split, a merge, a fixup copying another
+//! cursor's stack, a read operation moving the cursor) the old slot simply
+//! misses and the page is searched by number, which is exactly what
+//! happened before slots existed. Slots are recorded where they are known
+//! for free: `mdb_page_touch` finds or creates the dirty page of every
+//! level of a cursor before each change and stores its slot (also in the
+//! other cursors it moves to a new page), and a write through a cursor
+//! stores the slot it found. Spills, nested transactions and commits need
+//! no special handling: see the invalidation rules in `super::dirty`.
 //!
 //! # Tracking
 //!
@@ -44,6 +66,7 @@ use crate::cmp::Comparator;
 use crate::consts::*;
 use crate::core::cursor::{corrupted, empty_page, Cursor, C_DEL, C_INITIALIZED, C_SUB};
 use crate::core::dbi::{DB_DIRTY, DB_DUPDATA, DB_USRVALID, DB_VALID};
+use crate::core::dirty::PageSlot;
 use crate::core::page_ops;
 use crate::core::txn::TxnCore;
 use crate::core::txn_rw::{RwTxn, TXN_ERROR, TXN_SPILLS};
@@ -77,6 +100,9 @@ pub(crate) struct WCursor {
     pub(crate) db: DbRef,
     /// `mc_pg`, as page numbers (`SUBPAGE` for a sub-page root).
     pub(crate) pg: [u64; CURSOR_STACK],
+    /// Where each page of `pg` was last found in the dirty list: a hint,
+    /// checked before use (see the module documentation).
+    pub(crate) pg_slot: [PageSlot; CURSOR_STACK],
     /// `mc_ki`.
     pub(crate) ki: [u16; CURSOR_STACK],
     /// `mc_snum`.
@@ -96,12 +122,28 @@ impl WCursor {
             dbi,
             db,
             pg: [P_INVALID; CURSOR_STACK],
+            pg_slot: [PageSlot::NONE; CURSOR_STACK],
             ki: [0; CURSOR_STACK],
             snum: 0,
             top: 0,
             flags,
             subp: false,
         }
+    }
+
+    /// Makes this cursor what [`WCursor::new`] returns, in place (cursors
+    /// are large; building one and moving it into its arena slot was a
+    /// measurable part of every `mdb_put`). The slot hints are left as they
+    /// are: they are checked before use.
+    fn reset(&mut self, dbi: usize, db: DbRef, flags: u8) {
+        self.dbi = dbi;
+        self.db = db;
+        self.pg.fill(P_INVALID);
+        self.ki.fill(0);
+        self.snum = 0;
+        self.top = 0;
+        self.flags = flags;
+        self.subp = false;
     }
 
     /// `C_INITIALIZED`.
@@ -215,7 +257,61 @@ pub(crate) struct Arena {
     depth: u32,
 }
 
+impl XState {
+    /// `mdb_xcursor_init0`: the unpositioned sub-cursor of slot `slot` on
+    /// `dbi`, ordering duplicates by `cmp`.
+    fn new(dbi: usize, slot: usize, cmp: Comparator) -> XState {
+        XState {
+            c: WCursor::new(dbi, DbRef::Sub(slot), C_SUB),
+            db: Db::empty(0),
+            dbflag: 0,
+            cmp,
+        }
+    }
+
+    /// [`XState::new`] in place (see [`WCursor::reset`]).
+    fn reset(&mut self, dbi: usize, slot: usize, cmp: Comparator) {
+        self.c.reset(dbi, DbRef::Sub(slot), C_SUB);
+        self.db = Db::empty(0);
+        self.dbflag = 0;
+        self.cmp = cmp;
+    }
+}
+
 impl Arena {
+    /// `mdb_cursor_init`: a new slot holding an unpositioned cursor on
+    /// `dbi` and, for a `MDB_DUPSORT` database (`dup_cmp`, the duplicate
+    /// order), its sub-cursor. A free slot is reset in place.
+    pub(crate) fn open(&mut self, dbi: usize, dup_cmp: Option<Comparator>, tracked: bool) -> usize {
+        let i = match self.free.pop() {
+            Some(i) => {
+                self.slots[i].main.reset(dbi, DbRef::Txn(dbi), 0);
+                i
+            }
+            None => {
+                self.slots.push(Slot {
+                    main: WCursor::new(dbi, DbRef::Txn(dbi), 0),
+                    x: None,
+                    tracked,
+                    live: true,
+                    gen: 0,
+                    owner: self.depth,
+                });
+                self.slots.len() - 1
+            }
+        };
+        let s = &mut self.slots[i];
+        match (dup_cmp, &mut s.x) {
+            (Some(cmp), Some(x)) => x.reset(dbi, i, cmp),
+            (Some(cmp), None) => s.x = Some(XState::new(dbi, i, cmp)),
+            (None, _) => s.x = None,
+        }
+        s.tracked = tracked;
+        s.live = true;
+        s.owner = self.depth;
+        i
+    }
+
     /// Stores a new cursor and returns its slot.
     pub(crate) fn alloc(&mut self, main: WCursor, x: Option<XState>, tracked: bool) -> usize {
         let owner = self.depth;
@@ -340,6 +436,13 @@ impl Arena {
         }
     }
 
+    /// The sub-cursor of slot `slot`, for its record (`mc_db` of a
+    /// sub-cursor). Panics if there is none, which would be a bug in the
+    /// write path (only sub-cursors refer to it).
+    fn sub_record(&self, slot: usize) -> &XState {
+        self.slots[slot].x.as_ref().expect("sub-cursor record")
+    }
+
     /// For a fixup loop over `mt_cursors[dbi]` on behalf of a cursor with
     /// (`sub`) or without `C_SUB`: the cursor of tracked slot `i` to adjust
     /// (`m3`), if slot `i` is tracked on `dbi`.
@@ -378,7 +481,7 @@ fn subpage_of<'t>(
     if m.snum == 0 || m.pg[m.top] == SUBPAGE {
         return Ok(None);
     }
-    let leaf = core.page(m.pg[m.top])?;
+    let leaf = core.page_by_slot(m.pg[m.top], m.pg_slot[m.top])?;
     match leaf.node(usize::from(m.ki[m.top])) {
         Some(n) if n.flags() & (F_DUPDATA | F_SUBDATA) == F_DUPDATA => {
             let data = n.inline_data().ok_or_else(corrupted)?;
@@ -433,7 +536,7 @@ fn load_read<'t>(
     let snum = w.snum.min(CURSOR_STACK);
     out.load(w.flags, &w.ki, snum, w.top, sub, |i| match sub {
         Some(sp) if i == 0 => Ok(sp),
-        _ => core.page(w.pg[i]),
+        _ => core.page_by_slot(w.pg[i], w.pg_slot[i]),
     })
 }
 
@@ -483,11 +586,12 @@ pub(crate) fn write_back(arena: &mut Arena, c: CRef, mc: &Cursor<'_>, mx: Option
 fn db_and_cmp(core: &TxnCore<'_>, arena: &Arena, c: CRef) -> (Db, Comparator) {
     match arena.cur(c).db {
         DbRef::Txn(dbi) => {
-            let e = core.dbs.borrow()[dbi];
+            let dbs = core.dbs.borrow();
+            let e = &dbs[dbi];
             (e.db, e.key_cmp)
         }
         DbRef::Sub(slot) => {
-            let x = arena.slots[slot].x.as_ref().expect("sub-cursor record");
+            let x = arena.sub_record(slot);
             (x.db, x.cmp)
         }
     }
@@ -508,7 +612,10 @@ impl<'env> RwTxn<'env> {
 
     /// `*mc->mc_db` (a copy).
     pub(crate) fn db_of(&self, c: CRef) -> Db {
-        db_and_cmp(&self.core, &self.w.cursors, c).0
+        match self.cur(c).db {
+            DbRef::Txn(dbi) => self.core.dbs.borrow()[dbi].db,
+            DbRef::Sub(slot) => self.w.cursors.sub_record(slot).db,
+        }
     }
 
     /// `mc->mc_db`, for updating the record.
@@ -529,7 +636,10 @@ impl<'env> RwTxn<'env> {
 
     /// `mc->mc_dbx->md_cmp`.
     pub(crate) fn cmp_of(&self, c: CRef) -> Comparator {
-        db_and_cmp(&self.core, &self.w.cursors, c).1
+        match self.cur(c).db {
+            DbRef::Txn(dbi) => self.core.dbs.borrow()[dbi].key_cmp,
+            DbRef::Sub(slot) => self.w.cursors.sub_record(slot).cmp,
+        }
     }
 
     /// `mc->mc_dbx->md_dcmp` of a main cursor.
@@ -562,19 +672,13 @@ impl<'env> RwTxn<'env> {
     /// tracked list if `tracked` (`mdb_cursor_open`, `mdb_put`). The DBI's
     /// record must be fresh.
     pub(crate) fn open_slot(&mut self, dbi: usize, tracked: bool) -> usize {
-        let entry = self.core.dbs.borrow()[dbi];
-        let main = WCursor::new(dbi, DbRef::Txn(dbi), 0);
-        let x = (u32::from(entry.db.flags) & MDB_DUPSORT != 0).then(|| XState {
-            c: WCursor::new(dbi, DbRef::Sub(usize::MAX), C_SUB),
-            db: Db::empty(0),
-            dbflag: 0,
-            cmp: entry.dup_cmp.unwrap_or(Comparator::Memn),
-        });
-        let slot = self.w.cursors.alloc(main, x, tracked);
-        if let Some(x) = self.w.cursors.slot_mut(slot).and_then(|s| s.x.as_mut()) {
-            x.c.db = DbRef::Sub(slot);
-        }
-        slot
+        let dup_cmp = {
+            let dbs = self.core.dbs.borrow();
+            let e = &dbs[dbi];
+            (u32::from(e.db.flags) & MDB_DUPSORT != 0)
+                .then(|| e.dup_cmp.unwrap_or(Comparator::Memn))
+        };
+        self.w.cursors.open(dbi, dup_cmp, tracked)
     }
 
     /// Frees a cursor slot.
@@ -612,6 +716,7 @@ impl<'env> RwTxn<'env> {
         d.flags = s.flags;
         d.subp = s.subp;
         d.pg[..s.snum].copy_from_slice(&s.pg[..s.snum]);
+        d.pg_slot[..s.snum].copy_from_slice(&s.pg_slot[..s.snum]);
         d.ki[..s.snum].copy_from_slice(&s.ki[..s.snum]);
     }
 
@@ -657,7 +762,7 @@ impl<'env> RwTxn<'env> {
         if level == 0 && w.subp {
             return subpage_of(&self.core, &self.w.cursors, c.slot)?.ok_or_else(corrupted);
         }
-        self.core.page(w.pg[level])
+        self.core.page_by_slot(w.pg[level], w.pg_slot[level])
     }
 
     /// The top page of `c` (`mc->mc_pg[mc->mc_top]`), for reading.
@@ -667,19 +772,32 @@ impl<'env> RwTxn<'env> {
 
     /// The bytes of the page of `c` at `level`, for writing. The page must
     /// be dirty (touched); a sub-page is written inside its dirty leaf.
+    /// The slot of the page is stored back into the cursor.
     pub(crate) fn page_mut_of(&mut self, c: CRef, level: usize) -> Result<&mut [u8]> {
         let ps = self.psize();
         let l = self.layout();
         let w = self.w.cursors.cur(c);
         if level == 0 && w.subp {
-            let m = &self.w.cursors.slot(c.slot).ok_or_else(corrupted)?.main;
+            let m = &mut self.w.cursors.slot_mut(c.slot).ok_or_else(corrupted)?.main;
             let (leaf, idx) = (m.pg[m.top], usize::from(m.ki[m.top]));
-            let buf = self.core.dirty.get_mut(leaf).ok_or_else(corrupted)?;
+            let slot = self
+                .core
+                .dirty
+                .resolve(m.pg_slot[m.top], leaf)
+                .ok_or_else(corrupted)?;
+            m.pg_slot[m.top] = slot;
+            let buf = self.core.dirty.at_mut(slot, leaf).ok_or_else(corrupted)?;
             let range = page_ops::node_data_range(l, &buf[..ps], idx).ok_or_else(corrupted)?;
             return Ok(&mut buf[range]);
         }
         let pgno = w.pg[level];
-        let buf = self.core.dirty.get_mut(pgno).ok_or_else(corrupted)?;
+        let slot = self
+            .core
+            .dirty
+            .resolve(w.pg_slot[level], pgno)
+            .ok_or_else(corrupted)?;
+        self.cur_mut(c).pg_slot[level] = slot;
+        let buf = self.core.dirty.at_mut(slot, pgno).ok_or_else(corrupted)?;
         Ok(&mut buf[..ps])
     }
 
@@ -764,7 +882,48 @@ impl<'env> RwTxn<'env> {
     /// this transaction's dirty list under its own number. Neither moves a
     /// cursor: they hold page numbers, which do not change (C's fixups only
     /// replace the page pointer there).
+    ///
+    /// The page's slot in the dirty list is stored in the cursor (and in
+    /// the cursors moved to a copy), so that later accesses through the
+    /// cursor need no search. A page already in this transaction's list,
+    /// the common case, is recognised through the slot the cursor already
+    /// has, without a search.
+    #[inline]
     pub(crate) fn page_touch(&mut self, mc: CRef) -> Result<()> {
+        let top = self.cur(mc).top;
+        match self.touch_needed(mc, top) {
+            None => Ok(()),
+            Some(in_list) => self.page_touch_slow(mc, in_list),
+        }
+    }
+
+    /// The common case of `mdb_page_touch` for the page of `mc` at `level`:
+    /// `None` if there is nothing to do because it is a sub-page or already
+    /// dirty in this transaction's own list (found through the cursor's
+    /// slot, which is then stored; a page there is what `TxnCore::page`
+    /// returns for it). Otherwise whether the page is in that list, for
+    /// [`RwTxn::page_touch_slow`].
+    #[inline]
+    fn touch_needed(&mut self, mc: CRef, level: usize) -> Option<bool> {
+        let l = self.layout();
+        let w = self.w.cursors.cur_mut(mc);
+        if level == 0 && w.subp {
+            return None;
+        }
+        match self.core.dirty.lookup(w.pg_slot[level], w.pg[level]) {
+            Some((slot, page)) if page_ops::flags(l, page) & P_DIRTY != 0 => {
+                w.pg_slot[level] = slot;
+                None
+            }
+            found => Some(found.is_some()),
+        }
+    }
+
+    /// [`RwTxn::page_touch`] for a page that is not dirty in this
+    /// transaction's own list yet (`in_list`: whether it is in that list at
+    /// all, as [`RwTxn::touch_needed`] found).
+    #[inline(never)]
+    fn page_touch_slow(&mut self, mc: CRef, in_list: bool) -> Result<()> {
         let (top, mp, snum, is_sub) = {
             let w = self.cur(mc);
             if w.top == 0 && w.subp {
@@ -772,12 +931,18 @@ impl<'env> RwTxn<'env> {
             }
             (w.top, w.pg[w.top], w.snum, w.is_sub())
         };
-        if self.core.page(mp)?.flags() & P_DIRTY != 0 {
-            if self.has_parent() && !self.core.dirty.contains(mp) {
+        let page = if in_list {
+            self.core.page(mp)?
+        } else {
+            self.core.page_not_dirty_here(mp)?
+        };
+        if page.flags() & P_DIRTY != 0 {
+            if self.has_parent() && !in_list {
                 // If txn has a parent, make sure the page is in our dirty
                 // list. No - copy it (it is already counted in the parent's
                 // dirty room).
-                self.copy_ancestor_page(mp)?;
+                let slot = self.copy_ancestor_page(mp)?;
+                self.cur_mut(mc).pg_slot[top] = slot;
             }
             return Ok(());
         }
@@ -795,7 +960,7 @@ impl<'env> RwTxn<'env> {
         // done by the allocation; see `page_alloc_copy`).
         let map = std::sync::Arc::clone(&self.core.map);
         let src = clean_page(&map, self.psize(), mp)?;
-        let np = match self.page_alloc_copy(src) {
+        let (np, np_slot) = match self.page_alloc_copy(src) {
             Ok(p) => p,
             Err(e) => {
                 self.w.flags |= TXN_ERROR;
@@ -819,11 +984,13 @@ impl<'env> RwTxn<'env> {
         } else {
             self.db_mut(mc).root = np;
         }
-        self.own_copied_page(np)?;
+        self.own_copied_page(np, np_slot)?;
 
         // Adjust cursors pointing to mp.
-        self.cur_mut(mc).pg[top] = np;
-        let dbi = self.cur(mc).dbi;
+        let w = self.cur_mut(mc);
+        w.pg[top] = np;
+        w.pg_slot[top] = np_slot;
+        let dbi = w.dbi;
         for i in 0..self.w.cursors.len() {
             let Some(m3) = self.w.cursors.peer(i, dbi, is_sub) else {
                 continue;
@@ -837,6 +1004,7 @@ impl<'env> RwTxn<'env> {
             }
             if w3.pg[top] == mp && !(top == 0 && w3.subp) {
                 w3.pg[top] = np;
+                w3.pg_slot[top] = np_slot;
             }
         }
         Ok(())
@@ -844,8 +1012,8 @@ impl<'env> RwTxn<'env> {
 
     /// The nested branch of `mdb_page_touch`: copy the page (`ps` bytes, or
     /// the whole overflow run) that an ancestor has dirty into this
-    /// transaction's dirty list under the same number.
-    pub(crate) fn copy_ancestor_page(&mut self, pgno: u64) -> Result<()> {
+    /// transaction's dirty list under the same number. Returns its slot.
+    pub(crate) fn copy_ancestor_page(&mut self, pgno: u64) -> Result<PageSlot> {
         let crate::core::txn::PageSource::Dirty(_, level) = self.core.locate(pgno) else {
             return Err(corrupted());
         };
@@ -858,18 +1026,15 @@ impl<'env> RwTxn<'env> {
             .and_then(|layer| layer.dirty.get(pgno))
             .ok_or_else(corrupted)?;
         let buf = core.dirty.alloc_copy(src);
-        if !core.dirty.insert(pgno, buf) {
-            return Err(corrupted());
-        }
-        Ok(())
+        core.dirty.insert(pgno, buf).ok_or_else(corrupted)
     }
 
-    /// The tail of `mdb_page_touch` for the new dirty page `dst`, which
-    /// holds a copy of the clean page (`page_alloc_copy`):
+    /// The tail of `mdb_page_touch` for the new dirty page `dst` (in
+    /// `slot`), which holds a copy of the clean page (`page_alloc_copy`):
     /// `np->mp_pgno = pgno; np->mp_flags |= P_DIRTY`.
-    fn own_copied_page(&mut self, dst: u64) -> Result<()> {
+    fn own_copied_page(&mut self, dst: u64, slot: PageSlot) -> Result<()> {
         let l = self.layout();
-        let to = self.core.dirty.get_mut(dst).ok_or_else(corrupted)?;
+        let to = self.core.dirty.at_mut(slot, dst).ok_or_else(corrupted)?;
         page_ops::set_pgno(to, dst);
         let f = page_ops::flags(l, to);
         page_ops::set_flags(l, to, f | P_DIRTY);
@@ -900,8 +1065,13 @@ impl<'env> RwTxn<'env> {
         if snum > 0 {
             let mut rc = Ok(());
             for level in 0..snum {
+                // `page_touch` with `mc_top` at each level in turn; the
+                // common case does not look at `mc_top`.
+                let Some(in_list) = self.touch_needed(mc, level) else {
+                    continue;
+                };
                 self.cur_mut(mc).top = level;
-                rc = self.page_touch(mc);
+                rc = self.page_touch_slow(mc, in_list);
                 if rc.is_err() {
                     break;
                 }
@@ -1086,6 +1256,7 @@ impl<'env> RwTxn<'env> {
         }
         x.db = sx.db;
         x.c.pg[0] = sx.c.pg[0];
+        x.c.pg_slot[0] = sx.c.pg_slot[0];
         x.c.subp = sx.c.subp;
     }
 }
