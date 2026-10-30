@@ -1,5 +1,5 @@
 //! Every interop scenario with the C peer writing and the Rust peer
-//! (`rpeer`, on `lmdb-core`) reading: verifying, dumping, holding
+//! (`rpeer`, on `rlmdb`) reading: verifying, dumping, holding
 //! snapshots, running reader loops, auditing page usage and listing and
 //! checking reader slots, concurrently with C writers on the same
 //! environment (and, in the bidirectional scenarios, writing too).

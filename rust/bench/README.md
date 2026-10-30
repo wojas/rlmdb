@@ -1,20 +1,20 @@
-# lmdb-bench
+# rlmdb-bench
 
-Benchmarks of the Rust rewrite (`lmdb-core`) against the C library
+Benchmarks of the Rust rewrite (`rlmdb`) against the C library
 (`libraries/liblmdb`, 0.9.36), with identical workloads and data on both
 sides. Results and analysis: [`RESULTS.md`](RESULTS.md).
 
 * **C side**: `c/cbench.c`, linked with `mdb.c`/`midl.c` compiled by
   `build.rs` with the interop test bed's flags (the upstream Makefile's:
   `-O2 -g -pthread -W -Wall -Wno-unused-parameter`).
-* **Rust side**: `src/workloads.rs` on `lmdb_core`'s byte-level API, built
+* **Rust side**: `src/workloads.rs` on `rlmdb`'s byte-level API, built
   with the workspace's release profile (`lto = "thin"`,
   `codegen-units = 1`).
 * **Data**: `src/data.rs` and the top of `cbench.c` implement the same
   generator (`splitmix64` with fixed seeds): 16-byte keys, 100-byte values
   (zero-copy slices of a fixed random pool), the same random index streams
   and permutations, so both sides store the same data in the same
-  order. `lmdb-bench --check-data` verifies that: both sides hash
+  order. `rlmdb-bench --check-data` verifies that: both sides hash
   everything the generator produces and the driver compares the hashes.
 * **Timing**: hand-rolled. Every workload runs one warm-up iteration and
   `--reps` timed ones (`CLOCK_MONOTONIC` / `Instant`); the table shows the
@@ -27,14 +27,14 @@ sides. Results and analysis: [`RESULTS.md`](RESULTS.md).
 
 ```sh
 cd rust
-cargo run --release -p lmdb-bench               # everything, both sides (20-30 min)
-cargo run --release -p lmdb-bench -- --check-data   # C and Rust generate the same data?
-cargo run --release -p lmdb-bench -- --only read,dupsort --reps 9
-cargo run --release -p lmdb-bench -- --impl rust --only rand_put --raw
-cargo run --release -p lmdb-bench -- --help
+cargo run --release -p rlmdb-bench               # everything, both sides (20-30 min)
+cargo run --release -p rlmdb-bench -- --check-data   # C and Rust generate the same data?
+cargo run --release -p rlmdb-bench -- --only read,dupsort --reps 9
+cargo run --release -p rlmdb-bench -- --impl rust --only rand_put --raw
+cargo run --release -p rlmdb-bench -- --help
 # Linux (4 KiB pages), in the Docker container of scripts/linux-test.sh;
 # environments go to the container's /tmp, not the bind-mounted workspace:
-scripts/linux-test.sh run --release -p lmdb-bench -- --dir /tmp/lmdb-bench
+scripts/linux-test.sh run --release -p rlmdb-bench -- --dir /tmp/lmdb-bench
 ```
 
 Options: `--n N` (keys, default 1 000 000; every other size scales with
@@ -45,7 +45,7 @@ temp directory; everything is deleted afterwards), `--only G1,G2`,
 (run every group K times per side, alternating which side goes first;
 the samples are pooled).
 
-### A/B of two versions of `lmdb-core`
+### A/B of two versions of `rlmdb`
 
 `--baseline EXE` replaces the C side with the Rust side of another build
 of `lmdb-bench`, for measuring a change to the library: build the bench
@@ -53,9 +53,9 @@ at the old version, keep the binary, build the new version and compare,
 interleaved:
 
 ```sh
-cargo build --release -p lmdb-bench && cp target/release/lmdb-bench /tmp/lmdb-bench-old
-# ... change lmdb-core ...
-cargo run --release -p lmdb-bench -- --baseline /tmp/lmdb-bench-old --rounds 3 --reps 3
+cargo build --release -p rlmdb-bench && cp target/release/lmdb-bench /tmp/lmdb-bench-old
+# ... change rlmdb ...
+cargo run --release -p rlmdb-bench -- --baseline /tmp/lmdb-bench-old --rounds 3 --reps 3
 ```
 
 The machine this was developed on was shared with other heavy jobs, so

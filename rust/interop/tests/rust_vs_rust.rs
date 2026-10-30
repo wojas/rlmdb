@@ -1,4 +1,4 @@
-//! Every interop scenario with the Rust peer (`rpeer` on `lmdb-core`) on both sides
+//! Every interop scenario with the Rust peer (`rpeer` on `rlmdb`) on both sides
 //! (two processes of the same implementation sharing one environment).
 //!
 //! See `src/scenarios` for the scenarios and README.md for the matrix; steps

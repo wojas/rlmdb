@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "lmdb-core",
-    "lmdb-capi",
-    "lmdb-tools",
+    "rlmdb",
+    "rlmdb-capi",
+    "rlmdb-tools",
     "interop",
     "bench",
 ]

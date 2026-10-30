@@ -1,5 +1,5 @@
 //! The Rust side of every workload: line-by-line twins of the groups in
-//! `c/cbench.c`, on `lmdb_core`'s byte-level API. Each group runs one
+//! `c/cbench.c`, on `rlmdb`'s byte-level API. Each group runs one
 //! warm-up iteration and `reps` timed ones per workload and prints
 //! `RESULT <name> <ns>/<ops> ...` lines (see `main.rs`).
 
@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use lmdb_core::{
+use rlmdb::{
     DatabaseFlags, Dbi, Environment, EnvironmentFlags, Result, RwTxn, Transaction, WriteFlags,
 };
 

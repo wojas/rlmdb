@@ -58,17 +58,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "interop"
-version = "0.1.0"
-dependencies = [
- "cc",
- "libc",
- "lmdb-capi",
- "lmdb-core",
- "tempfile",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -81,41 +70,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "lmdb-bench"
-version = "0.1.0"
-dependencies = [
- "cc",
- "lmdb-core",
-]
-
-[[package]]
-name = "lmdb-capi"
-version = "0.1.0"
-dependencies = [
- "cc",
- "libc",
- "lmdb-core",
-]
-
-[[package]]
-name = "lmdb-core"
-version = "0.1.0"
-dependencies = [
- "bitflags",
- "libc",
- "tempfile",
-]
-
-[[package]]
-name = "lmdb-tools"
-version = "0.1.0"
-dependencies = [
- "cc",
- "lmdb-core",
- "tempfile",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -126,6 +80,52 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "rlmdb"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "libc",
+ "tempfile",
+]
+
+[[package]]
+name = "rlmdb-bench"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "rlmdb",
+]
+
+[[package]]
+name = "rlmdb-capi"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "rlmdb",
+]
+
+[[package]]
+name = "rlmdb-interop"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "rlmdb",
+ "rlmdb-capi",
+ "tempfile",
+]
+
+[[package]]
+name = "rlmdb-tools"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "rlmdb",
+ "tempfile",
+]
 
 [[package]]
 name = "rustix"

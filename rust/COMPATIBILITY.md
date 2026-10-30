@@ -1,6 +1,6 @@
 # Compatibility contract
 
-What the Rust rewrite (`lmdb-core`, and `lmdb-capi`/`lmdb-tools` built on
+What the Rust rewrite (`rlmdb`, and `rlmdb-capi`/`rlmdb-tools` built on
 it) promises with respect to C LMDB 0.9.36 (`../libraries/liblmdb`), and
 which tests check each promise. "C" below means the C library built with
 its platform defaults (the upstream `Makefile`: `MDB_USE_POSIX_MUTEX` with
@@ -136,7 +136,7 @@ of it changes the files or what another process concludes about them.
   `mdb_load` keeps the first database's flags (#1) and handles `-a`,
   `format=print` and odd lines correctly (#23–#26), `mdb_stat -r` exits 0
   (#2).
-* Through the C API (`lmdb-capi/README.md`, "Differences from C LMDB
+* Through the C API (`rlmdb-capi/README.md`, "Differences from C LMDB
   0.9.36"): opening one environment twice in a process is `EBUSY`; NULL
   handles and use after free return `EINVAL` instead of crashing;
   handles of existing databases opened in a transaction are published at
@@ -156,18 +156,18 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 
 | Promise | Verified by |
 |---|---|
-| Struct layout of every on-disk and lock-file structure equals C's | `interop/tests/layout.rs` (C `layout_dump` vs the Rust constants), `lmdb-core` unit tests in `format/` |
-| Rust reads C-written files exactly | `lmdb-core/tests/c_databases.rs` (cursor walks, `get`, all `SET*`/dup ops vs `mdb_dump`/`mdb_stat` on `mtest*`/`mdb_load` output), `lmdb-core/tests/handbuilt.rs`, `interop` C→Rust scenarios |
-| C reads Rust-written files; no page lost or shared | `lmdb-core/tests/rust_writes.rs`, `write_interop.rs`, `interop` Rust→C scenarios, the C peer's page audit (`check-freelist`) after every scenario and C API test |
-| Rust writes produce C's trees, cursor positions and free list | `lmdb-core/tests/write_differential.rs` (same scripts in C and Rust, every cursor compared after every step; full-size spill comparison, ignored by default), `lmdb-capi/tests/mtest.rs` (upstream `mtest*` against both libraries: same `mdb_stat -ff` free list, same dumps) |
-| Concurrent C and Rust processes on one environment | `interop` (three peers: C, Rust, C-on-Rust; all nine writer/reader pairs; concurrent writer loops of both with reader loops of all three; `three_peers`), `lmdb-core/tests/c_concurrency.rs`, `lmdb-capi/tests/concurrency.rs` and `cross_process.rs` |
-| Lock file created by either side | `interop` `reader_creates_lock_file`, `lmdb-core/tests/c_concurrency.rs` (`rust_creates_environment_c_uses_it`, `c_creates_environment_rust_attaches`, `exclusive_opener_resizes_small_lock_file`) |
-| Reader table, stale readers, `mdb_reader_check` | `interop` `readers_list`, `stale_reader_cleared_by_reader`, `stale_reader_cleared_by_mdb_stat`; `lmdb-tools/tests/readers.rs` |
-| MVCC across implementations, map growth | `interop` `mvcc_hold_reader`, `lmdb-capi/tests/concurrency.rs` (snapshots byte-identical while the other side commits; `MDB_MAP_RESIZED`) |
-| `MDB_NOTLS` superset | `interop` `notls_readers` and every scenario (C peers in TLS mode next to Rust readers), `lmdb-core/tests/rust_env.rs` (`transactions_move_between_threads`) |
-| `MDB_NOSUBDIR`, read-only, `MDB_NOLOCK` | `interop` `nosubdir`, `lmdb-core/tests/core_api_c2.rs` |
-| Nested transactions | `lmdb-core/tests/nested_txn.rs` (written by one side, checked by the other), `interop` `nested_txns`, `reader_loop_during_nested`, `lmdb-capi/tests/c/capi_write.c` |
-| Copies byte-identical to `mdb_copy [-c]` | `lmdb-core/tests/env_copy.rs`, `lmdb-tools/tests/copy_drop.rs`, `interop` `copy_dump_equal` |
-| The C API behaves as C (return codes, outputs, traces) | `lmdb-capi/tests/c/capi_read.c`, `capi_write.c` (run against both libraries; traces must be identical; `DIFFERS()`/`DEVIATION()` mark the documented deviations), `lmdb-capi/tests/tools.rs` (upstream `mdb_stat.c`/`mdb_dump.c` linked against both print the same) |
-| The tools behave as C's | `lmdb-tools/tests/*.rs` (every option on every environment: same stdout, stderr, exit code; loaded environments identical as C sees them) |
-| Corrupt input never crashes | `lmdb-core` `format::page` unit tests (`corrupt_pointers_do_not_panic`), `lmdb-core/tests/handbuilt.rs` (`corrupt_pages_give_errors_not_panics`) |
+| Struct layout of every on-disk and lock-file structure equals C's | `interop/tests/layout.rs` (C `layout_dump` vs the Rust constants), `rlmdb` unit tests in `format/` |
+| Rust reads C-written files exactly | `rlmdb/tests/c_databases.rs` (cursor walks, `get`, all `SET*`/dup ops vs `mdb_dump`/`mdb_stat` on `mtest*`/`mdb_load` output), `rlmdb/tests/handbuilt.rs`, `interop` C→Rust scenarios |
+| C reads Rust-written files; no page lost or shared | `rlmdb/tests/rust_writes.rs`, `write_interop.rs`, `interop` Rust→C scenarios, the C peer's page audit (`check-freelist`) after every scenario and C API test |
+| Rust writes produce C's trees, cursor positions and free list | `rlmdb/tests/write_differential.rs` (same scripts in C and Rust, every cursor compared after every step; full-size spill comparison, ignored by default), `rlmdb-capi/tests/mtest.rs` (upstream `mtest*` against both libraries: same `mdb_stat -ff` free list, same dumps) |
+| Concurrent C and Rust processes on one environment | `interop` (three peers: C, Rust, C-on-Rust; all nine writer/reader pairs; concurrent writer loops of both with reader loops of all three; `three_peers`), `rlmdb/tests/c_concurrency.rs`, `rlmdb-capi/tests/concurrency.rs` and `cross_process.rs` |
+| Lock file created by either side | `interop` `reader_creates_lock_file`, `rlmdb/tests/c_concurrency.rs` (`rust_creates_environment_c_uses_it`, `c_creates_environment_rust_attaches`, `exclusive_opener_resizes_small_lock_file`) |
+| Reader table, stale readers, `mdb_reader_check` | `interop` `readers_list`, `stale_reader_cleared_by_reader`, `stale_reader_cleared_by_mdb_stat`; `rlmdb-tools/tests/readers.rs` |
+| MVCC across implementations, map growth | `interop` `mvcc_hold_reader`, `rlmdb-capi/tests/concurrency.rs` (snapshots byte-identical while the other side commits; `MDB_MAP_RESIZED`) |
+| `MDB_NOTLS` superset | `interop` `notls_readers` and every scenario (C peers in TLS mode next to Rust readers), `rlmdb/tests/rust_env.rs` (`transactions_move_between_threads`) |
+| `MDB_NOSUBDIR`, read-only, `MDB_NOLOCK` | `interop` `nosubdir`, `rlmdb/tests/core_api_c2.rs` |
+| Nested transactions | `rlmdb/tests/nested_txn.rs` (written by one side, checked by the other), `interop` `nested_txns`, `reader_loop_during_nested`, `rlmdb-capi/tests/c/capi_write.c` |
+| Copies byte-identical to `mdb_copy [-c]` | `rlmdb/tests/env_copy.rs`, `rlmdb-tools/tests/copy_drop.rs`, `interop` `copy_dump_equal` |
+| The C API behaves as C (return codes, outputs, traces) | `rlmdb-capi/tests/c/capi_read.c`, `capi_write.c` (run against both libraries; traces must be identical; `DIFFERS()`/`DEVIATION()` mark the documented deviations), `rlmdb-capi/tests/tools.rs` (upstream `mdb_stat.c`/`mdb_dump.c` linked against both print the same) |
+| The tools behave as C's | `rlmdb-tools/tests/*.rs` (every option on every environment: same stdout, stderr, exit code; loaded environments identical as C sees them) |
+| Corrupt input never crashes | `rlmdb` `format::page` unit tests (`corrupt_pointers_do_not_panic`), `rlmdb/tests/handbuilt.rs` (`corrupt_pages_give_errors_not_panics`) |

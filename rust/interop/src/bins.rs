@@ -5,7 +5,7 @@
 //! subprocesses.
 //!
 //! One more C program is linked at test time: [`cpeer_capi`], the C peer
-//! linked against the *Rust* `liblmdb.a` of `lmdb-capi`.
+//! linked against the *Rust* `liblmdb.a` of `rlmdb-capi`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -72,7 +72,7 @@ pub fn lmdb_src() -> &'static Path {
 }
 
 /// System libraries a C program needs next to the Rust `liblmdb.a` (as
-/// `lmdb-capi/README.md` lists them; on macOS the compiler driver adds
+/// `rlmdb-capi/README.md` lists them; on macOS the compiler driver adds
 /// them).
 fn rust_native_libs() -> &'static [&'static str] {
     if cfg!(target_os = "linux") {
@@ -90,7 +90,7 @@ fn rust_native_libs() -> &'static [&'static str] {
     }
 }
 
-/// The Rust `liblmdb.a` built by cargo for `lmdb-capi` (a dev-dependency of
+/// The Rust `liblmdb.a` built by cargo for `rlmdb-capi` (a dev-dependency of
 /// this crate, so it is built before the tests): in `target/<profile>/deps`
 /// next to the running test executable, or one level up.
 pub fn rust_staticlib() -> Result<PathBuf> {
@@ -108,8 +108,8 @@ pub fn rust_staticlib() -> Result<PathBuf> {
         .find(|p| p.is_file())
         .ok_or_else(|| {
             Error::new(format!(
-                "the Rust liblmdb.a (lmdb-capi) is not next to {}: build it with \
-                 `cargo test -p interop` (lmdb-capi is a dev-dependency)",
+                "the Rust liblmdb.a (rlmdb-capi) is not next to {}: build it with \
+                 `cargo test -p rlmdb-interop` (rlmdb-capi is a dev-dependency)",
                 exe.display()
             ))
         })
@@ -158,9 +158,9 @@ fn link_cpeer_capi() -> Result<PathBuf> {
     Ok(out)
 }
 
-/// The C peer linked against the Rust `liblmdb.a` of `lmdb-capi`
+/// The C peer linked against the Rust `liblmdb.a` of `rlmdb-capi`
 /// ([`crate::Peer::COnRust`]): the same C program as [`cpeer`], compiled
-/// against `lmdb-capi/include/lmdb.h`, with the library swapped.
+/// against `rlmdb-capi/include/lmdb.h`, with the library swapped.
 ///
 /// Linked once per test process (the first call), so it always uses the
 /// `liblmdb.a` the tests were built with.

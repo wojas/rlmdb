@@ -1,4 +1,4 @@
-//! Every interop scenario with the C peer linked against the Rust `liblmdb.a` (`lmdb-capi`) on both sides
+//! Every interop scenario with the C peer linked against the Rust `liblmdb.a` (`rlmdb-capi`) on both sides
 //! (two processes of the same implementation sharing one environment).
 //!
 //! See `src/scenarios` for the scenarios and README.md for the matrix; steps

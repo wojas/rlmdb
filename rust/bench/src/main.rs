@@ -12,7 +12,7 @@
 //!
 //! With `--baseline <lmdb-bench>` the other side is not C but the Rust side
 //! of another build of this program (say, of the commit before a change):
-//! an A/B comparison of two versions of `lmdb-core`, best run with several
+//! an A/B comparison of two versions of `rlmdb`, best run with several
 //! `--rounds` so the two alternate.
 
 mod data;
@@ -48,7 +48,7 @@ usage: lmdb-bench [options]
   --impl both|c|rust (default both)
   --raw              also print the raw RESULT lines
   --baseline EXE     compare with the Rust side of another lmdb-bench build
-                     (A/B of two lmdb-core versions) instead of with C
+                     (A/B of two rlmdb versions) instead of with C
   --rounds K         run every group K times per side, alternating (default 1)
   --check-data       check that C and Rust generate the same data, and exit
 groups: seq_put rand_put read overwrite dupsort overflow delete small_txn mixed";

@@ -1,4 +1,4 @@
-//! Every interop scenario with the Rust peer (`rpeer` on `lmdb-core`) writing and
+//! Every interop scenario with the Rust peer (`rpeer` on `rlmdb`) writing and
 //! the C peer (`cpeer` on the C library) reading (and, in the bidirectional scenarios,
 //! writing too).
 //!

@@ -25,7 +25,7 @@ use std::io::BufRead;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use lmdb_core::{
+use rlmdb::{
     CursorOp, DatabaseFlags, Dbi, Environment, MdbError, RoTxn, RwTxn, Transaction, WriteFlags,
 };
 
@@ -263,7 +263,7 @@ impl WriterLoop {
                 let value = wl_value(r, version, len);
                 match txn.put(self.main, key.as_bytes(), &value, WriteFlags::NO_OVERWRITE) {
                     Ok(()) => count += 1,
-                    Err(lmdb_core::Error::Mdb(MdbError::KeyExist)) => txn
+                    Err(rlmdb::Error::Mdb(MdbError::KeyExist)) => txn
                         .put(self.main, key.as_bytes(), &value, WriteFlags::empty())
                         .check("mdb_put(w)")?,
                     Err(e) => return Err(Fail::lmdb("mdb_put(w)", &e)),
@@ -284,7 +284,7 @@ impl WriterLoop {
                 let value = dup_value(splitmix64(&mut self.rng), r);
                 match txn.put(self.dups, key.as_bytes(), &value, WriteFlags::NO_DUP_DATA) {
                     Ok(()) => ndups += 1,
-                    Err(lmdb_core::Error::Mdb(MdbError::KeyExist)) => {}
+                    Err(rlmdb::Error::Mdb(MdbError::KeyExist)) => {}
                     Err(e) => return Err(Fail::lmdb("mdb_put(d)", &e)),
                 }
             } else {

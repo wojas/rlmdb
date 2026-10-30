@@ -3,7 +3,7 @@
 //!
 //! These numbers are what the Rust implementation must reproduce;
 //! `rust_layout_matches_c` compares every one of them with the constants of
-//! the `lmdb` crate (`lmdb_core::consts`, `lmdb_core::format::layout`).
+//! the `lmdb` crate (`rlmdb::consts`, `rlmdb::format::layout`).
 
 use interop::tools::{c_layout, Layout};
 
@@ -216,14 +216,14 @@ fn lock_file_header() {
 }
 
 /// Every value `layout_dump` prints that has a counterpart in the Rust
-/// library, as the library sees it: constants from `lmdb_core::consts` and
-/// `lmdb_core::format::layout`, and sizes of the fields of its decoded structs.
+/// library, as the library sees it: constants from `rlmdb::consts` and
+/// `rlmdb::format::layout`, and sizes of the fields of its decoded structs.
 /// On Linux the lock-file offsets depend on `sizeof(pthread_mutex_t)`, which
 /// both sides take from the platform's C headers (`libc` on the Rust side).
 fn rust_layout() -> Vec<(String, u64)> {
-    use lmdb_core::consts as c;
-    use lmdb_core::format::layout as l;
-    use lmdb_core::format::{lockfile, node, page, Db, Meta, PageRef};
+    use rlmdb::consts as c;
+    use rlmdb::format::layout as l;
+    use rlmdb::format::{lockfile, node, page, Db, Meta, PageRef};
     use std::mem::{align_of, size_of, size_of_val};
 
     let sem = lockfile::USES_NAMED_SEMAPHORES;
@@ -239,10 +239,10 @@ fn rust_layout() -> Vec<(String, u64)> {
     };
     let hdr = [0u8; l::PAGE_HDR_SIZE];
     let pg = PageRef::new(&hdr).unwrap();
-    let nd = lmdb_core::format::NodeRef::new(&hdr).unwrap();
+    let nd = rlmdb::format::NodeRef::new(&hdr).unwrap();
     let db = Db::empty(0);
     let meta = Meta::default();
-    let reader = lmdb_core::ReaderInfo {
+    let reader = rlmdb::ReaderInfo {
         pid: 0,
         thread: 0,
         txnid: None,
@@ -559,7 +559,7 @@ const NOT_COMPARED: &[(&str, &str)] = &[
 fn rust_layout_matches_c() {
     let l = layout();
     let rust = rust_layout();
-    let expected_mode = if lmdb_core::format::lockfile::USES_NAMED_SEMAPHORES {
+    let expected_mode = if rlmdb::format::lockfile::USES_NAMED_SEMAPHORES {
         "posix_sem"
     } else {
         "posix_mutex"

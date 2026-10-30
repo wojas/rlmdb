@@ -13,7 +13,7 @@
 
 use std::io::{self, BufWriter, Write};
 
-use lmdb_core::{CursorOp, DatabaseFlags, Dbi, RoCursor, RoTxn, RwTxn, Transaction, WriteFlags};
+use rlmdb::{CursorOp, DatabaseFlags, Dbi, RoCursor, RoTxn, RwTxn, Transaction, WriteFlags};
 
 use crate::args::{found, short_hex, show, Check, CmdResult, Fail, Opts};
 use crate::dataset::{delete_dup, delete_key, DataSet, Model, ModelItem};
@@ -461,7 +461,7 @@ fn check_dups(cur: &mut RoCursor<'_>, ds: &DataSet, m: &Model) -> CmdResult {
                 ));
             }
         }
-        if ds.flags & lmdb_core::consts::MDB_DUPFIXED != 0 {
+        if ds.flags & rlmdb::consts::MDB_DUPFIXED != 0 {
             check_multiple(cur, ds, it)?;
         }
     }

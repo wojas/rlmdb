@@ -83,7 +83,7 @@ fn gen_matches_c() -> interop::Result<()> {
 
 /// rpeer implements every command of the protocol (the C peer's list), and
 /// says so in `rpeer commands`, which is what `Peer::supports` asks. (A
-/// command that needs a part of `lmdb-core` that does not exist yet would
+/// command that needs a part of `rlmdb` that does not exist yet would
 /// be listed with `implemented=0` and exit with status 4.)
 #[test]
 fn rpeer_implements_every_command() -> interop::Result<()> {

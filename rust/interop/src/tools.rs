@@ -3,7 +3,7 @@
 //! output.
 //!
 //! The parsers document the exact output formats, which the Rust
-//! reimplementations in `lmdb-tools` must reproduce.
+//! reimplementations in `rlmdb-tools` must reproduce.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;

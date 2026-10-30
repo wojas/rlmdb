@@ -1,5 +1,5 @@
 [package]
-name = "interop"
+name = "rlmdb-interop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,13 +8,16 @@ repository.workspace = true
 publish = false
 description = "Cross-process compatibility test bed: C LMDB and Rust LMDB processes sharing one environment"
 
-# The Rust peer: the command protocol of README.md on `lmdb::core`.
+[lib]
+name = "interop"
+
+# The Rust peer: the command protocol of README.md on `rlmdb::core`.
 [[bin]]
 name = "rpeer"
 path = "src/bin/rpeer/main.rs"
 
 [dependencies]
-lmdb-core = { path = "../lmdb-core" }
+rlmdb = { path = "../rlmdb" }
 tempfile = "3"
 
 [dev-dependencies]
@@ -25,7 +28,7 @@ libc.workspace = true
 # `liblmdb.a` (the lib has an rlib crate type, so all crate types are built
 # before the tests), which the third peer, `Peer::COnRust` (cpeer linked
 # against the Rust library), is linked with at test time.
-lmdb-capi = { path = "../lmdb-capi" }
+rlmdb-capi = { path = "../rlmdb-capi" }
 
 [build-dependencies]
 cc = "1"

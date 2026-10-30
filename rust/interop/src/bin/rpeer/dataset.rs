@@ -9,12 +9,12 @@
 //!
 //! All arithmetic is on `u32`/`u64` with wrap-around, as in C. The
 //! comparators at the end sort the *expected* model; they are written out
-//! here instead of using `lmdb_core::cmp`, so that the model does not depend on
+//! here instead of using `rlmdb::cmp`, so that the model does not depend on
 //! the code under test.
 
 use std::cmp::Ordering;
 
-use lmdb_core::consts::{
+use rlmdb::consts::{
     MDB_DUPFIXED, MDB_DUPSORT, MDB_INTEGERDUP, MDB_INTEGERKEY, MDB_REVERSEDUP, MDB_REVERSEKEY,
 };
 
