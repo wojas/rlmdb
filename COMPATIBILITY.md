@@ -37,6 +37,24 @@ with `MDB_USE_POSIX_SEM`).
   lock file, the mutexes or semaphores) or a later one; C on the other
   side either way. Reader liveness uses the same `fcntl` byte locks at the
   process id.
+* **Lock file: format 2** (LMDB 1.0's `MDB_LOCK_VERSION 2`), the lock file
+  of LMDB 1.0 data files: the version follows the data format. Header
+  `magic, format, txnid, numreaders`, then the reader lock; `mti_format` is
+  `2 + (MDB_lock_desc << 12)`, a per-platform constant computed with C's
+  formula: `0x28570002` on macOS, `0x2cd82002` on Linux aarch64 glibc,
+  `0x2c2f6002` on Linux x86-64 glibc (measured once with `layout_dump10`
+  in an emulated x86-64 container; the test runs do not cover x86-64).
+  On macOS the file holds a 64-bit hash (`mtb_mutexid`) and
+  the semaphore names are derived from it, as 1.0 does; there is no writer
+  lock cache line, so the reader slots start at 64. On Linux the mutexes
+  are at 24 and 128 (64 on x86-64), the slots at 192 (128). rlmdb creates
+  and attaches to it as C 1.0 does, but only through the lock-file code so
+  far (`rlmdb::core::reader::LockFile`, not part of the API): an
+  `Environment` refuses `Format::V10` until the 1.0 data layout exists.
+* **Lock files of the other version** are refused with
+  `MDB_VERSION_MISMATCH` while another process holds them, and
+  re-initialised in the opener's version by an exclusive opener, by C and
+  Rust alike.
 * **Page size** is chosen when an environment is created and recorded in
   the file, as in C: the OS page size, capped at 32 KiB (`MAX_PAGESIZE`):
   4 KiB on Linux, 16 KiB on Apple Silicon macOS. An existing environment
@@ -168,6 +186,9 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 | Rust writes produce C's trees, cursor positions and free list | `rlmdb/tests/write_differential.rs` (same scripts in C and Rust, every cursor compared after every step; full-size spill comparison, ignored by default), `rlmdb-capi/tests/mtest.rs` (upstream `mtest*` against both libraries: same `mdb_stat -ff` free list, same dumps) |
 | Concurrent C and Rust processes on one environment | `interop` (three peers: C, Rust, C-on-Rust; all nine writer/reader pairs; concurrent writer loops of both with reader loops of all three; `three_peers`), `rlmdb/tests/c_concurrency.rs`, `rlmdb-capi/tests/concurrency.rs` and `cross_process.rs` |
 | Lock file created by either side | `interop` `reader_creates_lock_file`, `rlmdb/tests/c_concurrency.rs` (`rust_creates_environment_c_uses_it`, `c_creates_environment_rust_attaches`, `exclusive_opener_resizes_small_lock_file`) |
+| Lock file format 2 (LMDB 1.0): every offset, size and `MDB_LOCK_FORMAT` equals C 1.0's; `mti_format` per platform; macOS semaphore names | `interop/tests/lockfile10.rs` `lock_file_lines_match_c` (`layout_dump` and `layout_dump10` vs `LOCK_V09`/`LOCK_V10`), `rlmdb` unit tests in `format/lockfile.rs` (the measured values, the `MDB_lock_desc` formula for all three platforms) and `os/shared_lock.rs` (`mdb_pack85` names) |
+| Lock file format 2 shared with C 1.0 processes: rlmdb attaches to C 1.0's table (header, `mtb_mutexid` equal to C's hash, C's reader in `reader_list` as in `mdb_stat10 -r`, writer lock exclusive both ways, a killed C reader cleared by `reader_check`) and C 1.0 attaches to rlmdb's (lists the Rust reader, `mdb_stat10 -e` sees rlmdb's table size, a C commit moves rlmdb's `mti_txnid`) | `interop/tests/lockfile10.rs` `rust_attaches_to_c10_lock_file`, `c10_attaches_to_rust_lock_file` |
+| Lock files of the two versions refuse each other while held (`MDB_VERSION_MISMATCH` from rlmdb, C 0.9 and C 1.0), and an exclusive opener re-initialises the other version | `interop/tests/lockfile10.rs` `lock_versions_refuse_each_other` and the two tests above; `rlmdb` `core::reader` unit test `exclusive_opener_reinitialises_other_version` |
 | Reader table, stale readers, `mdb_reader_check` | `interop` `readers_list`, `stale_reader_cleared_by_reader`, `stale_reader_cleared_by_mdb_stat`; `rlmdb-tools/tests/readers.rs` |
 | MVCC across implementations, map growth | `interop` `mvcc_hold_reader`, `rlmdb-capi/tests/concurrency.rs` (snapshots byte-identical while the other side commits; `MDB_MAP_RESIZED`) |
 | `MDB_NOTLS` superset | `interop` `notls_readers` and every scenario (C peers in TLS mode next to Rust readers), `rlmdb/tests/rust_env.rs` (`transactions_move_between_threads`) |
