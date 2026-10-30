@@ -172,9 +172,11 @@ or collapsed root to `mdb_page_loose` in `mdb_rebalance` (0.9 frees it), which
 rlmdb follows (`KNOWN_C_BUGS.md`, section "LMDB 1.0"). Free-list records,
 `MDB_db`, `MDB_meta`, node headers and sort order are the same in both formats.
 
-The lock file is still the version 1 one in both formats (stage 3 of
-`DUAL_FORMAT.md` adds 1.0's): a C 1.0 process refuses it while rlmdb holds
-the environment open, so for now the two take turns on a 1.0 environment.
+A 1.0 environment uses 1.0's lock file (version 2, next section), so C 1.0
+and rlmdb processes share an open environment as C 0.9 and rlmdb do; the
+interop matrix runs every cross-process scenario with C 1.0, Rust and C on
+Rust peers on 1.0 environments, and one process may have environments of
+both formats open at once (`interop/README.md`).
 
 ### Lock file (`<path>/lock.mdb`, or `<path>-lock` with `MDB_NOSUBDIR`)
 
@@ -570,7 +572,9 @@ strings match `mdb_strerror`.
   `child_pgno`. Mention the C name in the doc comment once.
 * Tests: unit tests next to the code for format parsing (hand-built pages),
   integration tests in `rlmdb/tests/` for API behaviour, and `interop/`
-  for cross-process checks against the C build.
+  for cross-process checks against the C builds: the peer matrix of each
+  format (C 0.9 or C 1.0, Rust, C on Rust; every writer/reader pair),
+  differential tests against C 1.0, the C 1.0 tools.
 * Linux is tested in Docker: `rust/scripts/linux-test.sh [cargo args]` runs
   cargo inside `rust:1-bookworm` (Debian, glibc, aarch64, 4 KiB pages) with
   the workspace bind-mounted. Run it before declaring a stage done; the lock

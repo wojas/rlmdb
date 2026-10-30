@@ -45,8 +45,11 @@ entry says whether it touches on-disk or lock-file state.
 rlmdb writes the LMDB 1.0 format (`MDB_DATA_VERSION 3`) the way C 1.0
 (`mdb.RE/1.0` at 4865523, LMDB 1.0.2 plus ITS#10642/10643) does; the
 differential tests check it page by page (`interop/tests/write_differential10.rs`,
-`format10.rs`). The rows above apply to 1.0 as well unless they say
-otherwise; these are the differences and what rlmdb does about them.
+`format10.rs`), and the interop matrix of 1.0 runs every cross-process
+scenario with C 1.0, Rust and C-on-Rust peers (`interop/README.md`; it
+found no difference beyond these). The rows above apply to 1.0 as well
+unless they say otherwise; these are the differences and what rlmdb does
+about them.
 
 | What | C 1.0 | rlmdb (1.0 format) |
 |---|---|---|

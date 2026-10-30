@@ -50,7 +50,9 @@ Implemented and tested against the C library on macOS (arm64) and Linux
   0.9|1.0` for the format of a new environment.
 * **`interop`**: the cross-process test bed: C, Rust and "C on the Rust
   library" peers writing and reading one environment concurrently, in all
-  nine combinations.
+  nine combinations, for each format (the C peer is C 0.9 on 0.9
+  environments and C 1.0 on 1.0 ones); one rlmdb process with a 0.9 and a
+  1.0 environment open next to C peers of both releases.
 
 **The LMDB 1.0 data file.** `rlmdb` also reads and writes the data file of
 LMDB 1.0 (`MDB_DATA_VERSION 3`), chosen per environment: an existing file
@@ -60,7 +62,8 @@ page sizes from 256 B to 64 KiB (`page_size`). What it writes is page for
 page what C LMDB 1.0 writes for the same operations, `mp_txnid` included
 (checked against a C 1.0 build in `interop`); encrypted or checksummed 1.0
 environments are refused. A 1.0 environment has 1.0's lock file, so C 1.0
-and rlmdb processes can have it open at the same time. The C API and the
+and rlmdb processes can have it open at the same time, and one process can
+have environments of both formats open. The C API and the
 tools handle both formats: an existing file in its format, a new one as
 0.9 unless 1.0 is asked for (`rlmdb_env_set_format`,
 `rlmdb_set_default_format`, `mdb_load -F 1.0`, or the **experimental**
@@ -199,7 +202,7 @@ subsets:
 cargo test -p rlmdb                   # library: C-written files, differential write tests
 cargo test -p rlmdb-capi                   # C programs against both libraries
 cargo test -p rlmdb-tools                  # tools against the C tools
-cargo test -p rlmdb-interop                     # concurrent C/Rust processes, 9 peer pairs
+cargo test -p rlmdb-interop                     # concurrent C/Rust processes, 9 peer pairs per format
 INTEROP_LOOP_SECS=20 cargo test -p rlmdb-interop --no-fail-fast   # longer stress run
 ```
 
