@@ -1,0 +1,21 @@
+[package]
+name = "lmdb-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Benchmarks of the Rust LMDB rewrite against the C library (identical workloads, side by side)"
+
+# The driver and the Rust side of every workload. The C side is the
+# `cbench` program built by build.rs from c/cbench.c and the C library.
+[[bin]]
+name = "lmdb-bench"
+path = "src/main.rs"
+
+[dependencies]
+lmdb-core = { path = "../lmdb-core" }
+
+[build-dependencies]
+cc = "1"
