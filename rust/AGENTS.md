@@ -2,8 +2,10 @@
 
 `rust/` holds `rlmdb`, a rewrite of LMDB 0.9 in Rust that is binary
 compatible with the C library in `../libraries/liblmdb` (the reference is
-whatever that tree holds; 0.9.36 at the time of writing). This file lists
-the rules that every change must respect. The details live in:
+whatever that tree holds; 0.9.36 at the time of writing), and that also
+reads and writes the data file of LMDB 1.0 (the reference is the pinned
+`mdb.RE/1.0` commit of `interop/build.rs`). This file lists the rules that
+every change must respect. The details live in:
 
 * `DESIGN.md`: goals, the on-disk and lock-file format, architecture.
 * `COMPATIBILITY.md`: the compatibility contract and which test checks it.
@@ -42,6 +44,15 @@ the rules that every change must respect. The details live in:
 * Platform ABI is part of the contract: `sizeof(pthread_mutex_t)` and the
   reader-table offset differ between Linux and macOS, and page sizes differ
   (16 KiB on macOS, 4 KiB on Linux). Test on both before claiming done.
+* LMDB 1.0's data file (`MDB_DATA_VERSION 3`, `DUAL_FORMAT.md`) is a
+  supported format with the same rules: C 1.0 is its specification and its
+  oracle (`interop`: `mdb_*10`, `cpeer10`, `writeops10`), and a Rust writer
+  leaves the pages C 1.0 would, `mp_txnid` included (C 1.0 writers decide
+  from it which pages they may change in place). Every format-dependent
+  offset, size and decision goes through `format::Layout`; never hard-code
+  the 0.9 header in engine code, and keep 0.9 files byte-identical when
+  touching the 1.0 side (and the reverse). Page sizes of 1.0 environments
+  range from 256 B to 64 KiB, so test small pages too.
 
 ## 2. Do not port plain C bugs; track them
 
@@ -152,7 +163,10 @@ deferred until the core has been validated through the C API.
   `windows.rs` can be added without touching the engine.
 * Possible later: `MDB_WRITEMAP` (dirty pages are owned buffers today;
   keep the page backing replaceable), the typed Rust API, LMDB 1.0
-  features.
+  features beyond its data file (`MDB_PREVSNAPSHOT`, two-phase commit,
+  checksums, encryption; `DUAL_FORMAT.md` §7). The 1.0 lock file, the
+  format selection of the C API and the tools follow as stages 3 and 4 of
+  `DUAL_FORMAT.md`.
 * Not unless needed and feasible: 32-bit targets (`compile_error!` today;
   the format depends on `sizeof(size_t)`) and `MDB_VL32`.
 * `MDB_FIXEDMAP`, `MDB_MAPASYNC` and `MDB_NOMEMINIT` are accepted and

@@ -8,7 +8,9 @@ not a binding. The goals, in priority order:
    a Rust LMDB process must be able to open the same environment *at the same
    time*, share the lock file, and read and write the same data file. The data
    file format (`MDB_DATA_VERSION 1`) and lock file format (`MDB_LOCK_VERSION 1`)
-   are fixed by the C code and are the specification.
+   are fixed by the C code and are the specification. As a second format,
+   rlmdb reads and writes LMDB 1.0's data file (`MDB_DATA_VERSION 3`, see
+   "The LMDB 1.0 data file" below and `DUAL_FORMAT.md`).
 2. **Clear, readable, documented Rust.** Every module starts with a doc comment
    explaining what it models and which part of `mdb.c` it corresponds to.
    Every pub item has a doc comment. Prefer small functions with names that say
@@ -133,6 +135,47 @@ All integers are host-endian (LMDB does not byte-swap). We implement the
   `mdb_cmp_memnr`; else `mdb_cmp_memn`. Read those five functions (lines
   5321-5405) carefully, including their `size` handling.
 
+### The LMDB 1.0 data file (`MDB_DATA_VERSION 3`)
+
+rlmdb also reads and writes the data file of LMDB 1.0 (`mdb.RE/1.0`, pinned
+to 4865523 in `interop/build.rs`; `DUAL_FORMAT.md` is the design). The format
+of an environment is decided at open, before the lock file is touched: an
+existing file keeps its format (`rlmdb::sniff_format` looks at the magic and
+version of the first meta page; a request for the other one is
+`MDB_VERSION_MISMATCH`), a new one gets the requested format, LMDB 0.9 by
+default. The engine is the same for both; every page and node access goes
+through the environment's `format::Layout`. What differs on disk:
+
+| item | 0.9 | 1.0 |
+|---|---|---|
+| page header | 16 bytes: `pgno, pad, flags, lower/upper` | 24 bytes: `pgno, txnid, pad, flags, lower/upper` |
+| `mp_lower`, `mp_upper`, `mp_ptrs[]` | from the page start | from the end of the header (`PAGEBASE` 24, ITS#7713): an empty page has lower 0 and upper `psize - 24` |
+| node data | `mn_data + ksize` | `mn_data + EVEN(ksize)`; `LEAFSIZE` pads key and data to even lengths, which moves split points and the overflow threshold |
+| `F_BIGDATA` node data | the 8-byte pgno | `MDB_ovpage {pgno, txnid, pages}`, 24 bytes |
+| sub-page (`P_SUBP`) | flags `0x52`, 16-byte header | flags `0x42` (no `P_DIRTY`), 24-byte header whose `mp_txnid` is the txnid of the transaction that built it |
+| meta | at 16 | at 24; `mm_flags` may carry `MDB_ENCRYPT`, page 0's last two bytes a checksum size (both refused: `MDB_ENV_ENCRYPTION`, `MDB_BAD_CHECKSUM`) |
+| page size | the OS page size, at most 32 KiB | any power of two from 256 to 64 KiB (`EnvironmentBuilder::page_size`, `mdb_env_set_pagesize`; 1.0's `mtest` uses 1 KiB) |
+| maximum key size | 511 | `me_nodemax - 56`: 442 on 1 KiB pages, 1978 on 4 KiB, 8122 on 16 KiB, 32698 on 64 KiB |
+| named database keys | the name | the name with its terminating NUL |
+
+Every page a 1.0 writer writes carries the id of the writing transaction in
+`mp_txnid` (`mdb_page_flush`, also for pages spilled during the transaction
+and in nested transactions, which share their parent's id); C 1.0 writers
+tell their own pages from shared ones by that field (`IS_WRITABLE`,
+`IS_MUTABLE`), so a wrong value corrupts the next C writer's transaction.
+rlmdb keeps its own dirty and spill lists and stamps the field when it writes
+a page. New overflow references record the writer's txnid and the run's
+length; an in-place overwrite of an overflow value restamps the run, not the
+reference. The compacting copy writes every page, overflow run and
+reference as transaction 1, as `mdb_copy -c` does. 1.0 also hands an emptied
+or collapsed root to `mdb_page_loose` in `mdb_rebalance` (0.9 frees it), which
+rlmdb follows (`KNOWN_C_BUGS.md`, section "LMDB 1.0"). Free-list records,
+`MDB_db`, `MDB_meta`, node headers and sort order are the same in both formats.
+
+The lock file is still the version 1 one in both formats (stage 3 of
+`DUAL_FORMAT.md` adds 1.0's): a C 1.0 process refuses it while rlmdb holds
+the environment open, so for now the two take turns on a 1.0 environment.
+
 ### Lock file (`<path>/lock.mdb`, or `<path>-lock` with `MDB_NOSUBDIR`)
 
 `MDB_txninfo` (line 779). Layout is `CACHELINE` (64) padded and depends on the
@@ -232,7 +275,8 @@ src/os/             ALL unsafe lives here. mod.rs selects unix; unix.rs: DataMap
 src/core/mod.rs     the byte-level API (see "Core layer"), Stat, Info
 src/core/env.rs     Environment, EnvironmentBuilder, open sequence, meta selection,
                     map size, the per-process registry of open paths, the
-                    environment's Format/Layout (always V09 so far)
+                    the environment's Format/Layout (sniffed from the file,
+                    requested, or V09), sniff_format
 src/core/reader.rs  lock file and reader table: slots, oldest reader, reader_check/list
 src/core/txn.rs     TxnCore (snapshot, DBI view, page lookup), RoTxn, InactiveTxn,
                     the Transaction trait
@@ -344,8 +388,8 @@ impl Environment {
     pub fn sync(&self, force: bool) -> Result<()>;
     pub fn stat(&self) -> Result<Stat>;  pub fn info(&self) -> Result<Info>;  pub fn freelist(&self) -> Result<usize>;
     pub fn flags(&self) -> EnvironmentFlags;  pub fn set_flags(&self, flags: EnvironmentFlags, on: bool) -> Result<()>;
-    pub fn path(&self) -> &Path;  pub fn max_readers(&self) -> u32;  pub fn max_key_size(&self) -> usize;  // 511
-    pub fn format(&self) -> Format;                                              // V09 (V10 refused with ENOTSUP for now)
+    pub fn path(&self) -> &Path;  pub fn max_readers(&self) -> u32;  pub fn max_key_size(&self) -> usize;  // 511; 1.0: from the page size
+    pub fn format(&self) -> Format;                                              // V09 or V10 (EnvironmentBuilder::format, ::page_size)
     pub fn set_map_size(&self, size: usize) -> Result<()>;
     pub fn reader_list(&self) -> Result<Vec<ReaderInfo>>;  pub fn reader_check(&self) -> Result<usize>;
     pub fn copy_to_path(&self, path: &Path, compact: bool) -> Result<()>;  pub fn copy_to_fd(&self, fd: BorrowedFd<'_>, compact: bool) -> Result<()>;

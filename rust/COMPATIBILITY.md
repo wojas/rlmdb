@@ -2,7 +2,8 @@
 
 What the Rust rewrite (`rlmdb`, and `rlmdb-capi`/`rlmdb-tools` built on
 it) promises with respect to C LMDB 0.9.36 (`../libraries/liblmdb`), and
-which tests check each promise. "C" below means the C library built with
+which tests check each promise. The last section covers the LMDB 1.0 data
+file, the second format `rlmdb` handles. "C" below means the C library built with
 its platform defaults (the upstream `Makefile`: `MDB_USE_POSIX_MUTEX` with
 robust mutexes on Linux, `MDB_USE_POSIX_SEM` on macOS), 64-bit.
 
@@ -183,3 +184,48 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 | `mdb_version` reports 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)`; major and minor equal `lmdb.h`'s | `rlmdb-capi/tests/c/capi_read.c` (`MDB_VERSION_STRING` and 0.9.36 for C, 0.9.85 for Rust), `capi_version.c`, unit tests in `rlmdb/src/version.rs`, `rlmdb-capi/src/version.rs`, `rlmdb-tools/src/common.rs` |
 | `rlmdb.h`: `rlmdb_version()` (struct `size`, numbers, sorted NULL-terminated capabilities), `rlmdb_version_string()` (the `Display` line of `rlmdb::VersionInfo`), `rlmdb_has_capability()`; usable from C++ | `rlmdb-capi/tests/capi_version.rs` (`tests/c/capi_version.c` built as C and as C++, against the Rust library) |
 | Corrupt input never crashes | `rlmdb` `format::page` unit tests (`corrupt_pointers_do_not_panic`), `rlmdb/tests/handbuilt.rs` (`corrupt_pages_give_errors_not_panics`) |
+
+## The LMDB 1.0 data file
+
+rlmdb also reads and writes the data file of C LMDB 1.0 (`mdb.RE/1.0` at
+4865523: LMDB 1.0.2 plus ITS#10642/10643; `MDB_DATA_VERSION 3`), with the
+differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
+
+* **Format selection.** An existing data file is opened in its format
+  (magic and version of the first meta page, `rlmdb::sniff_format`); asking
+  for the other format is `MDB_VERSION_MISMATCH`, as is a version 2 file
+  (lmdb-js prerelease builds); a header of neither format is `MDB_INVALID`.
+  All of it is decided before the lock file is touched. A new environment is
+  LMDB 0.9 unless 1.0 is requested (`EnvironmentBuilder::format`).
+* **Page sizes** 256 B to 64 KiB for new 1.0 environments
+  (`EnvironmentBuilder::page_size`, C 1.0's `mdb_env_set_pagesize`; the OS
+  page size by default); the maximum key size and the overflow threshold
+  follow the page size as in C 1.0 (442 bytes on 1 KiB pages, 1978 on 4 KiB,
+  8122 on 16 KiB, 32698 on 64 KiB).
+* **What a Rust writer leaves behind** in a 1.0 environment is what C 1.0
+  leaves for the same operations, page by page: tree shape, split points,
+  free list, spill decisions, sub-pages, `MDB_ovpage` references, and the
+  `mp_txnid` of every page (`mdb_page_flush`'s stamp, which C 1.0 writers
+  rely on). Copies are byte-identical to `mdb_copy10` and `mdb_copy10 -c`;
+  a load is page for page `mdb_load10`'s.
+* **Refused 1.0 features:** encrypted environments (`MDB_ENV_ENCRYPTION`)
+  and page checksums (`MDB_BAD_CHECKSUM`), with C 1.0's codes.
+* **Not yet:** the version 2 lock file (`DUAL_FORMAT.md` stage 3). rlmdb
+  uses its version 1 lock file for 1.0 environments, which C 1.0 refuses
+  (`MDB_VERSION_MISMATCH`) while rlmdb has the environment open, and the
+  reverse: C 1.0 and rlmdb take turns on one environment (each re-initialises
+  the lock file when it opens alone) or use `MDB_NOLOCK`. The C API and the
+  tools (`rlmdb-capi`, `rlmdb-tools`) are 0.9's (stage 4).
+
+| Promise (1.0 format) | Verified by |
+|---|---|
+| Format detection and selection, page sizes, key size limit, refused features | `rlmdb/tests/format_v10.rs`, `rlmdb/tests/rust_env.rs` (`data_file_format`), `rlmdb::format::meta` unit tests (`sniff`) |
+| The 1.0 page, node, overflow and meta layout | `rlmdb::format::{layout, page, node, meta}` unit tests (hand-built 1.0 pages), `interop/tests/oracle10.rs` (`layout_dump10`) |
+| Rust reads C 1.0's files exactly (512 B to 64 KiB pages, `mtest*10`) | `interop/tests/format10.rs` (`rlmdb_reads_c10_files_at_every_page_size`, `rlmdb_reads_mtest10_environments`: cursor walks both ways, `get`, statistics vs `mdb_dump10`/`mdb_stat10`) |
+| Rust writes C 1.0's pages, cursor positions and free list, at 1, 4, 16 and 64 KiB pages | `interop/tests/write_differential10.rs` (the lock-step harness of `rlmdb/tests/common/differential.rs` with `writeops` built against 1.0: plain, integer, reverse, DUPSORT, DUPFIXED, overflow overwrites, deep trees, nested transactions, drops, spills; every step compared, then `mdb_dump10`, `cpeer10 check-freelist`, and `interop::pagecmp` page by page including `mp_txnid` and `MDB_ovpage`) |
+| Spills write what C 1.0 would | `write_differential10.rs` (`diff10_spilling_rust_side`: Rust spills where C does not, same files; `diff10_spill_full_size`, `#[ignore]`d: both spill), `rlmdb/tests/format_v10.rs` (`spilling_leaves_the_same_file`) |
+| Copies byte-identical to `mdb_copy10 [-c]`, loads to `mdb_load10` | `interop/tests/format10.rs` (`copies_match_mdb_copy10`, `rlmdb_loads_what_mdb_load10_loads`) |
+| C 1.0 continues writing what Rust wrote and the reverse | `interop/tests/format10.rs` (`c10_and_rlmdb_take_turns`, with the C 1.0 page audit after every turn) |
+| The page audit and the structural comparison understand 1.0 | `interop/tests/audit10.rs` |
+| Corrupt 1.0 input never crashes | `rlmdb/tests/robust_mutation.rs` (`*_v10`, `robust_huge_overflow_refs_v10`), `rlmdb/tests/format_v10.rs` (`unknown_headers_are_refused_before_the_lock_file`) |
+| Concurrent C 1.0 and Rust processes | `interop/tests/format10.rs`, `#[ignore]`d until stage 3 (`c10_reader_pins_pages_against_rlmdb_writer`, `rlmdb_reader_pins_pages_against_c10_writer`, `c10_and_rlmdb_share_an_open_environment`) |
