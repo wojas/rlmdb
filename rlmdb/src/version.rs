@@ -36,9 +36,9 @@ use crate::consts;
 /// * `checksum`: page checksums (LMDB 1.0).
 /// * `encrypt`: encrypted environments, `MDB_ENCRYPT` (LMDB 1.0).
 /// * `default-format-env`: the experimental `RLMDB_DEFAULT_FORMAT`
-///   environment variable is honoured, so a program can test whether it
-///   still is.
-const CAPABILITIES: &[&str] = &["format-0.9", "format-1.0"];
+///   environment variable is honoured ([`crate::DEFAULT_FORMAT_ENV`]), so a
+///   program can test whether it still is. Present.
+const CAPABILITIES: &[&str] = &["default-format-env", "format-0.9", "format-1.0"];
 
 /// The C LMDB release whose data and lock file formats and API the 0.9
 /// format matches (`libraries/liblmdb`).
@@ -57,7 +57,7 @@ const V10_RELEASE: (i32, i32, i32) = (1, 0, 2);
 /// is also what `rlmdb_version_string()` returns:
 ///
 /// ```text
-/// rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; format 1.0 = LMDB 1.0.2; caps: format-0.9 format-1.0)
+/// rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; format 1.0 = LMDB 1.0.2; caps: default-format-env format-0.9 format-1.0)
 /// ```
 ///
 /// The `format 1.0` part is there exactly with capability `format-1.0`.
@@ -217,7 +217,7 @@ mod tests {
         let v = version_info();
         let expected = format!(
             "rlmdb {} (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; \
-             format 1.0 = LMDB 1.0.2; caps: format-0.9 format-1.0)",
+             format 1.0 = LMDB 1.0.2; caps: default-format-env format-0.9 format-1.0)",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(v.to_string(), expected);
@@ -251,6 +251,7 @@ mod tests {
         let v = version_info();
         assert!(v.has("format-0.9"));
         assert!(v.has("format-1.0"));
+        assert!(v.has("default-format-env"));
         for absent in [
             "",
             "nope",

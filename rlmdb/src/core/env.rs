@@ -7,8 +7,11 @@
 //! 2. Decide the data-file format ([`sniff_format`]: the magic and version
 //!    of the first meta page; not in C, which handles one format only). An
 //!    existing file keeps its format, a new one gets the requested format
-//!    or LMDB 0.9. This happens before the lock file is touched, so opening
-//!    a file of the other format never re-initialises a peer's lock file.
+//!    or the [`default_format`] (the process default of
+//!    [`set_default_format`], the experimental `RLMDB_DEFAULT_FORMAT`
+//!    variable, LMDB 0.9). This happens before the lock file is touched, so
+//!    opening a file of the other format never re-initialises a peer's lock
+//!    file.
 //! 3. Unless read-only or `NO_LOCK`, set up the lock file *first*
 //!    (`LockRegion::open`, `mdb_env_setup_locks`). Read-only environments
 //!    open the data file first (it must exist) and the lock file second.
@@ -40,9 +43,10 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 
 use crate::cmp::CmpFn;
@@ -194,7 +198,10 @@ impl EnvironmentBuilder {
         self
     }
 
-    /// Environment flags.
+    /// Environment flags. Bits that are not environment flags of LMDB 0.9
+    /// make the open fail with `EINVAL`, for either format; among them are
+    /// LMDB 1.0's `MDB_PREVSNAPSHOT` (`0x2000000`, not implemented: rlmdb
+    /// always opens the newest snapshot) and `MDB_ENCRYPT` (`0x2000`).
     pub fn flags(&mut self, flags: EnvironmentFlags) -> &mut Self {
         self.flags = flags;
         self
@@ -205,7 +212,9 @@ impl EnvironmentBuilder {
     /// keeps its format: opening it fails with `MDB_VERSION_MISMATCH` if
     /// this asks for the other one ([`sniff_format`] tells which it is).
     /// Without a request an existing file is opened in its format and a new
-    /// one is created as LMDB 0.9.
+    /// one is created in the [`default_format`]: the process default
+    /// ([`set_default_format`]), else the experimental `RLMDB_DEFAULT_FORMAT`
+    /// variable ([`DEFAULT_FORMAT_ENV`]), else LMDB 0.9.
     pub fn format(&mut self, format: Format) -> &mut Self {
         self.format = Some(format);
         self
@@ -804,13 +813,80 @@ fn sniff_data_file(data_path: &Path) -> Result<Option<Format>> {
 
 /// The format to open with: the existing file's (`found`), which must be
 /// the one `requested` if any (`MDB_VERSION_MISMATCH` otherwise: there is
-/// no conversion in place), else the requested one, else LMDB 0.9.
+/// no conversion in place), else the requested one, else
+/// [`default_format`]. The defaults never apply to an existing file.
 fn choose_format(found: Option<Format>, requested: Option<Format>) -> Result<Format> {
     match (found, requested) {
         (Some(f), Some(r)) if f != r => Err(MdbError::VersionMismatch.into()),
         (Some(f), _) | (None, Some(f)) => Ok(f),
-        (None, None) => Ok(Format::V09),
+        (None, None) => Ok(default_format()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The format of new environments
+// ---------------------------------------------------------------------------
+
+/// The environment variable that sets the format of new environments that
+/// do not ask for one: `RLMDB_DEFAULT_FORMAT=0.9` or `=1.0`
+/// ([`Format::name`]).
+///
+/// **Experimental**: it may be removed or restricted in a later release
+/// (capability `default-format-env` tells whether it is honoured). A stray
+/// variable in a service's environment silently creates LMDB 1.0 files
+/// that C LMDB 0.9 cannot open, so programs and deployments should prefer
+/// [`EnvironmentBuilder::format`] and [`set_default_format`]. It is read at
+/// every open of a new environment, also through the C API and by the
+/// tools. A value other than `0.9` or `1.0` is ignored, never an error.
+pub const DEFAULT_FORMAT_ENV: &str = "RLMDB_DEFAULT_FORMAT";
+
+/// The process default of [`set_default_format`]: 0 = none, else
+/// [`format_code`].
+static PROCESS_DEFAULT_FORMAT: AtomicU8 = AtomicU8::new(0);
+
+/// The value [`PROCESS_DEFAULT_FORMAT`] stores for `format`.
+const fn format_code(format: Format) -> u8 {
+    match format {
+        Format::V09 => 9,
+        Format::V10 => 10,
+    }
+}
+
+/// `rlmdb_set_default_format`: the format of new environments of this
+/// process that do not ask for one with [`EnvironmentBuilder::format`];
+/// `None` removes the process default again. It takes precedence over the
+/// experimental [`DEFAULT_FORMAT_ENV`] variable.
+///
+/// An existing data file always keeps its format; the default only decides
+/// what a new environment is created as. The setting applies to every
+/// environment opened afterwards, by any thread, and to the C API.
+pub fn set_default_format(format: Option<Format>) {
+    PROCESS_DEFAULT_FORMAT.store(format.map_or(0, format_code), Ordering::SeqCst);
+}
+
+/// The process default of [`set_default_format`], if one is set.
+pub fn process_default_format() -> Option<Format> {
+    match PROCESS_DEFAULT_FORMAT.load(Ordering::SeqCst) {
+        9 => Some(Format::V09),
+        10 => Some(Format::V10),
+        _ => None,
+    }
+}
+
+/// The format a new environment gets when it does not ask for one: the
+/// process default ([`set_default_format`]), else the experimental
+/// [`DEFAULT_FORMAT_ENV`] variable if it names a format, else
+/// [`Format::V09`], so that new files stay readable by every C LMDB 0.9.
+pub fn default_format() -> Format {
+    process_default_format()
+        .or_else(env_default_format)
+        .unwrap_or(Format::V09)
+}
+
+/// The format [`DEFAULT_FORMAT_ENV`] names, read now; `None` if it is unset
+/// or names none.
+fn env_default_format() -> Option<Format> {
+    std::env::var_os(DEFAULT_FORMAT_ENV).and_then(|v| Format::from_name(v.as_bytes()))
 }
 
 /// The checks of 1.0's `mdb_env_set_pagesize`: a power of two from 256 to

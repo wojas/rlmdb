@@ -188,6 +188,79 @@ fn named_database_keys_keep_the_nul_in_1_0() {
     }
 }
 
+/// Emptying the main DB of an environment with named databases: LMDB 0.9
+/// leaves their pages behind (`KNOWN_C_BUGS.md` #21, ported), LMDB 1.0
+/// deletes them first and refuses while one is open (C 1.0's
+/// `mdb_drop`). That the files are C 1.0's, page for page, is
+/// `interop/tests/tools10.rs` (`mdb_drop_matches_mdb_drop10`).
+#[test]
+fn emptying_the_main_db_with_named_dbs() {
+    for format in [Format::V09, Format::V10] {
+        let dir = tmp();
+        let env = Environment::builder()
+            .format(format)
+            .max_dbs(4)
+            .map_size(64 << 20)
+            .open(dir.path())
+            .unwrap();
+        let mut txn = env.begin_rw_txn().unwrap();
+        let mut handles = Vec::new();
+        for name in ["a", "b", "c"] {
+            let db = txn.create_db(Some(name), DatabaseFlags::CREATE).unwrap();
+            handles.push(db);
+            for i in 0..300u32 {
+                txn.put(
+                    db,
+                    format!("{name}{i:05}").as_bytes(),
+                    &[7; 40],
+                    WriteFlags::empty(),
+                )
+                .unwrap();
+            }
+        }
+        txn.commit().unwrap();
+        let used = env.info().unwrap().last_pgno + 1;
+        let free_before = env.freelist().unwrap();
+        // The handles stay open after the commit, as in C.
+        let mut txn = env.begin_rw_txn().unwrap();
+        let rc = txn.clear_db(rlmdb::Dbi::MAIN);
+        if format == Format::V10 {
+            // A named database is open: C 1.0 says MDB_DBIS_BUSY, until the
+            // last one is closed.
+            assert!(matches!(rc, Err(Error::Mdb(MdbError::DbisBusy))), "{rc:?}");
+            drop(txn);
+            for db in handles.drain(1..) {
+                env.close_db(db);
+            }
+            let mut txn = env.begin_rw_txn().unwrap();
+            let rc = txn.clear_db(rlmdb::Dbi::MAIN);
+            assert!(matches!(rc, Err(Error::Mdb(MdbError::DbisBusy))), "{rc:?}");
+            drop(txn);
+            env.close_db(handles[0]);
+            let mut txn = env.begin_rw_txn().unwrap();
+            txn.clear_db(rlmdb::Dbi::MAIN).unwrap();
+            txn.commit().unwrap();
+            // Every page but the two metas and the free DB's is free.
+            let free = env.freelist().unwrap();
+            assert!(free + 4 >= used, "{free} of {used} pages free");
+            assert!(env.open_db(Some("b")).unwrap_err().not_found());
+            // An empty main DB: nothing to do, no commit is needed.
+            let txnid = env.info().unwrap().last_txnid;
+            let mut txn = env.begin_rw_txn().unwrap();
+            txn.clear_db(rlmdb::Dbi::MAIN).unwrap();
+            txn.commit().unwrap();
+            assert_eq!(env.info().unwrap().last_txnid, txnid);
+        } else {
+            rc.unwrap();
+            txn.commit().unwrap();
+            // The named databases' pages leak: only the main DB's leaf is
+            // freed.
+            assert!(env.freelist().unwrap() <= free_before + 3);
+            assert!(main_keys(&env).is_empty());
+        }
+    }
+}
+
 /// Patches `len` bytes at `off` of the data file of `dir`.
 fn patch(dir: &Path, off: usize, bytes: &[u8]) {
     let path = dir.join("data.mdb");

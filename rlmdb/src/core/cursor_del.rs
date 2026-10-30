@@ -954,7 +954,88 @@ impl<'env> RwTxn<'env> {
     /// closed for every transaction at once, as in C; if this is a nested
     /// transaction that aborts, it is reopened (KNOWN_C_BUGS.md #20).
     pub(crate) fn mdb_drop(&mut self, dbi: usize, del: bool) -> Result<()> {
+        if dbi == MAIN_DBI as usize && self.layout().drops_named_dbs_with_main() {
+            let main_flags = u32::from(self.core.dbs.borrow()[dbi].db.flags);
+            // Named databases cannot coexist with these main-DB flags.
+            if main_flags & (MDB_DUPSORT | MDB_INTEGERKEY) == 0 {
+                return self.drop_main_with_named_dbs(del);
+            }
+        }
         FailOnPanic(self).mdb_drop0(dbi, del)
+    }
+
+    /// LMDB 1.0's `mdb_drop` of the main DB when it may record named
+    /// databases (see [`Layout::drops_named_dbs_with_main`]): refuse while
+    /// a named database is open (`MDB_DBIS_BUSY`); if the first record is a
+    /// named database's, delete that database (`mdb_drop(txn, i, 1)`) and
+    /// look at the first record again, until the main DB is empty or holds
+    /// something else; then empty the main DB. As in C, only the first
+    /// record is checked: when named databases are in use, the main DB
+    /// holds nothing else.
+    ///
+    /// [`Layout::drops_named_dbs_with_main`]: crate::format::Layout::drops_named_dbs_with_main
+    fn drop_main_with_named_dbs(&mut self, del: bool) -> Result<()> {
+        if self.named_dbi_open() {
+            return Err(MdbError::DbisBusy.into());
+        }
+        let main = crate::core::Dbi(MAIN_DBI);
+        let id = self.open_cursor(main)?;
+        let rc = self.drop_named_dbs(id);
+        let rc = match rc {
+            // Already empty: nothing to do, the record stays as it is.
+            Ok(false) => Ok(()),
+            Ok(true) => FailOnPanic(self).mdb_drop0(MAIN_DBI as usize, del),
+            Err(e) => Err(e),
+        };
+        self.close_cursor(id);
+        rc
+    }
+
+    /// The loop of [`Self::drop_main_with_named_dbs`] with the main-DB
+    /// cursor `id`: `Ok(false)` if the main DB was empty to begin with,
+    /// `Ok(true)` when it is time to empty it.
+    fn drop_named_dbs(&mut self, id: crate::core::CursorId) -> Result<bool> {
+        use crate::core::{CursorOp, DatabaseFlags};
+        let mut key = match self.cursor_get(id, None, None, CursorOp::First)? {
+            Some((k, _)) => k.to_vec(),
+            None => return Ok(false),
+        };
+        if !self.cursor_is_db(id)? {
+            // Not a named database: just a normal drop.
+            return Ok(true);
+        }
+        loop {
+            // mdb_dbi_open(txn, key.mv_data, 0, &i): the key as a C string
+            // (1.0 stores the name with its NUL).
+            let name = key.split(|&b| b == 0).next().unwrap_or_default();
+            let db = match self.create_db_bytes(Some(name), DatabaseFlags::empty()) {
+                Ok(db) => db,
+                Err(e) if e.not_found() => return Ok(true),
+                Err(e) => return Err(e),
+            };
+            self.mdb_drop(db.0 as usize, true)?;
+            // C: any failure to find a first record ends the loop.
+            match self.cursor_get(id, None, None, CursorOp::First) {
+                Ok(Some((k, _))) => key = k.to_vec(),
+                Ok(None) | Err(_) => return Ok(true),
+            }
+        }
+    }
+
+    /// Whether a named database is open in this transaction (C: a DBI
+    /// `>= CORE_DBS` of the transaction with `DB_VALID`): opened by it, or
+    /// open in the environment when it began and not yet looked at.
+    fn named_dbi_open(&self) -> bool {
+        let dbs = self.core.dbs.borrow();
+        let slots = self.core.env.dbis.read();
+        (CORE_DBS as usize..dbs.len()).any(|i| {
+            let state = dbs[i].state;
+            if state != 0 {
+                state & crate::core::dbi::DB_VALID != 0
+            } else {
+                slots.get(i).is_some_and(|s| s.valid)
+            }
+        })
     }
 
     fn mdb_drop0(&mut self, dbi: usize, del: bool) -> Result<()> {

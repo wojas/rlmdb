@@ -891,7 +891,14 @@ impl<'env> RwTxn<'env> {
             dummy.leaf_pages = 1;
             dummy.entries = page_ops::num_keys(l, &fp) as u64;
             let mp = self.page_alloc(1)?;
-            offset = ps - olddata_size;
+            // `me_pagespace + PAGEHDRSZ - olddata.mv_size` (1.0; 0.9:
+            // `me_psize - olddata.mv_size`). Negative when a single
+            // MDB_DUPFIXED item becomes a sub-DB whose fake sub-page (two
+            // items and room for two more) is larger than a page: items
+            // over a quarter page, reachable with 1.0's small pages only.
+            // C's unsigned arithmetic wraps back to the page's
+            // `mp_upper` there; `build_subpage` adds it signed.
+            let sub_offset = ps as isize - olddata_size as isize;
             *flags |= u32::from(F_DUPDATA | F_SUBDATA);
             dummy.root = mp;
             let db = self.db_mut(mc);
@@ -904,7 +911,7 @@ impl<'env> RwTxn<'env> {
                 fp_pad,
             };
             // A regular dirty page: P_DIRTY in every format.
-            build_subpage(l, &mut page[..ps], sub, offset, P_DIRTY).ok_or_else(corrupted)?;
+            build_subpage(l, &mut page[..ps], sub, sub_offset, P_DIRTY).ok_or_else(corrupted)?;
             self.give_scratch(fp);
             let mut rec = self.take_scratch();
             rec.extend_from_slice(&dummy.to_bytes());
@@ -926,7 +933,8 @@ impl<'env> RwTxn<'env> {
                 fp_flags,
                 fp_pad,
             };
-            build_subpage(l, &mut mp, sub, offset, l.subpage_dirty()).ok_or_else(corrupted)?;
+            let grow = isize::try_from(offset).map_err(|_| corrupted())?;
+            build_subpage(l, &mut mp, sub, grow, l.subpage_dirty()).ok_or_else(corrupted)?;
             self.give_scratch(fp);
             (mp, None)
         };
@@ -1309,14 +1317,16 @@ struct SubpageSrc<'a> {
 /// Builds a (sub-)page `mp` from the old sub-page `fp` grown by `offset`
 /// bytes (the `if (mp != fp)` block of `mdb_cursor_put`): same header with
 /// `mp_upper += offset`, the nodes moved to the end and their pointers
-/// shifted, or the `P_LEAF2` keys copied. `dirty` is the `P_DIRTY` bit the
-/// new page gets: always for a sub-DB root (an ordinary dirty page),
-/// [`Layout::subpage_dirty`] for a sub-page.
+/// shifted, or the `P_LEAF2` keys copied. `offset` is negative when a
+/// `P_LEAF2` fake sub-page larger than a page becomes a sub-DB root (see
+/// the caller); `None` if a result is out of range (corrupt input).
+/// `dirty` is the `P_DIRTY` bit the new page gets: always for a sub-DB root
+/// (an ordinary dirty page), [`Layout::subpage_dirty`] for a sub-page.
 fn build_subpage(
     l: &Layout,
     mp: &mut [u8],
     src: SubpageSrc<'_>,
-    offset: usize,
+    offset: isize,
     dirty: u16,
 ) -> Option<()> {
     let SubpageSrc {
@@ -1330,7 +1340,7 @@ fn build_subpage(
     page_ops::set_flags(l, mp, fp_flags | dirty);
     page_ops::set_pad(l, mp, fp_pad);
     page_ops::set_lower(l, mp, page_ops::lower(l, fp));
-    let mp_upper = fp_upper + offset;
+    let mp_upper = fp_upper.checked_add_signed(offset)?;
     page_ops::set_upper(l, mp, mp_upper);
     if fp_flags & P_LEAF2 != 0 {
         let len = nkeys * usize::from(fp_pad);
@@ -1342,7 +1352,7 @@ fn build_subpage(
         mp.get_mut(mp_upper..mp_upper + tail.len())?
             .copy_from_slice(tail);
         for i in 0..nkeys {
-            let v = page_ops::ptr(l, fp, i)? + offset;
+            let v = page_ops::ptr(l, fp, i)?.checked_add_signed(offset)?;
             page_ops::set_ptr(l, mp, i, v)?;
         }
     }
