@@ -867,6 +867,38 @@ pub fn delete_verify(pair: Pair) -> Result<()> {
     Ok(())
 }
 
+/// `KNOWN_C_BUGS.md` #34: C 1.0's `mdb_env_set_pagesize` stores the page
+/// size in `me_os_psize`, so a copy by a process that called it opens the
+/// destination with `O_DIRECT` (Linux) and writes multiples of the page
+/// size, which fails with `EINVAL` on file systems that honour `O_DIRECT`
+/// when the page size is below the device's logical block size. `None`,
+/// with a SKIPPED note, when `out` is exactly that failure (the C 1.0 peer
+/// on Linux, a page size below 4 KiB, `mdb_env_copy2` failing with
+/// `EINVAL`); `Some(out)` when the copy succeeded; the error otherwise.
+pub fn copy_or_skip(
+    copier: Peer,
+    pair: &Pair,
+    out: Output,
+    scenario: &str,
+) -> Result<Option<Output>> {
+    let small_pages = pair.page_size.is_some_and(|ps| ps < 4096);
+    if cfg!(target_os = "linux")
+        && copier == Peer::C10
+        && small_pages
+        && !out.success()
+        && out.stderr.contains("mdb_env_copy2")
+        && (out.stderr.contains("Invalid argument") || out.stderr.contains("failed: 22"))
+    {
+        skipped(format_args!(
+            "{scenario}: C 1.0 cannot copy {}-byte pages with O_DIRECT (KNOWN_C_BUGS.md #34): {}",
+            pair.page_size.unwrap_or(0),
+            out.label
+        ));
+        return Ok(None);
+    }
+    out.ok().map(Some)
+}
+
 /// `copy` and `copy --compact` by the peers and by `mdb_copy [-c]`: same
 /// content, valid page usage, compacted copies without free pages.
 pub fn copy_dump_equal(pair: Pair) -> Result<()> {
@@ -884,25 +916,30 @@ pub fn copy_dump_equal(pair: Pair) -> Result<()> {
     let orig_audit = audit(&pair, &env)?;
     let orig_tool_dump = tools::mdb_dump(&env, &["-a"])?;
 
+    let mut targets: Vec<(&TestEnv, bool)> = Vec::new();
     let copy = env.derived("copy");
-    pair.writer.on("copy", &env).arg(copy.path()).run()?;
+    let out = pair.writer.on("copy", &env).arg(copy.path()).output()?;
+    if copy_or_skip(pair.writer, &pair, out, "copy_dump_equal")?.is_some() {
+        targets.push((&copy, false));
+    }
     let compact = env.derived("compact");
-    pair.capable(pair.reader, "copy")
+    let compactor = pair.capable(pair.reader, "copy");
+    let out = compactor
         .on("copy", &env)
         .arg(compact.path())
         .arg("--compact")
-        .run()?;
+        .output()?;
+    if copy_or_skip(compactor, &pair, out, "copy_dump_equal")?.is_some() {
+        targets.push((&compact, true));
+    }
     let tcopy = env.derived("tcopy");
     tools::mdb_copy(&env, &tcopy, false)?;
     let tcompact = env.derived("tcompact");
     tools::mdb_copy(&env, &tcompact, true)?;
+    targets.push((&tcopy, false));
+    targets.push((&tcompact, true));
 
-    for (target, compacted) in [
-        (&copy, false),
-        (&compact, true),
-        (&tcopy, false),
-        (&tcompact, true),
-    ] {
+    for (target, compacted) in targets {
         let what = target.path().display();
         ensure!(
             dump_all(pair.reader, target)? == original,
@@ -1136,15 +1173,18 @@ pub fn nosubdir(pair: Pair) -> Result<()> {
     fill_verify(&pair, &env, &named, &[])?;
     audit(&pair, &env)?;
     let copy = env.derived("copy.mdb");
-    pair.writer
+    let out = pair
+        .writer
         .on("copy", &env)
         .arg(copy.path())
         .arg("--compact")
-        .run()?;
-    ensure!(copy.data_file().is_file(), "copy is not a file");
-    main.verify(pair.reader, &copy)?;
-    named.verify(pair.reader, &copy)?;
-    audit(&pair, &copy)?;
+        .output()?;
+    if copy_or_skip(pair.writer, &pair, out, "nosubdir")?.is_some() {
+        ensure!(copy.data_file().is_file(), "copy is not a file");
+        main.verify(pair.reader, &copy)?;
+        named.verify(pair.reader, &copy)?;
+        audit(&pair, &copy)?;
+    }
     let ms = tools::mdb_stat(&env, &["-e", "-a"])?;
     ensure!(
         ms.db(Some("named")).map(|d| d.entries)

@@ -8,7 +8,10 @@
 
 use std::time::Duration;
 
-use super::{audit, create, drop_db, dump_all, log, new_env, stat, verify_by, DataSet, Pair, MIB};
+use super::{
+    audit, copy_or_skip, create, drop_db, dump_all, log, new_env, stat, verify_by, DataSet, Pair,
+    MIB,
+};
 use crate::report::{HoldReady, WriterLoopReport};
 use crate::{bail, ensure, Output, Peer, Result, TestEnv};
 
@@ -293,14 +296,14 @@ pub fn copy_cross(pair: Pair) -> Result<()> {
                 "{peer}-{}",
                 if compact { "compact" } else { "plain" }
             ));
-            let mut cmd = pair
-                .capable(peer, "copy")
-                .on("copy", &env)
-                .arg(target.path());
+            let copier = pair.capable(peer, "copy");
+            let mut cmd = copier.on("copy", &env).arg(target.path());
             if compact {
                 cmd = cmd.arg("--compact");
             }
-            cmd.run()?;
+            if copy_or_skip(copier, &pair, cmd.output()?, "copy_cross")?.is_none() {
+                continue;
+            }
             copies.push((peer, compact, target));
         }
     }
