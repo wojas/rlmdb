@@ -103,7 +103,7 @@ impl Audit<'_, '_> {
                     c.leaf += sc.leaf;
                     c.entries += sc.entries;
                 } else {
-                    let sp = crate::format::PageRef::new(data).unwrap();
+                    let sp = crate::format::PageRef::with_layout(data, node.layout()).unwrap();
                     c.entries += sp.num_keys() as u64;
                 }
             } else if node.is_subdata() && name == "main" {

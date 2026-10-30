@@ -428,7 +428,7 @@ impl TxnCore<'_> {
             return Err(MdbError::BadValSize.into());
         }
         let main = self.dbs.borrow()[MAIN_DBI as usize];
-        let mut mc = Cursor::new(main.db, main.key_cmp, 0);
+        let mut mc = Cursor::new(main.db, main.key_cmp, 0, self.layout);
         mc.page_search(self, Some(name), 0)?;
         let (found, exact) = mc.node_search(name)?;
         if !found || !exact {

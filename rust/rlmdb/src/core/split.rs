@@ -25,10 +25,10 @@ use crate::core::page_ops;
 use crate::core::txn_rw::{RwTxn, TXN_ERROR};
 use crate::core::wcursor::CRef;
 use crate::error::Result;
-use crate::format::layout::{NODE_SIZE, PAGE_HDR_SIZE, PAGE_PAD};
+use crate::format::layout::{Layout, NODE_SIZE};
 use crate::format::node::F_BIGDATA;
 use crate::format::page::{P_BRANCH, P_LEAF, P_LEAF2};
-use crate::format::{put_u16, NodeRef, PageRef};
+use crate::format::{NodeRef, PageRef};
 
 impl<'env> RwTxn<'env> {
     /// `mdb_page_split`: insert `newkey` (with `newdata`, or child `newpgno`
@@ -70,6 +70,7 @@ impl<'env> RwTxn<'env> {
         bufs: &mut SplitBufs,
     ) -> Result<()> {
         let ps = self.psize();
+        let l = self.layout();
         let nodemax = self.core.env.node_max();
         let mp = self.cur(mc).pg_top();
         let newindx = self.cur(mc).ki_top();
@@ -82,7 +83,7 @@ impl<'env> RwTxn<'env> {
 
         // Create a right sibling.
         let rp = self.page_new(mc, mp_flags, 1)?;
-        put_u16(self.dirty_mut(rp)?, PAGE_PAD, mp_pad);
+        page_ops::set_pad(l, self.dirty_mut(rp)?, mp_pad);
 
         // Usually when splitting the root page, the cursor height is 1. But
         // when called from update_key, the cursor height may be greater
@@ -155,23 +156,24 @@ impl<'env> RwTxn<'env> {
                 sepkey = self.split_leaf2(mc, mp, rp, src, newkey, newindx, si, nkeys)?;
             } else {
                 // Maximum free space in an empty page.
-                let pmax = ps - PAGE_HDR_SIZE;
+                let pmax = l.page_space(ps);
                 // Threshold number of keys considered "small".
                 let keythresh = ps >> 7;
                 let nsize = if is_leaf {
-                    leaf_size(nodemax, newkey.len(), newdata.map_or(0, |d| d.size))
+                    leaf_size(l, nodemax, newkey.len(), newdata.map_or(0, |d| d.size))
                 } else {
-                    branch_size(newkey.len())
+                    branch_size(l, newkey.len())
                 };
                 let nsize = page_ops::even(nsize);
 
                 // Grab a page to hold a temporary copy (zero-filled: node
                 // padding bytes are not written but end up in mp).
+                let hdr = l.page_hdr;
                 copy.resize(ps, 0);
-                copy[..PAGE_HDR_SIZE].copy_from_slice(&src[..PAGE_HDR_SIZE]);
-                page_ops::set_lower(copy, PAGE_HDR_SIZE);
-                page_ops::set_upper(copy, ps);
-                put_u16(copy, PAGE_PAD, 0);
+                copy[..hdr].copy_from_slice(&src[..hdr]);
+                page_ops::set_lower(l, copy, hdr);
+                page_ops::set_upper(l, copy, ps);
+                page_ops::set_pad(l, copy, 0);
 
                 // Prepare to insert.
                 copy_ptrs = Vec::with_capacity(nkeys + 1);
@@ -179,7 +181,7 @@ impl<'env> RwTxn<'env> {
                     if i == newindx {
                         copy_ptrs.push(0);
                     }
-                    copy_ptrs.push(page_ops::ptr(src, i).ok_or_else(corrupted)?);
+                    copy_ptrs.push(page_ops::ptr(l, src, i).ok_or_else(corrupted)?);
                 }
                 if newindx >= nkeys {
                     copy_ptrs.push(0);
@@ -217,14 +219,11 @@ impl<'env> RwTxn<'env> {
                             // A corrupt page can be "full" with too few
                             // keys for the scan (C reads garbage here).
                             let ptr = *copy_ptrs.get(i as usize).ok_or_else(corrupted)?;
-                            let node = node_at(src, ptr)?;
-                            psize += NODE_SIZE + node.key_size() + 2;
+                            let node = node_at(l, src, ptr)?;
+                            psize += NODE_SIZE + l.node_key_len(node.key_size()) + 2;
                             if is_leaf {
-                                psize += if node.flags() & F_BIGDATA != 0 {
-                                    8
-                                } else {
-                                    node.data_size()
-                                };
+                                let big = node.flags() & F_BIGDATA != 0;
+                                psize += l.stored_data_len(node.data_size(), big);
                             }
                             psize = page_ops::even(psize);
                         }
@@ -239,7 +238,7 @@ impl<'env> RwTxn<'env> {
                     newkey
                 } else {
                     let ptr = *copy_ptrs.get(si).ok_or_else(corrupted)?;
-                    let node = node_at(src, ptr)?;
+                    let node = node_at(l, src, ptr)?;
                     node.key().ok_or_else(corrupted)?
                 };
             }
@@ -249,7 +248,7 @@ impl<'env> RwTxn<'env> {
         // Copy separator key to the parent.
         let mut did_split = false;
         let parent_room = self.page_of(mn, ptop)?.size_left();
-        if parent_room < branch_size(sepkey.len()) {
+        if parent_room < branch_size(l, sepkey.len()) {
             let snum = self.cur(mc).snum;
             {
                 let w = self.cur_mut(mn);
@@ -332,7 +331,7 @@ impl<'env> RwTxn<'env> {
                     // Update index for the new key.
                     self.cur_mut(mc).ki[top] = j as u16;
                 } else {
-                    let node = node_at(src, copy_ptrs[i])?;
+                    let node = node_at(l, src, copy_ptrs[i])?;
                     node_key = node.key().ok_or_else(corrupted)?;
                     rkey = node_key;
                     if is_leaf {
@@ -367,14 +366,14 @@ impl<'env> RwTxn<'env> {
                     break;
                 }
             }
-            // Write the left half back into mp.
-            let n = page_ops::num_keys(copy);
-            let cu = page_ops::upper(copy);
+            // Write the left half back into mp: mp_lower, mp_upper (the
+            // last 4 header bytes), the pointers and the node area.
+            let n = page_ops::num_keys(l, copy);
+            let cu = page_ops::upper(l, copy);
+            let lo = l.lower_offset();
+            let ptrs_end = l.ptrs_offset() + 2 * n;
             let page = self.dirty_mut(mp)?;
-            page[crate::format::layout::PAGE_LOWER..PAGE_HDR_SIZE]
-                .copy_from_slice(&copy[crate::format::layout::PAGE_LOWER..PAGE_HDR_SIZE]);
-            page[PAGE_HDR_SIZE..PAGE_HDR_SIZE + 2 * n]
-                .copy_from_slice(&copy[PAGE_HDR_SIZE..PAGE_HDR_SIZE + 2 * n]);
+            page[lo..ptrs_end].copy_from_slice(&copy[lo..ptrs_end]);
             page[cu..ps].copy_from_slice(&copy[cu..ps]);
 
             // Reset back to original page.
@@ -436,8 +435,10 @@ impl<'env> RwTxn<'env> {
         if newkey.len() != ksize {
             return Err(crate::error::MdbError::BadValSize.into());
         }
+        let l = self.layout();
+        let hdr = l.page_hdr;
         let x = newindx as isize - split_indx as isize;
-        let split = PAGE_HDR_SIZE + split_indx * ksize;
+        let split = hdr + split_indx * ksize;
         let rsize = (nkeys - split_indx) * ksize;
         let lsize = (nkeys - split_indx) * 2;
         let keys = src.get(split..split + rsize).ok_or_else(corrupted)?;
@@ -448,35 +449,35 @@ impl<'env> RwTxn<'env> {
         };
         {
             let page = self.dirty_mut(mp)?;
-            page_ops::set_lower(page, page_ops::lower(page) - lsize);
-            page_ops::set_upper(page, page_ops::upper(page) + rsize - lsize);
+            page_ops::set_lower(l, page, page_ops::lower(l, page) - lsize);
+            page_ops::set_upper(l, page, page_ops::upper(l, page) + rsize - lsize);
         }
         {
             let page = self.dirty_mut(rp)?;
-            page_ops::set_lower(page, page_ops::lower(page) + lsize);
-            page_ops::set_upper(page, page_ops::upper(page) - (rsize - lsize));
+            page_ops::set_lower(l, page, page_ops::lower(l, page) + lsize);
+            page_ops::set_upper(l, page, page_ops::upper(l, page) - (rsize - lsize));
         }
         if x < 0 {
             // The new key goes left: all keys from split_indx move right.
             {
                 let page = self.dirty_mut(rp)?;
-                page[PAGE_HDR_SIZE..PAGE_HDR_SIZE + rsize].copy_from_slice(keys);
+                page[hdr..hdr + rsize].copy_from_slice(keys);
             }
             let page = self.dirty_mut(mp)?;
-            let ins = PAGE_HDR_SIZE + newindx * ksize;
+            let ins = hdr + newindx * ksize;
             page.copy_within(ins..split, ins + ksize);
             page[ins..ins + ksize].copy_from_slice(newkey);
-            page_ops::set_lower(page, page_ops::lower(page) + 2);
-            page_ops::set_upper(page, page_ops::upper(page) - (ksize - 2));
+            page_ops::set_lower(l, page, page_ops::lower(l, page) + 2);
+            page_ops::set_upper(l, page, page_ops::upper(l, page) - (ksize - 2));
         } else {
             let x = x as usize;
             let page = self.dirty_mut(rp)?;
-            page[PAGE_HDR_SIZE..PAGE_HDR_SIZE + x * ksize].copy_from_slice(&keys[..x * ksize]);
-            let ins = PAGE_HDR_SIZE + x * ksize;
+            page[hdr..hdr + x * ksize].copy_from_slice(&keys[..x * ksize]);
+            let ins = hdr + x * ksize;
             page[ins..ins + ksize].copy_from_slice(newkey);
             page[ins + ksize..ins + ksize + rsize - x * ksize].copy_from_slice(&keys[x * ksize..]);
-            page_ops::set_lower(page, page_ops::lower(page) + 2);
-            page_ops::set_upper(page, page_ops::upper(page) - (ksize - 2));
+            page_ops::set_lower(l, page, page_ops::lower(l, page) + 2);
+            page_ops::set_upper(l, page, page_ops::upper(l, page) - (ksize - 2));
             let w = self.cur_mut(mc);
             let t = w.top;
             w.ki[t] = x as u16;
@@ -576,19 +577,19 @@ struct SplitBufs {
     copy: Vec<u8>,
 }
 
-/// The node at offset `off` of page bytes `src`.
-fn node_at(src: &[u8], off: usize) -> Result<NodeRef<'_>> {
-    NodeRef::new(src.get(off..).ok_or_else(corrupted)?).ok_or_else(corrupted)
+/// The node at offset `off` of page bytes `src`, a page of layout `l`.
+fn node_at<'a>(l: &'static Layout, src: &'a [u8], off: usize) -> Result<NodeRef<'a>> {
+    NodeRef::with_layout(src.get(off..).ok_or_else(corrupted)?, l).ok_or_else(corrupted)
 }
 
-/// The stored data part of a leaf node: the inline bytes, or the 8-byte
-/// overflow page number of an `F_BIGDATA` node.
+/// The stored data part of a leaf node: the inline bytes, or the overflow
+/// reference of an `F_BIGDATA` node.
 pub(crate) fn node_body<'a>(node: &NodeRef<'a>) -> Result<&'a [u8]> {
     if node.is_bigdata() {
-        let k = node.key().ok_or_else(corrupted)?;
-        let start = NODE_SIZE + k.len();
+        let l = node.layout();
+        let start = l.node_data_offset(node.key_size());
         let raw = node.raw(true).ok_or_else(corrupted)?;
-        raw.get(start..start + 8).ok_or_else(corrupted)
+        raw.get(start..start + l.ovpage_size).ok_or_else(corrupted)
     } else {
         node.inline_data().ok_or_else(corrupted)
     }

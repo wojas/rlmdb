@@ -1,4 +1,7 @@
-//! `MDB_meta`: the root of a snapshot, stored at offset 16 of pages 0 and 1.
+//! `MDB_meta`: the root of a snapshot, stored right after the page header
+//! of pages 0 and 1 (offset 16 in LMDB 0.9, 24 in 1.0: [`Layout::meta_offset`]).
+//! The structure itself is the same in both formats; `mm_version` tells
+//! them apart ([`Layout::data_version`]).
 //!
 //! Transaction `N` writes meta page `N % 2` (`mdb_env_write_meta`), so the two
 //! pages hold the two most recent snapshots and the valid one with the larger
@@ -11,7 +14,7 @@
 use super::db::Db;
 use super::layout::*;
 use super::{get_u32, get_u64, put_u16, put_u32, put_u64};
-use crate::consts::{MDB_DATA_VERSION, MDB_MAGIC};
+use crate::consts::MDB_MAGIC;
 use crate::format::page::P_META;
 
 /// A decoded `MDB_meta` (mdb.c line 1096).
@@ -35,7 +38,8 @@ pub struct Meta {
 
 impl Meta {
     /// Decodes a meta from the first [`META_SIZE`] bytes of `buf` (which
-    /// must start at the `MDB_meta`, i.e. 16 bytes into the page).
+    /// must start at the `MDB_meta`, i.e. [`Layout::meta_offset`] bytes into
+    /// the page).
     pub fn read(buf: &[u8]) -> Option<Meta> {
         if buf.len() < META_SIZE {
             return None;
@@ -69,27 +73,38 @@ impl Meta {
         put_u64(buf, META_TXNID, self.txnid);
     }
 
-    /// Decodes and validates the meta page in `page` (a whole page,
-    /// header included), as `mdb_env_read_header` does: the page must be a
-    /// `P_META` page, the magic must match (`MDB_INVALID` otherwise) and the
-    /// version must be 1 (`MDB_VERSION_MISMATCH` otherwise).
+    /// [`Meta::read_page_with_layout`] for an LMDB 0.9 meta page.
     pub fn read_page(page: &[u8]) -> Result<Meta, MetaError> {
-        let flags = super::get_u16(page, PAGE_FLAGS).ok_or(MetaError::Invalid)?;
+        Meta::read_page_with_layout(page, &V09)
+    }
+
+    /// Decodes and validates the meta page in `page` (a whole page,
+    /// header included) of the format `layout` describes, as
+    /// `mdb_env_read_header` does: the page must be a `P_META` page, the
+    /// magic must match (`MDB_INVALID` otherwise) and the version must be
+    /// the format's (`MDB_VERSION_MISMATCH` otherwise).
+    pub fn read_page_with_layout(page: &[u8], layout: &Layout) -> Result<Meta, MetaError> {
+        let flags = super::get_u16(page, layout.flags_offset()).ok_or(MetaError::Invalid)?;
         if flags & P_META != P_META {
             return Err(MetaError::Invalid);
         }
-        let meta = Meta::read(page.get(META_OFFSET_IN_PAGE..).ok_or(MetaError::Invalid)?)
+        let meta = Meta::read(page.get(layout.meta_offset()..).ok_or(MetaError::Invalid)?)
             .ok_or(MetaError::Invalid)?;
-        meta.validate()?;
+        meta.validate_with_layout(layout)?;
         Ok(meta)
     }
 
-    /// Checks magic and version.
+    /// [`Meta::validate_with_layout`] for LMDB 0.9.
     pub fn validate(&self) -> Result<(), MetaError> {
+        self.validate_with_layout(&V09)
+    }
+
+    /// Checks magic and that the version is `layout`'s `MDB_DATA_VERSION`.
+    pub fn validate_with_layout(&self, layout: &Layout) -> Result<(), MetaError> {
         if self.magic != MDB_MAGIC {
             return Err(MetaError::Invalid);
         }
-        if self.version != MDB_DATA_VERSION {
+        if self.version != layout.data_version {
             return Err(MetaError::VersionMismatch);
         }
         Ok(())
@@ -107,15 +122,26 @@ impl Meta {
         self.dbs[0].flags
     }
 
-    /// The meta for a brand-new environment (`mdb_env_init_meta0`).
+    /// [`Meta::new_env_with_layout`] for LMDB 0.9.
+    pub fn new_env(page_size: u32, map_size: u64, env_flags: u32) -> Meta {
+        Meta::new_env_with_layout(&V09, page_size, map_size, env_flags)
+    }
+
+    /// The meta for a brand-new environment of the format `layout`
+    /// describes (`mdb_env_init_meta0`).
     ///
     /// `env_flags` are the open flags; C stores `me_flags & 0xffff` (which
     /// keeps `MDB_FIXEDMAP` and `MDB_NOSUBDIR`) plus `MDB_INTEGERKEY` in the
     /// free DB's `md_flags`.
-    pub fn new_env(page_size: u32, map_size: u64, env_flags: u32) -> Meta {
+    pub fn new_env_with_layout(
+        layout: &Layout,
+        page_size: u32,
+        map_size: u64,
+        env_flags: u32,
+    ) -> Meta {
         let mut meta = Meta {
             magic: MDB_MAGIC,
-            version: MDB_DATA_VERSION,
+            version: layout.data_version,
             map_size,
             last_pgno: 1,
             ..Meta::default()
@@ -126,16 +152,27 @@ impl Meta {
         meta
     }
 
-    /// Writes the two initial meta pages into `buf` (`2 * page_size` bytes),
-    /// as `mdb_env_init_meta` does: page 0 and page 1, both `P_META`, both
-    /// holding `self`; everything else zero.
+    /// [`Meta::write_initial_pages_with_layout`] for LMDB 0.9.
     pub fn write_initial_pages(&self, buf: &mut [u8], page_size: usize) {
+        self.write_initial_pages_with_layout(buf, page_size, &V09);
+    }
+
+    /// Writes the two initial meta pages of the format `layout` describes
+    /// into `buf` (`2 * page_size` bytes), as `mdb_env_init_meta` does:
+    /// page 0 and page 1, both `P_META`, both holding `self`; everything
+    /// else zero.
+    pub fn write_initial_pages_with_layout(
+        &self,
+        buf: &mut [u8],
+        page_size: usize,
+        layout: &Layout,
+    ) {
         buf.fill(0);
         for i in 0..2 {
             let page = &mut buf[i * page_size..(i + 1) * page_size];
             put_u64(page, PAGE_PGNO, i as u64);
-            put_u16(page, PAGE_FLAGS, P_META);
-            self.write(&mut page[META_OFFSET_IN_PAGE..]);
+            put_u16(page, layout.flags_offset(), P_META);
+            self.write(&mut page[layout.meta_offset()..]);
         }
     }
 }
@@ -203,6 +240,34 @@ mod tests {
         let mut bad = buf[..4096].to_vec();
         bad[20] = 2;
         assert_eq!(Meta::read_page(&bad), Err(MetaError::VersionMismatch));
+    }
+
+    #[test]
+    fn v10_pages() {
+        let meta = Meta::new_env_with_layout(&V10, 4096, 1 << 20, 0);
+        assert_eq!(meta.version, 3);
+        let mut buf = vec![0xffu8; 8192];
+        meta.write_initial_pages_with_layout(&mut buf, 4096, &V10);
+        let page = &buf[..4096];
+        // The meta follows the 24-byte header; mp_flags is at 18.
+        assert_eq!(super::super::get_u16(page, 18), Some(P_META));
+        assert_eq!(super::super::get_u32(page, 24), Some(MDB_MAGIC));
+        assert_eq!(Meta::read_page_with_layout(page, &V10), Ok(meta));
+        // A 1.0 page is not a 0.9 one, and a 0.9 meta is not a 1.0 one.
+        assert_eq!(Meta::read_page(page), Err(MetaError::Invalid));
+        let mut v09 = vec![0u8; 8192];
+        Meta::new_env(4096, 1 << 20, 0).write_initial_pages(&mut v09, 4096);
+        assert_eq!(
+            Meta::read_page_with_layout(&v09[..4096], &V10),
+            Err(MetaError::Invalid)
+        );
+        let mut wrong = meta;
+        wrong.version = 1;
+        assert_eq!(
+            wrong.validate_with_layout(&V10),
+            Err(MetaError::VersionMismatch)
+        );
+        assert_eq!(wrong.validate(), Ok(()));
     }
 
     #[test]

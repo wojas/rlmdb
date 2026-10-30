@@ -44,10 +44,10 @@ use crate::core::env::Environment;
 use crate::core::page_ops;
 use crate::core::txn::{Transaction, TxnCore};
 use crate::error::{Error, MdbError, Result};
-use crate::format::layout::{META_OFFSET_IN_PAGE, PAGE_FLAGS, PAGE_LOWER, PAGE_PGNO, PAGE_UPPER};
+use crate::format::layout::Layout;
 use crate::format::meta::Meta;
 use crate::format::page::{P_LEAF2, P_META};
-use crate::format::{get_u16, put_u16, put_u64, Db};
+use crate::format::{put_u16, put_u64, Db, PageRef};
 use crate::idl::Idl;
 use crate::os;
 
@@ -158,13 +158,15 @@ impl Environment {
     /// `mdb_env_copyfd1`.
     fn copy_compact(&self, out: &mut impl Write) -> Result<()> {
         let ps = self.page_size();
+        let l = self.layout();
         let txn = self.begin_ro_txn()?;
         let core = txn.core();
-        let mut w = CopyWriter::new(out, ps);
+        let mut w = CopyWriter::new(out, ps, l);
 
         // Meta page 0: a new environment (mdb_env_init_meta0), with the
         // source's recorded map address.
-        let mut meta = Meta::new_env(ps as u32, self.map_size() as u64, self.raw_flags());
+        let mut meta =
+            Meta::new_env_with_layout(l, ps as u32, self.map_size() as u64, self.raw_flags());
         meta.address = self.read_meta(0)?.address;
         let mut meta1 = meta;
 
@@ -202,9 +204,9 @@ impl Environment {
         }
         for (i, m) in [meta, meta1].iter().enumerate() {
             let page = &mut w.current()[i * ps..(i + 1) * ps];
-            put_u64(page, PAGE_PGNO, i as u64);
-            put_u16(page, PAGE_FLAGS, P_META);
-            m.write(&mut page[META_OFFSET_IN_PAGE..]);
+            put_u64(page, 0, i as u64);
+            put_u16(page, l.flags_offset(), P_META);
+            m.write(&mut page[l.meta_offset()..]);
         }
         w.wlen[0] = 2 * ps;
 
@@ -268,6 +270,8 @@ struct CopyWriter<'o, W: Write> {
     /// `mc_next_pgno`: the number the next page written gets.
     next_pgno: u64,
     ps: usize,
+    /// The page layout of the environment (and of the copy).
+    layout: &'static Layout,
     /// How many `cwalk`s are running (the main DB, a named DB, its
     /// duplicates' sub-DBs). C recurses without a limit, so a corrupt
     /// sub-DB record pointing back up the tree overflows its stack.
@@ -279,7 +283,7 @@ struct CopyWriter<'o, W: Write> {
 const MAX_CWALK_NESTING: usize = 3;
 
 impl<'o, W: Write> CopyWriter<'o, W> {
-    fn new(out: &'o mut W, ps: usize) -> Self {
+    fn new(out: &'o mut W, ps: usize, layout: &'static Layout) -> Self {
         CopyWriter {
             out,
             bufs: AlignedBuf::new(2 * WBUF),
@@ -287,6 +291,7 @@ impl<'o, W: Write> CopyWriter<'o, W> {
             toggle: 0,
             next_pgno: NUM_METAS as u64,
             ps,
+            layout,
             nesting: 0,
         }
     }
@@ -333,11 +338,15 @@ impl<'o, W: Write> CopyWriter<'o, W> {
     fn put_page(&mut self, src: &[u8]) -> Result<u64> {
         self.make_room()?;
         let ps = self.ps;
+        let l = self.layout;
         let off = self.wlen[self.toggle];
         let pgno = self.next_pgno;
         let dst = &mut self.current()[off..off + ps];
-        copy_used(dst, src, ps)?;
-        put_u64(dst, PAGE_PGNO, pgno);
+        copy_used(l, dst, src, ps)?;
+        put_u64(dst, 0, pgno);
+        // 1.0's compacting copy writes every page as txn 1 (mdb.c 1.0,
+        // line 11517); a no-op for 0.9.
+        l.stamp_clean_page(dst, 1);
         self.next_pgno += 1;
         self.wlen[self.toggle] += ps;
         Ok(pgno)
@@ -347,11 +356,14 @@ impl<'o, W: Write> CopyWriter<'o, W> {
     fn put_overflow(&mut self, run: &[u8], pages: usize) -> Result<u64> {
         self.make_room()?;
         let ps = self.ps;
+        let l = self.layout;
         let off = self.wlen[self.toggle];
         let pgno = self.next_pgno;
         let dst = &mut self.current()[off..off + ps];
         dst.copy_from_slice(&run[..ps]);
-        put_u64(dst, PAGE_PGNO, pgno);
+        put_u64(dst, 0, pgno);
+        // As in `put_page` (mdb.c 1.0, lines 11436, 11448).
+        l.stamp_clean_page(dst, 1);
         self.next_pgno += pages as u64;
         self.wlen[self.toggle] += ps;
         if pages > 1 {
@@ -390,12 +402,13 @@ impl<'o, W: Write> CopyWriter<'o, W> {
                     }
                 }
                 None => {
+                    let l = self.layout;
                     let (bpage, ki) = branches.last_mut().ok_or(MdbError::Corrupted)?;
                     *ki += 1;
-                    if *ki < page_ops::num_keys(bpage) {
+                    if *ki < page_ops::num_keys(l, bpage) {
                         // Whenever we advance to a sibling branch page, we
                         // must proceed all the way down to its first leaf.
-                        let child = child_at(bpage, *ki)?;
+                        let child = child_at(l, bpage, *ki)?;
                         leaf = Some(descend(txn, child, &mut branches)?);
                         continue;
                     }
@@ -406,7 +419,8 @@ impl<'o, W: Write> CopyWriter<'o, W> {
             match branches.last_mut() {
                 // Update parent if there is one.
                 Some((parent, ki)) => {
-                    page_ops::set_node_pgno(parent, *ki, new_pgno).ok_or(MdbError::Corrupted)?;
+                    page_ops::set_node_pgno(self.layout, parent, *ki, new_pgno)
+                        .ok_or(MdbError::Corrupted)?;
                 }
                 // Otherwise we're done.
                 None => return Ok(new_pgno),
@@ -418,10 +432,11 @@ impl<'o, W: Write> CopyWriter<'o, W> {
     /// sub-DBs of the nodes of `leaf` and return the leaf with their new
     /// numbers, or `None` if it has no such nodes.
     fn copy_leaf_payloads(&mut self, txn: &TxnCore<'_>, leaf: &[u8]) -> Result<Option<Vec<u8>>> {
+        let l = self.layout;
         let mut copy: Option<Vec<u8>> = None;
-        let n = page_ops::num_keys(leaf);
+        let n = page_ops::num_keys(l, leaf);
         for i in 0..n {
-            let page = crate::format::PageRef::new(leaf).ok_or(MdbError::Corrupted)?;
+            let page = PageRef::with_layout(leaf, l).ok_or(MdbError::Corrupted)?;
             let node = page.node(i).ok_or(MdbError::Corrupted)?;
             if node.is_bigdata() {
                 let pg = node.overflow_pgno().ok_or(MdbError::Corrupted)?;
@@ -430,7 +445,9 @@ impl<'o, W: Write> CopyWriter<'o, W> {
                 let run = overflow_run(txn, pg, pages, self.ps)?;
                 let new = self.put_overflow(run, pages)?;
                 let c = copy.get_or_insert_with(|| leaf.to_vec());
-                page_ops::set_node_overflow_pgno(c, i, new).ok_or(MdbError::Corrupted)?;
+                // (1.0 also sets op_txnid to 1 here, mdb.c 1.0 line 11420:
+                // left to the 1.0 write path.)
+                page_ops::set_node_overflow_pgno(l, c, i, new).ok_or(MdbError::Corrupted)?;
             } else if node.is_subdata() {
                 let data = node.inline_data().ok_or(MdbError::Corrupted)?;
                 let mut db = Db::read(data).ok_or(MdbError::Corrupted)?;
@@ -442,7 +459,7 @@ impl<'o, W: Write> CopyWriter<'o, W> {
                 self.nesting -= 1;
                 db.root = walked?;
                 let c = copy.get_or_insert_with(|| leaf.to_vec());
-                let range = page_ops::node_data_range(c, i).ok_or(MdbError::Corrupted)?;
+                let range = page_ops::node_data_range(l, c, i).ok_or(MdbError::Corrupted)?;
                 db.write(c.get_mut(range).ok_or(MdbError::Corrupted)?);
             }
         }
@@ -470,9 +487,9 @@ fn descend(txn: &TxnCore<'_>, mut pgno: u64, branches: &mut Vec<(Vec<u8>, usize)
     }
 }
 
-/// The child page number of branch node `i`.
-fn child_at(branch: &[u8], i: usize) -> Result<u64> {
-    let page = crate::format::PageRef::new(branch).ok_or(MdbError::Corrupted)?;
+/// The child page number of branch node `i` of a page of layout `l`.
+fn child_at(l: &'static Layout, branch: &[u8], i: usize) -> Result<u64> {
+    let page = PageRef::with_layout(branch, l).ok_or(MdbError::Corrupted)?;
     Ok(page.node(i).ok_or(MdbError::Corrupted)?.child_pgno())
 }
 
@@ -497,12 +514,16 @@ fn overflow_run<'t>(txn: &'t TxnCore<'_>, pgno: u64, pages: usize, ps: usize) ->
 /// `mdb_page_copy`: copy page `src` into `dst` except the unused space
 /// between the node pointers and the nodes, with the boundaries widened to
 /// 8-byte alignment; if less than 8 bytes are unused, or for `P_LEAF2`
-/// pages, everything up to the (aligned) unused tail.
-fn copy_used(dst: &mut [u8], src: &[u8], ps: usize) -> Result<()> {
+/// pages, everything up to the (aligned) unused tail. `lower` and `upper`
+/// are taken from the page start (`+ PAGEBASE`), as in C 1.0.
+fn copy_used(l: &Layout, dst: &mut [u8], src: &[u8], ps: usize) -> Result<()> {
     let bad = || Error::from(MdbError::Corrupted);
-    let lower = usize::from(get_u16(src, PAGE_LOWER).ok_or_else(bad)?);
-    let upper = usize::from(get_u16(src, PAGE_UPPER).ok_or_else(bad)?);
-    let flags = get_u16(src, PAGE_FLAGS).ok_or_else(bad)?;
+    if src.len() < l.page_hdr {
+        return Err(bad());
+    }
+    let lower = page_ops::lower(l, src);
+    let upper = page_ops::upper(l, src);
+    let flags = page_ops::flags(l, src);
     if src.len() < ps || dst.len() < ps || lower > upper || upper > ps {
         return Err(bad());
     }

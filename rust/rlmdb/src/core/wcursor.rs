@@ -50,7 +50,7 @@ use crate::core::txn_rw::{RwTxn, TXN_ERROR, TXN_SPILLS};
 use crate::error::{MdbError, Result};
 use crate::format::node::{F_DUPDATA, F_SUBDATA};
 use crate::format::page::P_DIRTY;
-use crate::format::{Db, PageRef};
+use crate::format::{Db, Layout, PageRef};
 
 /// Page number recorded in `pg[0]` of a sub-cursor whose tree is a `P_SUBP`
 /// sub-page: the page lives in the main cursor's current leaf node.
@@ -382,7 +382,9 @@ fn subpage_of<'t>(
     match leaf.node(usize::from(m.ki[m.top])) {
         Some(n) if n.flags() & (F_DUPDATA | F_SUBDATA) == F_DUPDATA => {
             let data = n.inline_data().ok_or_else(corrupted)?;
-            Ok(Some(PageRef::new(data).ok_or_else(corrupted)?))
+            Ok(Some(
+                PageRef::with_layout(data, n.layout()).ok_or_else(corrupted)?,
+            ))
         }
         _ => Ok(None),
     }
@@ -406,7 +408,7 @@ fn build_read<'t>(
     db: Db,
     cmp: Comparator,
 ) -> Result<Cursor<'t>> {
-    let mut rc = Cursor::new(db, cmp, 0);
+    let mut rc = Cursor::new(db, cmp, 0, core.layout);
     load_read(core, arena, c, &mut rc)?;
     Ok(rc)
 }
@@ -421,7 +423,10 @@ fn load_read<'t>(
 ) -> Result<()> {
     let w = arena.cur(c);
     let sub = if w.subp {
-        Some(subpage_of(core, arena, c.slot)?.unwrap_or(empty_page()))
+        Some(
+            subpage_of(core, arena, c.slot)?
+                .unwrap_or_else(|| PageRef::from_parts(empty_page(), core.layout)),
+        )
     } else {
         None
     };
@@ -618,6 +623,15 @@ impl<'env> RwTxn<'env> {
         self.core.env.page_size()
     }
 
+    /// The environment's page layout (a `&'static`, so it can be held
+    /// across a mutable borrow of a page). Re-derived from the format so
+    /// that the page edits it is passed to fold its numbers into constants
+    /// (see `PageRef::l`).
+    #[inline]
+    pub(crate) fn layout(&self) -> &'static Layout {
+        self.core.layout.format.layout()
+    }
+
     /// Identity of the page of `c` at `level` (`mc->mc_pg[level]`).
     pub(crate) fn page_id(&self, c: CRef, level: usize) -> PageId {
         let w = self.cur(c);
@@ -655,12 +669,13 @@ impl<'env> RwTxn<'env> {
     /// be dirty (touched); a sub-page is written inside its dirty leaf.
     pub(crate) fn page_mut_of(&mut self, c: CRef, level: usize) -> Result<&mut [u8]> {
         let ps = self.psize();
+        let l = self.layout();
         let w = self.w.cursors.cur(c);
         if level == 0 && w.subp {
             let m = &self.w.cursors.slot(c.slot).ok_or_else(corrupted)?.main;
             let (leaf, idx) = (m.pg[m.top], usize::from(m.ki[m.top]));
             let buf = self.core.dirty.get_mut(leaf).ok_or_else(corrupted)?;
-            let range = page_ops::node_data_range(&buf[..ps], idx).ok_or_else(corrupted)?;
+            let range = page_ops::node_data_range(l, &buf[..ps], idx).ok_or_else(corrupted)?;
             return Ok(&mut buf[range]);
         }
         let pgno = w.pg[level];
@@ -696,12 +711,12 @@ impl<'env> RwTxn<'env> {
         let core = &self.core;
         let arena = &self.w.cursors;
         let (db, cmp) = db_and_cmp(core, arena, c);
-        let mut mc = Cursor::new(db, cmp, 0);
+        let mut mc = Cursor::new(db, cmp, 0, core.layout);
         load_read(core, arena, c, &mut mc)?;
         let mut x_store;
         let mut mx = match (&arena.slots[c.slot].x, c.sub) {
             (Some(x), false) => {
-                x_store = Cursor::new(x.db, x.cmp, 0);
+                x_store = Cursor::new(x.db, x.cmp, 0, core.layout);
                 load_read(core, arena, CRef::sub(c.slot), &mut x_store)?;
                 Some(&mut x_store)
             }
@@ -798,8 +813,9 @@ impl<'env> RwTxn<'env> {
         // Update the parent page, if any, to point to the new page.
         if top > 0 {
             let pki = usize::from(self.cur(mc).ki[top - 1]);
+            let l = self.layout();
             let parent = self.page_mut_of(mc, top - 1)?;
-            page_ops::set_node_pgno(parent, pki, np).ok_or_else(corrupted)?;
+            page_ops::set_node_pgno(l, parent, pki, np).ok_or_else(corrupted)?;
         } else {
             self.db_mut(mc).root = np;
         }
@@ -852,10 +868,11 @@ impl<'env> RwTxn<'env> {
     /// holds a copy of the clean page (`page_alloc_copy`):
     /// `np->mp_pgno = pgno; np->mp_flags |= P_DIRTY`.
     fn own_copied_page(&mut self, dst: u64) -> Result<()> {
+        let l = self.layout();
         let to = self.core.dirty.get_mut(dst).ok_or_else(corrupted)?;
         page_ops::set_pgno(to, dst);
-        let f = page_ops::flags(to);
-        page_ops::set_flags(to, f | P_DIRTY);
+        let f = page_ops::flags(l, to);
+        page_ops::set_flags(l, to, f | P_DIRTY);
         Ok(())
     }
 
@@ -906,7 +923,8 @@ impl<'env> RwTxn<'env> {
             if node.is_subdata() {
                 (Db::read(data).ok_or_else(corrupted)?, false)
             } else {
-                let fp = PageRef::new(data).ok_or_else(corrupted)?;
+                // A sub-page has the layout of the page it is stored in.
+                let fp = PageRef::with_layout(data, node.layout()).ok_or_else(corrupted)?;
                 let mut db = Db {
                     pad: 0,
                     flags: 0,
@@ -972,7 +990,8 @@ impl<'env> RwTxn<'env> {
             if node.is_subdata() {
                 Db::read(data).ok_or_else(corrupted)?
             } else {
-                let fp = PageRef::new(data).ok_or_else(corrupted)?;
+                // A sub-page has the layout of the page it is stored in.
+                let fp = PageRef::with_layout(data, node.layout()).ok_or_else(corrupted)?;
                 let mut db = Db {
                     pad: 0,
                     flags: 0,

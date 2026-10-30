@@ -38,7 +38,7 @@ use crate::consts::*;
 use crate::core::dbi::TxnDb;
 use crate::core::txn::TxnCore;
 use crate::error::{Error, MdbError, Result};
-use crate::format::{Db, NodeRef, PageRef};
+use crate::format::{Db, Format, Layout, NodeRef, PageRef};
 
 pub use super::ro_cursor::{CursorOp, RoCursor};
 
@@ -59,15 +59,37 @@ pub(crate) const PS_FIRST: u8 = 4;
 /// `MDB_PS_LAST`: descend to the last leaf.
 pub(crate) const PS_LAST: u8 = 8;
 
-/// A header-only page used to fill unused cursor stack slots. A constant,
-/// so that filling a cursor's stack with it compiles to plain stores.
-const EMPTY_PAGE: PageRef<'static> = match PageRef::new(&[0; 16]) {
-    Some(p) => p,
-    // 16 bytes hold exactly a header, so `new` cannot fail.
-    None => unreachable!(),
-};
+/// Evaluates `$body` once per data-file format, with `$l` bound to that
+/// format's `&'static Layout` (the static itself, not a pointer loaded at
+/// run time), chosen by `$format`. Pages the body builds with `$l` then
+/// have every layout number folded into a constant, as in a build that
+/// knows only one layout; otherwise each access selects between the
+/// formats' numbers, which made scans about 1 ns per item slower. For the
+/// few functions that read pages once per item of a scan. (Not for
+/// `node_search`: two copies of the binary search made point lookups
+/// slower than the selects do.)
+macro_rules! per_format {
+    ($format:expr, |$l:ident| $body:expr) => {
+        match $format {
+            Format::V09 => {
+                let $l: &'static Layout = &crate::format::layout::V09;
+                $body
+            }
+            Format::V10 => {
+                let $l: &'static Layout = &crate::format::layout::V10;
+                $body
+            }
+        }
+    };
+}
 
-pub(crate) fn empty_page() -> PageRef<'static> {
+/// A header-only page (of either layout: 24 bytes) used to fill unused
+/// cursor stack slots. A constant, so that filling a cursor's stack with it
+/// compiles to plain stores. An empty header has no keys.
+const EMPTY_PAGE: &[u8] = &[0; 24];
+
+/// See [`EMPTY_PAGE`].
+pub(crate) fn empty_page() -> &'static [u8] {
     EMPTY_PAGE
 }
 
@@ -96,10 +118,15 @@ pub(crate) struct Kv<'t> {
 /// of a lookup in a small tree, so `TxnCore::get` uses a shorter stack
 /// and only falls back to a full one for a deeper tree. A push beyond `N`
 /// levels fails with `MDB_CURSOR_FULL`, as C's does beyond `CURSOR_STACK`.
+///
+/// The stack holds the bytes of each page, and the cursor the format they
+/// all share (that of its environment), rather than a [`PageRef`] per
+/// level: a `PageRef` is three words, and the larger stack made filling
+/// and copying cursors measurably slower.
 #[derive(Clone)]
 pub(crate) struct Cursor<'t, const N: usize = CURSOR_STACK> {
-    /// `mc_pg`: the page stack, root first.
-    pg: [PageRef<'t>; N],
+    /// `mc_pg`: the page stack, root first (the bytes of each page).
+    pg: [&'t [u8]; N],
     /// `mc_ki`: the index taken at each level.
     ki: [u16; N],
     /// `mc_snum`: number of pushed pages.
@@ -114,14 +141,20 @@ pub(crate) struct Cursor<'t, const N: usize = CURSOR_STACK> {
     pub(crate) cmp: Comparator,
     /// For a sub-cursor over a `P_SUBP` sub-page: that page, which is the
     /// root of its one-page tree (C finds it through `mc_pg[0]`).
-    subpage: Option<PageRef<'t>>,
+    subpage: Option<&'t [u8]>,
+    /// The format of every page on the stack. Kept as the [`Format`] value
+    /// rather than the `&'static Layout`, so that building a [`PageRef`]
+    /// from the stack needs no load through a pointer: the layout is
+    /// re-derived from it and its numbers fold into constants (see
+    /// `PageRef::l`).
+    format: Format,
 }
 
 impl<'t> Cursor<'t> {
     /// `mdb_cursor_init` / `mdb_xcursor_init0`: an unpositioned cursor
-    /// with C's full stack.
-    pub(crate) fn new(db: Db, cmp: Comparator, flags: u8) -> Cursor<'t> {
-        Cursor::unpositioned(db, cmp, flags)
+    /// with C's full stack, over pages of layout `layout`.
+    pub(crate) fn new(db: Db, cmp: Comparator, flags: u8, layout: &'static Layout) -> Cursor<'t> {
+        Cursor::unpositioned(db, cmp, flags, layout)
     }
 
     /// Loads the state of a write cursor (`wcursor`) into a cursor fresh
@@ -145,17 +178,12 @@ impl<'t> Cursor<'t> {
         self.ki = *ki;
         self.snum = snum;
         self.top = top;
-        self.subpage = subpage;
-        for (i, slot) in self.pg.iter_mut().enumerate().take(snum) {
-            *slot = page(i)?;
+        self.subpage = subpage.map(|p| self.stack_bytes(p));
+        for i in 0..snum.min(CURSOR_STACK) {
+            let p = page(i)?;
+            self.pg[i] = self.stack_bytes(p);
         }
         Ok(())
-    }
-
-    /// `mc_pg[i]`.
-    #[inline]
-    pub(crate) fn page_at(&self, i: usize) -> PageRef<'t> {
-        self.pg[i]
     }
 
     /// `mc_ki`.
@@ -169,7 +197,12 @@ impl<'t, const N: usize> Cursor<'t, N> {
     /// `mdb_cursor_init` / `mdb_xcursor_init0`: an unpositioned cursor
     /// with a stack of `N` levels.
     #[inline]
-    pub(crate) fn unpositioned(db: Db, cmp: Comparator, flags: u8) -> Cursor<'t, N> {
+    pub(crate) fn unpositioned(
+        db: Db,
+        cmp: Comparator,
+        flags: u8,
+        layout: &'static Layout,
+    ) -> Cursor<'t, N> {
         Cursor {
             pg: [empty_page(); N],
             ki: [0; N],
@@ -179,7 +212,24 @@ impl<'t, const N: usize> Cursor<'t, N> {
             db,
             cmp,
             subpage: None,
+            format: layout.format,
         }
+    }
+
+    /// A page on the stack as a [`PageRef`]. Every slice on the stack is
+    /// either [`EMPTY_PAGE`] or came from a `PageRef` of this cursor's
+    /// format (see [`Cursor::stack_bytes`]), so it holds a header.
+    #[inline]
+    fn page_from(&self, bytes: &'t [u8]) -> PageRef<'t> {
+        PageRef::from_parts(bytes, self.format.layout())
+    }
+
+    /// The bytes of `mp` for the stack. All pages of a cursor come from
+    /// one environment, so they share its format.
+    #[inline]
+    fn stack_bytes(&self, mp: PageRef<'t>) -> &'t [u8] {
+        debug_assert_eq!(mp.layout().format, self.format);
+        mp.bytes()
     }
 
     /// `mc_top`.
@@ -188,10 +238,16 @@ impl<'t, const N: usize> Cursor<'t, N> {
         self.top
     }
 
+    /// `mc_pg[i]`.
+    #[inline]
+    pub(crate) fn page_at(&self, i: usize) -> PageRef<'t> {
+        self.page_from(self.pg[i])
+    }
+
     /// The sub-page this sub-cursor walks, if any.
     #[inline]
     pub(crate) fn subpage(&self) -> Option<PageRef<'t>> {
-        self.subpage
+        self.subpage.map(|b| self.page_from(b))
     }
 
     #[inline]
@@ -201,7 +257,15 @@ impl<'t, const N: usize> Cursor<'t, N> {
 
     #[inline]
     pub(crate) fn top_page(&self) -> PageRef<'t> {
-        self.pg[self.top]
+        self.page_from(self.pg[self.top])
+    }
+
+    /// [`Cursor::top_page`] read with `l`, the cursor's layout given as a
+    /// constant (see `per_format!`).
+    #[inline(always)]
+    fn top_page_as(&self, l: &'static Layout) -> PageRef<'t> {
+        debug_assert_eq!(l.format, self.format);
+        PageRef::from_parts(self.pg[self.top], l)
     }
 
     #[inline]
@@ -260,7 +324,7 @@ impl<'t, const N: usize> Cursor<'t, N> {
         if level >= N {
             return Err(MdbError::CursorFull.into());
         }
-        self.pg[level] = mp;
+        self.pg[level] = self.stack_bytes(mp);
         self.ki[level] = 0;
         self.top = level;
         self.snum = level + 1;
@@ -331,7 +395,8 @@ impl<'t, const N: usize> Cursor<'t, N> {
                 if self.db.root == P_INVALID {
                     return Err(not_found());
                 }
-                txn.page(self.db.root)?
+                let root = txn.page(self.db.root)?;
+                self.stack_bytes(root)
             }
         };
         self.pg[0] = root;
@@ -484,7 +549,10 @@ fn bsearch(
 
 /// A sub-cursor for `entry` if it is a `MDB_DUPSORT` database
 /// (`mdb_xcursor_init0`), else `None`.
-pub(crate) fn new_xcursor<'t, const N: usize>(entry: &TxnDb) -> Option<Cursor<'t, N>> {
+pub(crate) fn new_xcursor<'t, const N: usize>(
+    entry: &TxnDb,
+    layout: &'static Layout,
+) -> Option<Cursor<'t, N>> {
     if u32::from(entry.db.flags) & MDB_DUPSORT == 0 {
         return None;
     }
@@ -494,24 +562,28 @@ pub(crate) fn new_xcursor<'t, const N: usize>(entry: &TxnDb) -> Option<Cursor<'t
         Db::empty(0),
         entry.dup_cmp.unwrap_or(Comparator::Memn),
         C_SUB,
+        layout,
     ))
 }
 
 /// `mdb_node_read`: the data of a leaf node, following `F_BIGDATA` to its
-/// overflow pages.
-#[inline]
+/// overflow pages. Always inlined: called out of line, the three-word
+/// [`NodeRef`] goes through memory, which costs a scan step about 1 ns.
+#[inline(always)]
 pub(crate) fn node_read<'t>(txn: &'t TxnCore<'_>, leaf: NodeRef<'t>) -> Result<&'t [u8]> {
     if !leaf.is_bigdata() {
         return leaf.inline_data().ok_or_else(corrupted);
     }
-    overflow_read(txn, leaf)
+    overflow_read(txn, leaf.overflow_pgno(), leaf.data_size())
 }
 
-/// [`node_read`] of an `F_BIGDATA` node.
+/// [`node_read`] of an `F_BIGDATA` node (its overflow page and data size).
+/// Takes the two numbers rather than the [`NodeRef`]: a node is three
+/// words and so passed through memory, which made the caller keep it on
+/// its stack also on the common path.
 #[inline(never)]
-fn overflow_read<'t>(txn: &'t TxnCore<'_>, leaf: NodeRef<'t>) -> Result<&'t [u8]> {
-    let pgno = leaf.overflow_pgno().ok_or_else(corrupted)?;
-    txn.overflow_data(pgno, leaf.data_size())
+fn overflow_read<'t>(txn: &'t TxnCore<'_>, pgno: Option<u64>, len: usize) -> Result<&'t [u8]> {
+    txn.overflow_data(pgno.ok_or_else(corrupted)?, len)
 }
 
 /// `mdb_xcursor_init1`: point the sub-cursor `mx` at the duplicates in
@@ -530,7 +602,8 @@ pub(crate) fn xcursor_init1<'t, const N: usize>(
         mx.top = 0;
         mx.flags = C_SUB;
     } else {
-        let fp = PageRef::new(data).ok_or_else(corrupted)?;
+        // A sub-page has the layout of the page it is stored in.
+        let fp = PageRef::with_layout(data, node.layout()).ok_or_else(corrupted)?;
         mx.db = Db {
             pad: 0,
             flags: 0,
@@ -541,11 +614,12 @@ pub(crate) fn xcursor_init1<'t, const N: usize>(
             entries: fp.num_keys() as u64,
             root: fp.pgno(),
         };
-        mx.subpage = Some(fp);
+        let fp_bytes = mx.stack_bytes(fp);
+        mx.subpage = Some(fp_bytes);
         mx.snum = 1;
         mx.top = 0;
         mx.flags = C_INITIALIZED | C_SUB;
-        mx.pg[0] = fp;
+        mx.pg[0] = fp_bytes;
         mx.ki[0] = 0;
         let parent_flags = u32::from(mc.db.flags);
         if parent_flags & MDB_DUPFIXED != 0 {
@@ -579,7 +653,20 @@ fn read_position<'t, const N: usize>(
     mx: Option<&mut Cursor<'t, N>>,
     pos: DupPos,
 ) -> Result<Kv<'t>> {
-    let mp = mc.top_page();
+    per_format!(mc.format, |l| read_position_in(txn, mc, mx, pos, l))
+}
+
+/// The body of [`read_position`], compiled once per format: `l` is the
+/// cursor's layout as a constant.
+#[inline(always)]
+fn read_position_in<'t, const N: usize>(
+    txn: &'t TxnCore<'_>,
+    mc: &mut Cursor<'t, N>,
+    mx: Option<&mut Cursor<'t, N>>,
+    pos: DupPos,
+    l: &'static Layout,
+) -> Result<Kv<'t>> {
+    let mp = mc.top_page_as(l);
     if !mp.is_leaf() {
         return Err(corrupted());
     }
@@ -590,7 +677,7 @@ fn read_position<'t, const N: usize>(
     }
     let leaf = mp.node(ki).ok_or_else(corrupted)?;
     let data = if leaf.is_dupdata() {
-        enter_dups(txn, mc, mx, leaf, pos)?
+        enter_dups(txn, mc, mx, leaf.bytes(), pos)?
     } else if mc.flags & C_SUB == 0 {
         node_read(txn, leaf)?
     } else {
@@ -603,18 +690,21 @@ fn read_position<'t, const N: usize>(
 }
 
 /// The duplicates branch of [`read_position`]: point the sub-cursor at
-/// the duplicates in `leaf` and return the first or last of them. Out of
-/// line, so that the common case, an item without duplicates, gets by with
-/// a smaller stack frame.
+/// the duplicates in the leaf node at `leaf` (its bytes, on a page of `mc`)
+/// and return the first or last of them. Out of line, so that the common
+/// case, an item without duplicates, gets by with a smaller stack frame;
+/// for the same reason it takes the node's bytes, not the three-word
+/// [`NodeRef`] (see [`overflow_read`]).
 #[inline(never)]
 fn enter_dups<'t, const N: usize>(
     txn: &'t TxnCore<'_>,
     mc: &Cursor<'t, N>,
     mx: Option<&mut Cursor<'t, N>>,
-    leaf: NodeRef<'t>,
+    leaf: &'t [u8],
     pos: DupPos,
 ) -> Result<&'t [u8]> {
     let mx = mx.ok_or_else(corrupted)?;
+    let leaf = NodeRef::with_layout(leaf, mc.format.layout()).ok_or_else(corrupted)?;
     xcursor_init1(mc, mx, leaf)?;
     let dup = match pos {
         DupPos::First => cursor_first(txn, mx, None)?,
@@ -668,8 +758,21 @@ pub(crate) fn cursor_last<'t, const N: usize>(
 pub(crate) fn cursor_next<'t, const N: usize>(
     txn: &'t TxnCore<'_>,
     mc: &mut Cursor<'t, N>,
+    mx: Option<&mut Cursor<'t, N>>,
+    op: CursorOp,
+) -> Result<Kv<'t>> {
+    per_format!(mc.format, |l| cursor_next_in(txn, mc, mx, op, l))
+}
+
+/// The body of [`cursor_next`], compiled once per format: `l` is the
+/// cursor's layout as a constant.
+#[inline(always)]
+fn cursor_next_in<'t, const N: usize>(
+    txn: &'t TxnCore<'_>,
+    mc: &mut Cursor<'t, N>,
     mut mx: Option<&mut Cursor<'t, N>>,
     op: CursorOp,
+    l: &'static Layout,
 ) -> Result<Kv<'t>> {
     if mc.flags & C_DEL != 0 && op == CursorOp::NextDup {
         return Err(not_found());
@@ -677,7 +780,7 @@ pub(crate) fn cursor_next<'t, const N: usize>(
     if !mc.is_initialized() {
         return cursor_first(txn, mc, mx);
     }
-    let mp = mc.top_page();
+    let mp = mc.top_page_as(l);
     if mc.flags & C_EOF != 0 {
         // C returns MDB_NOTFOUND at once for a cursor on the last item of
         // its page. In a write transaction the key may have got more
@@ -736,14 +839,27 @@ pub(crate) fn cursor_next<'t, const N: usize>(
 pub(crate) fn cursor_prev<'t, const N: usize>(
     txn: &'t TxnCore<'_>,
     mc: &mut Cursor<'t, N>,
+    mx: Option<&mut Cursor<'t, N>>,
+    op: CursorOp,
+) -> Result<Kv<'t>> {
+    per_format!(mc.format, |l| cursor_prev_in(txn, mc, mx, op, l))
+}
+
+/// The body of [`cursor_prev`], compiled once per format: `l` is the
+/// cursor's layout as a constant.
+#[inline(always)]
+fn cursor_prev_in<'t, const N: usize>(
+    txn: &'t TxnCore<'_>,
+    mc: &mut Cursor<'t, N>,
     mut mx: Option<&mut Cursor<'t, N>>,
     op: CursorOp,
+    l: &'static Layout,
 ) -> Result<Kv<'t>> {
     if !mc.is_initialized() {
         cursor_last(txn, mc, mx.as_deref_mut())?;
         mc.ki[mc.top] = mc.ki[mc.top].wrapping_add(1);
     }
-    let mp = mc.top_page();
+    let mp = mc.top_page_as(l);
     if u32::from(mc.db.flags) & MDB_DUPSORT != 0 && mc.ki_top() < mp.num_keys() {
         let leaf = mp.node(mc.ki_top()).ok_or_else(corrupted)?;
         if leaf.is_dupdata() {
@@ -851,7 +967,7 @@ pub(crate) fn cursor_set<'t, const N: usize>(
                 // If any parents have right siblings, search; otherwise
                 // there's nothing further.
                 let has_right =
-                    (0..mc.top).any(|i| usize::from(mc.ki[i]) + 1 < mc.pg[i].num_keys());
+                    (0..mc.top).any(|i| usize::from(mc.ki[i]) + 1 < mc.page_at(i).num_keys());
                 if !has_right {
                     mc.set_ki_top(nkeys);
                     return Err(not_found());

@@ -35,7 +35,6 @@ use crate::core::txn_rw::{RwTxn, TXN_ERROR};
 use crate::core::wcursor::CRef;
 use crate::error::{MdbError, Result};
 use crate::format::get_u64;
-use crate::format::max_free_1pg;
 use crate::format::page::{P_DIRTY, P_LOOSE};
 use crate::idl::Idl;
 
@@ -139,7 +138,7 @@ impl<'env> RwTxn<'env> {
         let core = &self.core;
         let w = &mut self.w;
         let free = core.dbs.borrow()[FREE_DBI as usize];
-        let mut m2 = Cursor::new(free.db, free.key_cmp, 0);
+        let mut m2 = Cursor::new(free.db, free.key_cmp, 0, core.layout);
         let mut op = CursorOp::First;
         let mut found_old = false;
         let mut oldest = 0u64;
@@ -235,9 +234,10 @@ impl<'env> RwTxn<'env> {
         let dirty = self.core.dirty.contains(pgno) && self.core.page(pgno)?.flags() & P_DIRTY != 0;
         if dirty && self.cur(mc).dbi != FREE_DBI as usize {
             self.w.loose.push(pgno);
+            let l = self.layout();
             let page = self.dirty_mut(pgno)?;
-            let f = crate::core::page_ops::flags(page);
-            crate::core::page_ops::set_flags(page, f | P_LOOSE);
+            let f = crate::core::page_ops::flags(l, page);
+            crate::core::page_ops::set_flags(l, page, f | P_LOOSE);
         } else {
             self.w.free_pgs.append(pgno);
         }
@@ -310,7 +310,7 @@ impl<'env> RwTxn<'env> {
         // `pghead` can grow and shrink during this call; `pglast` and
         // `free_pgs` can only grow. Page numbers cannot disappear from
         // `free_pgs`.
-        let maxfree_1pg = max_free_1pg(self.psize()) as isize;
+        let maxfree_1pg = self.layout().max_free_1pg(self.psize()) as isize;
         let mut more = 1isize;
         let mut pglast = 0u64;
         let mut head_id = 0u64;

@@ -5,7 +5,7 @@
 mod common;
 
 use rlmdb::consts::MDB_MAXKEYSIZE;
-use rlmdb::{CursorOp, Dbi, Environment, EnvironmentFlags, Error, MdbError, Transaction};
+use rlmdb::{CursorOp, Dbi, Environment, EnvironmentFlags, Error, Format, MdbError, Transaction};
 
 fn tmp() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
@@ -153,6 +153,29 @@ fn not_an_lmdb_file() {
     std::fs::write(dir.path().join("data.mdb"), vec![0x5a; 8192]).unwrap();
     let err = Environment::builder().open(dir.path()).unwrap_err();
     assert!(matches!(err, Error::Mdb(MdbError::Invalid)), "{err:?}");
+}
+
+#[test]
+fn data_file_format() {
+    let dir = tmp();
+    // The 1.0 layout is not written yet: refused before any file exists.
+    let err = Environment::builder()
+        .format(Format::V10)
+        .open(dir.path())
+        .unwrap_err();
+    assert_eq!(err.to_err_code(), libc::ENOTSUP);
+    assert!(!dir.path().join("data.mdb").exists());
+    assert!(!dir.path().join("lock.mdb").exists());
+    // Without a request, and on request, an environment is LMDB 0.9.
+    let env = Environment::builder().open(dir.path()).unwrap();
+    assert_eq!(env.format(), Format::V09);
+    drop(env);
+    let env = Environment::builder()
+        .format(Format::V09)
+        .open(dir.path())
+        .unwrap();
+    assert_eq!(env.format(), Format::V09);
+    assert_eq!(env.max_key_size(), MDB_MAXKEYSIZE);
 }
 
 #[test]

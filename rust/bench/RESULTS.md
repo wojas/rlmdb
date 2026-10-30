@@ -434,3 +434,117 @@ Linux, scripts/linux-test.sh test -p rlmdb-capi --test mtest:
 ```
 
 </details>
+
+## Format descriptor (dual-format stage 1)
+
+`DUAL_FORMAT.md` stage 1: page, node and meta accessors read every
+format-dependent offset from a per-environment `format::Layout` (only the
+LMDB 0.9 layout is used; same file bytes). Measured on macOS (same machine
+as above, 16 KiB pages), the new build against the unchanged one
+(`--baseline`, interleaved, 3 reps per round). The machine was shared with
+other heavy jobs (load average 3-38 during the runs), so single rows move
+by up to ±15 % between runs; only effects that show in every run are
+read as real.
+
+**First cut** (`PageRef`, `NodeRef` and every cursor stack slot carrying a
+`&'static Layout`; 3 rounds): writes 1.10-1.13 (`seq_put_append`,
+`rand_put`), scans 1.08, `readers8_get` 1.12, `get_64k` 1.12,
+`mixed_readers` 1.16. Two causes, found with an experiment build (same
+struct sizes, constant 0.9 offsets: only part of it went away) and the
+disassembly:
+
+1. Size. A `PageRef` grew from two words to three, so the cursor page
+   stacks (32 slots) took 50 % longer to fill and copy, and a `NodeRef`
+   of three words is passed through memory: `read_position` kept the node
+   on its stack and reloaded it, and `node_read`/`inline_data` stopped
+   being inlined.
+2. Selects. Each accessor computed header size, `PAGEBASE` and the
+   node data offset from the descriptor, several dependent instructions
+   per page access where the old code had constants.
+
+**Cheap fixes** (all kept, no `unsafe`, file bytes unchanged):
+
+* The cursor stack holds the page bytes (`&[u8]`, two words) and the
+  cursor one `Format`; `PageRef`s are made from them on access.
+* Accessors re-derive the layout from its format (`PageRef::l`), so the
+  numbers become selects between two constants instead of loads; the small
+  `PageRef`/`NodeRef`/`Layout` accessors are `#[inline(always)]`;
+  `node_read` is always inlined and its cold paths (`overflow_read`,
+  `enter_dups`) take scalars or bytes instead of a `NodeRef`.
+* `cursor_next`, `cursor_prev` and `read_position` (the per-item
+  functions of a scan) are compiled once per format (`per_format!` in
+  `core/cursor.rs`), so in the 0.9 copy every offset is a constant again.
+  The same for `node_search` made point lookups slower (two copies of the
+  binary search no longer inline into the descent) and was dropped.
+
+**After**, full run (3 rounds; other jobs used the disk and CPU heavily
+during it, see the `txn_*` and `put_64k` medians against their
+minimums):
+
+| workload | before fixes: new/base (median) | (min) | after: base ns/op | new ns/op | new/base (median) | (min) |
+|---|---:|---:|---:|---:|---:|---:|
+| seq_put_append | 1.13 | 1.12 | 222 (200) | 214 (208) | 0.96 | 1.04 |
+| rand_put | 1.10 | 1.12 | 2811 (2471) | 3014 (2843) | 1.07 | 1.15 |
+| rand_get | 0.99 | 1.07 | 953 (845) | 901 (839) | 0.95 | 0.99 |
+| scan_fwd | 1.08 | 1.06 | 19.4 (18.7) | 18.3 (17.7) | 0.94 | 0.95 |
+| scan_bwd | 1.08 | 1.12 | 16.5 (15.9) | 17.4 (16.3) | 1.05 | 1.03 |
+| readers8_get | 1.12 | 1.03 | 136 (118) | 137 (125) | 1.01 | 1.06 |
+| rand_overwrite | 0.90 | 1.01 | 4273 (3704) | 4265 (3705) | 1.00 | 1.00 |
+| dup_put | 1.07 | 1.07 | 1184 (1162) | 1220 (1185) | 1.03 | 1.02 |
+| dup_get_both | 1.01 | 1.09 | 922 (702) | 1031 (886) | 1.12 | 1.26 |
+| dup_next_dup | 1.00 | 1.04 | 110 (89.3) | 112 (95.2) | 1.01 | 1.07 |
+| put_4k | 0.91 | 1.01 | 8464 (8007) | 8499 (8378) | 1.00 | 1.05 |
+| get_4k | 1.20 | 1.08 | 603 (565) | 737 (583) | 1.22 | 1.03 |
+| put_64k | 1.02 | 1.10 | 77434 (30928) | 31936 (30683) | 0.41 | 0.99 |
+| get_64k | 1.12 | 1.25 | 238 (217) | 281 (236) | 1.18 | 1.09 |
+| del_rand | 1.02 | 1.01 | 3435 (3279) | 3709 (3444) | 1.08 | 1.05 |
+| txn_nosync | 1.05 | 1.12 | 10720 (8393) | 32311 (8764) | 3.01 | 1.04 |
+| txn_sync | 1.00 | 1.01 | 13087292 (10402648) | 19704090 (10240197) | 1.51 | 0.98 |
+| mixed_writer | 0.99 | 0.97 | 6160 (6096) | 6063 (5354) | 0.98 | 0.88 |
+| mixed_readers | 1.16 | 1.19 | 4.4 (4.4) | 5.0 (4.8) | 1.12 | 1.09 |
+
+Reruns of the same build on a quieter machine (new/base, median (min)):
+
+| workload | read group, 6 rounds | `mixed` + `read`, 3 rounds | `rand_put`, `dupsort`, `overflow`, `delete`, 4 rounds |
+|---|---:|---:|---:|
+| rand_get | 0.97 (1.01) | 1.02 (1.01) | |
+| scan_fwd | 0.98 (1.03) | 1.10 (1.05) | |
+| scan_bwd | 1.01 (1.09) | 1.16 (1.06) | |
+| readers8_get | 1.01 (1.12) | 0.93 (1.04) | |
+| mixed_writer | | 0.95 (0.84) | |
+| mixed_readers | | 0.99 (1.07) | |
+| rand_put | | | 0.93 (1.04) |
+| dup_put | | | 1.04 (1.03) |
+| dup_get_both | | | 1.08 (1.05) |
+| dup_next_dup | | | 1.13 (1.02) |
+| put_4k / get_4k | | | 0.93 (0.94) / 0.85 (0.98) |
+| put_64k / get_64k | | | 1.00 (0.99) / 1.06 (1.04) |
+| del_rand | | | 0.97 (1.01) |
+
+Reading: writes, point reads and scans are back within noise (medians on
+both sides of 1 from run to run). What may be left is a few percent on
+reads of cached data, which shows in the minimums more than in the
+medians: `get_64k`, `scan_bwd` and the `DUPSORT` reads (`dup_get_both`
+1.26 and 1.05 at the minimum in the two runs after the fixes; its lookups
+go through `node_search` and `xcursor_init1`, which are not compiled per
+format).
+If the 1.0 work makes that worse, the next step is the generic version
+`DUAL_FORMAT.md` §4.1 describes (the layout as a type parameter of the
+cursor), not more of these fixes.
+
+**Coordinator's check** of the same build against a baseline built from the
+commit before it (3 rounds, 3 reps; load average 10-12 on 10 cores from
+other jobs, so ±5 % is noise), new/base median (min): `seq_put_append`
+1.06 (1.06), `rand_put` 1.01 (1.00), `rand_get` 1.05 (1.11), `scan_fwd`
+1.03 (1.01), `scan_bwd` 1.06 (1.06), `readers8_get` 1.01 (1.01),
+`rand_overwrite` 0.95 (1.00), `dup_put` 1.00 (1.04), `dup_get_both` 1.18
+(1.09), `dup_next_dup` 1.09 (1.02), `put_4k` 1.02 (0.98), `get_4k` 0.98
+(0.99), `put_64k` 0.96 (0.94), `get_64k` 1.10 (1.06), `del_rand` 1.05
+(1.04), `txn_nosync` 1.01 (1.03), `txn_sync` 1.00 (1.01), `mixed_writer`
+1.15 (1.00), `mixed_readers` 1.10 (1.12). Same picture: writes and point
+reads within noise, DUPSORT lookups (`node_search`, `xcursor_init1`, not
+specialised per format) and the cached-read loops a few percent slower.
+Accepted as the price of the descriptor for now; the follow-up, once the
+1.0 layout exists and the cost can be measured on both formats, is the
+per-format compilation of the remaining hot read paths or the generic
+engine of `DUAL_FORMAT.md` §4.1.

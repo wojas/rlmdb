@@ -22,7 +22,6 @@ use crate::core::split::node_body;
 use crate::core::txn_rw::{FailOnPanic, RwTxn, TXN_DIRTY, TXN_ERROR};
 use crate::core::wcursor::{CRef, SUBPAGE};
 use crate::error::{Error, MdbError, Result};
-use crate::format::layout::PAGE_HDR_SIZE;
 use crate::format::node::{F_DUPDATA, F_SUBDATA};
 use crate::format::page::{P_LEAF2, P_SUBP};
 use crate::format::{Db, PageRef};
@@ -31,9 +30,11 @@ use crate::format::{Db, PageRef};
 /// candidates for merging.
 const FILL_THRESHOLD: usize = 250;
 
-/// `PAGEFILL`: how full a page is, in tenths of a percent.
+/// `PAGEFILL`: how full a page is, in tenths of a percent of the space
+/// after the header (`me_pagespace`).
 fn page_fill(ps: usize, p: &PageRef<'_>) -> usize {
-    1000 * (ps - PAGE_HDR_SIZE).saturating_sub(p.size_left()) / (ps - PAGE_HDR_SIZE)
+    let space = p.layout().page_space(ps);
+    1000 * space.saturating_sub(p.size_left()) / space
 }
 
 /// The key of the first item of a page (`LEAF2KEY(p, 0, ksize)` or
@@ -146,8 +147,9 @@ impl<'env> RwTxn<'env> {
                         // find their sub-pages through their main cursor,
                         // so C's XCURSOR_REFRESH loop has nothing to do.)
                         let pgno = self.cur(mc).pg_top();
+                        let l = self.layout();
                         let page = self.top_page_mut(mc)?;
-                        page_ops::shrink_node(page, ki, pgno).ok_or_else(corrupted)?;
+                        page_ops::shrink_node(l, page, ki, pgno).ok_or_else(corrupted)?;
                     }
                     let db = self.db_mut(mc);
                     db.entries = db.entries.wrapping_sub(1);
@@ -579,7 +581,7 @@ impl<'env> RwTxn<'env> {
 
         let psrc = self.cur(csrc).pg_top();
         let src: Vec<u8> = self.top_page(csrc)?.bytes().to_vec();
-        let srcp = PageRef::new(&src).ok_or_else(corrupted)?;
+        let srcp = PageRef::with_layout(&src, self.layout()).ok_or_else(corrupted)?;
         let pdst = self.cur(cdst).pg_top();
         let nkeys = self.top_page(cdst)?.num_keys();
         let mut j = nkeys;

@@ -210,10 +210,16 @@ src/consts.rs       MDB_* flag bits, error codes and cursor op values (the C num
 src/flags.rs        bitflags types: EnvironmentFlags, DatabaseFlags, WriteFlags
 src/error.rs        MdbError (C code mapping) and the heed-style Error, Result<T>
 src/format/         pure parsing/serialisation of on-disk structures over &[u8]
-  mod.rs            PAGE_HDR_SIZE, NODE_SIZE, …; `layout` constants
-  page.rs           PageRef/PageMut: header accessors, node index, leaf2 keys
-  node.rs           NodeRef: key(), data(), flags(), child_pgno(), ovf_pgno()
-  meta.rs           Meta (+ Db) read/write, pick newest
+  mod.rs            get/put helpers, 0.9 size wrappers (node_max, OVPAGES)
+  layout.rs         the 0.9 offset constants (PAGE_HDR_SIZE, NODE_SIZE, …), and
+                    Format/Layout: one static descriptor per data-file format
+                    (V09, V10) with the C macros derived from it (NODEDATA,
+                    LEAFSIZE, OVPAGES, me_nodemax, maxkey, MDB_ovpage I/O)
+  page.rs           PageRef/PageMut over a Layout: header accessors, node index,
+                    leaf2 keys
+  node.rs           NodeRef over a Layout: key(), data(), flags(), child_pgno(),
+                    overflow_ref()
+  meta.rs           Meta (+ Db) read/write per layout, pick newest
   db.rs             Db (MDB_db) read/write
   lockfile.rs       Txninfo/Reader layout constants and accessors
 src/idl.rs          sorted id lists (MDB_IDL semantics) and dirty lists (ID2L)
@@ -225,7 +231,8 @@ src/os/             ALL unsafe lives here. mod.rs selects unix; unix.rs: DataMap
                     (robust pthread mutex on Linux, named semaphore on macOS)
 src/core/mod.rs     the byte-level API (see "Core layer"), Stat, Info
 src/core/env.rs     Environment, EnvironmentBuilder, open sequence, meta selection,
-                    map size, the per-process registry of open paths
+                    map size, the per-process registry of open paths, the
+                    environment's Format/Layout (always V09 so far)
 src/core/reader.rs  lock file and reader table: slots, oldest reader, reader_check/list
 src/core/txn.rs     TxnCore (snapshot, DBI view, page lookup), RoTxn, InactiveTxn,
                     the Transaction trait
@@ -327,7 +334,7 @@ transactions); `RoCursor::is_initialized`/`current_has_dups`;
 
 ```rust
 pub struct Environment;             // Send + Sync; Drop closes; share via Arc
-pub struct EnvironmentBuilder;      // map_size, max_readers, max_dbs, flags(EnvironmentFlags), open(path), open_with_permissions(path, mode)
+pub struct EnvironmentBuilder;      // map_size, max_readers, max_dbs, flags(EnvironmentFlags), format(Format), open(path), open_with_permissions(path, mode)
 impl Environment {
     pub fn open_db(&self, name: Option<&str>) -> Result<Dbi>;                     // existing only
     pub fn create_db(&self, name: Option<&str>, flags: DatabaseFlags) -> Result<Dbi>;
@@ -338,6 +345,7 @@ impl Environment {
     pub fn stat(&self) -> Result<Stat>;  pub fn info(&self) -> Result<Info>;  pub fn freelist(&self) -> Result<usize>;
     pub fn flags(&self) -> EnvironmentFlags;  pub fn set_flags(&self, flags: EnvironmentFlags, on: bool) -> Result<()>;
     pub fn path(&self) -> &Path;  pub fn max_readers(&self) -> u32;  pub fn max_key_size(&self) -> usize;  // 511
+    pub fn format(&self) -> Format;                                              // V09 (V10 refused with ENOTSUP for now)
     pub fn set_map_size(&self, size: usize) -> Result<()>;
     pub fn reader_list(&self) -> Result<Vec<ReaderInfo>>;  pub fn reader_check(&self) -> Result<usize>;
     pub fn copy_to_path(&self, path: &Path, compact: bool) -> Result<()>;  pub fn copy_to_fd(&self, fd: BorrowedFd<'_>, compact: bool) -> Result<()>;

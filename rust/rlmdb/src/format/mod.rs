@@ -6,14 +6,25 @@
 //! `from_ne_bytes` because LMDB stores everything in host byte order.
 //!
 //! Only the 64-bit layout is implemented (`sizeof(size_t) == 8`), which is the
-//! layout of every 64-bit C build of LMDB 0.9 (`MDB_VL32` is out of scope).
+//! layout of every 64-bit C build of LMDB (`MDB_VL32` is out of scope).
 //!
-//! | C structure | Rust | size |
+//! The page header, the node data offset and the overflow reference differ
+//! between the LMDB 0.9 and 1.0 data formats. A [`Layout`] describes one
+//! format ([`layout::V09`], [`layout::V10`]); the page and node views carry
+//! the layout of the environment they belong to and read every
+//! format-dependent offset from it. Their plain constructors
+//! ([`PageRef::new`], [`NodeRef::new`], [`PageMut::new`]) and the free size
+//! functions below use the 0.9 layout, for tools and tests that only handle
+//! 0.9 files; the engine uses the `with_layout` constructors and the
+//! [`Layout`] methods.
+//!
+//! | C structure | Rust | size (0.9 / 1.0) |
 //! |---|---|---|
-//! | `MDB_page` header | [`page::PageRef`] / [`page::PageMut`] | 16 |
+//! | `MDB_page` header | [`page::PageRef`] / [`page::PageMut`] | 16 / 24 |
 //! | `MDB_node` header | [`node::NodeRef`] | 8 |
 //! | `MDB_db` | [`db::Db`] | 48 |
 //! | `MDB_meta` | [`meta::Meta`] | 136 |
+//! | `MDB_ovpage` | [`layout::OverflowRef`] | 8 / 24 |
 //! | `MDB_txninfo` / `MDB_reader` | [`lockfile`] | platform dependent |
 
 #[cfg(not(target_pointer_width = "64"))]
@@ -22,116 +33,17 @@ compile_error!(
 );
 
 pub mod db;
+pub mod layout;
 pub mod lockfile;
 pub mod meta;
 pub mod node;
 pub mod page;
 
 pub use db::Db;
+pub use layout::{Format, Layout, OverflowRef};
 pub use meta::Meta;
 pub use node::NodeRef;
 pub use page::{PageMut, PageRef};
-
-/// Byte offsets and sizes of the on-disk structures (64-bit layout).
-///
-/// Each constant names the C field it locates.
-pub mod layout {
-    // --- MDB_page ---------------------------------------------------------
-
-    /// `PAGEHDRSZ`: size of the page header (`offsetof(MDB_page, mp_ptrs)`).
-    pub const PAGE_HDR_SIZE: usize = 16;
-    /// Offset of `mp_pgno` (u64).
-    pub const PAGE_PGNO: usize = 0;
-    /// Offset of `mp_pad` (u16): key size on `P_LEAF2` pages.
-    pub const PAGE_PAD: usize = 8;
-    /// Offset of `mp_flags` (u16).
-    pub const PAGE_FLAGS: usize = 10;
-    /// Offset of `mp_lower` (u16), lower bound of free space.
-    pub const PAGE_LOWER: usize = 12;
-    /// Offset of `mp_upper` (u16), upper bound of free space.
-    pub const PAGE_UPPER: usize = 14;
-    /// Offset of `mp_pages` (u32): overflow page count, overlays lower/upper.
-    pub const PAGE_OVERFLOW_PAGES: usize = 12;
-    /// Offset of `mp_ptrs[0]` (u16 node offsets).
-    pub const PAGE_PTRS: usize = 16;
-
-    // --- MDB_node ---------------------------------------------------------
-
-    /// `NODESIZE`: size of the node header (`offsetof(MDB_node, mn_data)`).
-    pub const NODE_SIZE: usize = 8;
-    /// Offset of `mn_lo` (u16). `MDB_node` declares `mn_lo, mn_hi` on
-    /// little-endian hosts and `mn_hi, mn_lo` on big-endian hosts.
-    #[cfg(target_endian = "little")]
-    pub const NODE_LO: usize = 0;
-    /// Offset of `mn_hi` (u16).
-    #[cfg(target_endian = "little")]
-    pub const NODE_HI: usize = 2;
-    /// Offset of `mn_lo` (u16) on big-endian hosts.
-    #[cfg(target_endian = "big")]
-    pub const NODE_LO: usize = 2;
-    /// Offset of `mn_hi` (u16) on big-endian hosts.
-    #[cfg(target_endian = "big")]
-    pub const NODE_HI: usize = 0;
-    /// Offset of `mn_flags` (u16); on branch nodes the top 16 bits of the pgno.
-    pub const NODE_FLAGS: usize = 4;
-    /// Offset of `mn_ksize` (u16).
-    pub const NODE_KSIZE: usize = 6;
-    /// Offset of `mn_data` (key bytes, then data bytes).
-    pub const NODE_DATA: usize = 8;
-
-    // --- MDB_db -----------------------------------------------------------
-
-    /// `sizeof(MDB_db)`.
-    pub const DB_SIZE: usize = 48;
-    /// Offset of `md_pad` (u32): page size in the free DB record, LEAF2 key size otherwise.
-    pub const DB_PAD: usize = 0;
-    /// Offset of `md_flags` (u16).
-    pub const DB_FLAGS: usize = 4;
-    /// Offset of `md_depth` (u16).
-    pub const DB_DEPTH: usize = 6;
-    /// Offset of `md_branch_pages` (u64).
-    pub const DB_BRANCH_PAGES: usize = 8;
-    /// Offset of `md_leaf_pages` (u64).
-    pub const DB_LEAF_PAGES: usize = 16;
-    /// Offset of `md_overflow_pages` (u64).
-    pub const DB_OVERFLOW_PAGES: usize = 24;
-    /// Offset of `md_entries` (u64).
-    pub const DB_ENTRIES: usize = 32;
-    /// Offset of `md_root` (u64).
-    pub const DB_ROOT: usize = 40;
-
-    // --- MDB_meta ---------------------------------------------------------
-
-    /// `sizeof(MDB_meta)`.
-    pub const META_SIZE: usize = 136;
-    /// Offset of the `MDB_meta` inside a meta page (`METADATA(p)`).
-    pub const META_OFFSET_IN_PAGE: usize = PAGE_HDR_SIZE;
-    /// Offset of `mm_magic` (u32).
-    pub const META_MAGIC: usize = 0;
-    /// Offset of `mm_version` (u32).
-    pub const META_VERSION: usize = 4;
-    /// Offset of `mm_address` (pointer, 8 bytes).
-    pub const META_ADDRESS: usize = 8;
-    /// Offset of `mm_mapsize` (u64). `mdb_env_write_meta` rewrites the meta
-    /// from this offset to the end.
-    pub const META_MAPSIZE: usize = 16;
-    /// Offset of `mm_dbs[FREE_DBI]`.
-    pub const META_FREE_DB: usize = 24;
-    /// Offset of `mm_dbs[MAIN_DBI]`.
-    pub const META_MAIN_DB: usize = 24 + DB_SIZE;
-    /// Offset of `mm_last_pg` (u64).
-    pub const META_LAST_PGNO: usize = 24 + 2 * DB_SIZE;
-    /// Offset of `mm_txnid` (u64).
-    pub const META_TXNID: usize = 24 + 2 * DB_SIZE + 8;
-
-    // --- MDB_txninfo / MDB_reader (lock file) ------------------------------
-
-    pub use super::lockfile::{
-        LOCK_FORMAT, MNAME_LEN, READERS_OFFSET, READER_PID, READER_SIZE, READER_TID, READER_TXNID,
-        TXNINFO_FORMAT, TXNINFO_HEADER_SIZE, TXNINFO_MAGIC, TXNINFO_NUMREADERS, TXNINFO_RMUTEX,
-        TXNINFO_TXNID, TXNINFO_WMUTEX,
-    };
-}
 
 /// Reads a native-endian `u16` at `off`; `None` if out of bounds.
 #[inline]
@@ -173,22 +85,24 @@ pub(crate) fn put_u64(buf: &mut [u8], off: usize, v: u64) {
     buf[off..off + 8].copy_from_slice(&v.to_ne_bytes());
 }
 
-/// `OVPAGES(size, psize)`: number of overflow pages needed for `size` bytes
-/// of data (the first page also holds the 16-byte header).
+/// `OVPAGES(size, psize)` of the 0.9 layout: number of overflow pages
+/// needed for `size` bytes of data (the first page also holds the 16-byte
+/// header). The engine uses [`Layout::overflow_pages_for`].
 pub fn overflow_pages_for(size: usize, page_size: usize) -> usize {
-    (layout::PAGE_HDR_SIZE - 1 + size) / page_size + 1
+    layout::V09.overflow_pages_for(size, page_size)
 }
 
-/// `me_nodemax`: the largest node a page may hold before its data goes to an
-/// overflow page (`mdb_env_open2`). Uses C's `& -2` (round down to even)
-/// followed by `- sizeof(indx_t)`.
+/// `me_nodemax` of the 0.9 layout: the largest node a page may hold before
+/// its data goes to an overflow page (`mdb_env_open2`). The engine uses
+/// [`Layout::node_max`].
 pub fn node_max(page_size: usize) -> usize {
-    (((page_size - layout::PAGE_HDR_SIZE) / crate::consts::MDB_MINKEYS) & !1) - 2
+    layout::V09.node_max(page_size)
 }
 
-/// `me_maxfree_1pg`: how many page numbers fit in one free-list overflow page.
+/// `me_maxfree_1pg` of the 0.9 layout: how many page numbers fit in one
+/// free-list overflow page. The engine uses [`Layout::max_free_1pg`].
 pub fn max_free_1pg(page_size: usize) -> usize {
-    (page_size - layout::PAGE_HDR_SIZE) / 8 - 1
+    layout::V09.max_free_1pg(page_size)
 }
 
 #[cfg(test)]
