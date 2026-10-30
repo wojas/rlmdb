@@ -84,7 +84,7 @@ mod tests {
     use super::*;
     use std::os::raw::c_int;
 
-    unsafe extern "C" fn by_length(a: *const MDB_val, b: *const MDB_val) -> c_int {
+    unsafe extern "C-unwind" fn by_length(a: *const MDB_val, b: *const MDB_val) -> c_int {
         // SAFETY: called by call_slot with valid values.
         let (a, b) = unsafe { (&*a, &*b) };
         a.mv_size as c_int - b.mv_size as c_int
