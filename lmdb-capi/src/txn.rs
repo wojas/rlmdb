@@ -40,8 +40,10 @@ const TXN_BEGIN_FLAGS: c_uint = MDB_RDONLY;
 /// when it aborts. While it is active the parent cannot be used
 /// (`MDB_BAD_TXN`), so a parent has at most one child. `EINVAL` for a
 /// read-only parent; `MDB_BAD_TXN` with `MDB_RDONLY` or a blocked parent,
-/// as in C. Cursors of the parent cannot be used in the child (C lets the
-/// child use them; known gap).
+/// as in C. Cursors of the parent (and further ancestors) work through the
+/// child while it is active, as in C: `mdb_cursor_txn` returns the child,
+/// they keep the position the child leaves them at when it commits and get
+/// their old one back when it aborts, and `mdb_cursor_close` ignores them.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_txn_begin(
     env: *mut MDB_env,

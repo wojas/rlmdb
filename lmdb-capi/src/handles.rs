@@ -28,7 +28,13 @@
 //! Re-entrancy: while a write operation runs, the transaction state is
 //! borrowed mutably. A C comparison function that calls back into the
 //! library with the same transaction gets `EINVAL` (C would let it read
-//! inconsistent state).
+//! inconsistent state). One that frees a handle the running operation is
+//! using (`mdb_txn_commit`/`mdb_txn_abort` of its transaction or an
+//! ancestor, `mdb_cursor_close` of a cursor that may be in use) aborts the
+//! process with a message: the alternative is a use after free, which is
+//! what C does. `mdb_txn_reset` of a transaction in use does nothing and
+//! `mdb_txn_renew` returns `EINVAL`. `mdb_env_close` cannot be guarded this way; as in
+//! C, it must not be called while transactions are alive.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
@@ -163,6 +169,16 @@ impl MDB_env {
 /// anyway, so a poisoned lock cannot be observed in practice).
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Aborts the process because `what` would free a handle that an operation
+/// further up the stack is using: a callback of that operation (a
+/// comparison function) called back into the library. See "Re-entrancy"
+/// in the module documentation.
+#[cold]
+fn abort_in_use(what: &str) -> ! {
+    eprintln!("lmdb: {what} called on a handle that is in use (from a callback?); aborting");
+    std::process::abort()
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +325,21 @@ impl MDB_txn {
         self.child.set(child);
     }
 
+    /// The innermost active nested transaction below this one (NULL if it
+    /// has no child). C moves an ancestor's cursors into it for its
+    /// lifetime (`mdb_cursor_shadow`), so they are used through it.
+    pub(crate) fn innermost_child(&self) -> *mut MDB_txn {
+        let mut innermost = ptr::null_mut();
+        let mut next = self.child.get();
+        // SAFETY: an active child is a live handle; it clears its parent's
+        // `child` before it is freed.
+        while let Some(t) = unsafe { MDB_txn::from_ptr(next) } {
+            innermost = next;
+            next = t.child.get();
+        }
+        innermost
+    }
+
     /// The active read transaction, or `err` if the transaction is reset or
     /// finished (`EINVAL` for a write transaction).
     pub(crate) fn with_read<T>(
@@ -430,6 +461,7 @@ impl MDB_txn {
     pub(crate) unsafe fn commit_and_free(p: *mut MDB_txn) -> c_int {
         // SAFETY: per this function's contract.
         let txn = unsafe { &*p };
+        txn.assert_not_in_use("mdb_txn_commit");
         let child = txn.child.get();
         if !child.is_null() {
             // SAFETY: the active child is a live handle.
@@ -467,6 +499,7 @@ impl MDB_txn {
     pub(crate) unsafe fn end_and_free(p: *mut MDB_txn) {
         // SAFETY: per this function's contract.
         let txn = unsafe { &*p };
+        txn.assert_not_in_use("mdb_txn_abort");
         let child = txn.child.get();
         if !child.is_null() {
             // SAFETY: the active child is a live handle.
@@ -480,6 +513,17 @@ impl MDB_txn {
         // SAFETY: as in commit_and_free.
         if let Some(parent) = unsafe { MDB_txn::from_ptr(parent) } {
             parent.set_child(ptr::null_mut());
+        }
+    }
+
+    /// Aborts the process if an operation further up the stack is using
+    /// this transaction, i.e. `what` (which frees the handle) was called
+    /// from a callback of that operation, such as a comparison function.
+    /// Freeing the handle would leave the running operation with dangling
+    /// references (C: undefined behaviour).
+    fn assert_not_in_use(&self, what: &str) {
+        if self.state.try_borrow_mut().is_err() {
+            abort_in_use(what);
         }
     }
 
@@ -582,8 +626,17 @@ impl MDB_cursor {
         unsafe { p.as_ref() }
     }
 
-    /// The bound transaction pointer (NULL if detached).
+    /// The bound transaction pointer (NULL if detached). For a cursor of a
+    /// write transaction with an active nested transaction, the innermost
+    /// one, which the cursor works through (C: `mdb_cursor_shadow` sets
+    /// `mc_txn` to the child).
     pub(crate) fn txn_ptr(&self) -> *mut MDB_txn {
+        if let (Some(txn), Some(_)) = (self.txn(), self.write_id()) {
+            let child = txn.innermost_child();
+            if !child.is_null() {
+                return child;
+            }
+        }
         self.txn.get()
     }
 
@@ -622,7 +675,12 @@ impl MDB_cursor {
     ) -> Result<T, c_int> {
         let txn = self.txn().ok_or(libc::EINVAL)?;
         if let Some(id) = self.write_id() {
-            return txn.with_write(|w| f(CursorAccess::Write(w, id)));
+            // A cursor of an ancestor works through the active child, as
+            // in C; the core accepts ancestors' handles there.
+            // SAFETY: the innermost child is NULL or a live handle (see
+            // MDB_txn::innermost_child).
+            let active = unsafe { MDB_txn::from_ptr(txn.innermost_child()) }.unwrap_or(txn);
+            return active.with_write(|w| f(CursorAccess::Write(w, id)));
         }
         txn.with_read(bad_txn(), |rt| {
             let mut inner = self.inner.try_borrow_mut().map_err(|_| libc::EINVAL)?;
@@ -672,6 +730,11 @@ impl MDB_cursor {
     pub(crate) unsafe fn close(p: NonNull<MDB_cursor>) {
         // SAFETY: per this function's contract.
         let c = unsafe { p.as_ref() };
+        if c.inner.try_borrow_mut().is_err() {
+            // A read operation on this cursor is running (we were called
+            // from one of its callbacks).
+            abort_in_use("mdb_cursor_close");
+        }
         if let Some(txn) = c.txn() {
             if let Some(id) = c.write_id() {
                 if txn.has_child() {
@@ -679,6 +742,8 @@ impl MDB_cursor {
                     // and mdb_cursor_close ignores it.
                     return;
                 }
+                // An operation on the transaction may be using this cursor.
+                txn.assert_not_in_use("mdb_cursor_close");
                 let _ = txn.with_write(|w| {
                     w.close_cursor(id);
                     Ok(())

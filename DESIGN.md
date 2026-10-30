@@ -23,12 +23,13 @@ not a binding. The goals, in priority order:
    and run unchanged against the Rust build (`liblmdb.a` / `liblmdb.so`).
 5. **Performance comparable to C.** No allocations in the hot read path, binary
    search on pages, cursor stacks in fixed arrays, zero-copy values.
-6. **Minimal `unsafe`.** `unsafe` is confined to `lmdb/src/os/` (mmap, file
-   locks, fsync, shared mutexes/semaphores, pread/pwrite) and to `lmdb-capi`
-   (inherently FFI). Everything else, including all page parsing and B-tree
-   logic, is safe Rust over byte slices. `lmdb/src/lib.rs` carries
-   `#![forbid(unsafe_code)]` with a per-module `#![allow(unsafe_code)]` only
-   under `os/`.
+6. **Minimal `unsafe`.** `unsafe` is confined to `lmdb-core/src/os/` (mmap,
+   file locks, fsync, shared mutexes/semaphores, pread/pwrite) and to
+   `lmdb-capi` (inherently FFI). Everything else, including all page parsing
+   and B-tree logic, is safe Rust over byte slices. `lmdb-core/src/lib.rs`
+   carries `#![deny(unsafe_code)]` and `#[forbid(unsafe_code)]` on every
+   module except `os`, which opts back in with `#![allow(unsafe_code)]`
+   (a crate-level `forbid` could not be relaxed for one module).
 
 Out of scope for now (leave the door open, do not design it away):
 
@@ -36,8 +37,9 @@ Out of scope for now (leave the door open, do not design it away):
   added later. Only `unix` is implemented.
 * 32-bit targets. The on-disk format depends on `sizeof(size_t)`; we hard-code
   the 64-bit layout and emit `compile_error!` on 32-bit targets.
-* `MDB_VL32`, `MDB_FIXEDMAP`, encryption / checksums (those are 1.0 features
-  and not in 0.9 anyway), `MDB_NOMEMINIT`, `MDB_MAPASYNC`.
+* `MDB_VL32`, encryption / checksums (1.0 features, not in 0.9 anyway).
+  `MDB_FIXEDMAP`, `MDB_NOMEMINIT` and `MDB_MAPASYNC` are accepted and
+  ignored (per-process choices; see `COMPATIBILITY.md`).
 * `MDB_WRITEMAP` is deferred (not needed for compatibility: it is a per-process
   choice). Design `RwTxn` so dirty pages are owned buffers; WRITEMAP can be
   added later as an alternative page backing.
@@ -188,16 +190,22 @@ side either way.
 rust/
   Cargo.toml          workspace
   DESIGN.md           this file
+  README.md           overview, build and test instructions
+  COMPATIBILITY.md    the compatibility contract and what verifies it
+  KNOWN_C_BUGS.md     C 0.9.36 bugs not ported (or ported on purpose)
+  scripts/            linux-test.sh (cargo in Docker), check-all.sh
   lmdb-core/          the library (package `lmdb-core`, lib `lmdb_core`)
   lmdb-capi/          cdylib+staticlib `lmdb` exporting the C ABI, ships include/lmdb.h
   lmdb-tools/         mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop in Rust
   interop/            cross-process compatibility tests (builds the C library)
 ```
 
-### `lmdb` module map
+### `lmdb-core` module map
+
+As implemented (the heed-layer files at the end are planned only):
 
 ```
-src/lib.rs          crate docs, lint settings, heed-compatible re-exports
+src/lib.rs          crate docs, lint settings, re-exports `core::*` at the root
 src/consts.rs       MDB_* flag bits, error codes and cursor op values (the C numbers)
 src/flags.rs        bitflags types: EnvironmentFlags, DatabaseFlags, WriteFlags
 src/error.rs        MdbError (C code mapping) and the heed-style Error, Result<T>
@@ -210,28 +218,46 @@ src/format/         pure parsing/serialisation of on-disk structures over &[u8]
   lockfile.rs       Txninfo/Reader layout constants and accessors
 src/idl.rs          sorted id lists (MDB_IDL semantics) and dirty lists (ID2L)
 src/cmp.rs          the five comparators + Comparator enum
-src/os/             ALL unsafe lives here. mod.rs selects unix; unix.rs: Mmap,
-                    file open/lock/pread/pwrite/writev/fsync (F_FULLFSYNC on
+src/os/             ALL unsafe lives here. mod.rs selects unix; unix.rs: DataMap
+                    (read-only data map, volatile meta reads), LockMap, fcntl
+                    locks, pread/pwrite/pwritev, fdatasync (F_FULLFSYNC on
                     macOS), pid/tid, page size; shared_lock.rs: SharedMutex
-                    (pthread on linux, named sem on macos) + reader table access
-src/core/mod.rs     the byte-level API (see "Core layer")
-src/core/env.rs     Environment, EnvironmentBuilder, open sequence, meta selection, mapsize
-src/core/reader.rs  reader table: slot acquire/release, oldest reader, reader_check, reader_list
-src/core/txn.rs     RoTxn, RwTxn, nested txns, dirty page store, spill, commit
-src/core/freelist.rs page allocation and free DB maintenance (mdb_page_alloc, mdb_freelist_save)
+                    (robust pthread mutex on Linux, named semaphore on macOS)
+src/core/mod.rs     the byte-level API (see "Core layer"), Stat, Info
+src/core/env.rs     Environment, EnvironmentBuilder, open sequence, meta selection,
+                    map size, the per-process registry of open paths
+src/core/reader.rs  lock file and reader table: slots, oldest reader, reader_check/list
+src/core/txn.rs     TxnCore (snapshot, DBI view, page lookup), RoTxn, InactiveTxn,
+                    the Transaction trait
+src/core/dbi.rs     Dbi handles, open/close, names, stale-record refresh
 src/core/cursor.rs  cursor core: search, next/prev, set, dup sub-cursor
-src/core/cursor_put.rs  put, node add/del, split (write side)
-src/core/cursor_del.rs  del, rebalance, merge, drop
-src/core/dbi.rs     Dbi handles, open/create/close, flags, stat, comparators
+src/core/ro_cursor.rs  RoCursor, CursorOp, mdb_cursor_get dispatch
+src/core/txn_rw.rs  RwTxn, RwCursor, CursorId (handle cursors), put/del/create/drop API
+src/core/wcursor.rs write cursors in an arena, fixups, mdb_page_touch
+src/core/dirty.rs   dirty page list (ID2L), ancestor layers, spill set
+src/core/page_ops.rs byte-level node insert/delete/resize on owned pages
+src/core/freelist.rs page allocation and free DB maintenance (mdb_page_alloc, mdb_freelist_save)
+src/core/cursor_put.rs  put, node add (write side)
+src/core/split.rs   mdb_page_split
+src/core/cursor_del.rs  del, rebalance, merge, node move, drop
+src/core/commit.rs  mdb_txn_commit, mdb_page_flush, mdb_env_write_meta
+src/core/nested.rs  nested transactions, cursor shadowing
+src/core/spill.rs   mdb_page_spill / mdb_page_unspill
 src/core/copy.rs    env copy (plain and compacting)
+src/core/audit.rs   (tests only) page-usage audit like the C peer's check-freelist
+
+planned, not implemented (heed layer):
 src/env.rs, src/env_open_options.rs, src/txn.rs, src/database.rs,
 src/iterator/*.rs, src/iteration_method.rs, src/reserved_space.rs,
-src/traits.rs, src/types/*.rs      the heed-compatible layer over core
+src/traits.rs, src/types/*.rs
 ```
 
 Keep files under ~1500 lines; split further rather than growing a file.
 
 ### Public Rust API: mirror `heed` 0.23.1
+
+**Deferred (see "Status"): this subsection is the intended design; the
+typed layer does not exist yet and the crate root re-exports `core::*`.**
 
 The public API **mirrors the `heed` crate, version 0.23.1** (Meilisearch's
 LMDB wrapper, the actively maintained Rust binding). Code written against
@@ -277,8 +303,9 @@ Deliberate differences from heed:
   so `RoTxn<'_, WithoutTls>: Send` holds.
 * `EnvAlreadyOpened`: heed keeps a process-global registry of opened paths
   and refuses a second open of the same path (LMDB forbids opening one env
-  twice in one process because of the pid-based reader locks). Implement the
-  same registry; it is needed for correctness, not just API parity.
+  twice in one process because of the pid-based reader locks). The core
+  already has this registry (`Error::EnvAlreadyOpened`, `EBUSY` in C); it
+  is needed for correctness, not just API parity.
 * `Env::open_databases_and_commit` / `create_databases_and_commit` helpers
   and the `OnCommit` machinery may be implemented as thin wrappers; they are
   low priority.
@@ -289,7 +316,14 @@ Deliberate differences from heed:
 ### Core layer (`lmdb_core::core`)
 
 This is the C API in Rust clothing, byte slices in and out, with lifetimes
-doing the work that the C docs' "do not do X" paragraphs do.
+doing the work that the C docs' "do not do X" paragraphs do. The sketch
+below was the stage-1 plan; the rustdoc of `lmdb_core::core` is the
+reference. Additions since: `Transaction::open_db_bytes`, `set_compare`,
+`set_dupsort`, `comparators`; `RwTxn::create_db_bytes`; handle-based
+cursors (`RwTxn::open_cursor` -> `CursorId`, `cursor_get`/`cursor_put`/
+`cursor_del`/`cursor_count`/..., what the C API uses, also through nested
+transactions); `RoCursor::is_initialized`/`current_has_dups`;
+`Info::map_address`; `Environment::has_lock_file`, `page_size`.
 
 ```rust
 pub struct Environment;             // Send + Sync; Drop closes; share via Arc
@@ -337,7 +371,7 @@ pub struct RwCursor<'txn> {          // get borrows &self: dirty pages may move 
     pub fn get<'c>(&'c mut self, key: Option<&[u8]>, data: Option<&[u8]>, op: CursorOp) -> Result<Option<(&'c [u8], &'c [u8])>>;
     pub fn put(&mut self, key: &[u8], data: &[u8], flags: WriteFlags) -> Result<()>;
     pub fn reserve<'c>(&'c mut self, key: &[u8], len: usize, flags: WriteFlags) -> Result<&'c mut [u8]>;
-    pub fn del(&mut self, flags: WriteFlags) -> Result<()>;  pub fn count(&self) -> Result<u64>;
+    pub fn del(&mut self, flags: WriteFlags) -> Result<()>;  pub fn count(&mut self) -> Result<u64>;
 }
 pub struct Stat { page_size, depth, branch_pages, leaf_pages, overflow_pages, entries }
 pub struct Info { map_size, last_pgno, last_txnid, max_readers, num_readers }
@@ -350,8 +384,8 @@ DUP_FIXED, INTEGER_DUP, REVERSE_DUP, CREATE`), `WriteFlags` (`NO_OVERWRITE,
 NO_DUP_DATA, CURRENT, RESERVE, APPEND, APPEND_DUP, MULTIPLE`), all with the C
 bit values; the heed layer re-exports them under heed's names (`EnvFlags`,
 `DatabaseFlags`, `PutFlags`). Unsupported env flags (`FIXED_MAP`,
-`WRITE_MAP`, `MAP_ASYNC`, `NO_MEM_INIT`) are accepted and ignored, or return
-`Incompatible`; document which per flag.
+`WRITE_MAP`, `MAP_ASYNC`, `NO_MEM_INIT`) are all accepted and ignored
+(`flags.rs` documents each); `PREV_SNAPSHOT` (1.0 only) is `EINVAL`.
 
 Footgun rules: `put`/`del` take `&mut self` so no `&[u8]` borrowed from a
 write txn can be alive across a mutation; a `Dbi` is `Copy` and borrows
@@ -371,22 +405,28 @@ record); `Drop` aborts. No panics on corrupt input: a bad page/offset yields
 `TxnFull (-30788)`, `CursorFull (-30787)`, `PageFull (-30786)`,
 `MapResized (-30785)`, `Incompatible (-30784)`, `BadRslot (-30783)`,
 `BadTxn (-30782)`, `BadValSize (-30781)`, `BadDbi (-30780)`, `Problem (-30779)`,
-plus `Other(c_int)` for errno. This is `MdbError` in the heed layer and
-`core::Error` in the core layer (one type, re-exported). `to_err_code()`
-returns the C int; `from_err_code`; `Display` strings match `mdb_strerror`.
+plus `Other(c_int)` for other codes. As implemented these are two types,
+shaped like heed's: `MdbError` (the variants above) and the crate-wide
+`Error { Io(io::Error), Mdb(MdbError), Encoding, Decoding,
+EnvAlreadyOpened }`, which the core API returns; `errno` values become
+`Error::Io`. `Error::to_err_code()` returns exactly the C int
+(`EnvAlreadyOpened` is `EBUSY`); `MdbError::from_err_code`; `Display`
+strings match `mdb_strerror`.
 
 ### Concurrency model and memory safety
 
 * The data file is mapped `PROT_READ, MAP_SHARED` at `map_size` bytes (may be
-  larger than the file). `os::Mmap::page(pgno, npages) -> Result<&[u8]>` is
-  bounds-checked against the map and the snapshot's `last_pg`.
+  larger than the file). `os::DataMap::slice(offset, len) -> Option<&[u8]>`
+  is bounds-checked against the map; `TxnCore::page` checks page numbers
+  against the snapshot's `last_pg`.
 * LMDB's MVCC guarantees that pages reachable from a snapshot are not modified
   while a reader slot pins that snapshot. This is the same invariant the C
   code relies on; document it in `os::Mmap`.
 * Meta pages *are* written concurrently by other processes. Read them with
   volatile reads (`ptr::read_volatile` in `os`) into an owned `Meta` value and
   validate (`magic`, `version`), re-reading as C does at txn begin
-  (`mdb_txn_renew0`).
+  (`mdb_txn_renew0`; the Rust reader additionally re-checks `mti_txnid`
+  after the copy and retries, where C accepts a torn read).
 * Dirty pages in a write txn are owned `Box<[u8]>` buffers (one per page or
   overflow run), kept in a sorted list by pgno (`ID2L` semantics). Readers in
   the same txn resolve a pgno first in the dirty list, then parent txns'
@@ -409,18 +449,20 @@ returns the C int; `from_err_code`; `Display` strings match `mdb_strerror`.
 
 ### Code conventions
 
-* `#![forbid(unsafe_code)]` at crate root except `os` (`#![allow(unsafe_code)]`
-  there, each `unsafe` block with a `// SAFETY:` comment).
-* `#![warn(missing_docs, clippy::all)]`. `cargo clippy --all-targets` and
-  `cargo fmt --check` clean. `cargo test` green.
+* `#![deny(unsafe_code)]` at the crate root, `#[forbid(unsafe_code)]` on
+  every module but `os` (`#![allow(unsafe_code)]` there, each `unsafe`
+  block with a `// SAFETY:` comment).
+* `#![warn(missing_docs, clippy::all)]`. `cargo clippy --all-targets -D
+  warnings`, `cargo doc -D warnings` and `cargo fmt --check` clean; `cargo
+  test` green on both platforms (`scripts/check-all.sh` runs all of it).
 * Integers from disk are read with `u16::from_ne_bytes` / `u64::from_ne_bytes`
   over sub-slices; no `transmute`, no `#[repr(C)]` pointer casts of mapped
   memory outside `os`.
 * Name things after the concept, not the C field: `lower`, `upper`, `num_keys`,
   `child_pgno`. Mention the C name in the doc comment once.
 * Tests: unit tests next to the code for format parsing (hand-built pages),
-  integration tests in `lmdb/tests/` for API behaviour, and `interop/` for
-  cross-process checks against the C build.
+  integration tests in `lmdb-core/tests/` for API behaviour, and `interop/`
+  for cross-process checks against the C build.
 * Linux is tested in Docker: `rust/scripts/linux-test.sh [cargo args]` runs
   cargo inside `rust:1-bookworm` (Debian, glibc, aarch64, 4 KiB pages) with
   the workspace bind-mounted. Run it before declaring a stage done; the lock
@@ -469,63 +511,83 @@ Facts about C 0.9.36 behaviour that implementers must honour; the harness in
 * `mdb_load` in 0.9.36 drops the flags of the first DB in its input (the
   `flags = 0;` from ITS#8662); the Rust tool must not copy that bug.
 * `mtest6` calls `mdb_dkey`, which exists only with `MDB_DEBUG`;
-  `lmdb/tests` builds it against a small shim, the interop harness skips it.
+  `lmdb-core/tests` and `lmdb-capi/tests` build it against a small shim,
+  the interop harness skips it.
 
-## Staged plan
+## Status
 
-Stage 1 is done (commits `c13c67d` interop, and the lmdb read path). The
-implemented `rust/lmdb-core` crate is the reference for the core API from here
-on; read its `src/core/mod.rs` and `src/core/txn.rs` (`TxnCore::page` is
-where dirty pages plug in) before extending it.
+The work was planned in stages, each ending with a commit by the
+coordinator. What landed (commits on this branch):
 
-**Stage 1 (parallel):**
+**Stage 1** (in parallel):
 
-* A. `lmdb` foundation + `core` read path: workspace member, consts, flags,
-  errors, format, idl, cmp, os (mmap, locks, shared mutex, reader table),
-  env open (including
-  creating a fresh environment: `mdb_env_init_meta`, line 3882), read txns,
-  `open_db` for existing DBs, read cursors (all `CursorOp`s, DUPSORT,
-  DUPFIXED/LEAF2, overflow pages), stats/info, reader_list/reader_check.
-  Verified against databases produced by the C tools/mtest programs.
-* B. `interop` crate: build the C library from `../libraries/liblmdb` with the
-  `cc` crate, a C peer program with a small command protocol, a layout-dump C
-  program that prints `sizeof`/`offsetof` for every on-disk struct, and the
-  Rust test runner. Stage 1 ships C-vs-C tests to validate the harness; the
-  Rust peer follows in stage 2.
+* A. `lmdb-core` foundation and the complete read path (`39256da`):
+  consts, flags, errors, `format`, `idl`, `cmp`, `os` (maps, locks, shared
+  mutex/semaphores, reader table), environment open including creating a
+  new environment (`mdb_env_init_meta`), read transactions, `open_db`,
+  read cursors with every `CursorOp` (DUPSORT, DUPFIXED/LEAF2, overflow
+  pages), stat/info, `reader_list`/`reader_check`. Verified against files
+  written by the C tools and `mtest*`. Findings folded in above
+  (`b70ea62`).
+* B. `interop` (`c13c67d`): the C library built with `cc`, the C peer and
+  its command protocol, `layout_dump`, C-vs-C scenarios validating the
+  harness. Linux testing in Docker: `scripts/linux-test.sh` (`d189fd1`).
 
-**Stage 2:** C1 write path part 1 (page alloc/freelist, dirty pages, touch,
-node add, split, put in all variants, commit/flush/meta write, sync,
-set_map_size). D1 `lmdb-capi` for everything stage 1 exposes. B2 Rust peer
-read side + "C writes, Rust reads" interop tests + layout test against the C
-dump.
+**Stage 2:**
 
-**Stage 3:** C2 write path part 2 (del, rebalance, merge, drop, nested txns,
-spill, copy/compact). D2 rest of the C API + run `mtest*.c` against it. B3
-bidirectional and concurrent interop stress. T `lmdb-tools`.
+* C1. The write path, part 1 (`6046d62`): page allocation and free-list
+  reuse, dirty pages, `mdb_page_touch`, node add, splits, put with every
+  flag, commit (flush, sync, meta write), `set_map_size`. Deletes,
+  rebalancing and merges landed here too (planned for stage 3).
+* D1. `lmdb-capi` read side (`6678f83`).
+* B2. The Rust peer's read side; every scenario as "C writes, Rust reads";
+  the layout test against the C dump (`d85dd7c`).
+* The core API gaps the C API and interop agents reported (`f2db7cd`) all
+  landed in stage 3: `Transaction::set_compare`/`set_dupsort` updating the
+  calling transaction, `Transaction::open_db_bytes` (database names are
+  bytes), `Info::map_address`, `Environment::has_lock_file`,
+  `Transaction::comparators`, `RoCursor::is_initialized`/
+  `current_has_dups`, `Environment::copy_to_path`/`copy_to_fd`, and the
+  rename of the library to package `lmdb-core`, lib `lmdb_core`
+  (`028c63f`).
 
-**Stage 3 inputs gathered in stage 2** (core API gaps reported by the C API
-and interop agents; the core agent adds them, additively):
+**Stage 3:**
 
-* `Transaction::set_compare(db, Option<CmpFn>)` / `set_dupsort` that also
-  update the calling transaction's cached comparators (C's usual
-  `mdb_dbi_open` -> `mdb_set_compare` -> use within one txn).
-* `Transaction::open_db_bytes(Option<&[u8]>)`: C database names are
-  arbitrary NUL-free bytes, not necessarily UTF-8.
-* `Info::map_address` (`mm_address`) for `mdb_stat -e`/`mdb_dump` output.
-* `Environment::has_lock_file()` (read-only env on a read-only fs has none).
-* `Transaction::comparators(db) -> (Comparator, Option<Comparator>)` for
-  `mdb_cmp`/`mdb_dcmp`.
-* `RoCursor::is_initialized()` and "current item has duplicates" so the C
-  layer reproduces C's untouched-key cases exactly.
-* `Environment::copy_to_path` / `copy_to_fd`.
-* Crate naming: the C ABI crate's lib must be `lmdb` (to produce
-  `liblmdb.a`), and it needs an `rlib` so cargo builds the staticlib before
-  its integration tests, so the Rust library cannot also be `lmdb`. Rename
-  the library to package `lmdb-core`, lib `lmdb_core` (directory
-  `rust/lmdb-core`) once no agent is editing it.
+* C2. Nested transactions, spilling, `drop_db`/`clear_db`, plain and
+  compacting copy, the API gaps above (`b275112`; findings below).
+* D2. The rest of the C API: all 56 functions of `lmdb.h`; the unmodified
+  `mtest.c` .. `mtest6.c` and C tools run against it with C's results
+  (`36285e9`).
+* B3. The Rust peer's write side, a third peer (the C peer linked against
+  the Rust `liblmdb.a`), all nine writer/reader pairs, concurrent and
+  alternating writers, stale readers (`25ae621`).
+* T. `lmdb-tools`: `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`,
+  `mdb_drop`, byte-identical to the C tools (`4b5c420`).
 
-**Findings of stage 3 C2** (nested transactions, spilling, `mdb_drop`,
-env copy; see `KNOWN_C_BUGS.md` #18-#22):
+**Stage 4** (review, follow-ups, docs):
+
+* `lmdb-capi`: cursors of a parent transaction work inside a nested
+  transaction, as in C (the last known gap of the C API; the core
+  supported it since stage 3). `mdb_cursor_txn` on such a cursor returns
+  the active child.
+* `lmdb-tools`: the database-name errors (empty: `MDB_BAD_VALSIZE`; over
+  511 bytes: `MDB_NOTFOUND` when opening, `MDB_BAD_VALSIZE` when creating)
+  are checked against the C tools.
+* `scripts/check-all.sh`; `README.md`, `COMPATIBILITY.md`, the crate
+  documentation of `lmdb_core`, and this section.
+* Other stage-4 work (the review of `lmdb-core` and of the C API's
+  handle code, benchmarks against C) runs separately; the coordinator
+  records it here when it lands.
+
+**Deferred (not scheduled):** the heed-compatible layer over `core`. The
+user wants the core validated through the C API first. The crate root
+keeps re-exporting `core::*`; the heed section above stays as the intended
+design only.
+
+## Findings of stage 3 C2
+
+Nested transactions, spilling, `mdb_drop`, env copy; see
+`KNOWN_C_BUGS.md` #18-#22.
 
 * Nested transactions move the parent's dirty/spilled pages and cursor
   arena into the child (`core/nested.rs`); the parent is borrowed. As in C,
@@ -546,11 +608,3 @@ env copy; see `KNOWN_C_BUGS.md` #18-#22):
 * Empty DB names fail with `MDB_BAD_VALSIZE` (C's `mdb_cursor_set`); names
   over 511 bytes are `NOTFOUND` on open and `BAD_VALSIZE` on create, as C;
   names with NUL bytes are `EINVAL`.
-
-**Stage 4:** review, benchmarks vs C, docs. Until the heed layer exists,
-`lib.rs` re-exports `core::*` at the crate root.
-
-**Deferred (not scheduled):** the heed-compatible layer over `core`. The
-user wants the core validated through the C API first. The crate root keeps
-re-exporting `core::*`; the heed section above stays as the intended design
-only.

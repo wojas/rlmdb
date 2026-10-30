@@ -1,19 +1,33 @@
 //! The byte-level API: LMDB's C API in Rust clothing.
 //!
 //! Keys and values are byte slices in and out; lifetimes do the work that
-//! the "do not do X" paragraphs of `lmdb.h` do in C:
+//! the "do not do X" paragraphs of `lmdb.h` do in C (the crate
+//! documentation lists the rules and has an example):
 //!
 //! * an [`Environment`] owns the files and maps; transactions borrow it, so
 //!   it cannot be closed while they are alive;
 //! * a [`RoTxn`] pins one snapshot; every slice it (or one of its
 //!   [`RoCursor`]s) returns borrows the transaction and stays valid until it
 //!   ends, because pages of a pinned snapshot never change;
+//! * an [`RwTxn`] is the environment's single writer (the writer lock is
+//!   shared with C processes); slices it returns borrow it, and changes
+//!   need `&mut`, so they cannot outlive a change that moves a dirty page.
+//!   [`RwTxn::begin_nested_txn`] starts a child that borrows the parent;
+//! * cursors of a write transaction come in two forms: [`RwCursor`]
+//!   borrows the transaction (the Rust way), a [`CursorId`] is a handle
+//!   used through [`RwTxn::cursor_get`], [`RwTxn::cursor_put`], ... and
+//!   stays valid across every change in the transaction, as C's tracked
+//!   cursors do (the C API is built on these);
 //! * a [`Dbi`] is a plain `Copy` handle, as in C; using it after
 //!   [`Environment::close_db`] yields [`MdbError::BadDbi`](crate::MdbError).
 //!
 //! Read transactions are never bound to a thread (we always behave like
 //! `MDB_NOTLS`, which is compatible with every C peer since the flag is a
 //! per-process choice that the lock file does not record).
+//!
+//! Where C 0.9.36 has a plain bug that does not affect the files, this
+//! module does the obviously correct thing instead; `rust/KNOWN_C_BUGS.md`
+//! lists every such case, and the ones ported on purpose.
 //!
 //! Module map (C functions in parentheses):
 //!
@@ -24,14 +38,16 @@
 //!   `mdb_env_excl_lock`, `mdb_env_share_locks`, `mdb_reader_pid`,
 //!   `mdb_reader_list`, `mdb_reader_check0`, `mdb_find_oldest`,
 //!   `mdb_mutex_failed`);
-//! * [`txn`]: read transactions (`mdb_txn_begin`, `mdb_txn_renew0`,
-//!   `mdb_txn_reset`, `mdb_txn_abort`, `mdb_get`);
+//! * [`txn`]: read transactions and the [`Transaction`] trait
+//!   (`mdb_txn_begin`, `mdb_txn_renew0`, `mdb_txn_reset`, `mdb_txn_abort`,
+//!   `mdb_get`);
 //! * [`dbi`]: database handles (`mdb_dbi_open`, `mdb_dbi_close`,
 //!   `mdb_dbi_flags`, `mdb_stat`, `mdb_default_cmp`, stale-record refresh in
 //!   `mdb_page_search`);
 //! * [`cursor`]: B-tree search and movement (`mdb_page_get`,
 //!   `mdb_page_search*`, `mdb_node_search`, `mdb_cursor_*`,
-//!   `mdb_xcursor_init*`).
+//!   `mdb_xcursor_init*`), and [`ro_cursor`]: the public read cursor and
+//!   [`CursorOp`] (`mdb_cursor_get`);
 //! * [`txn_rw`]: write transactions and write cursors (`mdb_txn_begin`,
 //!   `mdb_txn_commit`, `mdb_put`, `mdb_cursor_put`, `mdb_dbi_open` with
 //!   `MDB_CREATE`, `mdb_drop`), built on private modules: `wcursor` (write
@@ -46,7 +62,7 @@
 //!   and abort) and `spill` (`mdb_page_spill`, `mdb_page_unspill`);
 //! * `copy`: [`Environment::copy_to_path`] and
 //!   [`Environment::copy_to_fd`] (`mdb_env_copyfd0`, `mdb_env_copyfd1`,
-//!   `mdb_env_cwalk`).
+//!   `mdb_env_cwalk`), byte-identical to `mdb_copy` and `mdb_copy -c`.
 
 #[cfg(test)]
 pub(crate) mod audit;

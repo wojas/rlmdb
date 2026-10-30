@@ -1086,16 +1086,45 @@ static void test_nested(void)
 	mdb_txn_abort(child);
 	RC(mdb_get(parent, db, &k, &d), MDB_NOTFOUND);
 
-	/* the parent's cursors: kept in place across a child's changes, and
-	 * (in C) usable inside the child */
+	/* the parent's cursors are moved into a child for its lifetime
+	 * (mdb_cursor_shadow): usable there, restored if it aborts */
 	OK(mdb_cursor_open(parent, db, &pc));
 	k = sv("b");
 	OK(mdb_cursor_get(pc, &k, &d, MDB_SET));
 	OK(mdb_txn_begin(env, parent, 0, &child));
-	rc = mdb_cursor_get(pc, &k, &d, MDB_GET_CURRENT);
-	GAP("cursors of the parent transaction can be used in a nested one",
-		rc == 0 && veq(k, "b"));
+	CHECK(mdb_cursor_txn(pc) == child);
+	OK(mdb_cursor_get(pc, &k, &d, MDB_GET_CURRENT));
+	CHECK(veq(k, "b") && veq(d, "2"));
 	mdb_cursor_close(pc);	/* ignored while the child is active (C) */
+	OK(mdb_cursor_get(pc, &k, &d, MDB_FIRST));
+	CHECK(veq(k, "a"));
+	k = sv("a0");
+	d = sv("put through the parent's cursor");
+	OK(mdb_cursor_put(pc, &k, &d, 0));
+	OK(mdb_cursor_get(pc, &k, &d, MDB_GET_CURRENT));
+	CHECK(veq(k, "a0"));
+	OK(mdb_get(child, db, &k, &d));
+	CHECK(veq(d, "put through the parent's cursor"));
+	/* a grandchild gets it too, and gives it back */
+	OK(mdb_txn_begin(env, child, 0, &grand));
+	CHECK(mdb_cursor_txn(pc) == grand);
+	OK(mdb_cursor_get(pc, &k, &d, MDB_NEXT));
+	CHECK(veq(k, "b"));
+	OK(mdb_cursor_del(pc, 0));
+	mdb_txn_abort(grand);
+	CHECK(mdb_cursor_txn(pc) == child);
+	OK(mdb_cursor_get(pc, &k, &d, MDB_GET_CURRENT));
+	CHECK(veq(k, "a0"));
+	mdb_txn_abort(child);
+	CHECK(mdb_cursor_txn(pc) == parent);
+	OK(mdb_cursor_get(pc, &k, &d, MDB_GET_CURRENT));
+	CHECK(veq(k, "b") && veq(d, "2"));
+	k = sv("a0");
+	RC(mdb_get(parent, db, &k, &d), MDB_NOTFOUND);
+
+	/* kept in place across a child's changes, and where the child left
+	 * it when the child commits */
+	OK(mdb_txn_begin(env, parent, 0, &child));
 	OK(mdb_cursor_open(child, db, &cc));
 	for (i = 0; i < 2000; i++) {
 		snprintf(key, sizeof(key), "a%05d-%s", i, "padding-to-split-pages");
@@ -1105,11 +1134,22 @@ static void test_nested(void)
 	}
 	k = sv("a");
 	OK(mdb_del(child, db, &k, NULL));
-	OK(mdb_txn_commit(child));	/* closes cc */
 	OK(mdb_cursor_get(pc, &k, &d, MDB_GET_CURRENT));
 	CHECK(veq(k, "b") && veq(d, "2"));
 	OK(mdb_cursor_get(pc, &k, &d, MDB_PREV));
-	T("parent cursor after the child: MDB_PREV gives %.*s", (int)k.mv_size, (char *)k.mv_data);
+	T("parent cursor in the child: MDB_PREV gives %.*s", (int)k.mv_size, (char *)k.mv_data);
+	OK(mdb_cursor_del(pc, 0));
+	OK(mdb_cursor_get(pc, &k, &d, MDB_GET_CURRENT));
+	T("parent cursor in the child after its delete: %.*s", (int)k.mv_size, (char *)k.mv_data);
+	OK(mdb_cursor_get(pc, &k, &d, MDB_PREV));
+	T("parent cursor in the child: MDB_PREV gives %.*s", (int)k.mv_size, (char *)k.mv_data);
+	OK(mdb_txn_commit(child));	/* closes cc */
+	CHECK(mdb_cursor_txn(pc) == parent);
+	OK(mdb_cursor_get(pc, &k, &d, MDB_GET_CURRENT));
+	T("parent cursor after the child: %.*s", (int)k.mv_size, (char *)k.mv_data);
+	OK(mdb_cursor_get(pc, &k, &d, MDB_NEXT));
+	CHECK(veq(k, "b") && veq(d, "2"));
+	RC(mdb_cursor_get(pc, &k, &d, MDB_NEXT), MDB_NOTFOUND);
 	trace_stat("db after the child's 2000 puts", parent, db);
 
 	/* committing the parent commits its active child first */
