@@ -335,25 +335,13 @@ impl TxnCore<'_> {
     /// this transaction's entry for `dbi`, taking a (stale) view of the
     /// environment slot the first time. `EINVAL` if the handle is not valid,
     /// `MDB_BAD_DBI` if it was closed or reused since.
+    #[inline]
     pub(crate) fn dbi_entry(&self, dbi: Dbi, validity: u8) -> Result<TxnDb> {
         let i = dbi.0 as usize;
         let registry = &self.env.dbis;
         let mut entry = *self.dbs.borrow().get(i).ok_or_else(Error::einval)?;
         if entry.state == 0 {
-            // First use in this transaction: take a stale view of the slot.
-            let slots = registry.read();
-            let slot = slots.get(i).filter(|s| s.valid).ok_or_else(Error::einval)?;
-            let (key_cmp, dup_cmp) = DbiRegistry::comparators(slot, i, slot.flags);
-            entry = TxnDb {
-                db: Db::empty(slot.flags),
-                state: DB_VALID | DB_USRVALID | DB_STALE,
-                seq: registry.seq(i),
-                key_cmp,
-                dup_cmp,
-                name_id: slot.name.as_deref().map_or(0, name_id),
-            };
-            drop(slots);
-            self.dbs.borrow_mut()[i] = entry;
+            entry = self.first_use(i)?;
         }
         if entry.state & validity == 0 {
             return Err(Error::einval());
@@ -364,8 +352,30 @@ impl TxnCore<'_> {
         Ok(entry)
     }
 
+    /// The first use of DBI slot `i` in this transaction: take a stale
+    /// view of the environment's slot (see [`Self::dbi_entry`]).
+    #[cold]
+    fn first_use(&self, i: usize) -> Result<TxnDb> {
+        let registry = &self.env.dbis;
+        let slots = registry.read();
+        let slot = slots.get(i).filter(|s| s.valid).ok_or_else(Error::einval)?;
+        let (key_cmp, dup_cmp) = DbiRegistry::comparators(slot, i, slot.flags);
+        let entry = TxnDb {
+            db: Db::empty(slot.flags),
+            state: DB_VALID | DB_USRVALID | DB_STALE,
+            seq: registry.seq(i),
+            key_cmp,
+            dup_cmp,
+            name_id: slot.name.as_deref().map_or(0, name_id),
+        };
+        drop(slots);
+        self.dbs.borrow_mut()[i] = entry;
+        Ok(entry)
+    }
+
     /// As [`Self::dbi_entry`], with a stale record refreshed from this
     /// transaction's snapshot of the main DB.
+    #[inline]
     pub(crate) fn fresh_dbi(&self, dbi: Dbi, validity: u8) -> Result<TxnDb> {
         let entry = self.dbi_entry(dbi, validity)?;
         self.refreshed(dbi, entry)

@@ -154,9 +154,37 @@ fn word_at(buf: &[u8], i: isize) -> u16 {
 /// operand sorts first.
 #[inline]
 pub fn cmp_memn(a: &[u8], b: &[u8]) -> Ordering {
-    // Slice `Ord` for `[u8]` is exactly memcmp + length tie-break.
-    a.cmp(b)
+    let common = a.len().min(b.len());
+    if common > MEMN_INLINE_MAX {
+        // Slice `Ord` for `[u8]` is exactly memcmp + length tie-break.
+        return a.cmp(b);
+    }
+    // Short keys are compared here, eight bytes at a time as big-endian
+    // integers (which order exactly like memcmp), then byte by byte. The
+    // binary searches compare the search key with a dozen keys per page,
+    // and a call into the C library's memcmp costs more than such a
+    // comparison and makes the search loop spill its registers.
+    let (a8, b8) = (&a[..common], &b[..common]);
+    let mut words_a = a8.chunks_exact(8);
+    let mut words_b = b8.chunks_exact(8);
+    for (x, y) in (&mut words_a).zip(&mut words_b) {
+        let x = u64::from_be_bytes(x.try_into().unwrap_or_default());
+        let y = u64::from_be_bytes(y.try_into().unwrap_or_default());
+        if x != y {
+            return x.cmp(&y);
+        }
+    }
+    for (x, y) in words_a.remainder().iter().zip(words_b.remainder()) {
+        if x != y {
+            return x.cmp(y);
+        }
+    }
+    a.len().cmp(&b.len())
 }
+
+/// Longest common length [`cmp_memn`] compares itself; longer operands go
+/// to memcmp, which is faster on long common prefixes.
+const MEMN_INLINE_MAX: usize = 32;
 
 /// `mdb_cmp_memnr`: compare bytes from the end backwards over the common
 /// length, then the shorter operand sorts first.
@@ -272,6 +300,29 @@ mod tests {
         assert_eq!(cmp_memn(b"", b"a"), Less);
         assert_eq!(cmp_memn(b"b", b"abc"), Greater);
         assert_eq!(cmp_memn(&[0xff], &[0x01, 0x00]), Greater);
+    }
+
+    #[test]
+    fn memn_is_memcmp_order() {
+        // Every pair of lengths up to twice the inline limit, sharing
+        // every possible prefix, random bytes after it: the same order as
+        // slices (memcmp, then length).
+        let mut seed = 0x5eed_u64;
+        let mut byte = || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (seed >> 56) as u8
+        };
+        for la in 0..=2 * MEMN_INLINE_MAX + 3 {
+            let a: Vec<u8> = (0..la).map(|_| byte()).collect();
+            for lb in 0..=2 * MEMN_INLINE_MAX + 3 {
+                for shared in 0..=la.min(lb) {
+                    let mut b: Vec<u8> = a[..shared].to_vec();
+                    b.extend((shared..lb).map(|_| byte()));
+                    assert_eq!(cmp_memn(&a, &b), a.cmp(&b), "{a:?} {b:?}");
+                    assert_eq!(cmp_memn(&b, &a), b.cmp(&a), "{b:?} {a:?}");
+                }
+            }
+        }
     }
 
     #[test]

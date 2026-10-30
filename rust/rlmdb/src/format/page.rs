@@ -72,16 +72,28 @@ impl<'a> PageRef<'a> {
         self.buf
     }
 
+    /// The header bytes. `new` checked that they exist, so the fallback
+    /// is never used; it keeps the accessors free of panics. Reading the
+    /// fields from a fixed-size array leaves one length check per read,
+    /// which compiles to a conditional select instead of a branch per
+    /// field offset.
+    #[inline]
+    fn header(&self) -> &'a [u8; PAGE_HDR_SIZE] {
+        self.buf.first_chunk().unwrap_or(&[0; PAGE_HDR_SIZE])
+    }
+
+    /// The `u16` at `off`, one of the header field offsets (all below
+    /// `PAGE_HDR_SIZE - 1`), so the indexing compiles to a plain load.
     #[inline]
     fn hdr16(&self, off: usize) -> u16 {
-        // In bounds: `new` checked for PAGE_HDR_SIZE bytes.
-        get_u16(self.buf, off).unwrap_or(0)
+        let h = self.header();
+        u16::from_ne_bytes([h[off], h[off + 1]])
     }
 
     /// `mp_pgno`.
     #[inline]
     pub fn pgno(&self) -> u64 {
-        get_u64(self.buf, PAGE_PGNO).unwrap_or(0)
+        get_u64(self.header(), PAGE_PGNO).unwrap_or(0)
     }
 
     /// `mp_pad`: the key size on `P_LEAF2` pages.
@@ -111,7 +123,7 @@ impl<'a> PageRef<'a> {
     /// `mp_pages`: length of an overflow run (overlays lower/upper).
     #[inline]
     pub fn overflow_pages(&self) -> u32 {
-        get_u32(self.buf, PAGE_OVERFLOW_PAGES).unwrap_or(0)
+        get_u32(self.header(), PAGE_OVERFLOW_PAGES).unwrap_or(0)
     }
 
     /// `NUMKEYS`: number of nodes (or `P_LEAF2` keys). A corrupt `mp_lower`

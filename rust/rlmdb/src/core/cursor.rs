@@ -88,12 +88,20 @@ pub(crate) struct Kv<'t> {
 }
 
 /// `MDB_cursor` without the sub-cursor.
+///
+/// `N` is the capacity of the page stack. Cursors that outlive a call
+/// have C's [`CURSOR_STACK`] levels. Safe Rust initialises the whole
+/// stack when a cursor is created, where C leaves `mc_pg` uninitialised;
+/// for the temporary cursor of every `mdb_get` that was a measurable part
+/// of a lookup in a small tree, so `TxnCore::get` uses a shorter stack
+/// and only falls back to a full one for a deeper tree. A push beyond `N`
+/// levels fails with `MDB_CURSOR_FULL`, as C's does beyond `CURSOR_STACK`.
 #[derive(Clone)]
-pub(crate) struct Cursor<'t> {
+pub(crate) struct Cursor<'t, const N: usize = CURSOR_STACK> {
     /// `mc_pg`: the page stack, root first.
-    pg: [PageRef<'t>; CURSOR_STACK],
+    pg: [PageRef<'t>; N],
     /// `mc_ki`: the index taken at each level.
-    ki: [u16; CURSOR_STACK],
+    ki: [u16; N],
     /// `mc_snum`: number of pushed pages.
     snum: usize,
     /// `mc_top`: index of the top page, normally `snum - 1`.
@@ -110,18 +118,10 @@ pub(crate) struct Cursor<'t> {
 }
 
 impl<'t> Cursor<'t> {
-    /// `mdb_cursor_init` / `mdb_xcursor_init0`: an unpositioned cursor.
+    /// `mdb_cursor_init` / `mdb_xcursor_init0`: an unpositioned cursor
+    /// with C's full stack.
     pub(crate) fn new(db: Db, cmp: Comparator, flags: u8) -> Cursor<'t> {
-        Cursor {
-            pg: [empty_page(); CURSOR_STACK],
-            ki: [0; CURSOR_STACK],
-            snum: 0,
-            top: 0,
-            flags,
-            db,
-            cmp,
-            subpage: None,
-        }
+        Cursor::unpositioned(db, cmp, flags)
     }
 
     /// Loads the state of a write cursor (`wcursor`) into a cursor fresh
@@ -162,6 +162,24 @@ impl<'t> Cursor<'t> {
     #[inline]
     pub(crate) fn ki_array(&self) -> &[u16; CURSOR_STACK] {
         &self.ki
+    }
+}
+
+impl<'t, const N: usize> Cursor<'t, N> {
+    /// `mdb_cursor_init` / `mdb_xcursor_init0`: an unpositioned cursor
+    /// with a stack of `N` levels.
+    #[inline]
+    pub(crate) fn unpositioned(db: Db, cmp: Comparator, flags: u8) -> Cursor<'t, N> {
+        Cursor {
+            pg: [empty_page(); N],
+            ki: [0; N],
+            snum: 0,
+            top: 0,
+            flags,
+            db,
+            cmp,
+            subpage: None,
+        }
     }
 
     /// `mc_top`.
@@ -234,14 +252,18 @@ impl<'t> Cursor<'t> {
     }
 
     /// `mdb_cursor_push`.
+    #[inline]
     pub(crate) fn push(&mut self, mp: PageRef<'t>) -> Result<()> {
-        if self.snum >= CURSOR_STACK {
+        // Indexing with the level just checked against `N` lets the
+        // compiler drop the bounds checks of the two stores.
+        let level = self.snum;
+        if level >= N {
             return Err(MdbError::CursorFull.into());
         }
-        self.top = self.snum;
-        self.snum += 1;
-        self.pg[self.top] = mp;
-        self.ki[self.top] = 0;
+        self.pg[level] = mp;
+        self.ki[level] = 0;
+        self.top = level;
+        self.snum = level + 1;
         Ok(())
     }
 
@@ -342,7 +364,7 @@ impl<'t> Cursor<'t> {
                     // right place: the child we descended into last time is
                     // still on the stack (snapshots never change).
                     if self.is_initialized() && self.ki_top() == i {
-                        if self.snum >= CURSOR_STACK {
+                        if self.snum >= N {
                             return Err(MdbError::CursorFull.into());
                         }
                         self.top = self.snum;
@@ -462,13 +484,13 @@ fn bsearch(
 
 /// A sub-cursor for `entry` if it is a `MDB_DUPSORT` database
 /// (`mdb_xcursor_init0`), else `None`.
-pub(crate) fn new_xcursor<'t>(entry: &TxnDb) -> Option<Cursor<'t>> {
+pub(crate) fn new_xcursor<'t, const N: usize>(entry: &TxnDb) -> Option<Cursor<'t, N>> {
     if u32::from(entry.db.flags) & MDB_DUPSORT == 0 {
         return None;
     }
     // Until mdb_xcursor_init1 runs the sub-tree is empty. (C leaves mx_db
     // uninitialised and asserts if it is searched before that.)
-    Some(Cursor::new(
+    Some(Cursor::unpositioned(
         Db::empty(0),
         entry.dup_cmp.unwrap_or(Comparator::Memn),
         C_SUB,
@@ -477,19 +499,26 @@ pub(crate) fn new_xcursor<'t>(entry: &TxnDb) -> Option<Cursor<'t>> {
 
 /// `mdb_node_read`: the data of a leaf node, following `F_BIGDATA` to its
 /// overflow pages.
+#[inline]
 pub(crate) fn node_read<'t>(txn: &'t TxnCore<'_>, leaf: NodeRef<'t>) -> Result<&'t [u8]> {
     if !leaf.is_bigdata() {
         return leaf.inline_data().ok_or_else(corrupted);
     }
+    overflow_read(txn, leaf)
+}
+
+/// [`node_read`] of an `F_BIGDATA` node.
+#[inline(never)]
+fn overflow_read<'t>(txn: &'t TxnCore<'_>, leaf: NodeRef<'t>) -> Result<&'t [u8]> {
     let pgno = leaf.overflow_pgno().ok_or_else(corrupted)?;
     txn.overflow_data(pgno, leaf.data_size())
 }
 
 /// `mdb_xcursor_init1`: point the sub-cursor `mx` at the duplicates in
 /// `node` (a sub-DB record or a sub-page).
-pub(crate) fn xcursor_init1<'t>(
-    mc: &Cursor<'t>,
-    mx: &mut Cursor<'t>,
+pub(crate) fn xcursor_init1<'t, const N: usize>(
+    mc: &Cursor<'t, N>,
+    mx: &mut Cursor<'t, N>,
     node: NodeRef<'t>,
 ) -> Result<()> {
     let data = node.inline_data().ok_or_else(corrupted)?;
@@ -544,10 +573,10 @@ enum DupPos {
 /// The common tail of first/last/next/prev: read the entry at the cursor
 /// position; for a node with duplicates, set up the sub-cursor on its first
 /// or last duplicate and return that as the data.
-fn read_position<'t>(
+fn read_position<'t, const N: usize>(
     txn: &'t TxnCore<'_>,
-    mc: &mut Cursor<'t>,
-    mx: Option<&mut Cursor<'t>>,
+    mc: &mut Cursor<'t, N>,
+    mx: Option<&mut Cursor<'t, N>>,
     pos: DupPos,
 ) -> Result<Kv<'t>> {
     let mp = mc.top_page();
@@ -561,13 +590,7 @@ fn read_position<'t>(
     }
     let leaf = mp.node(ki).ok_or_else(corrupted)?;
     let data = if leaf.is_dupdata() {
-        let mx = mx.ok_or_else(corrupted)?;
-        xcursor_init1(mc, mx, leaf)?;
-        let dup = match pos {
-            DupPos::First => cursor_first(txn, mx, None)?,
-            DupPos::Last => cursor_last(txn, mx, None)?,
-        };
-        dup.key
+        enter_dups(txn, mc, mx, leaf, pos)?
     } else if mc.flags & C_SUB == 0 {
         node_read(txn, leaf)?
     } else {
@@ -579,17 +602,38 @@ fn read_position<'t>(
     })
 }
 
-fn reset_sub(mx: &mut Option<&mut Cursor<'_>>) {
+/// The duplicates branch of [`read_position`]: point the sub-cursor at
+/// the duplicates in `leaf` and return the first or last of them. Out of
+/// line, so that the common case, an item without duplicates, gets by with
+/// a smaller stack frame.
+#[inline(never)]
+fn enter_dups<'t, const N: usize>(
+    txn: &'t TxnCore<'_>,
+    mc: &Cursor<'t, N>,
+    mx: Option<&mut Cursor<'t, N>>,
+    leaf: NodeRef<'t>,
+    pos: DupPos,
+) -> Result<&'t [u8]> {
+    let mx = mx.ok_or_else(corrupted)?;
+    xcursor_init1(mc, mx, leaf)?;
+    let dup = match pos {
+        DupPos::First => cursor_first(txn, mx, None)?,
+        DupPos::Last => cursor_last(txn, mx, None)?,
+    };
+    Ok(dup.key)
+}
+
+fn reset_sub<const N: usize>(mx: &mut Option<&mut Cursor<'_, N>>) {
     if let Some(x) = mx.as_deref_mut() {
         x.flags &= !(C_INITIALIZED | C_EOF);
     }
 }
 
 /// `mdb_cursor_first`.
-pub(crate) fn cursor_first<'t>(
+pub(crate) fn cursor_first<'t, const N: usize>(
     txn: &'t TxnCore<'_>,
-    mc: &mut Cursor<'t>,
-    mut mx: Option<&mut Cursor<'t>>,
+    mc: &mut Cursor<'t, N>,
+    mut mx: Option<&mut Cursor<'t, N>>,
 ) -> Result<Kv<'t>> {
     reset_sub(&mut mx);
     if !mc.is_initialized() || mc.top > 0 {
@@ -602,10 +646,10 @@ pub(crate) fn cursor_first<'t>(
 }
 
 /// `mdb_cursor_last`. Leaves `C_EOF` set, as C does.
-pub(crate) fn cursor_last<'t>(
+pub(crate) fn cursor_last<'t, const N: usize>(
     txn: &'t TxnCore<'_>,
-    mc: &mut Cursor<'t>,
-    mut mx: Option<&mut Cursor<'t>>,
+    mc: &mut Cursor<'t, N>,
+    mut mx: Option<&mut Cursor<'t, N>>,
 ) -> Result<Kv<'t>> {
     reset_sub(&mut mx);
     if !mc.is_initialized() || mc.top > 0 {
@@ -621,10 +665,10 @@ pub(crate) fn cursor_last<'t>(
 }
 
 /// `mdb_cursor_next` for `op` in `Next`, `NextDup`, `NextNoDup`.
-pub(crate) fn cursor_next<'t>(
+pub(crate) fn cursor_next<'t, const N: usize>(
     txn: &'t TxnCore<'_>,
-    mc: &mut Cursor<'t>,
-    mut mx: Option<&mut Cursor<'t>>,
+    mc: &mut Cursor<'t, N>,
+    mut mx: Option<&mut Cursor<'t, N>>,
     op: CursorOp,
 ) -> Result<Kv<'t>> {
     if mc.flags & C_DEL != 0 && op == CursorOp::NextDup {
@@ -689,10 +733,10 @@ pub(crate) fn cursor_next<'t>(
 }
 
 /// `mdb_cursor_prev` for `op` in `Prev`, `PrevDup`, `PrevNoDup`.
-pub(crate) fn cursor_prev<'t>(
+pub(crate) fn cursor_prev<'t, const N: usize>(
     txn: &'t TxnCore<'_>,
-    mc: &mut Cursor<'t>,
-    mut mx: Option<&mut Cursor<'t>>,
+    mc: &mut Cursor<'t, N>,
+    mut mx: Option<&mut Cursor<'t, N>>,
     op: CursorOp,
 ) -> Result<Kv<'t>> {
     if !mc.is_initialized() {
@@ -739,10 +783,10 @@ pub(crate) fn cursor_prev<'t>(
 /// (everything but `SetRange`). Returns the position and whether the key
 /// matched exactly.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn cursor_set<'t>(
+pub(crate) fn cursor_set<'t, const N: usize>(
     txn: &'t TxnCore<'_>,
-    mc: &mut Cursor<'t>,
-    mut mx: Option<&mut Cursor<'t>>,
+    mc: &mut Cursor<'t, N>,
+    mut mx: Option<&mut Cursor<'t, N>>,
     dcmp: Option<Comparator>,
     key: &[u8],
     data: Option<&[u8]>,
@@ -914,10 +958,10 @@ pub(crate) fn cursor_set<'t>(
 }
 
 /// `MDB_GET_CURRENT`.
-pub(crate) fn cursor_get_current<'t>(
+pub(crate) fn cursor_get_current<'t, const N: usize>(
     txn: &'t TxnCore<'_>,
-    mc: &mut Cursor<'t>,
-    mx: Option<&mut Cursor<'t>>,
+    mc: &mut Cursor<'t, N>,
+    mx: Option<&mut Cursor<'t, N>>,
 ) -> Result<Kv<'t>> {
     if !mc.is_initialized() {
         return Err(Error::einval());
