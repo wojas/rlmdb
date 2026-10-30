@@ -118,7 +118,9 @@ sub-pages and sub-databases, a `MDB_NOSUBDIR` environment.
 
 * `stat.rs`, `dump.rs`: every option combination on every environment,
   plus usage errors and `getopt` edge cases: identical stdout, stderr and
-  exit code (`-f` output files too).
+  exit code (`-f` output files too). Database names C refuses (empty:
+  `MDB_BAD_VALSIZE`; over 511 bytes: `MDB_NOTFOUND` when opening,
+  `MDB_BAD_VALSIZE` when `mdb_load` creates) give the same errors.
 * `load.rs`: crafted dumps in both encodings, loads into existing
   environments, `-T`, `-N`, `-a` (sorted and unsorted input, several
   batches), malformed input (header errors, truncated lines, bad

@@ -7,11 +7,12 @@ existing C programs compile against `include/lmdb.h` (the unmodified 0.9.36
 header, with one comment added on top) and link against the Rust library
 unchanged.
 
-Status (stage 3, D2): every function of `lmdb.h` is implemented, read and
+Status (stage 4): every function of `lmdb.h` is implemented, read and
 write side. The unmodified upstream programs `mtest.c` .. `mtest6.c`,
 `mdb_load.c`, `mdb_dump.c`, `mdb_copy.c` and `mdb_stat.c` run against it and
 produce what they produce against the C library, down to the page numbers on
-the free list (see "Acceptance"). One known gap remains (see "Known gaps").
+the free list (see "Acceptance"). There are no known gaps (see "Known
+gaps").
 
 ## Building and linking
 
@@ -69,7 +70,13 @@ same return codes:
   `MDB_BAD_TXN` with `MDB_RDONLY` or when the parent already has a child or
   failed). While a child is active, the parent is blocked: its operations
   return `MDB_BAD_TXN`. Committing or aborting a parent ends its child
-  first.
+  first. The parent's cursors (and those of further ancestors) work
+  through the active child, as in C (`mdb_cursor_shadow`):
+  `mdb_cursor_txn` returns the child, they see and change the child's
+  data and are moved by its changes; when the child commits they keep the
+  position they have then, when it aborts they are put back where they
+  were when it began. `mdb_cursor_close` ignores them while the child is
+  active.
 * `mdb_put`/`mdb_cursor_put`: all flags. `MDB_RESERVE` returns the reserved
   space in `data->mv_data` (valid until the next change in the
   transaction); `MDB_NOOVERWRITE` returns the existing data in `data`
@@ -124,7 +131,6 @@ point into the memory map or the transaction's dirty pages (zero copy).
 | `MDB_FIXEDMAP`, `MDB_WRITEMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT` | Honoured. | Accepted and ignored (`mdb_env_get_flags` reports them). A new environment records map address 0 (`KNOWN_C_BUGS.md` #9); a C-created `MDB_FIXEDMAP` environment's recorded address is reported by `mdb_env_info`. |
 | Handles of existing databases opened in a transaction | Visible to other transactions only after that transaction commits; closed if it aborts (read or write transaction). | Published at once and kept after commit or abort. Handles of databases *created* by a write transaction follow C (published at commit, closed on abort). |
 | A parent transaction while its nested child is active | Most functions return `MDB_BAD_TXN`, but some check the DBI first (`EINVAL` for a bad one) and `mdb_dbi_flags`, `mdb_cmp`, `mdb_dcmp` still work. | Every function on the parent returns `MDB_BAD_TXN` (`mdb_txn_id`, `mdb_txn_env` work). |
-| Cursors of a parent transaction inside its child | Usable: C moves them into the child for its lifetime (`mdb_cursor_txn` returns the child). | `MDB_BAD_TXN` until the child ends; known gap (below). They are kept in place across the child's changes, or restored if it aborts, as in C. `mdb_cursor_close` on them is ignored while the child is active, as in C. |
 | `MDB_MULTIPLE` that fails after storing some items | `data[1].mv_size` = items stored, `data[0].mv_data` advanced to the failing one. | `data[1].mv_size` = 0, `data[0].mv_data` unchanged. Failures there leave the transaction unusable anyway. |
 | Keys and data that point into the transaction's own dirty pages | Read while the page is being changed (works in common cases, garbage or use-after-free in others). | Keys and data up to 16 KiB are copied before the write, so they are always read intact. |
 | A C comparison function that calls back into the library with the transaction being written | Reads inconsistent state. | `EINVAL`. |
@@ -142,13 +148,11 @@ point into the memory map or the transaction's dirty pages (zero copy).
 
 ## Known gaps
 
-`tests/c/capi_write.c` marks them with `GAP()`; the Rust build prints them
-and fails once one behaves like C, so this list stays accurate:
-
-* **Cursors of a parent transaction cannot be used inside a nested
-  transaction** (see the table above). The core keeps them in the parent's
-  cursor arena and refuses them in the child; supporting C's shadowing
-  would need the core to accept a parent's cursor handles in the child.
+None. `tests/c/capi_write.c` and `tests/c/capi_read.c` keep the `GAP()`
+macro for C behaviour the Rust library does not have yet: the Rust build
+prints such a gap and fails once it behaves like C, so this section stays
+accurate. (The last one, cursors of a parent transaction used inside a
+nested one, was closed in stage 4.)
 
 ## Acceptance: upstream programs against the Rust library
 
@@ -239,7 +243,9 @@ environments.
   creating transaction, `MDB_MAP_FULL` and the `MDB_BAD_TXN` state,
   threads waiting for the writer lock, `mdb_drop`, nested transactions
   (commit, abort, two levels, failing children, parents committed or
-  aborted with an active child, parent cursors across a child's changes)
+  aborted with an active child, parent cursors used, moved, written and
+  deleted through a child and a grandchild, kept on commit and restored on
+  abort)
   and all four copy functions. Besides the checks, both builds print a
   trace of what they observe (statistics, counts, keys, values, copy
   layouts), which must be identical; every environment left behind passes

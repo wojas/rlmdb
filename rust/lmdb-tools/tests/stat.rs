@@ -218,20 +218,51 @@ fn reader_table_exit_code() {
     }
 }
 
-/// `mdb_dbi_open` with an empty name: C's `mdb_cursor_set` rejects the
-/// zero-length key with `MDB_BAD_VALSIZE`; the Rust core says
-/// `MDB_NOTFOUND`.
+/// Database names C's `mdb_dbi_open` refuses: an empty name fails with
+/// `MDB_BAD_VALSIZE` (C's `mdb_cursor_set` rejects the zero-length key);
+/// a name over the 511-byte key limit is `MDB_NOTFOUND` when opening (the
+/// lookup finds nothing) but `MDB_BAD_VALSIZE` when creating (`mdb_load`
+/// opens with `MDB_CREATE`). The C tools are the oracle: the expected
+/// errors are checked in their output, and the Rust tools must print the
+/// same.
 #[test]
-#[ignore = "lmdb-core: open_db_bytes(Some(b\"\")) returns NOTFOUND, C returns MDB_BAD_VALSIZE"]
 fn empty_db_name() {
     let dir = tempdir();
     let env = env_copy("named", dir.path());
-    for tool in ["mdb_stat", "mdb_dump"] {
-        assert_same(
-            tool,
-            &args(&[b"-s".as_slice(), b"", &p(&env)]),
-            b"",
-            dir.path(),
+    let long = vec![b'n'; 512];
+    let cases: [(&[u8], &str); 2] = [(b"", "MDB_BAD_VALSIZE"), (&long, "MDB_NOTFOUND")];
+    for (name, error) in cases {
+        for tool in ["mdb_stat", "mdb_dump"] {
+            let argv = args(&[b"-s".as_slice(), name, &p(&env)]);
+            let (c, r) = both(tool, &argv, b"", dir.path());
+            assert_runs_equal(tool, &argv, &c, &r);
+            assert_eq!(c.code, 1, "{tool} -s <{} bytes>", name.len());
+            assert!(
+                c.stderr_str().contains(error),
+                "{tool} -s <{} bytes>: expected {error}, C said {}",
+                name.len(),
+                c.stderr_str()
+            );
+        }
+    }
+    // Creating: both names are MDB_BAD_VALSIZE.
+    let input = b"VERSION=3\nformat=bytevalue\ntype=btree\nHEADER=END\n 6b\n 76\nDATA=END\n";
+    for name in [&b""[..], &long] {
+        let mut runs = Vec::new();
+        for imp in [Impl::C, Impl::Rust] {
+            let target = dir.path().join(format!("load-{}-{imp:?}", name.len()));
+            std::fs::create_dir_all(&target).unwrap();
+            let argv = args(&[b"-s".as_slice(), name, &p(&target)]);
+            runs.push(run(imp, "mdb_load", &argv, input, dir.path()));
+        }
+        let argv = args(&[b"-s".as_slice(), name, b"<env>"]);
+        assert_runs_equal("mdb_load", &argv, &runs[0], &runs[1]);
+        assert_eq!(runs[0].code, 1, "mdb_load -s <{} bytes>", name.len());
+        assert!(
+            runs[0].stderr_str().contains("MDB_BAD_VALSIZE"),
+            "mdb_load -s <{} bytes>: C said {}",
+            name.len(),
+            runs[0].stderr_str()
         );
     }
 }
