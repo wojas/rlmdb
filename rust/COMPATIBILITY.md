@@ -49,9 +49,7 @@ with `MDB_USE_POSIX_SEM`).
   the semaphore names are derived from it, as 1.0 does; there is no writer
   lock cache line, so the reader slots start at 64. On Linux the mutexes
   are at 24 and 128 (64 on x86-64), the slots at 192 (128). rlmdb creates
-  and attaches to it as C 1.0 does, but only through the lock-file code so
-  far (`rlmdb::core::reader::LockFile`, not part of the API): an
-  `Environment` refuses `Format::V10` until the 1.0 data layout exists.
+  and attaches to it as C 1.0 does.
 * **Lock files of the other version** are refused with
   `MDB_VERSION_MISMATCH` while another process holds them, and
   re-initialised in the opener's version by an exclusive opener, by C and
@@ -117,7 +115,7 @@ Environment flags (`mdb_env_open`, `EnvironmentFlags`):
 | `MDB_WRITEMAP`, `MDB_MAPASYNC` | accepted and ignored: pages are always written with `pwrite`, which is compatible with C peers that use a writable map |
 | `MDB_FIXEDMAP` | accepted and ignored (the bit is recorded in a new file, the address is 0) |
 | `MDB_NOMEMINIT` | accepted and ignored (buffers are always zeroed) |
-| `MDB_PREVSNAPSHOT` (1.0) | `EINVAL`, as 0.9 does for flags it does not know |
+| `MDB_PREVSNAPSHOT`, `MDB_ENCRYPT` (1.0) | `EINVAL`, as 0.9 does for flags it does not know, also for LMDB 1.0 environments (not implemented); `mdb_env_set_flags` refuses `MDB_ENCRYPT` too |
 
 `mdb_env_set_flags` changes the same flags as C (`MDB_NOSYNC`,
 `MDB_NOMETASYNC`, `MDB_MAPASYNC`, `MDB_NOMEMINIT`). All of these are
@@ -217,7 +215,15 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
   for the other format is `MDB_VERSION_MISMATCH`, as is a version 2 file
   (lmdb-js prerelease builds); a header of neither format is `MDB_INVALID`.
   All of it is decided before the lock file is touched. A new environment is
-  LMDB 0.9 unless 1.0 is requested (`EnvironmentBuilder::format`).
+  LMDB 0.9 unless 1.0 is requested: per environment
+  (`EnvironmentBuilder::format`, `rlmdb_env_set_format`, `mdb_load -F`),
+  else by the process default (`rlmdb::set_default_format`,
+  `rlmdb_set_default_format`), else by the environment variable
+  `RLMDB_DEFAULT_FORMAT=1.0`. **The variable is experimental**: it may be
+  removed or restricted in a later release (capability `default-format-env`
+  tells whether it is honoured), because a stray variable silently creates
+  files C 0.9 cannot open. A value other than `0.9` or `1.0` is ignored.
+  None of the defaults applies to an existing file.
 * **Page sizes** 256 B to 64 KiB for new 1.0 environments
   (`EnvironmentBuilder::page_size`, C 1.0's `mdb_env_set_pagesize`; the OS
   page size by default); the maximum key size and the overflow threshold
@@ -234,8 +240,23 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
 * **Lock file:** a 1.0 environment uses the version 2 lock file ("Lock
   file: format 2" above), so C 1.0 and rlmdb processes share an open
   environment: readers pin pages against the other side's writer, and
-  both see each other's readers and the writer lock. The C API and the
-  tools (`rlmdb-capi`, `rlmdb-tools`) are 0.9's (stage 4).
+  both see each other's readers and the writer lock.
+* **The C API** (`rlmdb-capi`) opens 1.0 environments through the `mdb_*`
+  functions of the 0.9 `lmdb.h`, with `rlmdb.h` for the format functions
+  and 1.0's constants (`rlmdb-capi/README.md`): keys and `MDB_DUPSORT`
+  items up to the environment's `mdb_env_get_maxkeysize`, 1.0's page sizes
+  (`rlmdb_env_set_pagesize`), `mdb_strerror` of 1.0's codes. What a C
+  program writes through it is what C 1.0 writes, and C 1.0 reads it; what
+  C 1.0 writes, it reads. Return codes stay 0.9's where 1.0 changed them
+  (`EACCES` for writes in a read-only transaction). `mdb_drop` of the main
+  DB does what C 1.0's does (`MDB_DBIS_BUSY`, named databases freed;
+  `KNOWN_C_BUGS.md`, section "LMDB 1.0").
+* **The tools** (`rlmdb-tools`) open existing 1.0 files in their format and
+  print what C 1.0's tools print for them (the per-database page size of
+  `mdb_stat`, named databases with their NUL found by `-a`); `mdb_load -F
+  1.0` loads what `mdb_load10` loads, page for page, honouring
+  `db_pagesize=`. Not reproduced: C 1.0 reports the process's map address
+  where the file records none (`mdb_stat -e`, `mapaddr=` in dumps).
 
 | Promise (1.0 format) | Verified by |
 |---|---|
@@ -249,3 +270,11 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
 | The page audit and the structural comparison understand 1.0 | `interop/tests/audit10.rs` |
 | Corrupt 1.0 input never crashes | `rlmdb/tests/robust_mutation.rs` (`*_v10`, `robust_huge_overflow_refs_v10`), `rlmdb/tests/format_v10.rs` (`unknown_headers_are_refused_before_the_lock_file`) |
 | Concurrent C 1.0 and Rust processes | `interop/tests/format10.rs` (`c10_reader_pins_pages_against_rlmdb_writer`, `rlmdb_reader_pins_pages_against_c10_writer`, `c10_and_rlmdb_share_an_open_environment`), `interop/tests/lockfile10.rs` |
+| Defaults for new environments: builder, then `set_default_format`, then `RLMDB_DEFAULT_FORMAT` (unparseable values ignored), then 0.9; never for existing files | `rlmdb/tests/default_format.rs`, `rlmdb-capi/tests/c/capi_format.c` (`test_defaults`), `rlmdb-tools/tests/format.rs`, `interop/tests/capi10.rs` (`capi_creates_1_0_with_the_default_format_variable`, `capi_creates_0_9_by_default`) |
+| `rlmdb.h` format functions and 1.0 constants; `mdb_env_get_maxkeysize` before and after the open; `MDB_PREVSNAPSHOT`/`MDB_ENCRYPT` refused; `mdb_strerror` of 1.0's codes | `rlmdb-capi/tests/capi_format.rs` (`tests/c/capi_format.c`), `rlmdb-capi/src/version.rs` and `src/format.rs` unit tests |
+| The C API with 1.0 environments at 1, 4 and 64 KiB pages: keys longer than 511 bytes, inline data above 16 KiB, `MDB_RESERVE`, `MDB_MULTIPLE`, `MDB_CURRENT`, inputs that point into dirty pages | `rlmdb-capi/tests/c/capi_format.c` (`test_large_items`) |
+| C 1.0 reads what the C API writes (data sets verified by `cpeer10`, its page audit, `mdb_dump10`, `mdb_stat10`) and the C API reads what C 1.0 writes (`cpeer_capi verify`, keys over 511 bytes from `mdb_load10`) | `interop/tests/capi10.rs` |
+| The tools on 1.0 files print what C 1.0's print and leave the files C 1.0's leave (`mdb_load -F 1.0`, `mdb_stat`, `mdb_dump`, `mdb_drop`, `mdb_copy`, on `mdb_load10` and `mtest*10` environments) | `interop/tests/tools10.rs` |
+| The tools' `-F` and `RLMDB_DEFAULT_FORMAT` handling; nothing changes for 0.9 files | `rlmdb-tools/tests/format.rs` |
+| `mdb_drop` of the main DB in a 1.0 environment as C 1.0's (named databases deleted, `MDB_DBIS_BUSY`) | `rlmdb/tests/format_v10.rs` (`emptying_the_main_db_with_named_dbs`), `interop/tests/tools10.rs` (`mdb_drop_matches_mdb_drop10`) |
+| `MDB_DUPFIXED` items over a quarter page (1.0's small pages) written as C 1.0 writes them | `interop/tests/write_differential10.rs` (`diff10_dupfixed_items_over_a_quarter_page`) |

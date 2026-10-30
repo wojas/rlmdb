@@ -2,9 +2,10 @@
 
 Status: investigation, 2026-10-30. Implemented since: stage 1 (the `Layout`
 descriptor), stage 2 (the 1.0 data file: `DESIGN.md`, "The LMDB 1.0 data
-file"; `COMPATIBILITY.md`), and of stage 4 the version report and the
-format selection of the Rust API (`EnvironmentBuilder::format`,
-`sniff_format`).
+file"; `COMPATIBILITY.md`), stage 3 (the 1.0 lock file) and stage 4
+(defaults, `rlmdb.h`, the C API and the tools for 1.0 environments;
+§4.2–§4.4 describe what was built, §7 what it needed). Open: the
+format-converting copy (§4.3) and the 1.0 features beyond its data file.
 
 Question: can rlmdb read and write both the LMDB 0.9 (`MDB_DATA_VERSION 1`)
 and the LMDB 1.0 (`MDB_DATA_VERSION 3`) formats from one code base, picking
@@ -208,13 +209,31 @@ the code C returns when a file's format is not the one the library
 handles; no rlmdb-specific error codes are added. `rlmdb_sniff_format` and
 `rlmdb_env_get_format` let a program find out which format the file has.
 
+Implemented as described: `rlmdb::sniff_format`, then `choose_format` in
+`core/env.rs`, then the lock file. The defaults are `rlmdb::default_format`
+(`set_default_format`, then `RLMDB_DEFAULT_FORMAT`, read at every open of
+a new environment, then 0.9); they never apply to an existing file, so a
+default never causes `MDB_VERSION_MISMATCH`. Tests:
+`rlmdb/tests/default_format.rs` (its own test binary, serialised, because
+the variable and the process default are process-wide),
+`rlmdb-capi/tests/c/capi_format.c`, `rlmdb-tools/tests/format.rs`,
+`interop/tests/capi10.rs`.
+
 ### 4.3 Rust API
 
-* `EnvironmentBuilder::format(Format)`.
+Implemented, except the converting copy:
+
+* `EnvironmentBuilder::format(Format)`, `EnvironmentBuilder::page_size`
+  (1.0 only).
 * `Environment::format() -> Format`, `Environment::max_key_size()` already
   exists and becomes per-environment.
 * `rlmdb::sniff_format(path, flags) -> Result<Option<Format>>`.
-* `rlmdb::set_default_format(Option<Format>)`.
+* `rlmdb::set_default_format(Option<Format>)`, with
+  `process_default_format()`, `default_format()` (the resolution of §4.2)
+  and `DEFAULT_FORMAT_ENV`; `Format::name`/`Format::from_name` (`"0.9"`,
+  `"1.0"`).
+* `RoCursor::current_is_db` / `RwTxn::cursor_is_db`: 1.0's
+  `mdb_cursor_is_db`, which the tools' `-a` needs.
 * `rlmdb::version_info() -> &'static VersionInfo` with `rlmdb` (crate
   version), `lmdb` (what `mdb_version` reports, 0.9.85), `v09` and `v10`
   (the C releases each format matches, 0.9.36 and 1.0.2 today), and
@@ -231,17 +250,19 @@ handles; no rlmdb-specific error codes are added. `rlmdb_sniff_format` and
 ### 4.4 C API: `rlmdb_*` additions, `lmdb.h` untouched
 
 `rlmdb-capi` keeps shipping the unmodified 0.9.36 `lmdb.h` and the `mdb_*`
-symbols. New entry points go in a second header `include/rlmdb.h`:
+symbols. New entry points go in a second header `include/rlmdb.h`
+(implemented as below; the header's comments document them):
 
 ```c
 #define RLMDB_FORMAT_UNKNOWN 0
 #define RLMDB_FORMAT_09      9
 #define RLMDB_FORMAT_10     10
 
-int  rlmdb_env_set_format(MDB_env *env, unsigned format);   /* before mdb_env_open */
+int  rlmdb_env_set_format(MDB_env *env, unsigned format);   /* before mdb_env_open; 0 removes the request */
 int  rlmdb_env_get_format(MDB_env *env, unsigned *format);  /* requested, or actual once open */
 int  rlmdb_sniff_format(const char *path, unsigned flags, unsigned *format); /* MDB_NOSUBDIR honoured */
 int  rlmdb_set_default_format(unsigned format);             /* process-wide, 0 resets */
+int  rlmdb_env_set_pagesize(MDB_env *env, unsigned size);   /* 1.0's mdb_env_set_pagesize */
 ```
 
 `rlmdb.h` also carries the 1.0 constants a program needs with a 1.0
@@ -298,15 +319,38 @@ Behaviour of existing functions:
 
 * `rlmdb_env_get_format` tells the format of an environment; `mdb_version`
   does not change with it.
-* `mdb_env_get_maxkeysize` returns 511 before open unless V10 was requested,
-  and the environment's value after open (1.0 documents it as only valid
-  after open).
-* `mdb_env_open` accepts `MDB_PREVSNAPSHOT` only for V10.
+* `mdb_env_get_maxkeysize` returns 511 before open unless V10 was
+  requested, then the 1.0 value for the page size a new environment would
+  get (`rlmdb_env_set_pagesize`, else the OS page size); after open the
+  environment's value. (C 1.0 returns 0 before the open: `me_maxkey` is
+  only computed in `mdb_env_open2`; 1.0 documents it as only valid after
+  open.)
+* `mdb_env_open` refuses `MDB_PREVSNAPSHOT` with `EINVAL` for both formats
+  until it is implemented (capability `prevsnapshot`).
 * `mdb_env_set_flags` rejects `MDB_ENCRYPT` until encryption exists.
+* The key and data copies of `write.rs` (a caller's pointer may alias the
+  page the put changes) are sized per environment: keys up to its maximum
+  key size (on the heap above 511 bytes, so 0.9 environments copy to the
+  stack as before), data up to half and `MDB_MULTIPLE` items up to a whole
+  page of `max(page size, 32 KiB)`, which is 0.9's 16/32 KiB unchanged.
+  `mdb_dbi_open` copies the name in write transactions: a 1.0 key of the
+  main DB ends with the name's NUL, so passing it back is natural there.
+* `mdb_drop` of the main DB, through every API, does what C 1.0 does in a
+  1.0 environment (`MDB_DBIS_BUSY`, named databases deleted first;
+  `KNOWN_C_BUGS.md`, section "LMDB 1.0").
+* Return codes stay `lmdb.h`'s (0.9's) where 1.0 changed them
+  (`EACCES` for writes in a read-only transaction, 1.0:
+  `MDB_IS_READONLY`).
 
-Tools (`rlmdb-tools`): `mdb_load`, `mdb_copy` and anything that creates a
-file get a `-F 0.9|1.0` option; `mdb_stat` and `mdb_dump` print the format.
-The upstream tools of each release stay the oracle for their own format.
+Tools (`rlmdb-tools`): only `mdb_load` gets `-F 0.9|1.0` (a new file).
+`mdb_copy` copies pages, so its copy has the source's format; a `-F` there
+would be the converting copy (§4.3), not there yet. `mdb_stat` and
+`mdb_dump` do not print a format line (it fits neither tool's upstream
+output); instead each tool prints what the C tool of the environment's
+format prints: the upstream tools of each release stay the oracle for
+their own format (`rlmdb-tools/README.md`, "LMDB 1.0 environments";
+`interop/tests/tools10.rs` compares them with `mdb_load10`, `mdb_stat10`,
+`mdb_dump10`, `mdb_drop10`, `mdb_copy10`).
 
 ### 4.5 Tests and the C oracle
 
@@ -408,7 +452,16 @@ format. Needed:
    `rlmdb.h`, `rlmdb_version()` and the capability list, `mdb_version`
    0.9.85, tools options. The version
    function can land first, on its own, since it is useful without any
-   format work.
+   format work. Done (§4.2–§4.4); besides the items above it needed the
+   per-environment key and data copies of the C API, 1.0's tool output
+   (per-database page size in `mdb_stat`, `mdb_dbi_open` in messages, `-a`
+   by `mdb_cursor_is_db`, `mdb_load`'s `db_pagesize=` and empty keys), two
+   core fixes found by the new tests (C 1.0's `mdb_drop` of the main DB,
+   which frees the named databases where 0.9 leaks them; and a sub-DB made
+   from a single `MDB_DUPFIXED` item larger than a quarter page, only
+   possible on 1.0's small pages, where C's unsigned offset wraps and
+   rlmdb's subtraction panicked in debug builds), and one C 1.0 behaviour
+   not ported (`mdb_env_info`'s process map address; `KNOWN_C_BUGS.md`).
 5. Interop matrix with both C versions (1.0 sources via `git show` of the
    pinned commit, container mount for the common git dir); 1.0 fixtures for
    the robustness tests; docs (`AGENTS.md` §1 and §9, `COMPATIBILITY.md`,

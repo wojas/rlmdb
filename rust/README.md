@@ -40,10 +40,14 @@ Implemented and tested against the C library on macOS (arm64) and Linux
   `rlmdb_version()`, `rlmdb_version_string()` and
   `rlmdb_has_capability()` (rlmdb's version, the C release each format
   matches, capability tokens), which `rlmdb::version_info()` provides on
-  the Rust side.
+  the Rust side, and the data-file format functions
+  (`rlmdb_env_set_format`, `rlmdb_env_get_format`, `rlmdb_sniff_format`,
+  `rlmdb_set_default_format`, `rlmdb_env_set_pagesize`) with LMDB 1.0's
+  constants.
 * **`rlmdb-tools`**: `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` with the
   same options, output, messages and exit codes as the C tools, plus
-  `mdb_drop` (not part of 0.9.36; modelled on 1.0's).
+  `mdb_drop` (not part of 0.9.36; modelled on 1.0's), and `mdb_load -F
+  0.9|1.0` for the format of a new environment.
 * **`interop`**: the cross-process test bed: C, Rust and "C on the Rust
   library" peers writing and reading one environment concurrently, in all
   nine combinations.
@@ -55,9 +59,14 @@ is opened in its format (`rlmdb::sniff_format`), a new one is 0.9 unless
 page sizes from 256 B to 64 KiB (`page_size`). What it writes is page for
 page what C LMDB 1.0 writes for the same operations, `mp_txnid` included
 (checked against a C 1.0 build in `interop`); encrypted or checksummed 1.0
-environments are refused. Until rlmdb writes 1.0's lock file
-(`DUAL_FORMAT.md` stage 3), C 1.0 and rlmdb cannot have one environment open
-at the same time; the C API and the tools handle 0.9 only so far.
+environments are refused. A 1.0 environment has 1.0's lock file, so C 1.0
+and rlmdb processes can have it open at the same time. The C API and the
+tools handle both formats: an existing file in its format, a new one as
+0.9 unless 1.0 is asked for (`rlmdb_env_set_format`,
+`rlmdb_set_default_format`, `mdb_load -F 1.0`, or the **experimental**
+environment variable `RLMDB_DEFAULT_FORMAT=1.0`, which may be removed or
+restricted later); for a 1.0 file the tools print what C 1.0's tools
+print.
 
 Deliberately out of scope:
 
@@ -68,7 +77,9 @@ Deliberately out of scope:
   and ignored. They are per-process choices, so C peers using them are
   unaffected.
 * LMDB 1.0 features beyond its data file: `MDB_VL32`, encryption,
-  checksums, `MDB_PREVSNAPSHOT` (rejected with `EINVAL`, as 0.9 does).
+  checksums, `MDB_PREVSNAPSHOT` (rejected with `EINVAL`, as 0.9 does, for
+  1.0 environments too), two-phase commit; the format-converting copy
+  (`DUAL_FORMAT.md` §4.3) is planned.
 * The `heed`-compatible typed API described in `DESIGN.md` is deferred:
   the byte-level API is validated through the C API first.
   Performance work against C (benchmarks) has not started.
@@ -142,7 +153,8 @@ With the shared library, the loader must find it at run time
 (`LD_LIBRARY_PATH` on Linux; on macOS the dylib's install name is its
 absolute build path, or use `DYLD_LIBRARY_PATH`). Behaviour, the deviations
 from C, the thread rule for write transactions and `rlmdb.h` (rlmdb's
-version and capability functions, next to `lmdb.h`) are in
+version, capability and data-file format functions, next to `lmdb.h`) are
+in
 [`rlmdb-capi/README.md`](rlmdb-capi/README.md).
 
 ### `rlmdb-tools`
