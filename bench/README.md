@@ -53,9 +53,9 @@ at the old version, keep the binary, build the new version and compare,
 interleaved:
 
 ```sh
-cargo build --release -p rlmdb-bench && cp target/release/lmdb-bench /tmp/lmdb-bench-old
+cargo build --release -p rlmdb-bench && cp target/release/rlmdb-bench /tmp/rlmdb-bench-old
 # ... change rlmdb ...
-cargo run --release -p rlmdb-bench -- --baseline /tmp/lmdb-bench-old --rounds 3 --reps 3
+cargo run --release -p rlmdb-bench -- --baseline /tmp/rlmdb-bench-old --rounds 3 --reps 3
 ```
 
 The machine this was developed on was shared with other heavy jobs, so
