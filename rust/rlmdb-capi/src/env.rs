@@ -53,10 +53,22 @@ pub unsafe extern "C" fn mdb_env_create(env: *mut *mut MDB_env) -> c_int {
 /// `mdb_env_open`: open an environment handle.
 ///
 /// Flags set earlier with `mdb_env_set_flags` are added to `flags`, as in
-/// C. Unknown flags give `EINVAL`. `MDB_FIXEDMAP`, `MDB_WRITEMAP`,
-/// `MDB_MAPASYNC` and `MDB_NOMEMINIT` are accepted and ignored; `MDB_NOTLS`
-/// is accepted and is how this implementation always behaves. Opening an
-/// environment that this process already has open fails with `EBUSY`.
+/// C. Unknown flags give `EINVAL`, among them LMDB 1.0's
+/// `MDB_PREVSNAPSHOT` for environments of either format (it is not
+/// implemented) and `MDB_ENCRYPT`. `MDB_FIXEDMAP`, `MDB_WRITEMAP`,
+/// `MDB_MAPASYNC` and `MDB_NOMEMINIT` are accepted and ignored;
+/// `MDB_NOTLS` is accepted and is how this implementation always behaves.
+/// Opening an environment that this process already has open fails with
+/// `EBUSY`.
+///
+/// An existing data file is opened in its format (LMDB 0.9 or 1.0); a
+/// format requested with `rlmdb_env_set_format` that differs from it gives
+/// `MDB_VERSION_MISMATCH`. A new one is created in the requested format,
+/// else in the process default (`rlmdb_set_default_format`), else in the
+/// one the experimental `RLMDB_DEFAULT_FORMAT` variable names, else as
+/// LMDB 0.9; a page size set with `rlmdb_env_set_pagesize` applies to a
+/// new 1.0 environment ([`rlmdb::EnvironmentBuilder::format`],
+/// [`rlmdb::EnvironmentBuilder::page_size`]).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_env_open(
     env: *mut MDB_env,
@@ -82,12 +94,13 @@ pub unsafe extern "C" fn mdb_env_open(
         .map_size(config.map_size)
         .max_readers(config.max_readers)
         .max_dbs(config.max_dbs)
-        .flags(EnvironmentFlags::from_bits_retain(flags | config.flags))
-        // The key and data copies of `write.rs` are sized for LMDB 0.9's
-        // limits (511-byte keys, 32 KiB pages). Until `DUAL_FORMAT.md`
-        // stage 4 sizes them per environment, the C API creates and opens
-        // LMDB 0.9 environments only: a 1.0 file is `MDB_VERSION_MISMATCH`.
-        .format(rlmdb::Format::V09);
+        .flags(EnvironmentFlags::from_bits_retain(flags | config.flags));
+    if let Some(format) = config.format {
+        builder.format(format);
+    }
+    if let Some(page_size) = config.page_size {
+        builder.page_size(page_size);
+    }
     match builder.open_with_permissions(OsStr::from_bytes(path.to_bytes()), mode) {
         Ok(opened) => {
             e.set_opened(opened, path.to_owned());
@@ -165,8 +178,10 @@ pub unsafe extern "C" fn mdb_env_sync(env: *mut MDB_env, force: c_int) -> c_int 
 }
 
 /// `mdb_env_set_flags`: set environment flags (only `MDB_NOSYNC`,
-/// `MDB_NOMETASYNC`, `MDB_MAPASYNC` and `MDB_NOMEMINIT` can be changed).
-/// Before `mdb_env_open` the flags are remembered for the open.
+/// `MDB_NOMETASYNC`, `MDB_MAPASYNC` and `MDB_NOMEMINIT` can be changed;
+/// others give `EINVAL`, LMDB 1.0's `MDB_ENCRYPT` among them: encryption
+/// is not implemented). Before `mdb_env_open` the flags are remembered for
+/// the open.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_env_set_flags(
     env: *mut MDB_env,
@@ -316,10 +331,34 @@ pub unsafe extern "C" fn mdb_env_set_maxdbs(env: *mut MDB_env, dbs: MDB_dbi) -> 
 }
 
 /// `mdb_env_get_maxkeysize`: the maximum size of keys and `MDB_DUPSORT`
-/// data (511).
+/// data. For an open environment its own limit
+/// ([`rlmdb::Environment::max_key_size`]): 511 for LMDB 0.9, for 1.0 a
+/// value that follows from the page size (1978 on 4 KiB pages). Before
+/// the open 511, unless LMDB 1.0 was requested with
+/// `rlmdb_env_set_format`: then the 1.0 limit for the page size a new
+/// environment would get (`rlmdb_env_set_pagesize`, else the OS page
+/// size), which an existing file with another page size changes at the
+/// open. (C 1.0 returns 0 before the open: it only computes the limit in
+/// `mdb_env_open`.) 511 for a NULL handle, as C 0.9.
 #[no_mangle]
-pub unsafe extern "C" fn mdb_env_get_maxkeysize(_env: *mut MDB_env) -> c_int {
-    rlmdb::consts::MDB_MAXKEYSIZE as c_int
+pub unsafe extern "C" fn mdb_env_get_maxkeysize(env: *mut MDB_env) -> c_int {
+    // SAFETY: env is NULL or a live handle (lmdb.h).
+    let size = match unsafe { MDB_env::from_ptr(env) } {
+        Some(e) => match e.open_env() {
+            Some(open) => open.max_key_size(),
+            None => {
+                let config = *e.config();
+                match config.format {
+                    Some(f @ rlmdb::Format::V10) => f
+                        .layout()
+                        .max_key_size(crate::format::new_page_size(f, config.page_size)),
+                    _ => rlmdb::consts::MDB_MAXKEYSIZE,
+                }
+            }
+        },
+        None => rlmdb::consts::MDB_MAXKEYSIZE,
+    };
+    c_int::try_from(size).unwrap_or(c_int::MAX)
 }
 
 /// `mdb_env_set_userctx`: set application information associated with the

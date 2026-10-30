@@ -19,7 +19,13 @@
 //! core changes those pages while it works, so such inputs are first copied
 //! (keys always, data up to the largest size a leaf page can hold inline;
 //! larger data lives on overflow pages, which C also requires not to be
-//! passed back).
+//! passed back). The limits are the environment's (`CopyLimits`): keys up
+//! to its maximum key size (511 bytes in LMDB 0.9; in 1.0 up to 32698 on
+//! 64 KiB pages), data up to half a page and `MDB_MULTIPLE` items up to a
+//! page, where a page is the environment's or 0.9's largest (32 KiB),
+//! whichever is larger. For an LMDB 0.9 environment they are what they
+//! always were (511, 16 KiB and 32 KiB), and keys are copied to the stack;
+//! longer keys of 1.0 environments are copied to the heap.
 
 use std::os::raw::{c_char, c_int, c_uint};
 use std::os::unix::ffi::OsStrExt;
@@ -43,14 +49,51 @@ const PUT_FLAGS: c_uint =
 /// Flags `mdb_cursor_put` uses; C ignores all other bits.
 const CURSOR_PUT_FLAGS: c_uint = PUT_FLAGS | MDB_CURRENT | MDB_MULTIPLE;
 
-/// Data up to this size is copied before a put (see the module
-/// documentation): half the largest page size, an upper bound for the
-/// data of a node stored inline in a leaf page.
-const COPY_DATA_MAX: usize = rlmdb::consts::MAX_PAGESIZE / 2;
+/// How much of a caller's key and data a write operation copies first
+/// (see the module documentation), per environment.
+#[derive(Debug, Clone, Copy)]
+struct CopyLimits {
+    /// Keys up to this size are copied: the environment's maximum key
+    /// size (`mdb_env_get_maxkeysize`). Longer keys are not copied: the
+    /// core refuses them before it changes anything.
+    key: usize,
+    /// Data up to this size is copied: half a page, an upper bound for the
+    /// data of a node stored inline in a leaf page.
+    data: usize,
+    /// `MDB_MULTIPLE` items up to this size are copied: a page, the most
+    /// that `MDB_GET_MULTIPLE` / `MDB_NEXT_MULTIPLE` return.
+    multiple: usize,
+}
 
-/// `MDB_MULTIPLE` items up to this size are copied before the put: a page,
-/// the most that `MDB_GET_MULTIPLE` / `MDB_NEXT_MULTIPLE` return.
-const MULTIPLE_COPY_MAX: usize = rlmdb::consts::MAX_PAGESIZE;
+impl CopyLimits {
+    /// The limits of `env`'s open environment. The page is LMDB 0.9's
+    /// largest (`MAX_PAGESIZE`, 32 KiB), or the environment's own if it is
+    /// larger (LMDB 1.0 allows 64 KiB), so 0.9 environments copy exactly what
+    /// they did before 1.0 existed.
+    fn of(env: &MDB_env) -> CopyLimits {
+        let Some(e) = env.open_env() else {
+            // A transaction implies an open environment; this is never used.
+            return CopyLimits::of_size(MDB_MAXKEYSIZE, rlmdb::consts::MAX_PAGESIZE);
+        };
+        CopyLimits::of_size(e.max_key_size(), e.page_size())
+    }
+
+    /// The limits for keys up to `max_key` bytes and pages of `page_size`.
+    fn of_size(max_key: usize, page_size: usize) -> CopyLimits {
+        let page = page_size.max(rlmdb::consts::MAX_PAGESIZE);
+        CopyLimits {
+            key: max_key,
+            data: page / 2,
+            multiple: page,
+        }
+    }
+
+    /// Data copied out of the caller's memory if it could live inline in
+    /// a leaf page.
+    fn copy_data(&self, data: &[u8]) -> Option<Vec<u8>> {
+        (data.len() <= self.data).then(|| data.to_vec())
+    }
+}
 
 /// `TXN_DBI_EXIST(txn, dbi, DB_USRVALID)` of a read-only transaction:
 /// `false` unless `dbi` is a user database handle of the active
@@ -66,37 +109,43 @@ fn user_dbi_exists(txn: &MDB_txn, dbi: MDB_dbi) -> bool {
     .is_ok()
 }
 
-/// A key copied out of the caller's memory (see the module documentation).
-/// Keys longer than `MDB_MAXKEYSIZE` are not copied: the core refuses them
-/// before it changes anything.
-struct KeyCopy {
+/// A key copied out of the caller's memory (see the module documentation):
+/// on the stack up to `MDB_MAXKEYSIZE` (511) bytes, the limit of LMDB 0.9,
+/// on the heap up to the environment's limit (LMDB 1.0's is larger). Longer
+/// keys are not copied: the core refuses them before it changes anything.
+pub(crate) struct KeyCopy {
     buf: [u8; MDB_MAXKEYSIZE],
     len: usize,
+    /// The copy of a key longer than `buf`; empty (no allocation) otherwise.
+    long: Vec<u8>,
 }
 
 impl KeyCopy {
-    fn new(key: &[u8]) -> KeyCopy {
+    /// Copies `key` if it is at most `max_key` bytes long.
+    pub(crate) fn new(key: &[u8], max_key: usize) -> KeyCopy {
         let mut k = KeyCopy {
             buf: [0; MDB_MAXKEYSIZE],
             len: usize::MAX,
+            long: Vec::new(),
         };
         if let Some(dst) = k.buf.get_mut(..key.len()) {
             dst.copy_from_slice(key);
             k.len = key.len();
+        } else if key.len() <= max_key {
+            k.long = key.to_vec();
         }
         k
     }
 
     /// The key to pass on: the copy, or `original` if it was too long.
-    fn get<'a>(&'a self, original: &'a [u8]) -> &'a [u8] {
-        self.buf.get(..self.len).unwrap_or(original)
+    pub(crate) fn get<'a>(&'a self, original: &'a [u8]) -> &'a [u8] {
+        match self.buf.get(..self.len) {
+            Some(k) => k,
+            // Only keys longer than `buf` are copied there.
+            None if !self.long.is_empty() => &self.long,
+            None => original,
+        }
     }
-}
-
-/// Data copied out of the caller's memory if it could live inline in a
-/// leaf page.
-fn copy_data(data: &[u8]) -> Option<Vec<u8>> {
-    (data.len() <= COPY_DATA_MAX).then(|| data.to_vec())
 }
 
 /// The key of a write operation (`EINVAL` if its pointer is NULL with a
@@ -198,7 +247,8 @@ pub unsafe extern "C" fn mdb_put(
         (Ok(k), v) => (k, v),
         (Err(code), _) => return code,
     };
-    let key_copy = KeyCopy::new(key_in);
+    let limits = CopyLimits::of(t.env());
+    let key_copy = KeyCopy::new(key_in, limits.key);
     let k = key_copy.get(key_in);
     let db = Dbi::from_raw(dbi);
     let wflags = WriteFlags::from_bits_retain(flags);
@@ -212,7 +262,7 @@ pub unsafe extern "C" fn mdb_put(
         }
         // SAFETY: data points to a valid value (lmdb.h).
         let d = unsafe { input(data) }?.unwrap_or_default();
-        let d_copy = copy_data(d);
+        let d_copy = limits.copy_data(d);
         let result = w.put(db, k, d_copy.as_deref().unwrap_or(d), wflags);
         // SAFETY: data is writable (lmdb.h).
         unsafe { put_result(w, db, k, flags, data, result) }
@@ -247,8 +297,9 @@ pub unsafe extern "C" fn mdb_del(
         (Ok(k), Ok(d)) => (k, d),
         (Err(code), _) | (_, Err(code)) => return code,
     };
-    let key_copy = KeyCopy::new(key_in);
-    let data_copy = data_in.and_then(copy_data);
+    let limits = CopyLimits::of(t.env());
+    let key_copy = KeyCopy::new(key_in, limits.key);
+    let data_copy = data_in.and_then(|d| limits.copy_data(d));
     let data_in = data_copy.as_deref().or(data_in);
     code(t.with_write(
         |w| match w.del(Dbi::from_raw(dbi), key_copy.get(key_in), data_in) {
@@ -310,7 +361,8 @@ pub unsafe extern "C" fn mdb_cursor_put(
         (Ok(k), v) => (k, v),
         (Err(code), _) => return code,
     };
-    let key_copy = KeyCopy::new(key_in);
+    let limits = CopyLimits::of(t.env());
+    let key_copy = KeyCopy::new(key_in, limits.key);
     let k = key_copy.get(key_in);
     let wflags = WriteFlags::from_bits_retain(flags);
     code(c.with_cursor(|access| {
@@ -335,7 +387,7 @@ pub unsafe extern "C" fn mdb_cursor_put(
             // The items may be what MDB_GET_MULTIPLE returned from a dirty
             // page of this transaction, which the put changes: copy a
             // page's worth or less (see the module documentation).
-            let items_copy = (items.len() <= MULTIPLE_COPY_MAX).then(|| items.to_vec());
+            let items_copy = (items.len() <= limits.multiple).then(|| items.to_vec());
             let items = items_copy.as_deref().unwrap_or(items);
             let stored = w
                 .cursor_put_multiple(id, k, items, size, wflags)
@@ -361,7 +413,7 @@ pub unsafe extern "C" fn mdb_cursor_put(
         }
         // SAFETY: data points to a valid value (lmdb.h).
         let d = unsafe { input(data) }?.unwrap_or_default();
-        let d_copy = copy_data(d);
+        let d_copy = limits.copy_data(d);
         let result = w.cursor_put(id, k, d_copy.as_deref().unwrap_or(d), wflags);
         // SAFETY: data is writable (lmdb.h).
         unsafe { put_result(w, db, k, flags, data, result) }

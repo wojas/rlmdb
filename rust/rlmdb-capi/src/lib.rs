@@ -2,7 +2,13 @@
 //! crate: `liblmdb.a` / `liblmdb.so` / `liblmdb.dylib` built from this crate
 //! are drop-in replacements for the C library, so existing C programs link
 //! against them unchanged. `include/lmdb.h` is the unmodified 0.9.36 header;
-//! `include/rlmdb.h` declares the few functions of rlmdb's own.
+//! `include/rlmdb.h` declares the few functions of rlmdb's own and the LMDB
+//! 1.0 constants a program needs with a 1.0 environment.
+//!
+//! Environments of both data-file formats the core handles, LMDB 0.9 and
+//! LMDB 1.0, are opened through the same `mdb_*` functions: an existing
+//! file in its format, a new one in the format `rlmdb_env_set_format` (or
+//! a default, see [`env::mdb_env_open`]) asks for.
 //!
 //! This layer is deliberately thin: argument validation (the same checks,
 //! in the same order, with the same return codes as `mdb.c`), translation
@@ -13,6 +19,10 @@
 //!
 //! * `mdb_version`, `mdb_strerror`, and `rlmdb.h`'s `rlmdb_version`,
 //!   `rlmdb_version_string`, `rlmdb_has_capability` in [`version`].
+//! * `rlmdb.h`'s data-file format functions (`rlmdb_env_set_format`,
+//!   `rlmdb_env_get_format`, `rlmdb_sniff_format`,
+//!   `rlmdb_set_default_format`, `rlmdb_env_set_pagesize`) in
+//!   [`format`](mod@format).
 //! * `mdb_env_*`, `mdb_reader_list`, `mdb_reader_check` in [`env`](mod@env).
 //! * `mdb_txn_*` in [`txn`].
 //! * `mdb_dbi_*`, `mdb_stat`, `mdb_set_compare` & co., `mdb_cmp`,
@@ -53,6 +63,7 @@ pub mod cursor;
 pub mod dbi;
 pub mod env;
 mod erased;
+pub mod format;
 pub mod handles;
 pub mod txn;
 pub mod types;
