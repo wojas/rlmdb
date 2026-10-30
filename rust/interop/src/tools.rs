@@ -23,6 +23,39 @@ fn run_tool(
     run_tool_any_status(bin, args, cwd, stdin)?.ok()
 }
 
+/// As [`run_tool_any_status`], with environment variables set (`Some`) or
+/// removed (`None`) for the program, such as `RLMDB_DEFAULT_FORMAT`.
+pub fn run_tool_with_env(
+    bin: &Path,
+    args: &[OsString],
+    envs: &[(&str, Option<&str>)],
+    stdin: Option<&[u8]>,
+) -> Result<Output> {
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    for (name, value) in envs {
+        match value {
+            Some(v) => cmd.env(name, v),
+            None => cmd.env_remove(name),
+        };
+    }
+    let name = bin.file_name().unwrap_or_default().to_string_lossy();
+    let label = std::iter::once(name.into_owned())
+        .chain(args.iter().map(|a| a.to_string_lossy().into_owned()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    run_command(cmd, label, stdin, default_timeout())
+}
+
+/// The C LMDB 1.0 page audit (`cpeer10 check-freelist`) of the 1.0
+/// environment at `env`: every page is in use exactly once (reachable from
+/// the newest snapshot's trees or in the free list), and every page's
+/// `mp_txnid` is plausible. `Err` with the audit's output if it fails.
+pub fn audit10(env: &Path) -> Result<Output> {
+    let args = [OsString::from("check-freelist"), env.as_os_str().to_owned()];
+    run_tool_any_status(bins::cpeer10(), &args, None, None)?.ok()
+}
+
 /// Run a C program (`cwd`: its working directory) with arguments and
 /// optional stdin, whatever its exit status; times out like the peers.
 pub fn run_tool_any_status(
@@ -60,8 +93,13 @@ fn tool_args<S: AsRef<OsStr>>(env: &TestEnv, flags: &[S]) -> Vec<OsString> {
 ///   Overflow pages: 0
 ///   Entries: 3
 /// ```
+///
+/// LMDB 1.0's `mdb_stat` prints `  Page size: 4096` first (0.9 has that
+/// line under `#if 0`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TreeStat {
+    /// `Page size` (LMDB 1.0's `mdb_stat` only).
+    pub page_size: Option<u32>,
     /// `Tree depth`.
     pub depth: u32,
     /// `Branch pages`.
@@ -203,6 +241,7 @@ impl MdbStat {
             };
             if let Some(t) = tree {
                 match key {
+                    "Page size" => t.page_size = Some(num(value)? as u32),
                     "Tree depth" => t.depth = num(value)? as u32,
                     "Branch pages" => t.branch_pages = num(value)?,
                     "Leaf pages" => t.leaf_pages = num(value)?,

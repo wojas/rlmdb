@@ -16,8 +16,15 @@ name = "interop"
 name = "rpeer"
 path = "src/bin/rpeer/main.rs"
 
+# The Rust tools of `rlmdb-tools` in one executable (`rtools mdb_stat ...`),
+# so that tests can run them next to the C 1.0 tools built here.
+[[bin]]
+name = "rtools"
+path = "src/bin/rtools.rs"
+
 [dependencies]
 rlmdb = { path = "../rlmdb" }
+rlmdb-tools = { path = "../rlmdb-tools" }
 tempfile = "3"
 
 [dev-dependencies]

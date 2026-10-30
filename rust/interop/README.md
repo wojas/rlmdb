@@ -32,8 +32,13 @@ environment and checking what each sees.
   sixth argument sets the page size), built from 1.0 sources that
   `build.rs` takes from git (see "The LMDB 1.0 oracle" below).
 
+* `rtools` (`src/bin/rtools.rs`) is the Rust tools of `../rlmdb-tools` in
+  one executable (`rtools mdb_stat -a env` runs `mdb_stat` with `argv[0]`
+  `mdb_stat`): cargo builds a package's binaries for its own tests only,
+  and the C 1.0 tools the Rust ones are compared with are built here.
+
 The C programs are compiled into `$OUT_DIR/bin` (`interop::bins` has the
-paths); `rpeer` is a normal `[[bin]]` of this crate.
+paths); `rpeer` and `rtools` are normal `[[bin]]`s of this crate.
 
 Three peers give nine ordered (writer, reader) pairs. Every scenario runs
 for every pair, so each implementation writes what each implementation
@@ -70,6 +75,8 @@ rust/scripts/linux-test.sh test -p rlmdb-interop  # the same on Linux (Docker)
 | `tests/oracle10.rs` | the LMDB 1.0 build: tool versions, the `layout_dump10` numbers (page header, `MDB_ovpage`, lock-file header, the `MDB_LOCK_FORMAT` formula, maximum key size), the two dumps lining up, 0.9 and 1.0 refusing each other's environments, `cpeer10`, every 1.0 `mtest*` |
 | `tests/audit10.rs` | `cpeer10 check-freelist` and `pagecmp` on 1.0 files written by the C 1.0 programs (page sizes 256 to 65536, copies, `mtest*`): good files pass, broken copies (leaked page, page used twice, bad `mp_txnid`, `MDB_ovpage`, sub-page flags) fail; `pagecmp` refuses 0.9 against 1.0 |
 | `tests/write_differential10.rs` | the write path of the 1.0 format against C 1.0: the lock-step harness of `rlmdb/tests/common/differential.rs` with `writeops10` at 1, 4, 16 and 64 KiB pages (plain, integer, reverse, DUPSORT, DUPFIXED, deep trees, overwrites, nested transactions, drops, Rust-side spills; `diff10_spill_full_size` `#[ignore]`d), every step compared, then `mdb_dump10`, `cpeer10 check-freelist` and `pagecmp` (page by page, `mp_txnid` included) |
+| `tests/capi10.rs` | the C API with 1.0 environments against C 1.0: `cpeer_capi` creates one with `RLMDB_DEFAULT_FORMAT=1.0` (and a 0.9 one without), fills 1.0 files of 1 KiB and 64 KiB pages that `mdb_load10` created (opened without a format request; inline values of 20000 bytes on 64 KiB pages), and `cpeer10 verify`, the C 1.0 page audit, `mdb_dump10` and `mdb_stat10` agree; the reverse with `cpeer10` writing and `cpeer_capi verify`/`dump` reading, keys over 511 bytes from `mdb_load10` included |
+| `tests/tools10.rs` | the Rust tools (`rtools`) on 1.0 files against `mdb_load10` (`-F 1.0` and `RLMDB_DEFAULT_FORMAT=1.0`: same messages, same pages; empty keys), `mdb_stat10` and `mdb_dump10` (every option both have, on `mdb_load10` files at 1, 4, 64 KiB pages and on `mtest*10` environments), `mdb_drop10` (same files, also emptying the main DB), `mdb_copy10` (byte-identical copies); C 1.0's process map address is normalised (`KNOWN_C_BUGS.md`, "LMDB 1.0") |
 | `tests/format10.rs` | rlmdb reading C 1.0's files (`mdb_load10` at 512 B to 64 KiB pages, `mtest*10`) against `mdb_dump10`/`mdb_stat10`; rlmdb loading what `mdb_load10` loads (same pages); copies byte-identical to `mdb_copy10 [-c]`; C 1.0 and rlmdb writing one environment in turns; the concurrent scenarios, `#[ignore]`d until rlmdb writes the 1.0 lock file (`DUAL_FORMAT.md` stage 3) |
 
 A scenario step that needs something a peer lacks (none at the moment)
