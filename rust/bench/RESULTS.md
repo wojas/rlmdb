@@ -1,550 +1,303 @@
 # lmdb-bench results
 
-Rust rewrite (`rlmdb`) against the C library (0.9.36), stage 4 task P:
-measured, profiled, cheap wins fixed. Workloads and method: [`README.md`](README.md).
+Rust rewrite (`rlmdb`) against the C library (0.9.36) at `e84876f`,
+after the second optimisation round (tasks W, R, S and L) and with the
+Lightning Stream workloads (`ls` group). Workloads and method:
+[`README.md`](README.md); every change has a report with its A/B
+tables, profiles and tests under [`results/`](results/).
+
+The suite runs the same workloads with the same data on both sides:
+puts (sequential with `MDB_APPEND`, random, overwrites, `DUPSORT`,
+4 KiB and 64 KiB values), gets, cursor scans, deletes, one-put
+transactions with and without sync, a writer next to four scanning
+readers, and a Lightning Stream style sync scan and update of a
+5-million-record database. n = 1 000 000 keys (16-byte keys, 100-byte
+values) unless stated otherwise; all environments use `MDB_NOSYNC`
+except `txn_sync`.
 
 **Summary.**
 
-* Before: on macOS (16 KiB pages) Rust reads were already at parity
-  with C or faster (random gets, `GET_BOTH`, `NEXT_DUP`, 8 concurrent
-  readers), scans 1.2-1.35x C's time; on Linux (4 KiB pages, deeper
-  trees) every read was 1.07-1.4x. Writes were 1.2-5x slower on both.
-* Five local, behaviour-preserving changes (below). Interleaved A/B
-  against the unchanged code, macOS: sequential appends -44 %,
-  `DUPSORT` puts -32 %, small-tree gets -19 %, scans -10 to -15 %,
-  random gets, deletes, random puts, small transactions -7 to -13 %;
-  overwrites and large-value puts unchanged within noise. Linux,
-  interleaved too: appends -43 %, `DUPSORT` puts -33 %, scans -18 to
-  -23 %, random gets and small transactions -15 %, random puts, deletes
-  and overwrites -8 to -13 %, mixed readers -21 %.
-* After: reads 0.7-1.25x C (Linux: scans and `DUPSORT` reads at
-  parity, random gets 1.16x), except gets on a small cached tree with
-  4 KiB pages (`get_64k` on Linux, ~1.4-1.6x); writes 1.2-1.8x
-  (appends 2.5-3x). What is left is mostly architectural; see
-  "Remaining gaps".
+* Reads (other than `DUPSORT` lookups) are at parity with C or faster
+  on the server and on macOS; in the arm64 VM `get_4k` is at 1.33x.
+  `ls_scan`, the workload this project cares most about, is now ahead
+  of C everywhere: 0.77x C on the x86-64 server, 0.81x on macOS, 0.89x
+  in the arm64 VM (it was 1.03-1.25x before task L). Plain scans are at
+  0.8-1.0x C, random gets at 0.72-0.99x.
+* Writes: sequential appends are the largest gap (1.75-2.2x C), then
+  one-put transactions (1.2-1.45x). On the 4 KiB-page server random
+  overwrites and deletes are at 1.3x, random puts 1.15x, 64 KiB puts
+  1.7x, 4 KiB puts 1.1x; on macOS (16 KiB pages) all of these are at
+  0.94-1.1x. Lightning Stream updates are at 1.0-1.17x.
+* This round, against the tree before it (`71e228d`), interleaved on
+  the server: sequential appends -33 %, 4 KiB puts -47 %, gets of 4 KiB
+  and 64 KiB values -28 to -30 %, scans -10 % and random gets -5 %
+  (all before L). macOS, per task: random overwrites -30 %, random puts
+  -22 % (W) and -5 % (S), deletes -24 % and -5 %, sequential appends
+  -7 % and -19 %; `ls_scan` -19 to -22 % and plain scans -12 to -20 %
+  (L).
 
-## macOS (Apple M1 Pro, 16 KiB pages)
+## Rust against C, current tree
+
+ns/op: median (min); ratio = Rust median / C median (above 1: Rust is
+slower).
+
+### Linux server (x86-64, 4 KiB pages): the reference
+
+* x86-64 Hyper-V guest, 4 vCPUs (AMD EPYC Milan), 31 GB RAM, Rocky
+  Linux 9 kernel 5.14, environments on a tmpfs in RAM (`/dev/shm`)
+  except the second `txn_sync` row, which ran on ext4 on a virtio disk;
+  gcc 11.5, rustc 1.99.1.
+* The machine was idle during the runs. Run 1 (5 reps, one process per
+  side and group) has most medians within 1-3 % of the minimums; run 2
+  (3 rounds of 3 reps) spreads more between rounds, on both sides.
+* Source: the rows of run 2 are at `e84876f` (`--only
+  ls,read,dupsort --rounds 3 --reps 3`). The others are run 1, the full
+  suite at `ccc9893` (`--reps 5`), before task L. L changes only cursor
+  stepping, which none of those rows depends on except `mixed_readers`
+  (four scanners), marked *pre-L*; run 1's numbers for the rows run 2
+  replaced are in the notes below.
+
+| workload | ops/rep | run | C ns/op | Rust ns/op | Rust/C |
+|---|---:|:---:|---:|---:|---:|
+| seq_put_append | 1000000 | 1 | 141 (139) | 273 (271) | **1.94** |
+| rand_put | 1000000 | 1 | 2861 (2840) | 3290 (3206) | **1.15** |
+| rand_get | 1000000 | 2 | 1009 (954) | 972 (882) | **0.96** |
+| scan_fwd | 1000000 | 2 | 51.3 (46.0) | 41.7 (35.7) | **0.81** |
+| scan_bwd | 1000000 | 2 | 43.3 (39.3) | 35.8 (31.5) | **0.83** |
+| readers8_get | 8000000 | 2 | 259 (251) | 248 (220) | **0.96** |
+| rand_overwrite | 1000000 | 1 | 3146 (3065) | 4186 (4129) | **1.33** |
+| dup_put | 1000000 | 2 | 784 (731) | 1310 (1264) | **1.67** |
+| dup_get_both | 1000000 | 2 | 1055 (966) | 1233 (1208) | **1.17** |
+| dup_next_dup | 1000000 | 2 | 130 (123) | 162 (156) | **1.24** |
+| put_4k | 50000 | 1 | 4618 (4576) | 5066 (5001) | **1.10** |
+| get_4k | 1000000 | 1 | 481 (469) | 450 (441) | **0.94** |
+| put_64k | 5000 | 1 | 39409 (38892) | 66976 (64250) | **1.70** |
+| get_64k | 1000000 | 1 | 228 (227) | 226 (222) | **0.99** |
+| del_rand | 1000000 | 1 | 2884 (2839) | 3720 (3700) | **1.29** |
+| txn_nosync | 50000 | 1 | 5915 (5876) | 7929 (7751) | **1.34** |
+| txn_sync (tmpfs) | 1000 | 1 | 5152 (4717) | 6598 (6513) | **1.28** |
+| txn_sync (ext4) | 1000 | 1 | 311502 (308852) | 318443 (313707) | **1.02** |
+| mixed_writer | 50000 | 1 | 7771 (6979) | 9160 (8532) | **1.18** |
+| mixed_readers | 23749632 | 1, *pre-L* | 16.1 (15.8) | 17.5 (16.2) | **1.08** |
+| ls_scan | 5000000 | 2 | 69.3 (61.2) | 53.5 (50.2) | **0.77** |
+| ls_update | 50000 | 2 | 5161 (4839) | 5414 (5242) | **1.05** |
+
+Run 1 (before L) had `ls_scan` at 1.03, `scan_fwd` 0.99, `scan_bwd`
+1.11, `ls_update` 1.17 and the other rows of run 2 within a few
+percent of the values above (`rand_get` 0.96, `readers8_get` 0.94).
+`txn_sync` on tmpfs measures the commit path with a near-free
+`fdatasync`; on ext4 the sync dominates and both sides are equal. The
+ext4 run also had `txn_nosync` at 1.31.
+
+### macOS (Apple M1 Pro, 16 KiB pages)
 
 * macOS 15, Apple M1 Pro (10 cores), 32 GiB RAM, APFS on the internal
-  SSD; environments in `$TMPDIR`.
-* rustc 1.93.1 (Homebrew), Apple clang 17.0.0 (clang-1700.4.4.1).
-* Command (from `rust/`): `cargo build --release -p lmdb-bench &&
-  target/release/lmdb-bench --raw` (all groups, n = 1 000 000, 5 reps).
+  SSD, 16 KiB pages; environments in `$TMPDIR`. rustc 1.93.1
+  (Homebrew), Apple clang 17.0.0 (clang-1700.4.4.1).
+* At `e84876f`: `target/release/rlmdb-bench --rounds 2 --reps 3` (all
+  groups, 6 samples per side), started once the 1-minute load average
+  had dropped to 5.5 from other jobs on the machine; during the
+  10-minute run it stayed between 3.5 and 8.7 (10 cores). The `txn_*`
+  and `mixed_writer` C medians sit well above their minimums, so read
+  those rows with that in mind.
 
-Rust against C, before and after (ns/op: median (min); two separate runs,
-each comparing both sides within the run):
-
-| workload | ops/rep | C before | Rust before | Rust/C before | C after | Rust after | Rust/C after |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| seq_put_append | 1000000 | 110 (85.2) | 558 (430) | 5.06 | 79.8 (76.1) | 251 (245) | **3.14** |
-| rand_put | 1000000 | 3209 (2886) | 4763 (4309) | 1.48 | 2524 (2464) | 3418 (3143) | **1.35** |
-| rand_get | 1000000 | 1559 (1393) | 1316 (1123) | 0.84 | 1142 (1078) | 957 (915) | **0.84** |
-| scan_fwd | 1000000 | 18.2 (17.6) | 22.2 (20.7) | 1.22 | 15.8 (15.7) | 17.5 (17.2) | **1.11** |
-| scan_bwd | 1000000 | 16.1 (14.4) | 21.7 (19.6) | 1.35 | 14.2 (13.8) | 16.4 (16.2) | **1.16** |
-| readers8_get | 8000000 | 374 (285) | 360 (234) | 0.96 | 143 (130) | 119 (118) | **0.83** |
-| rand_overwrite | 1000000 | 4170 (3687) | 6817 (6431) | 1.63 | 4402 (4048) | 5789 (5338) | **1.32** |
-| dup_put | 1000000 | 798 (792) | 2093 (1874) | 2.62 | 828 (811) | 1326 (1278) | **1.60** |
-| dup_get_both | 1000000 | 1015 (955) | 929 (915) | 0.92 | 1133 (1070) | 807 (797) | **0.71** |
-| dup_next_dup | 1000000 | 109 (108) | 101 (97.0) | 0.93 | 120 (118) | 88.7 (87.7) | **0.74** |
-| put_4k | 50000 | 6253 (6056) | 9911 (9608) | 1.58 | 5789 (5657) | 9156 (9131) | **1.58** |
-| get_4k | 1000000 | 581 (557) | 645 (641) | 1.11 | 613 (516) | 503 (494) | **0.82** |
-| put_64k | 5000 | 23887 (22976) | 27030 (25672) | 1.13 | 22314 (21904) | 29536 (24550) | **1.32** |
-| get_64k | 1000000 | 227 (225) | 317 (306) | 1.40 | 220 (219) | 269 (258) | **1.22** |
-| del_rand | 1000000 | 3231 (3128) | 5372 (4993) | 1.66 | 3193 (2948) | 4653 (4492) | **1.46** |
-| txn_nosync | 50000 | 7062 (6998) | 12859 (11742) | 1.82 | 6014 (5793) | 8252 (8091) | **1.37** |
-| txn_sync | 1000 | 15534350 (14066008) | 15778200 (15039310) | 1.02 | 12175944 (10451865) | 10314719 (9840057) | **0.85** |
-| mixed_writer | 50000 | 5716 (5540) | 6300 (6199) | 1.10 | 5506 (5299) | 7162 (6915) | **1.30** |
-| mixed_readers | 63238144 | 4.4 (4.4) | 5.6 (5.5) | 1.27 | 4.4 (4.3) | 4.8 (4.7) | **1.10** |
-
-`txn_sync` is dominated by `F_FULLFSYNC` (10-15 ms per commit on this
-SSD, both sides). `mixed_writer` swings with whatever else the machine
-does; the interleaved A/B below shows the new build 5 % faster there.
-`put_64k` before/after differ within noise (A/B: 1.03 median, 0.93 min).
-
-Rust after against Rust before, interleaved (`--baseline`, 2 rounds of
-3 reps each; ns/op median (min)):
-
-| workload | base ns/op | new ns/op | new/base (median) | new/base (min) |
+| workload | ops/rep | C ns/op | Rust ns/op | Rust/C |
 |---|---:|---:|---:|---:|
-| seq_put_append | 382 (373) | 215 (210) | **0.56** | 0.56 |
-| rand_put | 3554 (3452) | 3245 (3144) | **0.91** | 0.91 |
-| rand_get | 1005 (921) | 878 (846) | **0.87** | 0.92 |
-| scan_fwd | 19.7 (19.5) | 17.7 (17.0) | **0.90** | 0.87 |
-| scan_bwd | 18.8 (18.2) | 15.9 (15.6) | **0.85** | 0.86 |
-| readers8_get | 128 (122) | 126 (114) | **0.98** | 0.93 |
-| rand_overwrite | 5554 (5312) | 5700 (5152) | **1.03** | 0.97 |
-| dup_put | 1889 (1864) | 1293 (1276) | **0.68** | 0.68 |
-| dup_get_both | 986 (933) | 892 (866) | **0.90** | 0.93 |
-| dup_next_dup | 110 (106) | 100 (96.8) | **0.91** | 0.92 |
-| put_4k | 9998 (9609) | 9781 (9195) | **0.98** | 0.96 |
-| get_4k | 654 (607) | 593 (549) | **0.91** | 0.91 |
-| put_64k | 27061 (26060) | 27985 (24333) | **1.03** | 0.93 |
-| get_64k | 333 (322) | 269 (264) | **0.81** | 0.82 |
-| del_rand | 4986 (4811) | 4514 (4272) | **0.91** | 0.89 |
-| txn_nosync | 9215 (9056) | 8553 (8018) | **0.93** | 0.89 |
-| txn_sync (200 commits) | 10082077 (9849516) | 9264786 (9007664) | **0.92** | 0.91 |
-| mixed_writer | 5923 (5753) | 5627 (5548) | **0.95** | 0.96 |
-| mixed_readers | 5.4 (5.4) | 4.8 (4.8) | **0.89** | 0.89 |
+| seq_put_append | 1000000 | 75.2 (74.1) | 162 (159) | **2.16** |
+| rand_put | 1000000 | 2560 (2460) | 2533 (2400) | **0.99** |
+| rand_get | 1000000 | 1154 (1120) | 827 (775) | **0.72** |
+| scan_fwd | 1000000 | 16.2 (15.6) | 13.2 (12.8) | **0.82** |
+| scan_bwd | 1000000 | 14.1 (13.8) | 13.5 (13.3) | **0.96** |
+| readers8_get | 8000000 | 138 (122) | 135 (105) | **0.98** |
+| rand_overwrite | 1000000 | 3790 (3657) | 3641 (3545) | **0.96** |
+| dup_put | 1000000 | 826 (817) | 1043 (1034) | **1.26** |
+| dup_get_both | 1000000 | 1008 (966) | 830 (775) | **0.82** |
+| dup_next_dup | 1000000 | 111 (109) | 87.1 (85.4) | **0.78** |
+| put_4k | 50000 | 6593 (6110) | 7256 (6870) | **1.10** |
+| get_4k | 1000000 | 652 (616) | 500 (489) | **0.77** |
+| put_64k | 5000 | 26934 (23488) | 27503 (26417) | **1.02** |
+| get_64k | 1000000 | 232 (222) | 221 (212) | **0.96** |
+| del_rand | 1000000 | 3645 (3146) | 3419 (3318) | **0.94** |
+| txn_nosync | 50000 | 6119 (5911) | 8731 (8109) | **1.43** |
+| txn_sync | 1000 | 10539481 (10038662) | 10278517 (10038202) | **0.98** |
+| mixed_writer | 50000 | 7975 (5396) | 6761 (6241) | **0.85** |
+| mixed_readers | 92385280 | 4.6 (4.3) | 3.6 (3.4) | **0.79** |
+| ls_scan | 5000000 | 17.8 (17.2) | 14.3 (13.5) | **0.81** |
+| ls_update | 50000 | 5306 (5266) | 5301 (4495) | **1.00** |
 
-## Linux (Debian bookworm container, 4 KiB pages)
+With 16 KiB pages 4 KiB values fit in a leaf (only the 64 KiB values are
+overflow runs, of 5 pages) and the trees are a level shallower; the
+random writes are at parity with C here, unlike on 4 KiB pages. `txn_sync` is `F_FULLFSYNC`
+(about 10 ms per commit, both sides). `mixed_writer` swings with the
+load; by the minimums it is 1.16.
 
-* `Linux 6.8.0-146-generic #146-Ubuntu SMP PREEMPT_DYNAMIC aarch64`
-  (the Lima VM behind `scripts/linux-test.sh`, 8 vCPUs and 12 GB on the
-  same M1 Pro host), Debian 12 `rust:1-bookworm` container, glibc;
-  environments in the container's `/tmp` (overlay on the VM disk).
-* rustc 1.99.1, gcc 12.2.0 (Debian 12.2.0-14+deb12u1).
-* Command: the container of `scripts/linux-test.sh` (same image,
-  volumes and `/work` bind mount), running
-  `cargo build --release -p lmdb-bench && target/release/lmdb-bench
-  --dir /tmp/lmdb-bench --raw` for the current tree, and the same for the
-  unchanged tree (copied into the container's `/tmp` and built with its
-  own `CARGO_TARGET_DIR`), one after the other in one container.
+### Linux VM (arm64, 4 KiB pages): indicative only
 
-Rust against C, before and after (two runs in one container, each
-comparing both sides within the run):
+* The Lima VM behind `scripts/linux-test.sh`: `Linux 6.8.0-146-generic
+  ... aarch64`, Debian 12 `rust:1-bookworm` container, 8 vCPUs, 12 GB,
+  on the same M1 Pro host; rustc 1.99.1, gcc 12.2.0.
+* Full suite at `87b1a9b` (W, R and S; before the LS workloads and L),
+  1 round of 3 reps. This run predates `bb96986`, which put the
+  container's `/tmp` on a tmpfs in the VM's memory, so its environments
+  were on the VM's virtual disk; and the host was shared. Read it as
+  indicative; the server above is the reference for 4 KiB pages.
 
-| workload | ops/rep | C before | Rust before | Rust/C before | C after | Rust after | Rust/C after |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| seq_put_append | 1000000 | 105 (102) | 459 (453) | 4.38 | 107 (105) | 268 (263) | **2.51** |
-| rand_put | 1000000 | 2438 (2359) | 3759 (3504) | 1.54 | 2581 (2451) | 3366 (3275) | **1.30** |
-| rand_get | 1000000 | 796 (763) | 1102 (953) | 1.38 | 951 (848) | 1108 (995) | **1.16** |
-| scan_fwd | 1000000 | 34.1 (32.6) | 43.1 (40.7) | 1.26 | 38.4 (37.2) | 37.1 (34.0) | **0.97** |
-| scan_bwd | 1000000 | 30.4 (28.9) | 36.8 (35.3) | 1.21 | 30.9 (28.8) | 32.7 (32.0) | **1.06** |
-| readers8_get | 8000000 | 140 (106) | 153 (129) | 1.10 | 136 (110) | 146 (140) | **1.07** |
-| rand_overwrite | 1000000 | 3377 (3131) | 4647 (4441) | 1.38 | 3397 (3224) | 4492 (4449) | **1.32** |
-| dup_put | 1000000 | 694 (659) | 1872 (1838) | 2.70 | 764 (715) | 1357 (1279) | **1.77** |
-| dup_get_both | 1000000 | 882 (851) | 1059 (929) | 1.20 | 985 (948) | 1026 (923) | **1.04** |
-| dup_next_dup | 1000000 | 94.0 (90.9) | 101 (97.9) | 1.07 | 108 (105) | 108 (98.5) | **1.00** |
-| put_4k | 50000 | 4080 (3994) | 5663 (5552) | 1.39 | 4172 (3831) | 6373 (6240) | **1.53** |
-| get_4k | 1000000 | 470 (420) | 611 (548) | 1.30 | 458 (417) | 569 (466) | **1.24** |
-| put_64k | 5000 | 37121 (36725) | 44281 (42970) | 1.19 | 34015 (32450) | 46783 (45096) | **1.38** |
-| get_64k | 1000000 | 217 (212) | 294 (291) | 1.36 | 202 (197) | 322 (304) | **1.59** |
-| del_rand | 1000000 | 3311 (3295) | 5580 (5159) | 1.69 | 3396 (3150) | 4939 (4701) | **1.45** |
-| txn_nosync | 50000 | 3438 (3348) | 6237 (5936) | 1.81 | 3797 (3701) | 5293 (5214) | **1.39** |
-| txn_sync | 1000 | 276214 (262861) | 330436 (293948) | 1.20 | 281145 (253726) | 287165 (259105) | **1.02** |
-| mixed_writer | 50000 | 4731 (4613) | 5340 (5224) | 1.13 | 4597 (4477) | 5421 (5279) | **1.18** |
-| mixed_readers | 28262400 | 8.4 (8.3) | 11.7 (11.7) | 1.40 | 8.6 (8.5) | 9.5 (9.3) | **1.11** |
+| workload | ops/rep | C ns/op | Rust ns/op | Rust/C |
+|---|---:|---:|---:|---:|
+| seq_put_append | 1000000 | 113 (109) | 197 (197) | **1.75** |
+| rand_put | 1000000 | 2260 (2205) | 2557 (2554) | **1.13** |
+| rand_get | 1000000 | 891 (863) | 879 (877) | **0.99** |
+| scan_fwd | 1000000 | 35.3 (34.4) | 42.8 (39.6) | **1.21** |
+| scan_bwd | 1000000 | 33.4 (33.0) | 35.3 (34.4) | **1.06** |
+| readers8_get | 8000000 | 116 (105) | 117 (109) | **1.02** |
+| rand_overwrite | 1000000 | 3141 (3138) | 3434 (3228) | **1.09** |
+| dup_put | 1000000 | 654 (633) | 1049 (970) | **1.60** |
+| dup_get_both | 1000000 | 858 (815) | 860 (835) | **1.00** |
+| dup_next_dup | 1000000 | 103 (87.3) | 98.3 (96.0) | **0.96** |
+| put_4k | 50000 | 3660 (3381) | 3938 (3805) | **1.08** |
+| get_4k | 1000000 | 368 (364) | 490 (480) | **1.33** |
+| put_64k | 5000 | 30568 (30453) | 43281 (42818) | **1.42** |
+| get_64k | 1000000 | 212 (200) | 233 (231) | **1.10** |
+| del_rand | 1000000 | 3146 (2963) | 3435 (3425) | **1.09** |
+| txn_nosync | 50000 | 3824 (3616) | 4677 (4673) | **1.22** |
+| txn_sync | 1000 | 288543 (266451) | 276385 (250578) | **0.96** |
+| mixed_writer | 50000 | 4364 (4352) | 4728 (4698) | **1.08** |
+| mixed_readers | 28639232 | 7.6 (7.6) | 8.2 (8.2) | **1.08** |
 
-On 4 KiB pages the trees are deeper (4 levels for 1M keys) and the
-per-level overhead shows: before, Rust was slower than C on every read
-here too (1.07-1.4x); after, scans and `DUPSORT` reads are at parity and
-random gets at 1.16x. 4 KiB values go to overflow pages here (2 pages
-each). The two sequential runs disagree for the overflow workloads
-(`put_4k`, `put_64k`, `get_64k` look slower after); the interleaved A/B
-in the same container (`lmdb-bench --baseline <unchanged build> --rounds
-3 --reps 3` for the read and overflow groups, `--rounds 2 --reps 3
---sync-commits 200` for the others) shows that was run-to-run noise, and
-gives the same picture as on macOS:
+After L, on the tmpfs and a quiet host (`--only ls,read --rounds 3
+--reps 3`, [`results/L-ls-scan.md`](results/L-ls-scan.md)): `ls_scan`
+44.1 (40.6) against 39.1 (34.4) ns, **0.89**; `ls_update` **1.17**;
+`scan_fwd` **0.83**; `scan_bwd` **0.99**. `get_4k` is the one read
+above 1.1 here; on the server it is at 0.94.
 
-| workload | base ns/op | new ns/op | new/base (median) |
-|---|---:|---:|---:|
-| seq_put_append | 487 (470) | 279 (256) | **0.57** |
-| rand_put | 3752 (3429) | 3251 (3077) | **0.87** |
-| rand_get | 1164 (1049) | 991 (953) | **0.85** |
-| scan_fwd | 44.4 (42.3) | 36.3 (32.8) | **0.82** |
-| scan_bwd | 39.6 (37.2) | 30.4 (29.5) | **0.77** |
-| readers8_get | 141 (130) | 149 (129) | **1.06** |
-| rand_overwrite | 4729 (4462) | 4348 (4146) | **0.92** |
-| dup_put | 1950 (1806) | 1299 (1229) | **0.67** |
-| dup_get_both | 1024 (946) | 968 (917) | **0.94** |
-| dup_next_dup | 108 (102) | 112 (103) | **1.03** |
-| put_4k | 7081 (6212) | 6554 (5259) | **0.93** |
-| get_4k | 578 (475) | 534 (441) | **0.92** |
-| put_64k | 49472 (39599) | 48889 (43318) | **0.99** |
-| get_64k | 338 (308) | 289 (256) | **0.86** |
-| del_rand | 5109 (4779) | 4547 (4402) | **0.89** |
-| txn_nosync | 5699 (5555) | 4843 (4717) | **0.85** |
-| txn_sync (200 commits) | 257297 (251175) | 233857 (204221) | **0.91** |
-| mixed_writer | 5407 (5180) | 5247 (5154) | **0.97** |
-| mixed_readers | 11.4 (11.4) | 9.0 (8.8) | **0.79** |
+## What changed in this round
 
-`txn_sync` on Linux is `fdatasync` per commit on the VM's virtual disk
-(about 0.28 ms); on macOS it is `F_FULLFSYNC` (10-15 ms).
+All in `rlmdb`, behaviour- and layout-preserving (same results, same
+errors on corrupt input, same file bytes), no new `unsafe`, public API
+unchanged. In commit order:
 
+| change | commit | what | what it bought (interleaved A/B, new/base of the medians) |
+|---|---|---|---|
+| hardening | `9eda847` | errors instead of panics or reuse of live pages for the corruptions py-lmdb patches against (checks in `page_touch` and the overflow-run length on delete) | correctness only; nothing measurable |
+| W: write-path allocations | `f8fb670` | a pool of page buffers (C's `me_dpages`), scratch buffers for `DUPSORT` puts and splits, the DBI resolved once per put/del | macOS: `rand_overwrite` 0.70, `rand_put` 0.78, `del_rand` and `put_4k` 0.76, `seq_put_append` 0.93, `put_64k` and `txn_nosync` 0.96. [`results/W-write-alloc.md`](results/W-write-alloc.md) |
+| R: read path | `30d5566` | 8-slot cursor stacks for `mdb_get`, a page lookup for read transactions that goes straight to the map, memcmp order compared inline for keys up to 32 bytes, smaller per-item and per-call costs | macOS: `get_64k` 0.78, `readers8_get` 0.86, `scan_bwd` 0.88, `rand_get` 0.91, `get_4k` 0.92, `mixed_readers` 0.87. [`results/R-read-path.md`](results/R-read-path.md) |
+| page layout descriptor | `0e26884` | every format-dependent offset from a per-environment layout (dual-format stage 1, `DUAL_FORMAT.md`) | first cut cost 8-16 % on scans and cached reads; after the fixes in the same commit writes, point reads and scans are within noise (a few percent may remain on `DUPSORT` lookups). Details: `git show 0e26884:rust/bench/RESULTS.md` |
+| S: stable dirty-page handles | `87b1a9b` | dirty pages in a slab with checked slot handles that write cursors remember, so the write path stops searching the dirty list; the arena slot of `mdb_put` reset in place, fewer record copies | macOS: `seq_put_append` 0.81, `rand_put` and `del_rand` 0.95; one-put transactions and overwrites unchanged. [`results/S-dirty-handles.md`](results/S-dirty-handles.md) |
+| LS workloads | `ccc9893` | the `ls` group: Lightning Stream sync scan and update (bench only) | [`results/LS-workloads.md`](results/LS-workloads.md) |
+| L: scan step | `e84876f` | a cursor step within a leaf with one format dispatch, one `NUMKEYS` read and one bounds check for key and data, returned straight to the caller; the general path out of line | macOS: `ls_scan` 0.78-0.81 (147 to 78 instructions per record; C 113), `scan_fwd` 0.80, `scan_bwd` 0.88. [`results/L-ls-scan.md`](results/L-ls-scan.md) |
 
-## How the numbers were taken
+On the server, the whole round before L (`ccc9893` against `71e228d`,
+`--baseline`, 3 rounds of 3 reps, groups `read`, `dupsort`, `overflow`,
+`seq_put`): `put_4k` 0.53, `seq_put_append` 0.67, `get_64k` 0.70,
+`dup_put` 0.71, `get_4k` 0.72, `scan_fwd` and `scan_bwd` 0.90,
+`rand_get` 0.95, `readers8_get` 0.97, `put_64k` 0.97.
 
-* Every workload: one warm-up and 5 timed repetitions (`--reps 5`),
-  median and min of ns/op, n = 1 000 000 keys (16-byte keys, 100-byte
-  values), environments with `MDB_NOSYNC` except `txn_sync`.
-* "Before" is the tree at `a031e87` plus the concurrent reviewer edits
-  present when the work started (bug fixes in the write path, no
-  performance effect expected); "after" adds the changes below.
-* The macOS machine was shared with other heavy jobs during all runs
-  (load average up to ~990 from unrelated processes), so absolute
-  numbers, and C's in particular, move by 20-40 % between runs. The
-  ratio columns compare C and Rust within one run (they alternate per
-  group), and the A/B tables interleave the old and new Rust builds
-  (2-3 rounds of 3 reps; on Linux with `--baseline`, on macOS with a
-  scratch script that did the same before `--baseline` existed), which
-  is what the per-change claims rest on.
-
-## Changes
-
-All in `rlmdb`, all behaviour-preserving (same results, same file
-bytes; `cargo test -p rlmdb`, `-p rlmdb-interop`, `-p rlmdb-capi --test
-mtest` pass, see the end), no new `unsafe`.
-
-1. **Write-path read cursors built in place** (`core/cursor.rs`
-   `Cursor::load`, `core/wcursor.rs` `read_op`/`load_read`). Write
-   cursors hold page numbers; every read operation on them (the
-   positioning of each put and delete) rebuilds read `Cursor`s, about
-   700 bytes each. They were built in a temporary array, copied into a
-   `Cursor`, moved out through two `Result`s and a tuple: 15-18 % of a
-   sequential put was `memmove`. Now `read_op` builds both cursors where
-   they are used. `Cursor::from_parts` is gone.
-2. **`mdb_node_search` resolves page layout and comparator once**
-   (`core/cursor.rs` `node_search`/`bsearch`, `format/page.rs`
-   `PageRef::node_key`): the binary search had a per-probe check for
-   `P_LEAF2`, built a `NodeRef` and a key tail and dispatched on the
-   comparator for every probe. The default (memcmp) order now has its own
-   loop over `node_key`, which does the same bounds checks without
-   building the node. The empty page that fills unused cursor slots is a
-   `const` (`PageRef::new` is `const fn`), so filling a cursor's stack is
-   plain stores.
-3. **No zero fill for touched pages** (`core/freelist.rs`
-   `page_alloc_copy`, `core/wcursor.rs` `page_touch`). `mdb_page_touch`
-   allocated a zero-filled 16 KiB buffer (`calloc`: 20 % of a random
-   delete was `memset`) and then copied the whole clean page over it. The
-   buffer is now created as a copy of the clean page. Same bytes (the
-   whole page is still copied, so even unused bytes are as before).
-4. **Position hints for the dirty list** (`core/dirty.rs`,
-   `idl.rs` `Id2List::get_at`/`get_at_mut`). The write path looks up the
-   same few pages (root, branch, leaf) about ten times per put, each a
-   binary search of the dirty list: 24 % of a sequential put. `DirtyPages`
-   remembers where it last found a page (16 slots by page number); the
-   page number at that position is checked before use, so a stale hint
-   only costs the binary search it replaces.
-5. **`RoCursor::next`/`prev` call `mdb_cursor_next`/`prev` directly**
-   (`core/ro_cursor.rs`) instead of going through the 19-way dispatch of
-   `mdb_cursor_get` once per item. Same code path otherwise (`finish`
-   does what `get` did after the dispatch).
-
-Measured step by step while making them (macOS, the Rust side of the
-new build interleaved with the unchanged one, n = 1M, 3 reps x 2-4
-rounds; the two scratch loops are a small program outside the repo
-timing 40 full scans or 2M gets in one read transaction; cumulative, so
-each row includes the changes above it):
-
-| after change | workload | new/base (median) |
-|---|---|---:|
-| 1 + 2 | seq_put_append | 0.75 |
-| 1 + 2 | dup_put | 0.83 |
-| 1 + 2 | rand_get / dup_get_both / dup_next_dup | 0.93 / 0.93 / 0.89 |
-| 1 + 2 | scan_fwd / scan_bwd | 0.98 / 0.94 |
-| 1 - 3 | rand_put | 0.81 |
-| 1 - 3 | txn_nosync / del_rand | 0.91 / 0.95 |
-| 1 - 4 | seq_put_append | 0.55 |
-| 1 - 4 | get, 64 KiB values, 5000 keys (scratch loop) | 0.89 (313 -> 280 ns) |
-| 5 | full forward/backward scan, 1M keys (scratch loop) | 0.86 (21 -> 18 ns) |
-
-The final interleaved A/B over all workloads is the second macOS table
-above (and the Linux before/after tables).
-
-
-## Profiles
-
-Profiled with `samply record --save-only --unstable-presymbolicate`
-(macOS; `sample` was not needed) and a small script aggregating self and
-inclusive time per (inlined) function with `atos -i`. Main findings
-before the changes, as share of samples:
-
-* `seq_put_append`: `memmove` of cursor structs 15 %, dirty-list binary
-  search 7 % self / 24 % inclusive (after fix 1), `Cursor::new` 3 %,
-  `pwritev` 5 %.
-* `del_rand`: `calloc` zero fill of the new page buffer in
-  `page_touch` 20 %, the full-page copy of the touched page 22 %, the
-  B-tree search itself (cache misses on a 1M-key tree) about 25 %.
-* `txn_nosync`: `pwrite` about 50 % (as in C, which spends 70 % there),
-  zero fill and `malloc` 7-9 %, the page copy 8-10 %.
-* `dup_put`: `memmove` 14 % (cursor structs, page copies), `malloc`
-  8 % (`dup_prepare` builds sub-pages in fresh `Vec`s, page buffers),
-  commit I/O 13 %.
-* `put_4k` (after the changes): commit I/O (`pwritev`/`pwrite`) 38 %,
-  then malloc/free churn of page buffers: `madvise` 9 %, `calloc` memset
-  7 %, `bzero` 4 %.
-* scans: no single hot spot; the per-item path (`mdb_cursor_get`
-  dispatch, header reads) costs 2-4 ns more than C's.
-* `get_64k` (small tree, all in cache; after the changes): 17 % of the
-  time is filling the 32-slot page stack of the temporary cursor
-  (`Cursor::new`; C leaves `mc_pg` uninitialised).
+The first optimisation round (stage 4 task P: read cursors built in
+place on the write path, `node_search` with the layout and comparator
+resolved once, no zero fill of touched pages, dirty-list position hints,
+direct `next`/`prev`) took appends from 4.4-5x C to 2.5-3x, `DUPSORT`
+puts from 2.6x to 1.6-1.8x and reads to 0.7-1.25x C. Its before/after
+and per-change tables, profiles and test runs, and the descriptor's
+measurements, are in the previous version of this file (`git show
+0e26884:rust/bench/RESULTS.md`).
 
 ## Remaining gaps and why
 
-These need design changes, not local fixes, so they were left alone:
+In order of importance for this project. `DUPSORT` performance is out
+of scope; its rows stay in the tables for completeness.
 
-* **Write cursors hold page numbers** (by design: no references into
-  buffers the same transaction mutates). Every operation re-resolves its
-  stack through the dirty list and rebuilds read cursors, and every
-  `page_touch`, `node_add`, `top_page` resolves the page again; C follows
-  pointers. This is most of the remaining 3x of `seq_put_append` (C does
-  ~80 ns per append; Rust ~10 page lookups plus two cursor rebuilds).
-  A fix would give dirty pages stable handles (a slab of page buffers
-  indexed by slot, with the dirty list mapping page numbers to slots),
-  so cursors could hold slots instead of searching by number.
-* **No page-buffer recycling.** C keeps freed page buffers on
-  `me_dpages` and reuses them without zeroing; Rust allocates a `Box`
-  per dirty page and frees it at commit (`dirty.rs` says so on purpose).
-  `put_4k` spends ~20 % in malloc/free/madvise/memset because of it, the
-  random-write workloads 5-10 %. An environment-level pool (writer-only,
-  under the writer lock, like `me_dpages`) would remove it; new pages
-  would still be zeroed so files stay deterministic.
-* **Full-page copies on touch.** C's `mdb_page_copy` copies only the
-  used parts of a page (header and pointers, then the nodes), leaving
-  the gap with whatever the buffer held. Rust copies the whole page so
-  the unused bytes stay identical to the source page. Copying only the
-  used parts into a zeroed (pooled) buffer would cut the copy by the
-  free space (~30 % on random-insert pages) but change unused bytes in
-  the file (to zeros); not done because output must stay byte-identical
-  to what the Rust writer produced before.
-* **`mdb_put` opens an arena slot per call** (copying `WCursor`s of
-  ~350 bytes, twice for `DUPSORT`), where C uses a stack cursor; part of
-  the per-put constant cost, and tied to the write-cursor design above.
-* **Cursor stack initialisation**: safe Rust must initialise the 32-slot
-  page stack of every cursor (`mdb_get` creates one per call); C leaves
-  `mc_pg` uninitialised. That is most of the remaining `get_64k` gap on
-  a small, cached tree. On a large tree with 16 KiB pages (`rand_get` on
-  macOS) cache misses hide it and Rust is faster than C; with 4 KiB pages
-  (4 levels for 1M keys, Linux) the per-level costs add up to 1.16x:
-  each level's `TxnCore::page` also consults the (empty) dirty and spill
-  lists of the read transaction, and `Cursor::push` is bounds-checked. A
-  smaller stack type (page offsets instead of fat slices) and a separate
-  page lookup for read-only transactions would address both.
-* `mixed_writer` is the writer path above (1.2-1.3x C, but this workload
-  swings by 20 % between runs here; interleaved, the new build is 5 %
-  faster than the old one).
+* **`ls_scan`: done for now.** Rust is ahead of C on all three machines
+  (0.77-0.89x). The step still checks every page and node access against
+  the page (`AGENTS.md` section 3), which C does not; the scan waits on
+  memory most of the time, so those checks cost little. Left: a page
+  change runs the general path after the fast step declines (about 60
+  instructions more than before, once in ~65 records), and the
+  `NUMKEYS` test could be fused with the pointer bounds check (2
+  instructions per record); neither could be shown to help.
+* **Sequential appends (`seq_put_append`, 1.75-2.2x C).** Every
+  positioning of a put rebuilds two read cursors from the write cursor
+  (`read_op`: 32 page slots to fill, the `ki` array copied back right
+  after the read operation's stores, a store-forwarding stall) and
+  descends by page number (three lookups per put). That rebuild is
+  17.6 % of a sequential put after S. The fix is to run read operations
+  on the write cursor's own stack of `(pgno, slot)` pairs (a read cursor
+  generic over where its pages come from); 8-slot read cursors on the
+  write path were tried and did not pay ([S](results/S-dirty-handles.md)).
+* **Overflow-value puts (`put_64k` 1.4-1.7x with 4 KiB pages, 1.02x on
+  macOS; `put_4k` 1.1x everywhere).** With 4 KiB pages both values are
+  overflow runs (2 and 17 pages); with 16 KiB pages only the 64 KiB
+  values are (5 pages), and 4 KiB values are leaf items. Not profiled in
+  this round. Overflow runs are not pooled on either side, but Rust
+  allocates a new run zero-filled (`DirtyPages::alloc_zeroed`) before
+  the value is copied in, where C's `mdb_page_malloc` clears only the
+  last page of a run. That is the first suspect for `put_64k` on Linux,
+  to be confirmed by a profile; the 1.1x of `put_4k` on macOS, where no
+  overflow page is involved, is unexplained.
+* **Small-transaction overhead (`txn_nosync` 1.2-1.45x, `mixed_writer`
+  1.1-1.2x on Linux, noisy on macOS).** The commit's `pwrite`s are
+  57-59 % of Rust's one-put transaction (C's share was about 70 % in the
+  first round's profile); the rest is fixed per-transaction cost: page
+  copies on touch (10 %), the writer lock's semaphores (7 % on macOS),
+  reading the meta page, and a dozen small `Vec`s (dirty list, free
+  list, cursor arena, write lists) allocated per transaction (1-5 %
+  depending on the profile). No single hot spot: the gap is the sum of
+  these small costs.
+* **Random overwrites and deletes (`rand_overwrite` 1.1-1.35x,
+  `del_rand` 1.1-1.3x, random puts 1.1-1.15x with 4 KiB pages; all at
+  0.94-0.99x on macOS).** Dominated by the binary searches in a 1M-key
+  tree (cache misses; 40-50 % of the put and delete paths on macOS)
+  and the copy of every page
+  touched for the first time: Rust copies the whole page so the unused
+  bytes match the source page, C's `mdb_page_copy` copies only the used
+  parts (16-33 % of these workloads). Copying only the used parts into
+  a zeroed buffer would change unused bytes in the file (to zeros), the
+  one layout change that would help here; not made, because output
+  stays byte-identical (`AGENTS.md` section 1 allows it as a recorded,
+  deliberate divergence).
 
-Local changes that would help but were out of scope here (the files are
-being fixed concurrently by the reviewer):
+## Profiles
 
-* **`DUPSORT` puts allocate**: `dup_prepare` (`cursor_put.rs`) builds
-  the new sub-page in a fresh `Vec` per put and `page_split0`
-  (`split.rs`) allocates zeroed scratch pages; C uses
-  `env->me_pbuf`/stack buffers. A reusable scratch buffer in the write
-  state would remove 5-8 % of `dup_put`.
-* `RwTxn::put` re-validates the DBI and borrows the DBI table's
-  `RefCell` several times per put (`dbi_entry`, `user_dbi`,
-  `check_reserve`, `db_of`); a few percent of `seq_put_append`.
+Current findings (macOS unless noted; tools and per-function tables in
+the per-task reports):
 
-## Tests after the changes
+* `ls_scan` and the plain scans: 78 instructions per record in Rust, 113
+  in C (counted by single-stepping, same method on both sides). Both
+  sides spend most of the time on the first loads of a record's node
+  and of the page header; the time ratio follows the cache misses more
+  than the instruction counts.
+* `rand_put`, `del_rand` (shares of the put and delete paths): B-tree
+  search and read path 43-49 %, whole-page copy on touch and node moves
+  23-31 %, node edits 6-7 %; allocator frames below 1 % since W (were
+  9 %). Overwrites were not profiled separately.
+* `seq_put_append`: read-cursor rebuild 17.6 %, B-tree search and read
+  path 15 %, page lookups by number or slot 13 %, `page_touch` 7 %.
+* `txn_nosync`: `pwrite` 57-59 %, page copies 10 %, writer-lock
+  semaphores 7 %, `malloc`/`free` 1-2 %.
+* `get_64k` (small cached tree): the binary search (branch
+  mispredictions on the probe direction) and the cache misses on the
+  values; the stack fill and the `memcmp` calls that were 20 % and a
+  third of it before R are gone.
 
-Run on the final tree (with the reviewer's concurrent edits present at
-the time), debug profile:
+## How the numbers were taken
 
-| platform | command | test binaries | passed | failed | ignored |
-|---|---|---:|---:|---:|---:|
-| macOS | `cargo test -p rlmdb` | 20 | 200 | 0 | 4 |
-| macOS | `cargo test -p rlmdb-interop` | 15 | 333 | 0 | 3 |
-| macOS | `cargo test -p rlmdb-capi --test mtest` | 1 | 8 | 0 | 0 |
-| Linux | `scripts/linux-test.sh test -p rlmdb` | 20 | 198 | 0 | 4 |
-| Linux | `scripts/linux-test.sh test -p rlmdb-interop` | 15 | 333 | 0 | 3 |
-| Linux | `scripts/linux-test.sh test -p rlmdb-capi --test mtest` | 1 | 8 | 0 | 0 |
-
-`cargo fmt --check`, `cargo clippy -p rlmdb -p lmdb-bench
---all-targets -D warnings` and `cargo doc -p rlmdb -p lmdb-bench
---no-deps` with `-D warnings` are clean.
-
-<details><summary>The <code>test result</code> lines</summary>
-
-```
-macOS, cargo test -p rlmdb:
-    test result: ok. 62 passed; 0 failed; 1 ignored; finished in 1.93s
-    test result: ok. 8 passed; 0 failed; 0 ignored; finished in 2.47s
-    test result: ok. 12 passed; 0 failed; 0 ignored; finished in 5.56s
-    test result: ok. 5 passed; 0 failed; 0 ignored; finished in 0.01s
-    test result: ok. 6 passed; 0 failed; 0 ignored; finished in 5.65s
-    test result: ok. 2 passed; 0 failed; 0 ignored; finished in 0.08s
-    test result: ok. 1 passed; 0 failed; 0 ignored; finished in 30.19s
-    test result: ok. 9 passed; 0 failed; 0 ignored; finished in 0.21s
-    test result: ok. 4 passed; 0 failed; 0 ignored; finished in 0.06s
-    test result: ok. 5 passed; 0 failed; 0 ignored; finished in 14.87s
-    test result: ok. 1 passed; 0 failed; 0 ignored; finished in 0.00s
-    test result: ok. 13 passed; 0 failed; 0 ignored; finished in 0.02s
-    test result: ok. 23 passed; 0 failed; 0 ignored; finished in 2.91s
-    test result: ok. 14 passed; 0 failed; 0 ignored; finished in 0.13s
-    test result: ok. 18 passed; 0 failed; 2 ignored; finished in 18.67s
-    test result: ok. 5 passed; 0 failed; 0 ignored; finished in 3.52s
-    test result: ok. 8 passed; 0 failed; 0 ignored; finished in 0.03s
-    test result: ok. 1 passed; 0 failed; 0 ignored; finished in 0.07s
-    test result: ok. 0 passed; 0 failed; 1 ignored; finished in 0.00s
-    test result: ok. 3 passed; 0 failed; 0 ignored; finished in 1.35s
-
-macOS, cargo test -p rlmdb-interop:
-    test result: ok. 5 passed; 0 failed; 0 ignored; finished in 0.00s
-    test result: ok. 3 passed; 0 failed; 0 ignored; finished in 0.00s
-    test result: ok. 39 passed; 0 failed; 0 ignored; finished in 6.56s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 7.45s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 7.46s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 8.72s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 8.22s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 9.11s
-    test result: ok. 11 passed; 0 failed; 0 ignored; finished in 0.01s
-    test result: ok. 10 passed; 0 failed; 0 ignored; finished in 15.36s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 8.81s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 7.86s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 9.33s
-    test result: ok. 1 passed; 0 failed; 0 ignored; finished in 2.40s
-    test result: ok. 0 passed; 0 failed; 3 ignored; finished in 0.00s
-
-macOS, cargo test -p rlmdb-capi --test mtest:
-    test result: ok. 8 passed; 0 failed; 0 ignored; finished in 12.27s
-
-Linux, scripts/linux-test.sh test -p rlmdb:
-    test result: ok. 60 passed; 0 failed; 1 ignored; finished in 1.96s
-    test result: ok. 8 passed; 0 failed; 0 ignored; finished in 0.71s
-    test result: ok. 12 passed; 0 failed; 0 ignored; finished in 6.41s
-    test result: ok. 5 passed; 0 failed; 0 ignored; finished in 0.01s
-    test result: ok. 6 passed; 0 failed; 0 ignored; finished in 4.73s
-    test result: ok. 2 passed; 0 failed; 0 ignored; finished in 0.08s
-    test result: ok. 1 passed; 0 failed; 0 ignored; finished in 30.07s
-    test result: ok. 9 passed; 0 failed; 0 ignored; finished in 0.07s
-    test result: ok. 4 passed; 0 failed; 0 ignored; finished in 0.02s
-    test result: ok. 5 passed; 0 failed; 0 ignored; finished in 13.66s
-    test result: ok. 1 passed; 0 failed; 0 ignored; finished in 0.00s
-    test result: ok. 13 passed; 0 failed; 0 ignored; finished in 0.19s
-    test result: ok. 23 passed; 0 failed; 0 ignored; finished in 2.22s
-    test result: ok. 14 passed; 0 failed; 0 ignored; finished in 0.22s
-    test result: ok. 18 passed; 0 failed; 2 ignored; finished in 20.76s
-    test result: ok. 5 passed; 0 failed; 0 ignored; finished in 3.52s
-    test result: ok. 8 passed; 0 failed; 0 ignored; finished in 0.08s
-    test result: ok. 1 passed; 0 failed; 0 ignored; finished in 0.04s
-    test result: ok. 0 passed; 0 failed; 1 ignored; finished in 0.00s
-    test result: ok. 3 passed; 0 failed; 0 ignored; finished in 0.48s
-
-Linux, scripts/linux-test.sh test -p rlmdb-interop:
-    test result: ok. 5 passed; 0 failed; 0 ignored; finished in 0.00s
-    test result: ok. 3 passed; 0 failed; 0 ignored; finished in 0.00s
-    test result: ok. 39 passed; 0 failed; 0 ignored; finished in 3.85s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 5.57s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 5.20s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 6.05s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 5.68s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 6.48s
-    test result: ok. 11 passed; 0 failed; 0 ignored; finished in 0.01s
-    test result: ok. 10 passed; 0 failed; 0 ignored; finished in 14.95s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 5.85s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 5.46s
-    test result: ok. 33 passed; 0 failed; 0 ignored; finished in 6.68s
-    test result: ok. 1 passed; 0 failed; 0 ignored; finished in 2.32s
-    test result: ok. 0 passed; 0 failed; 3 ignored; finished in 0.00s
-
-Linux, scripts/linux-test.sh test -p rlmdb-capi --test mtest:
-    test result: ok. 8 passed; 0 failed; 0 ignored; finished in 6.58s
-
-```
-
-</details>
-
-## Format descriptor (dual-format stage 1)
-
-`DUAL_FORMAT.md` stage 1: page, node and meta accessors read every
-format-dependent offset from a per-environment `format::Layout` (only the
-LMDB 0.9 layout is used; same file bytes). Measured on macOS (same machine
-as above, 16 KiB pages), the new build against the unchanged one
-(`--baseline`, interleaved, 3 reps per round). The machine was shared with
-other heavy jobs (load average 3-38 during the runs), so single rows move
-by up to ±15 % between runs; only effects that show in every run are
-read as real.
-
-**First cut** (`PageRef`, `NodeRef` and every cursor stack slot carrying a
-`&'static Layout`; 3 rounds): writes 1.10-1.13 (`seq_put_append`,
-`rand_put`), scans 1.08, `readers8_get` 1.12, `get_64k` 1.12,
-`mixed_readers` 1.16. Two causes, found with an experiment build (same
-struct sizes, constant 0.9 offsets: only part of it went away) and the
-disassembly:
-
-1. Size. A `PageRef` grew from two words to three, so the cursor page
-   stacks (32 slots) took 50 % longer to fill and copy, and a `NodeRef`
-   of three words is passed through memory: `read_position` kept the node
-   on its stack and reloaded it, and `node_read`/`inline_data` stopped
-   being inlined.
-2. Selects. Each accessor computed header size, `PAGEBASE` and the
-   node data offset from the descriptor, several dependent instructions
-   per page access where the old code had constants.
-
-**Cheap fixes** (all kept, no `unsafe`, file bytes unchanged):
-
-* The cursor stack holds the page bytes (`&[u8]`, two words) and the
-  cursor one `Format`; `PageRef`s are made from them on access.
-* Accessors re-derive the layout from its format (`PageRef::l`), so the
-  numbers become selects between two constants instead of loads; the small
-  `PageRef`/`NodeRef`/`Layout` accessors are `#[inline(always)]`;
-  `node_read` is always inlined and its cold paths (`overflow_read`,
-  `enter_dups`) take scalars or bytes instead of a `NodeRef`.
-* `cursor_next`, `cursor_prev` and `read_position` (the per-item
-  functions of a scan) are compiled once per format (`per_format!` in
-  `core/cursor.rs`), so in the 0.9 copy every offset is a constant again.
-  The same for `node_search` made point lookups slower (two copies of the
-  binary search no longer inline into the descent) and was dropped.
-
-**After**, full run (3 rounds; other jobs used the disk and CPU heavily
-during it, see the `txn_*` and `put_64k` medians against their
-minimums):
-
-| workload | before fixes: new/base (median) | (min) | after: base ns/op | new ns/op | new/base (median) | (min) |
-|---|---:|---:|---:|---:|---:|---:|
-| seq_put_append | 1.13 | 1.12 | 222 (200) | 214 (208) | 0.96 | 1.04 |
-| rand_put | 1.10 | 1.12 | 2811 (2471) | 3014 (2843) | 1.07 | 1.15 |
-| rand_get | 0.99 | 1.07 | 953 (845) | 901 (839) | 0.95 | 0.99 |
-| scan_fwd | 1.08 | 1.06 | 19.4 (18.7) | 18.3 (17.7) | 0.94 | 0.95 |
-| scan_bwd | 1.08 | 1.12 | 16.5 (15.9) | 17.4 (16.3) | 1.05 | 1.03 |
-| readers8_get | 1.12 | 1.03 | 136 (118) | 137 (125) | 1.01 | 1.06 |
-| rand_overwrite | 0.90 | 1.01 | 4273 (3704) | 4265 (3705) | 1.00 | 1.00 |
-| dup_put | 1.07 | 1.07 | 1184 (1162) | 1220 (1185) | 1.03 | 1.02 |
-| dup_get_both | 1.01 | 1.09 | 922 (702) | 1031 (886) | 1.12 | 1.26 |
-| dup_next_dup | 1.00 | 1.04 | 110 (89.3) | 112 (95.2) | 1.01 | 1.07 |
-| put_4k | 0.91 | 1.01 | 8464 (8007) | 8499 (8378) | 1.00 | 1.05 |
-| get_4k | 1.20 | 1.08 | 603 (565) | 737 (583) | 1.22 | 1.03 |
-| put_64k | 1.02 | 1.10 | 77434 (30928) | 31936 (30683) | 0.41 | 0.99 |
-| get_64k | 1.12 | 1.25 | 238 (217) | 281 (236) | 1.18 | 1.09 |
-| del_rand | 1.02 | 1.01 | 3435 (3279) | 3709 (3444) | 1.08 | 1.05 |
-| txn_nosync | 1.05 | 1.12 | 10720 (8393) | 32311 (8764) | 3.01 | 1.04 |
-| txn_sync | 1.00 | 1.01 | 13087292 (10402648) | 19704090 (10240197) | 1.51 | 0.98 |
-| mixed_writer | 0.99 | 0.97 | 6160 (6096) | 6063 (5354) | 0.98 | 0.88 |
-| mixed_readers | 1.16 | 1.19 | 4.4 (4.4) | 5.0 (4.8) | 1.12 | 1.09 |
-
-Reruns of the same build on a quieter machine (new/base, median (min)):
-
-| workload | read group, 6 rounds | `mixed` + `read`, 3 rounds | `rand_put`, `dupsort`, `overflow`, `delete`, 4 rounds |
-|---|---:|---:|---:|
-| rand_get | 0.97 (1.01) | 1.02 (1.01) | |
-| scan_fwd | 0.98 (1.03) | 1.10 (1.05) | |
-| scan_bwd | 1.01 (1.09) | 1.16 (1.06) | |
-| readers8_get | 1.01 (1.12) | 0.93 (1.04) | |
-| mixed_writer | | 0.95 (0.84) | |
-| mixed_readers | | 0.99 (1.07) | |
-| rand_put | | | 0.93 (1.04) |
-| dup_put | | | 1.04 (1.03) |
-| dup_get_both | | | 1.08 (1.05) |
-| dup_next_dup | | | 1.13 (1.02) |
-| put_4k / get_4k | | | 0.93 (0.94) / 0.85 (0.98) |
-| put_64k / get_64k | | | 1.00 (0.99) / 1.06 (1.04) |
-| del_rand | | | 0.97 (1.01) |
-
-Reading: writes, point reads and scans are back within noise (medians on
-both sides of 1 from run to run). What may be left is a few percent on
-reads of cached data, which shows in the minimums more than in the
-medians: `get_64k`, `scan_bwd` and the `DUPSORT` reads (`dup_get_both`
-1.26 and 1.05 at the minimum in the two runs after the fixes; its lookups
-go through `node_search` and `xcursor_init1`, which are not compiled per
-format).
-If the 1.0 work makes that worse, the next step is the generic version
-`DUAL_FORMAT.md` §4.1 describes (the layout as a type parameter of the
-cursor), not more of these fixes.
-
-**Coordinator's check** of the same build against a baseline built from the
-commit before it (3 rounds, 3 reps; load average 10-12 on 10 cores from
-other jobs, so ±5 % is noise), new/base median (min): `seq_put_append`
-1.06 (1.06), `rand_put` 1.01 (1.00), `rand_get` 1.05 (1.11), `scan_fwd`
-1.03 (1.01), `scan_bwd` 1.06 (1.06), `readers8_get` 1.01 (1.01),
-`rand_overwrite` 0.95 (1.00), `dup_put` 1.00 (1.04), `dup_get_both` 1.18
-(1.09), `dup_next_dup` 1.09 (1.02), `put_4k` 1.02 (0.98), `get_4k` 0.98
-(0.99), `put_64k` 0.96 (0.94), `get_64k` 1.10 (1.06), `del_rand` 1.05
-(1.04), `txn_nosync` 1.01 (1.03), `txn_sync` 1.00 (1.01), `mixed_writer`
-1.15 (1.00), `mixed_readers` 1.10 (1.12). Same picture: writes and point
-reads within noise, DUPSORT lookups (`node_search`, `xcursor_init1`, not
-specialised per format) and the cached-read loops a few percent slower.
-Accepted as the price of the descriptor for now; the follow-up, once the
-1.0 layout exists and the cost can be measured on both formats, is the
-per-format compilation of the remaining hot read paths or the generic
-engine of `DUAL_FORMAT.md` §4.1.
+* Every workload: one warm-up and `--reps` timed repetitions per round,
+  median and min of ns/op over all samples of a side; each group runs
+  in a fresh process per side and the side that goes first alternates
+  between groups and rounds. Rust/C ratios are always from one run, so
+  both sides saw the same conditions.
+* Per-change claims rest on interleaved A/B runs of two Rust builds
+  (`--baseline <old build> --rounds 3 --reps 3`), never on two separate
+  runs. The macOS machine is shared with other jobs (the per-task
+  reports give the load during each run), where separate runs move by
+  10-40 %.
+* Environments are on local storage only: the internal SSD on macOS
+  (`$TMPDIR`), a tmpfs on the server (`/dev/shm`) and in the VM since
+  `bb96986` (except where stated), so the numbers measure the libraries,
+  not the disks.
+* Commands, from `rust/`: `cargo build --release -p rlmdb-bench &&
+  target/release/rlmdb-bench --rounds 2 --reps 3` (macOS);
+  `rlmdb-bench --dir /dev/shm/rlmdb-bench --reps 5` and `--only
+  ls,read,dupsort --rounds 3 --reps 3` (server; the ext4 row with
+  `--only small_txn` and `--dir` on that file system); in the VM,
+  `scripts/linux-test.sh run --release -p rlmdb-bench -- --dir
+  /tmp/lmdb-bench --reps 3`.
