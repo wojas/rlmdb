@@ -990,6 +990,10 @@ pub fn differential(
         let r_lines = rust_cursorops(&txn, db, &ops);
         if !out.status.success() {
             // C asserted (or crashed) on some op; compare what it printed.
+            // Seen now and then (mtest3's data is seeded from the clock):
+            // `Assertion 'root > 1' failed in mdb_page_search()`, C's
+            // uninitialised sub-cursor of KNOWN_C_BUGS.md #6 after a failed
+            // MDB_SET followed by a duplicate move.
             let i = c_lines.len();
             eprintln!(
                 "NOTE: C cursorops died at op {i} {:?}: {}",
@@ -1054,10 +1058,13 @@ pub fn differential(
                 let (r_op, r_cur) = rl.split_once(" | ").unwrap();
                 let untouched =
                     c_op.ends_with("rc=0 d=-") && r_op.starts_with(c_op.trim_end_matches('-'));
-                // KNOWN_C_BUGS.md: C's mdb_cursor_count reads an unchecked
-                // node when the cursor is past the end (no current item)
-                // and usually reports 1; Rust reports MDB_NOTFOUND.
-                let count_past_end = c_op.starts_with("count rc=0")
+                // KNOWN_C_BUGS.md #5: C's mdb_cursor_count reads an
+                // unchecked node when the cursor is past the end (no current
+                // item, after a failed MDB_SET/MDB_GET_BOTH) and usually
+                // reports 1, but with the uninitialised sub-cursor of #6 it
+                // can also say EINVAL: any C result is undefined there, so
+                // only Rust's MDB_NOTFOUND and the positions are checked.
+                let count_past_end = c_op.starts_with("count rc=")
                     && r_op == "count rc=-30798 n=0"
                     && c_cur.starts_with("cur rc=-30798");
                 assert!(
