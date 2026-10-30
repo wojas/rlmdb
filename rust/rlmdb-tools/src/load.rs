@@ -4,13 +4,27 @@
 //! [`crate::dumpfmt`]).
 //!
 //! ```text
-//! mdb_load [-V] [-a] [-f input] [-n] [-s name] [-N] [-T] dbpath
+//! mdb_load [-V] [-a] [-f input] [-F 0.9|1.0] [-n] [-s name] [-N] [-T] dbpath
 //! ```
 //!
 //! The input is read exactly as C reads it: same header keywords and
 //! messages, same line numbers in messages, records written through one
 //! cursor and committed every 100 records, `mdb_env_sync` after each
-//! database. Deliberate differences from C 0.9.36:
+//! database.
+//!
+//! The environment may be an LMDB 0.9 or an LMDB 1.0 one. `-F 0.9|1.0`
+//! (rlmdb's own option) gives the format of a new environment; an existing
+//! one keeps its format, and `-F` naming the other one makes the open fail
+//! with `MDB_VERSION_MISMATCH`. Without `-F` a new environment gets the
+//! default format (`rlmdb::default_format`: LMDB 0.9 unless the
+//! experimental `RLMDB_DEFAULT_FORMAT` variable says `1.0`). The tool then
+//! behaves like the C `mdb_load` of that format: for 1.0, `db_pagesize=` in
+//! the header sets the page size of a new environment
+//! (`mdb_env_set_pagesize`, an invalid size is ignored) and a record with an
+//! empty key is skipped with a warning; 0.9's tool warns about
+//! `db_pagesize=` as an unknown keyword and fails on an empty key.
+//!
+//! Deliberate differences from C 0.9.36:
 //!
 //! * The header flags of the *first* database (`dupsort=1`, …) are used;
 //!   C drops them (`KNOWN_C_BUGS.md` #1).
@@ -29,8 +43,8 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 
 use rlmdb::{
-    CursorId, CursorOp, DatabaseFlags, Dbi, Environment, EnvironmentFlags, RwTxn, Transaction,
-    WriteFlags,
+    CursorId, CursorOp, DatabaseFlags, Dbi, Environment, EnvironmentFlags, Format, RwTxn,
+    Transaction, WriteFlags,
 };
 
 use crate::cfmt::{atoi, cstr, err_code, io_errno, scan_unsigned, strerror};
@@ -40,7 +54,10 @@ use crate::dumpfmt::decode_line_into;
 use crate::getopt::{GetOpt, Opt};
 use crate::output::eprint_bytes;
 
-const SYNOPSIS: &str = "[-V] [-a] [-f input] [-n] [-s name] [-N] [-T] dbpath";
+const SYNOPSIS: &str = "[-V] [-a] [-f input] [-F 0.9|1.0] [-n] [-s name] [-N] [-T] dbpath";
+
+/// The page sizes `mdb_env_set_pagesize` (LMDB 1.0) accepts.
+const SET_PAGESIZE: std::ops::RangeInclusive<u32> = 256..=65536;
 
 /// Records per write transaction (C commits every 100 puts).
 const BATCH: usize = 100;
@@ -61,6 +78,9 @@ struct Header {
     map_size: u64,
     /// `maxreaders=`.
     max_readers: u32,
+    /// `db_pagesize=` (LMDB 1.0's `pagesize`; 0 = not given). Like C 1.0's
+    /// global, it keeps its value across headers.
+    page_size: u32,
 }
 
 /// The input stream with C's line counter and end-of-input flag.
@@ -73,6 +93,10 @@ struct Input {
     eof: bool,
     /// `-T`: plain text, no headers and no leading spaces.
     plain: bool,
+    /// The format of the environment, whose C `mdb_load` decides how the
+    /// input is read (see the module documentation); before the open, the
+    /// format it will have.
+    format: Format,
     prog: Vec<u8>,
     /// Line buffer, reused.
     line: Vec<u8>,
@@ -156,6 +180,12 @@ impl Input {
             } else if let Some(rest) = line.strip_prefix(b"maxreaders=") {
                 // sscanf("%u") stores the low 32 bits.
                 hdr.max_readers = self.number(rest, 10, "maxreaders")? as u32;
+            } else if let Some(rest) = line
+                .strip_prefix(b"db_pagesize=")
+                .filter(|_| self.format == Format::V10)
+            {
+                // LMDB 1.0 only; 0.9's mdb_load does not know the keyword.
+                hdr.page_size = self.number(rest, 10, "pagesize")? as u32;
             } else if let Some((flag, _)) = DB_FLAG_NAMES.iter().find(|(_, name)| {
                 line.starts_with(name.as_bytes()) && line.get(name.len()) == Some(&b'=')
             }) {
@@ -269,6 +299,8 @@ struct Options {
     no_overwrite: bool,
     /// `-T`.
     plain: bool,
+    /// `-F 0.9|1.0`: the format of a new environment.
+    format: Option<Format>,
 }
 
 /// The `main` of `mdb_load`; returns the exit code.
@@ -277,7 +309,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         return tool.usage(SYNOPSIS);
     }
     let mut o = Options::default();
-    let mut getopt = GetOpt::new(args, "af:ns:NQTV");
+    let mut getopt = GetOpt::new(args, "af:F:ns:NQTV");
     while let Some(opt) = getopt.next() {
         match opt {
             Opt::Flag(b'V') => return tool.version(),
@@ -288,6 +320,13 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
                 Err(e) => {
                     let text = strerror(io_errno(&e));
                     tool.eprint_prog(&[&path, b": reopen: ", text.as_bytes(), b"\n"]);
+                    return EXIT_FAILURE;
+                }
+            },
+            Opt::Arg(b'F', name) => match Format::from_name(&name) {
+                Some(f) => o.format = Some(f),
+                None => {
+                    tool.eprint_prog(&[&name, b": unknown format, use 0.9 or 1.0\n"]);
                     return EXIT_FAILURE;
                 }
             },
@@ -314,11 +353,25 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         Some(f) => Box::new(BufReader::with_capacity(64 * 1024, f)),
         None => Box::new(BufReader::with_capacity(64 * 1024, io::stdin())),
     };
+    // The format the environment will have: -F, else an existing file's,
+    // else the default. (A file that cannot be sniffed fails at the open.)
+    let format = o.format.unwrap_or_else(|| {
+        let flags = if o.no_sub_dir {
+            EnvironmentFlags::NO_SUB_DIR
+        } else {
+            EnvironmentFlags::empty()
+        };
+        match rlmdb::sniff_format(path_of(envname), flags) {
+            Ok(Some(f)) => f,
+            _ => rlmdb::default_format(),
+        }
+    });
     let mut input = Input {
         reader,
         lineno: 0,
         eof: false,
         plain: o.plain,
+        format,
         prog: tool.prog.clone(),
         line: Vec::new(),
     };
@@ -341,11 +394,22 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     }
     let mut builder = Environment::builder();
     builder.max_dbs(2).flags(flags);
+    if let Some(f) = o.format {
+        builder.format(f);
+    }
     if hdr.max_readers != 0 {
         builder.max_readers(hdr.max_readers);
     }
     if hdr.map_size != 0 {
         builder.map_size(usize::try_from(hdr.map_size).unwrap_or(usize::MAX));
+    }
+    // C 1.0 ignores the result of mdb_env_set_pagesize: an invalid size is
+    // no error. An existing environment keeps its page size.
+    if format == Format::V10
+        && hdr.page_size.is_power_of_two()
+        && SET_PAGESIZE.contains(&hdr.page_size)
+    {
+        builder.page_size(hdr.page_size as usize);
     }
     let env = match builder.open_with_permissions(path_of(envname), 0o664) {
         Ok(env) => env,
@@ -354,6 +418,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
             return EXIT_FAILURE;
         }
     };
+    input.format = env.format();
 
     let mut loader = Loader {
         env: &env,
@@ -434,6 +499,11 @@ impl<'env> Loader<'env> {
             if self.input.read_value(&mut data, hdr.print).is_err() {
                 self.input.message(b"failed to read key value\n");
                 return Err(());
+            }
+            if key.is_empty() && self.input.format == Format::V10 {
+                // C 1.0; 0.9's mdb_cursor_put fails with MDB_BAD_VALSIZE.
+                self.input.message(b"zero-length key(ignored)\n");
+                continue;
             }
             let mut flags = self.put_flags;
             if self.append {

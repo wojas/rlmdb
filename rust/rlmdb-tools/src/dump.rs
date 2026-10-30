@@ -6,6 +6,12 @@
 //! mdb_dump [-V] [-f output] [-l] [-n] [-p] [-a|-s subdb] dbpath
 //! ```
 //!
+//! Output and messages are those of the C tool of the environment's format.
+//! The dump format is the same for LMDB 0.9 and 1.0 environments; for a 1.0
+//! one the messages are 1.0's (`mdb_dbi_open`), and `-a`/`-l` list the
+//! records of named databases (`mdb_cursor_is_db`; 1.0 stores a name with
+//! its NUL, which 0.9's tool would skip).
+//!
 //! C installs handlers for `SIGPIPE`, `SIGHUP`, `SIGINT` and `SIGTERM` that
 //! make the dump stop after the current record with "Interrupted system
 //! call". The Rust tool reproduces the `SIGPIPE` case (a closed pipe on
@@ -19,7 +25,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use rlmdb::{DatabaseFlags, Dbi, Environment, EnvironmentFlags, RoTxn, Transaction};
 
 use crate::cfmt::{err_code, io_errno, pointer, strerror};
-use crate::common::{open_db, path_of, report_failed, Tool, EXIT_FAILURE};
+use crate::common::{
+    db_name_of, dbi_open_name, open_db, path_of, report_failed, Tool, EXIT_FAILURE,
+};
 use crate::dumpfmt::encode_line;
 use crate::getopt::{GetOpt, Opt};
 use crate::output::{eprint_bytes, Output};
@@ -134,7 +142,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     let dbi = match open_db(&txn, o.subname.as_deref()) {
         Ok(d) => d,
         Err(e) => {
-            report_failed("mdb_open", &e);
+            report_failed(dbi_open_name(&env), &e);
             return EXIT_FAILURE;
         }
     };
@@ -178,6 +186,7 @@ fn dump_all(
             return err_code(&e);
         }
     };
+    let format = env.format();
     let mut count = 0usize;
     let mut rc = loop {
         let key = match cursor.next_nodup() {
@@ -185,19 +194,19 @@ fn dump_all(
             Ok(None) => break NOTFOUND,
             Err(e) => break err_code(&e),
         };
-        if key.contains(&0) {
+        let Some(name) = db_name_of(format, &cursor, key) else {
             continue;
-        }
+        };
         // Counted even if it turns out not to be a database, as in C.
         count += 1;
-        let Ok(db2) = open_db(txn, Some(key)) else {
+        let Ok(db2) = open_db(txn, Some(name)) else {
             continue;
         };
         if o.list {
-            tool.out.write(key);
+            tool.out.write(name);
             tool.out.write(b"\n");
         } else {
-            let rc = dump_db(&mut tool.out, env, txn, db2, Some(key), o.print);
+            let rc = dump_db(&mut tool.out, env, txn, db2, Some(name), o.print);
             if rc != 0 {
                 env.close_db(db2);
                 break rc;

@@ -11,6 +11,10 @@ processes use at the same time, since `rlmdb` shares the C data and
 lock file formats. The tests compare every tool with its C counterpart on
 macOS and Linux.
 
+They also work on LMDB 1.0 environments (`../DUAL_FORMAT.md`): an existing
+environment is opened in its format, and for a 1.0 environment the tools
+print what C 1.0's tools print (see "LMDB 1.0 environments" below).
+
 ```sh
 cargo build --release -p rlmdb-tools     # target/release/mdb_{stat,dump,load,copy,drop}
 ```
@@ -22,7 +26,7 @@ The C man pages (`libraries/liblmdb/*.1`) apply. In short:
 ```text
 mdb_stat [-V] [-n] [-e] [-r[r]] [-f[f[f]]] [-a|-s subdb] dbpath
 mdb_dump [-V] [-f output] [-l] [-n] [-p] [-a|-s subdb] dbpath
-mdb_load [-V] [-a] [-f input] [-n] [-s name] [-N] [-T] dbpath
+mdb_load [-V] [-a] [-f input] [-F 0.9|1.0] [-n] [-s name] [-N] [-T] dbpath
 mdb_copy [-V] [-c] [-n] srcpath [dstpath]
 mdb_drop [-V] [-n] [-d] [-s subdb] dbpath
 ```
@@ -38,7 +42,9 @@ mdb_drop [-V] [-n] [-d] [-s subdb] dbpath
   into an environment, creating it if needed; `-s` names the target
   database (a `database=` header line overrides it), `-N` keeps existing
   records, `-a` appends records in input order without sorting (for dumps
-  of databases with custom comparators), `-f` reads a file.
+  of databases with custom comparators), `-f` reads a file. `-F 0.9` or
+  `-F 1.0` is the format of a new environment (rlmdb's own option; see
+  below).
 * `mdb_copy`: copies an environment to an empty directory, or to standard
   output without `dstpath`; `-c` compacts (only pages in use, renumbered).
 * `mdb_drop`: empties a database (the main DB, or `-s subdb`); `-d`
@@ -50,6 +56,41 @@ Linux (glibc) options may follow the path (`mdb_stat db -e`) unless
 `POSIXLY_CORRECT` is set; on macOS parsing stops at the first non-option,
 and the error messages differ accordingly (`invalid option -- 'x'` vs.
 `illegal option -- x`).
+
+## LMDB 1.0 environments
+
+Each C release's tools are the oracle for their own format: for an LMDB
+1.0 environment the tools print and decide what C 1.0's do.
+
+* `mdb_load -F 1.0` creates a 1.0 environment; without `-F` a new
+  environment gets rlmdb's default format: LMDB 0.9, unless the
+  **experimental** variable `RLMDB_DEFAULT_FORMAT=1.0` is set (it may be
+  removed or restricted later; prefer `-F`). An existing environment keeps
+  its format; `-F` naming the other one fails with
+  `mdb_env_open failed, error -30794 MDB_VERSION_MISMATCH: …`. For a 1.0
+  environment, `db_pagesize=` in the dump header sets the page size of a
+  new environment (an invalid size is ignored, as C 1.0 ignores the result
+  of `mdb_env_set_pagesize`) and a record with an empty key is skipped
+  with `zero-length key(ignored)`; for a 0.9 environment `db_pagesize=` is
+  an unrecognized keyword and an empty key fails, as in C 0.9. The usage
+  line names `-F`, the one difference from C 0.9's.
+* `mdb_stat` of a 1.0 environment prints the page size in every
+  database's block (`  Page size: 4096`, as 1.0's `prstat` does), and
+  `mdb_stat`/`mdb_dump` say `mdb_dbi_open failed` where 0.9's say
+  `mdb_open failed`. `-a` (and `mdb_dump -l`) list the named databases
+  by their records (`mdb_cursor_is_db`): 1.0 stores a name with its NUL,
+  which the 0.9 rule (skip keys containing a NUL) would hide.
+* `mdb_copy` copies pages, so a copy has the source's format (also with
+  `-c`); there is no converting copy yet (`DUAL_FORMAT.md` §4.3).
+* `mdb_drop` without `-s` on a 1.0 environment deletes the named databases
+  first, as C 1.0 does, so their pages are freed (0.9 leaks them,
+  `../KNOWN_C_BUGS.md` #21).
+* The options are 0.9's: 1.0's `-L`, `-v`, `-i`, `-m`/`-w` are not there.
+* Not reproduced from C 1.0: its `mdb_env_info` reports the process's map
+  address when the file records none, so `mdb_stat10 -e` prints it and
+  every `mdb_dump10` output has a `mapaddr=` line (which makes `mdb_load`
+  of it use `MDB_FIXEDMAP`). The Rust tools print the recorded address (0:
+  `Map address: 0x0`, no `mapaddr=`) as 0.9 does.
 
 ## Differences from the C tools
 
@@ -143,3 +184,16 @@ sub-pages and sub-databases, a `MDB_NOSUBDIR` environment.
   DBs) leaves exactly the environment the C `mdb_drop` leaves.
 * `readers.rs`: `mdb_stat -r`/`-rr` with a C reader, a Rust reader (in the
   test process) and the stale slot of a killed reader.
+* `format.rs`: `mdb_load -F 0.9|1.0` and `RLMDB_DEFAULT_FORMAT` (set for
+  the tool's process only) in every combination: the format of the new
+  file, the same messages and environment as C 0.9's `mdb_load` for 0.9,
+  the same records for 1.0; `-F` against an existing file of the other
+  format, `db_pagesize=` (valid and invalid), empty keys, bad `-F` values;
+  and that `RLMDB_DEFAULT_FORMAT=1.0` changes nothing for `mdb_stat`,
+  `mdb_dump`, `mdb_copy` and `mdb_drop` on existing 0.9 files (C 0.9's
+  output and files).
+
+The comparison with C 1.0's tools needs the 1.0 oracle, which only
+`../interop` builds: `interop/tests/tools10.rs` runs these tools (as
+`rtools <tool>`, one executable built from this crate's library) next to
+`mdb_load10`, `mdb_stat10`, `mdb_dump10`, `mdb_drop10` and `mdb_copy10`.

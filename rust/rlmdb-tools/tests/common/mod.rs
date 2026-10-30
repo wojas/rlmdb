@@ -291,25 +291,44 @@ pub fn version_line(imp: Impl) -> Vec<u8> {
     format!("{line}\n").into_bytes()
 }
 
-/// `c` as the Rust tool should print it: each standard output line that is
-/// the C version line becomes the Rust one ([`version_line`]).
-fn expected_of_rust(c: &Run) -> Run {
+/// The usage synopsis of `mdb_load` as C 0.9 prints it, and as the Rust
+/// tool does, which also has `-F 0.9|1.0` (the format of a new
+/// environment; C 0.9 knows one format only).
+pub const LOAD_USAGE_C: &[u8] = b"[-V] [-a] [-f input] [-n] [-s name] [-N] [-T] dbpath\n";
+pub const LOAD_USAGE_RUST: &[u8] =
+    b"[-V] [-a] [-f input] [-F 0.9|1.0] [-n] [-s name] [-N] [-T] dbpath\n";
+
+/// `c` as the Rust `tool` should print it: each standard output line that
+/// is the C version line becomes the Rust one ([`version_line`]), and
+/// `mdb_load`'s usage line names `-F` ([`LOAD_USAGE_RUST`]).
+fn expected_of_rust(tool: &str, c: &Run) -> Run {
     let (c_line, rust_line) = (version_line(Impl::C), version_line(Impl::Rust));
     let mut stdout = Vec::with_capacity(c.stdout.len());
     for line in c.stdout.split_inclusive(|&b| b == b'\n') {
         stdout.extend_from_slice(if line == c_line { &rust_line } else { line });
     }
+    let mut stderr = c.stderr.clone();
+    if tool == "mdb_load" {
+        if let Some(rest) = stderr
+            .strip_suffix(LOAD_USAGE_C)
+            .filter(|head| head.ends_with(b"usage: mdb_load "))
+        {
+            stderr = [rest, LOAD_USAGE_RUST].concat();
+        }
+    }
     Run {
         stdout,
+        stderr,
         ..c.clone()
     }
 }
 
 /// Asserts that two runs are identical, with a readable diff. The version
 /// line is the exception: where C prints its version line, Rust must print
-/// its own ([`version_line`]).
+/// its own ([`version_line`]); so is `mdb_load`'s usage line, which also
+/// names `-F`.
 pub fn assert_runs_equal(tool: &str, argv: &[Vec<u8>], c: &Run, r: &Run) {
-    if expected_of_rust(c) != *r {
+    if expected_of_rust(tool, c) != *r {
         let cmd: Vec<String> = argv
             .iter()
             .map(|a| String::from_utf8_lossy(a).into_owned())
