@@ -1,6 +1,10 @@
 # Supporting the LMDB 0.9 and 1.0 formats in one rlmdb
 
-Status: investigation, 2026-10-30. Nothing here is implemented.
+Status: investigation, 2026-10-30. Implemented since: stage 1 (the `Layout`
+descriptor), stage 2 (the 1.0 data file: `DESIGN.md`, "The LMDB 1.0 data
+file"; `COMPATIBILITY.md`), and of stage 4 the version report and the
+format selection of the Rust API (`EnvironmentBuilder::format`,
+`sniff_format`).
 
 Question: can rlmdb read and write both the LMDB 0.9 (`MDB_DATA_VERSION 1`)
 and the LMDB 1.0 (`MDB_DATA_VERSION 3`) formats from one code base, picking
@@ -37,6 +41,7 @@ ITS#10615/10642/10643, line numbers below are from that file) and
 | `P_LEAF2` pages | keys from offset 16 | keys from offset 24 (`LEAF2KEY`) |
 | Max key size | 511, fixed | `nodemax - 56` where `nodemax = (((psize - 24 - sums) / 2) & -2) - 2` (mdb10.c 5669-5673; measured with `layout_dump10`): 1978 on 4 KiB pages, 8122 on 16 KiB; only known after open |
 | Page size range | OS page size, up to 32 KiB | `mdb_env_set_pagesize()`: any power of two from 256 to 65536; 1.0's own `mtest` creates 1 KiB-page environments, so a 1.0 reader must not assume the OS page size |
+| Named database keys in the main DB | the name (`strlen(name)` bytes) | the name and its terminating NUL (`strlen(name) + 1`, upstream e4cf950); found while implementing stage 2 |
 
 Lock file (`lock.mdb`), `MDB_LOCK_VERSION` 1 vs 2:
 
@@ -50,7 +55,9 @@ Lock file (`lock.mdb`), `MDB_LOCK_VERSION` 1 vs 2:
 
 Nothing else in the file format changed: magic, meta semantics (two meta
 pages, newer `mm_txnid` wins), `MDB_db`, node header, branch node pgno
-packing, dup sub-DBs, `MDB_INTEGERKEY` layouts, free-list records.
+packing, dup sub-DBs, `MDB_INTEGERKEY` layouts, free-list records. (Beyond
+the layout, what C 1.0 writes also differs in a few decisions: see
+`KNOWN_C_BUGS.md`, section "LMDB 1.0".)
 
 ## 2. What a 1.0 writer must do beyond the layout
 
@@ -391,7 +398,11 @@ format. Needed:
 2. V10 data layout: header, `PAGEBASE`, even nodes, `MDB_ovpage`, sub-page
    flags, `mp_txnid` stamping, max key size, 64 KiB pages. Read side first
    (dump/stat of files made by C 1.0), then write with the differential
-   tests against C 1.0.
+   tests against C 1.0. Done; besides the items above it needed 1.0's
+   NUL-terminated database names, `mdb_rebalance` loosening the root, the
+   sub-pages' `mp_txnid`, `op_pages` where 1.0 trusts it (`mdb_drop`, the
+   compacting copy), and the `mp_pad` C's scratch page leaves in sub-pages
+   (`KNOWN_C_BUGS.md`, section "LMDB 1.0").
 3. Lock file v2 on Linux and macOS, including the semaphore naming.
 4. Sniffing, selection, defaults (`RLMDB_DEFAULT_FORMAT`, experimental),
    `rlmdb.h`, `rlmdb_version()` and the capability list, `mdb_version`

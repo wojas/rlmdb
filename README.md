@@ -48,6 +48,17 @@ Implemented and tested against the C library on macOS (arm64) and Linux
   library" peers writing and reading one environment concurrently, in all
   nine combinations.
 
+**The LMDB 1.0 data file.** `rlmdb` also reads and writes the data file of
+LMDB 1.0 (`MDB_DATA_VERSION 3`), chosen per environment: an existing file
+is opened in its format (`rlmdb::sniff_format`), a new one is 0.9 unless
+`EnvironmentBuilder::format(Format::V10)` asks for 1.0, which also allows
+page sizes from 256 B to 64 KiB (`page_size`). What it writes is page for
+page what C LMDB 1.0 writes for the same operations, `mp_txnid` included
+(checked against a C 1.0 build in `interop`); encrypted or checksummed 1.0
+environments are refused. Until rlmdb writes 1.0's lock file
+(`DUAL_FORMAT.md` stage 3), C 1.0 and rlmdb cannot have one environment open
+at the same time; the C API and the tools handle 0.9 only so far.
+
 Deliberately out of scope:
 
 * Windows (all OS code is behind `rlmdb/src/os/`, so a `windows.rs`
@@ -56,8 +67,8 @@ Deliberately out of scope:
 * `MDB_WRITEMAP`, `MDB_FIXEDMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT`: accepted
   and ignored. They are per-process choices, so C peers using them are
   unaffected.
-* LMDB 1.0 features: `MDB_VL32`, encryption, checksums,
-  `MDB_PREVSNAPSHOT` (rejected with `EINVAL`, as 0.9 does).
+* LMDB 1.0 features beyond its data file: `MDB_VL32`, encryption,
+  checksums, `MDB_PREVSNAPSHOT` (rejected with `EINVAL`, as 0.9 does).
 * The `heed`-compatible typed API described in `DESIGN.md` is deferred:
   the byte-level API is validated through the C API first.
   Performance work against C (benchmarks) has not started.
