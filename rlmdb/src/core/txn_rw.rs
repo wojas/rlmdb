@@ -37,6 +37,7 @@ use crate::core::dbi::{
     check_db_name, name_id, Dbi, DbiRegistry, DbiSlot, NamedDb, TxnDb, DB_DIRTY, DB_NEW, DB_STALE,
     DB_USRVALID, DB_VALID,
 };
+use crate::core::dirty::PagePool;
 use crate::core::env::{Environment, WriterState};
 use crate::core::nested::{End, Nested};
 use crate::core::reader::LockRegion;
@@ -95,7 +96,15 @@ pub(crate) struct WriteState {
     /// before the close, so that a nested transaction that aborts can
     /// reopen them.
     pub(crate) dropped: Vec<(usize, DbiSlot, u32)>,
+    /// Spare byte buffers for the temporary pages and node data of puts
+    /// and splits (C's `me_pbuf` and stack buffers), see
+    /// [`RwTxn::take_scratch`]. A nested transaction borrows them.
+    pub(crate) scratch: Vec<Vec<u8>>,
 }
+
+/// How many spare buffers [`WriteState::scratch`] keeps: enough for a
+/// `DUPSORT` put (two) that splits a leaf and its parent (two each).
+const SCRATCH_BUFS: usize = 8;
 
 /// Wraps a write transaction for a mutating operation: if the operation
 /// panics (a user comparator, `set_compare`/`set_dupsort`), dropping the
@@ -184,6 +193,15 @@ pub struct CursorId {
     gen: u32,
 }
 
+/// `MDB_RESERVE` is documented as not allowed with `MDB_DUPSORT`; C does
+/// not check and misbehaves, we refuse it (`db_flags`: the database's).
+fn check_reserve(db_flags: u16, flags: u32) -> Result<()> {
+    if flags & MDB_RESERVE != 0 && u32::from(db_flags) & MDB_DUPSORT != 0 {
+        return Err(Error::einval());
+    }
+    Ok(())
+}
+
 /// Where the data of a put landed (for `MDB_RESERVE`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DataLoc {
@@ -204,7 +222,7 @@ impl<'env> RwTxn<'env> {
             lock.lock_writer(|| env.pick_meta().map(|m| m.txnid))?;
         }
         // From here on, dropping `lock` unlocks again.
-        let lock = WriterLock { state, shared };
+        let mut lock = WriterLock { state, shared };
         let (last, meta) = match shared {
             Some(l) => {
                 let t = l.txnid();
@@ -217,6 +235,11 @@ impl<'env> RwTxn<'env> {
         };
         let mut core = TxnCore::new(env, Vec::new());
         core.set_snapshot(last.wrapping_add(1), &meta)?;
+        // The spare page buffers are the transaction's until it ends. (The
+        // environment keeps an empty pool meanwhile, so that it still has
+        // one if the transaction is leaked.)
+        let pages = std::mem::replace(&mut lock.state.pages, PagePool::new(env.page_size()));
+        core.dirty.give_pool(pages);
         let pg_oldest = lock.state.pg_oldest;
         Ok(RwTxn {
             core,
@@ -281,6 +304,9 @@ impl<'env> RwTxn<'env> {
         self.w.flags = TXN_FINISHED;
         if let Some(mut lock) = self.lock.take() {
             lock.state.pg_oldest = self.w.pg_oldest;
+            let mut pages = self.core.dirty.take_pool();
+            pages.trim();
+            lock.state.pages.merge(pages);
         }
     }
 
@@ -345,6 +371,22 @@ impl<'env> RwTxn<'env> {
         rc
     }
 
+    /// An empty buffer for temporary bytes (a sub-page being built, a copy
+    /// of a page being split, ...). It is the caller's, so it cannot alias
+    /// a page; [`RwTxn::give_scratch`] it back when done so the next
+    /// operation reuses its memory instead of allocating.
+    pub(crate) fn take_scratch(&mut self) -> Vec<u8> {
+        self.w.scratch.pop().unwrap_or_default()
+    }
+
+    /// Returns a buffer from [`RwTxn::take_scratch`] for reuse.
+    pub(crate) fn give_scratch(&mut self, mut buf: Vec<u8>) {
+        if buf.capacity() > 0 && self.w.scratch.len() < SCRATCH_BUFS {
+            buf.clear();
+            self.w.scratch.push(buf);
+        }
+    }
+
     /// `MDB_TXN_BLOCKED` → `MDB_BAD_TXN`.
     pub(crate) fn check_usable(&self) -> Result<()> {
         if self.w.flags & TXN_BLOCKED != 0 {
@@ -377,12 +419,12 @@ impl<'env> RwTxn<'env> {
     }
 
     /// `TXN_DBI_EXIST(txn, dbi, DB_USRVALID)` for a write operation, then
-    /// the stale-record refresh of `mdb_cursor_init`. Returns the index.
-    fn user_dbi(&self, db: Dbi) -> Result<usize> {
-        self.core.dbi_entry(db, DB_USRVALID)?;
+    /// the stale-record refresh of `mdb_cursor_init`. Returns the entry
+    /// (resolved once for the whole operation).
+    fn user_dbi(&self, db: Dbi) -> Result<TxnDb> {
+        let entry = self.core.dbi_entry(db, DB_USRVALID)?;
         self.check_usable()?;
-        self.core.fresh_dbi(db, DB_USRVALID)?;
-        Ok(db.0 as usize)
+        self.core.refreshed(db, entry)
     }
 
     // --- databases ---------------------------------------------------------------
@@ -656,15 +698,16 @@ impl<'env> RwTxn<'env> {
         data: PutData<'_>,
         flags: u32,
     ) -> Result<Option<DataLoc>> {
-        self.core.dbi_entry(db, DB_USRVALID)?;
+        let entry = self.core.dbi_entry(db, DB_USRVALID)?;
         if flags & !(MDB_NOOVERWRITE | MDB_NODUPDATA | MDB_RESERVE | MDB_APPEND | MDB_APPENDDUP)
             != 0
         {
             return Err(Error::einval());
         }
-        let dbi = self.user_dbi(db)?;
-        self.check_reserve(dbi, flags)?;
-        let slot = self.open_slot(dbi, true);
+        self.check_usable()?;
+        let entry = self.core.refreshed(db, entry)?;
+        check_reserve(entry.db.flags, flags)?;
+        let slot = self.open_slot(db.0 as usize, true);
         let c = CRef::main(slot);
         let rc = self.put_at(c, key, data, flags);
         let loc = match rc {
@@ -674,17 +717,6 @@ impl<'env> RwTxn<'env> {
         };
         self.close_slot(slot);
         loc
-    }
-
-    /// `MDB_RESERVE` is documented as not allowed with `MDB_DUPSORT`; C
-    /// does not check and misbehaves, we refuse it.
-    fn check_reserve(&self, dbi: usize, flags: u32) -> Result<()> {
-        if flags & MDB_RESERVE != 0
-            && u32::from(self.core.dbs.borrow()[dbi].db.flags) & MDB_DUPSORT != 0
-        {
-            return Err(Error::einval());
-        }
-        Ok(())
     }
 
     /// The location of the data of the node under cursor `c` (after a put,
@@ -721,12 +753,11 @@ impl<'env> RwTxn<'env> {
     /// pair `key`/`data` if `data` is given, else all of the key's items.
     /// Returns `false` if there was nothing to delete (`MDB_NOTFOUND`).
     pub fn del(&mut self, db: Dbi, key: &[u8], data: Option<&[u8]>) -> Result<bool> {
-        self.core.dbi_entry(db, DB_USRVALID)?;
-        let dbi = self.user_dbi(db)?;
-        let dupsort = u32::from(self.core.dbs.borrow()[dbi].db.flags) & MDB_DUPSORT != 0;
+        let entry = self.user_dbi(db)?;
+        let dupsort = u32::from(entry.db.flags) & MDB_DUPSORT != 0;
         // Must ignore any data unless DUP_SORT.
         let data = if dupsort { data } else { None };
-        match self.del0(dbi, key, data, 0) {
+        match self.del0(db.0 as usize, key, data, 0) {
             Ok(()) => Ok(true),
             Err(e) if e.not_found() => Ok(false),
             Err(e) => Err(e),
@@ -853,8 +884,7 @@ impl<'env> RwTxn<'env> {
             return Err(Error::einval());
         }
         let slot = self.cursor_slot(id)?;
-        let dbi = self.cur(CRef::main(slot)).dbi;
-        self.check_reserve(dbi, MDB_RESERVE)?;
+        check_reserve(self.db_of(CRef::main(slot)).flags, MDB_RESERVE)?;
         self.cursor_put_checked(slot, key, PutData::reserve(len), flags.bits() | MDB_RESERVE)?;
         let loc = self.data_loc(CRef::main(slot))?;
         self.loc_mut(loc)

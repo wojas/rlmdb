@@ -19,7 +19,8 @@
 //!   ancestor [`Layer`]; reads walk the child's own pages, then the layers
 //!   (`mdb_page_get`), and a write to a page dirty in an ancestor first
 //!   copies it into the child's dirty list under the same page number
-//!   (`mdb_page_touch`);
+//!   (`mdb_page_touch`); the spare page buffers (`me_dpages`) go to the
+//!   child's dirty list too;
 //! * the parent's cursor arena moves to the child, so the child's page
 //!   moves, splits and merges keep the parent's cursors up to date as C's
 //!   fixup loops do on the shadowed cursors; a copy of their state
@@ -140,10 +141,12 @@ impl<'env> RwTxn<'env> {
         core.map = Arc::clone(&self.core.map);
         core.txnid = self.core.txnid;
         core.next_pgno = self.core.next_pgno;
-        let layer = Layer {
+        let mut layer = Layer {
             dirty: std::mem::take(&mut self.core.dirty),
             spilled: std::mem::take(&mut self.core.spilled),
         };
+        // The child allocates from the parent's spare buffers.
+        core.dirty.give_pool(layer.dirty.take_pool());
         core.parents = std::iter::once(layer)
             .chain(std::mem::take(&mut self.core.parents))
             .collect();
@@ -166,6 +169,7 @@ impl<'env> RwTxn<'env> {
             cursors,
             base_main: None,
             dropped: Vec::new(),
+            scratch: std::mem::take(&mut self.w.scratch),
         };
         self.w.flags |= TXN_HAS_CHILD;
         Ok(RwTxn::from_parts(
@@ -208,6 +212,9 @@ impl<'env> RwTxn<'env> {
         *p.parents = layers.collect();
         let mut p_dirty = mine.dirty;
         let mut p_spilled = mine.spilled;
+        // The spare buffers go back first, so that the pages the parent
+        // drops below are recycled.
+        p_dirty.give_pool(self.core.dirty.take_pool());
 
         let mut cursors = std::mem::take(&mut self.w.cursors);
         let depth = cursors.depth();
@@ -316,6 +323,7 @@ impl<'env> RwTxn<'env> {
                 p.w.flags |= TXN_ERROR;
             }
         }
+        p.w.scratch = std::mem::take(&mut self.w.scratch);
         // me_pgoldest lives in the environment in C; the child's view of the
         // oldest reader stays.
         p.w.pg_oldest = self.w.pg_oldest;

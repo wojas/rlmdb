@@ -167,13 +167,12 @@ impl<'env> RwTxn<'env> {
             .ok()
             .and_then(|p| p.checked_mul(ps))
             .ok_or(MdbError::PageNotFound)?;
-        let mut buf = crate::core::dirty::alloc_pages(ps, num);
-        buf.copy_from_slice(
-            self.core
-                .map
-                .slice(off, num * ps)
-                .ok_or(MdbError::PageNotFound)?,
-        );
+        let src = self
+            .core
+            .map
+            .slice(off, num * ps)
+            .ok_or(MdbError::PageNotFound)?;
+        let mut buf = self.core.dirty.alloc_copy(src);
         let flags = page_ops::flags(&buf);
         page_ops::set_flags(&mut buf, flags | P_DIRTY);
         if level == 1 {

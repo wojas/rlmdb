@@ -368,6 +368,12 @@ impl TxnCore<'_> {
     /// transaction's snapshot of the main DB.
     pub(crate) fn fresh_dbi(&self, dbi: Dbi, validity: u8) -> Result<TxnDb> {
         let entry = self.dbi_entry(dbi, validity)?;
+        self.refreshed(dbi, entry)
+    }
+
+    /// The refresh of [`Self::fresh_dbi`], for an `entry` that
+    /// [`Self::dbi_entry`] just returned.
+    pub(crate) fn refreshed(&self, dbi: Dbi, entry: TxnDb) -> Result<TxnDb> {
         if entry.state & DB_STALE == 0 {
             return Ok(entry);
         }

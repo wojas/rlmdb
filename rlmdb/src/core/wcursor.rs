@@ -830,11 +830,19 @@ impl<'env> RwTxn<'env> {
     /// the whole overflow run) that an ancestor has dirty into this
     /// transaction's dirty list under the same number.
     pub(crate) fn copy_ancestor_page(&mut self, pgno: u64) -> Result<()> {
-        let crate::core::txn::PageSource::Dirty(src, _) = self.core.locate(pgno) else {
+        let crate::core::txn::PageSource::Dirty(_, level) = self.core.locate(pgno) else {
             return Err(corrupted());
         };
-        let buf: Box<[u8]> = src.into();
-        if !self.core.dirty.insert(pgno, buf) {
+        // Level 2 is the parent's layer (level 1, our own list, cannot be:
+        // the callers checked).
+        let core = &mut self.core;
+        let src = level
+            .checked_sub(2)
+            .and_then(|i| core.parents.get(i))
+            .and_then(|layer| layer.dirty.get(pgno))
+            .ok_or_else(corrupted)?;
+        let buf = core.dirty.alloc_copy(src);
+        if !core.dirty.insert(pgno, buf) {
             return Err(corrupted());
         }
         Ok(())
