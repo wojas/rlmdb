@@ -285,12 +285,18 @@ impl<'txn> RoCursor<'txn> {
                 // KNOWN_C_BUGS.md #27): only fetch for a key with some.
                 let dups = current_has_dups(&self.mc);
                 let mx = self.mx.as_mut().ok_or(MdbError::Incompatible)?;
-                // C tests C_EOF instead, which MDB_LAST & co. also set on
-                // the last item (and which stays when more duplicates are
-                // added after it): it fetches nothing there
-                // (KNOWN_C_BUGS.md #28).
-                let on_item = mx.depth() > 0 && mx.ki_top() < mx.top_page().num_keys();
-                if dups && mx.is_initialized() && on_item {
+                // C tests C_EOF, which MDB_LAST & co. also set on the last
+                // item (and which stays when more duplicates are added after
+                // it): it fetches nothing there (KNOWN_C_BUGS.md #28). We
+                // fetch on an item, and past the end of the page only
+                // without C_EOF, as C: a failed MDB_GET_BOTH whose datum
+                // sorts after all the key's duplicates leaves the sub-cursor
+                // there, and C returns that (valid) last page.
+                let fetch = mx.depth() > 0 && {
+                    let nkeys = mx.top_page().num_keys();
+                    mx.ki_top() < nkeys || (nkeys > 0 && mx.flags & C_EOF == 0)
+                };
+                if dups && mx.is_initialized() && fetch {
                     Ok(Kv {
                         key,
                         data: mx.fetch_multiple()?,
@@ -318,10 +324,15 @@ impl<'txn> RoCursor<'txn> {
                 if !self.mc.is_initialized() {
                     cursor_last(txn, &mut self.mc, self.mx.as_mut())?;
                 }
-                let key = self.current_key()?;
+                // C does not read the key here: a cursor left past the end
+                // of its page by a failed MDB_SET has an uninitialised
+                // sub-cursor (mdb_cursor_set clears it), so C returns
+                // MDB_NOTFOUND. Only read the key once there is a node with
+                // duplicates under the cursor.
                 let dups = current_has_dups(&self.mc);
                 match self.mx.as_mut() {
                     Some(mx) if dups && mx.is_initialized() => {
+                        let key = self.mc.current_node()?.key().ok_or_else(corrupted)?;
                         mx.sibling(txn, false)?;
                         Ok(Kv {
                             key,

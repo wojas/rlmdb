@@ -90,6 +90,150 @@ fn get_multiple_on_a_single_item_after_a_key_with_duplicates() {
     );
 }
 
+/// Cursor operations after a failed `MDB_SET` / `MDB_GET_BOTH` on a
+/// `MDB_DUPFIXED` database. A failed exact search leaves the cursor on the
+/// insertion point, which is past the end of its leaf page when the key
+/// would go after the page's last key. `MDB_PREV_MULTIPLE` then failed with
+/// `MDB_CORRUPTED` in Rust: it read the current key first, and C's
+/// `mdb_cursor_get` does not. C finds the sub-cursor uninitialised
+/// (`mdb_cursor_set` clears it) and returns `MDB_NOTFOUND`. The same probe
+/// runs the other operations whose dispatch does not start from the current
+/// key; every result and position must be C's.
+#[test]
+fn cursor_ops_after_a_failed_set_on_dupfixed() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let flags = DatabaseFlags::CREATE | DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED;
+    let key = |i: u32| format!("k{i:05}").into_bytes();
+    let mut txn = env.begin_rw_txn().unwrap();
+    let db = txn.create_db(Some("f"), flags).unwrap();
+    // Even keys exist: some with a single item, most with a few
+    // duplicates, a few with several pages of them (a sub-DB).
+    for i in (0..800).step_by(2) {
+        let n = match i {
+            _ if i % 97 == 0 => 5000,
+            _ if i % 3 == 0 => 1,
+            _ => i % 5 + 2,
+        };
+        for d in 0..n {
+            txn.put(db, &key(i), &(d * 2 + 1).to_be_bytes(), WriteFlags::empty())
+                .unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Each case: reset the cursor with MDB_FIRST (which also clears a
+    // C_EOF that MDB_SET's shortcuts would keep, KNOWN_C_BUGS.md #28), fail
+    // a search, then probe.
+    const PROBES: &[&str] = &[
+        "prev_multiple",
+        "get_multiple",
+        "next_multiple",
+        "first_dup",
+        "last_dup",
+        "next_nodup",
+        "prev_nodup",
+    ];
+    let hex = common::hex;
+    let mut cases = Vec::new();
+    for i in (1..801).step_by(2) {
+        // A missing key; a missing key with data; an existing key with a
+        // duplicate that sorts after all of its duplicates.
+        cases.push(format!("set:{}", hex(&key(i))));
+        cases.push(format!("get_both:{}:{}", hex(&key(i)), hex(&[0; 4])));
+        cases.push(format!("get_both:{}:{}", hex(&key(i - 1)), hex(&[0xff; 4])));
+        cases.push(format!(
+            "get_both_range:{}:{}",
+            hex(&key(i - 1)),
+            hex(&[0xff; 4])
+        ));
+    }
+    let mut ops = Vec::new();
+    for case in &cases {
+        for probe in PROBES {
+            ops.extend(["first".to_owned(), case.clone(), (*probe).to_owned()]);
+        }
+    }
+
+    let txn = env.begin_ro_txn().unwrap();
+    let db = txn.open_db(Some("f")).unwrap();
+    let rust = common::rust_cursorops(&txn, db, &ops);
+    let corrupted = format!("rc={}", rlmdb::consts::MDB_CORRUPTED);
+    for (op, line) in ops.iter().zip(&rust) {
+        assert!(!line.contains(&corrupted), "{op}: {line}");
+    }
+    // The case of the report: past the end of a leaf page (GET_CURRENT
+    // says MDB_NOTFOUND), MDB_PREV_MULTIPLE reports MDB_NOTFOUND.
+    // (Only for a missing key: on an existing key GET_CURRENT also fails
+    // when the sub-cursor is past its end.)
+    let past_end = ops
+        .chunks(3)
+        .zip(rust.chunks(3))
+        .filter(|(o, _)| o[2] == "prev_multiple" && o[1].split(':').count() < 3)
+        .filter(|(_, l)| l[1].ends_with("| cur rc=-30798 k=- d=-"))
+        .inspect(|(_, l)| assert_eq!(l[2], "prev_multiple rc=-30798 d=- | cur rc=-30798 k=- d=-"))
+        .count();
+    assert!(
+        past_end > 0,
+        "no case left the cursor past the end of a page"
+    );
+
+    // The same through a write cursor (one dispatch for both).
+    let mut wtxn = env.begin_rw_txn().unwrap();
+    let wdb = wtxn.open_db(Some("f")).unwrap();
+    let c = wtxn.open_cursor(wdb).unwrap();
+    let k = key(799);
+    assert!(wtxn
+        .cursor_get(c, Some(&k), None, CursorOp::Set)
+        .unwrap()
+        .is_none());
+    assert!(wtxn
+        .cursor_get(c, None, None, CursorOp::GetCurrent)
+        .unwrap()
+        .is_none());
+    assert!(get(&mut wtxn, c, CursorOp::PrevMultiple).is_none());
+    drop(wtxn);
+
+    let Some(c_tools) = common::c_tools() else {
+        return;
+    };
+    let out = Command::new(c_tools.bin("cursorops"))
+        .arg(dir.path())
+        .arg("f")
+        .args(&ops)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "C cursorops: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let c_lines: Vec<String> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(c_lines.len(), rust.len());
+    for (i, (cl, rl)) in c_lines.iter().zip(&rust).enumerate() {
+        // MDB_GET_MULTIPLE with nothing to fetch: C leaves `data` untouched,
+        // Rust returns it empty (KNOWN_C_BUGS.md #8).
+        let cl = cl.replacen("get_multiple rc=0 d=- ", "get_multiple rc=0 d= ", 1);
+        // KNOWN_C_BUGS.md #4: past the end of a leaf page C's
+        // mdb_cursor_next reads the pointer slot NUMKEYS from the free
+        // space; a stale one naming an F_DUPDATA node makes MDB_NEXT_MULTIPLE
+        // "succeed" with the stale sub-cursor's duplicates while the cursor
+        // stays past the end. Rust has no item there, hence no duplicates.
+        if ops[i] == "next_multiple"
+            && cl.starts_with("next_multiple rc=0 d=")
+            && cl.ends_with("| cur rc=-30798 k=- d=-")
+        {
+            assert_eq!(rl, "next_multiple rc=-30798 d=- | cur rc=-30798 k=- d=-");
+            continue;
+        }
+        assert_eq!(&cl, rl, "op {i}: {}, after {:?}", ops[i], &ops[i - 2..i]);
+    }
+}
+
 /// Builds a small C program against the C library of the tests, or `None`
 /// without C tools.
 fn c_program(name: &str, source: &str) -> Option<std::path::PathBuf> {
