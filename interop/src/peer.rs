@@ -4,7 +4,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::OnceLock;
@@ -437,6 +437,23 @@ pub struct PeerProcess {
 }
 
 impl PeerProcess {
+    /// Start `bin args...` in the background like [`PeerCmd::spawn`], for
+    /// a program that speaks the peer protocol but is not one of the
+    /// [`Peer`]s, such as the LMDB 1.0 C peer [`bins::cpeer10`].
+    pub fn spawn_program<S: AsRef<OsStr>>(bin: &Path, args: &[S]) -> Result<Self> {
+        let mut cmd = Command::new(bin);
+        cmd.args(args);
+        let name = bin.file_name().unwrap_or_default().to_string_lossy();
+        let label = std::iter::once(name.into_owned())
+            .chain(
+                args.iter()
+                    .map(|a| a.as_ref().to_string_lossy().into_owned()),
+            )
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self::spawn(cmd, label, default_timeout())
+    }
+
     fn spawn(mut cmd: Command, label: String, timeout: Duration) -> Result<Self> {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -4,6 +4,13 @@
 //! `../../libraries/liblmdb` with the upstream Makefile's flags, and are run as
 //! subprocesses.
 //!
+//! The second oracle, LMDB 1.0, is built the same way from sources that
+//! `build.rs` extracts from git (the pinned `mdb.RE/1.0` commit, see
+//! `README.md`): the functions ending in `10` ([`mdb_stat10`], [`mtest10`],
+//! [`cpeer10`] …). Its executables are named after the 0.9 ones with `10`
+//! appended, after an underscore when the name ends in a digit
+//! (`mdb_stat10`, `mtest10`, `mtest2_10`).
+//!
 //! One more C program is linked at test time: [`cpeer_capi`], the C peer
 //! linked against the *Rust* `liblmdb.a` of `rlmdb-capi`.
 
@@ -61,6 +68,82 @@ pub fn mtest(name: &str) -> Option<&'static Path> {
 /// Names of the upstream test programs that [`mtest`] knows.
 pub const MTESTS: &[&str] = &["mtest", "mtest2", "mtest3", "mtest4", "mtest5"];
 
+/// The C peer built against the LMDB 1.0 header and library.
+///
+/// Its `check-freelist` command decodes pages with the 0.9 layout
+/// (`c/cpeer_pagewalk.c`), so it is only meaningful on 0.9 files; every other
+/// command uses the public API alone.
+pub fn cpeer10() -> &'static Path {
+    Path::new(env!("INTEROP_CPEER10"))
+}
+
+/// `c/layout_dump.c` built against the LMDB 1.0 `mdb.c`: the same lines as
+/// [`layout_dump`] where the structures agree, plus the 1.0-only values
+/// (`mp_txnid`, `MDB_ovpage`, the parts of `MDB_LOCK_FORMAT`, the maximum
+/// key size per page size). It creates and removes small environments in a
+/// fresh directory under `$TMPDIR`.
+pub fn layout_dump10() -> &'static Path {
+    Path::new(env!("INTEROP_LAYOUT_DUMP10"))
+}
+
+/// The upstream LMDB 1.0 `mdb_stat` tool.
+pub fn mdb_stat10() -> &'static Path {
+    Path::new(env!("INTEROP_MDB_STAT10"))
+}
+
+/// The upstream LMDB 1.0 `mdb_dump` tool.
+pub fn mdb_dump10() -> &'static Path {
+    Path::new(env!("INTEROP_MDB_DUMP10"))
+}
+
+/// The upstream LMDB 1.0 `mdb_load` tool.
+pub fn mdb_load10() -> &'static Path {
+    Path::new(env!("INTEROP_MDB_LOAD10"))
+}
+
+/// The upstream LMDB 1.0 `mdb_copy` tool.
+pub fn mdb_copy10() -> &'static Path {
+    Path::new(env!("INTEROP_MDB_COPY10"))
+}
+
+/// The upstream LMDB 1.0 `mdb_drop` tool (1.0 only; 0.9 has no `mdb_drop`).
+pub fn mdb_drop10() -> &'static Path {
+    Path::new(env!("INTEROP_MDB_DROP10"))
+}
+
+/// The upstream LMDB 1.0 test programs, by their upstream name (`mtest`,
+/// `mtest2` … `mtest5`, `mtest_remap`, `mtest_enc`, `mtest_enc3`); see
+/// [`MTESTS10`].
+///
+/// Not built: `mtest6` (needs `MDB_DEBUG`), `mtest_enc2` and `mtest_enc4`
+/// (they load the libsodium crypto module).
+pub fn mtest10(name: &str) -> Option<&'static Path> {
+    let p = match name {
+        "mtest" => env!("INTEROP_MTEST10"),
+        "mtest2" => env!("INTEROP_MTEST2_10"),
+        "mtest3" => env!("INTEROP_MTEST3_10"),
+        "mtest4" => env!("INTEROP_MTEST4_10"),
+        "mtest5" => env!("INTEROP_MTEST5_10"),
+        "mtest_remap" => env!("INTEROP_MTEST_REMAP10"),
+        "mtest_enc" => env!("INTEROP_MTEST_ENC10"),
+        "mtest_enc3" => env!("INTEROP_MTEST_ENC3_10"),
+        _ => return None,
+    };
+    Some(Path::new(p))
+}
+
+/// Upstream names of the LMDB 1.0 test programs that [`mtest10`] knows.
+pub const MTESTS10: &[&str] = &[
+    "mtest",
+    "mtest2",
+    "mtest3",
+    "mtest4",
+    "mtest5",
+    "mtest_remap",
+    "mtest_enc",
+    "mtest_enc3",
+];
+
 /// The directory holding all of the above.
 pub fn bin_dir() -> &'static Path {
     Path::new(env!("INTEROP_BIN_DIR"))
@@ -69,6 +152,12 @@ pub fn bin_dir() -> &'static Path {
 /// The C library sources (`libraries/liblmdb`).
 pub fn lmdb_src() -> &'static Path {
     Path::new(env!("INTEROP_LMDB_SRC"))
+}
+
+/// The LMDB 1.0 sources `build.rs` extracted from git (`$OUT_DIR/lmdb10`;
+/// `.commit` in it holds the commit hash).
+pub fn lmdb10_src() -> &'static Path {
+    Path::new(env!("INTEROP_LMDB10_SRC"))
 }
 
 /// System libraries a C program needs next to the Rust `liblmdb.a` (as
