@@ -181,6 +181,20 @@ impl<'a> NodeRef<'a> {
         self.buf.get(off..off.checked_add(self.data_size())?)
     }
 
+    /// The key and the inline data of a leaf node without `F_BIGDATA`:
+    /// `Some((self.key()?, self.inline_data()?))`, with one bounds check
+    /// instead of two. The key ends where the data starts (1.0: at most one
+    /// padding byte before), so data within the page means a key within it
+    /// too, and the result is `None` exactly when `inline_data` is.
+    #[inline(always)]
+    pub(crate) fn key_and_data(&self) -> Option<(&'a [u8], &'a [u8])> {
+        let ksize = self.key_size();
+        let off = self.data_offset();
+        let node = self.buf.get(..off.checked_add(self.data_size())?)?;
+        let (head, data) = node.split_at_checked(off)?;
+        Some((head.get(NODE_SIZE..NODE_SIZE + ksize)?, data))
+    }
+
     /// The overflow page number stored as the data of an `F_BIGDATA` node.
     #[inline(always)]
     pub fn overflow_pgno(&self) -> Option<u64> {
@@ -320,5 +334,31 @@ mod tests {
         let b = node_bytes(0, 0, 0, b"abcdef", &[]);
         let n = NodeRef::new(&b[..10]).unwrap();
         assert_eq!(n.key(), None);
+    }
+
+    #[test]
+    fn key_and_data_is_key_then_inline_data() {
+        use crate::format::layout::V10;
+        // Every key and data size up to 5 bytes, stored and claimed (the
+        // size fields may lie), in buffers cut at every length: the fused
+        // accessor agrees with the two separate ones in both layouts.
+        for layout in [&V09, &V10] {
+            for klen in 0..6 {
+                for dlen in 0..6u16 {
+                    let key = &b"abcde"[..klen];
+                    let mut b = node_bytes(dlen, 0, 0, key, b"");
+                    b.extend_from_slice(b"\0vwxyz");
+                    for cut in NODE_SIZE..=b.len() {
+                        let n = NodeRef::with_layout(&b[..cut], layout).unwrap();
+                        let both = n.key().zip(n.inline_data());
+                        assert_eq!(n.key_and_data(), both, "{klen} {dlen} {cut}");
+                        assert_eq!(n.key_and_data().is_some(), n.inline_data().is_some());
+                    }
+                }
+            }
+        }
+        // A data size beyond the buffer.
+        let b = node_bytes(0xffff, 0xffff, 0, b"k", b"data");
+        assert_eq!(NodeRef::new(&b).unwrap().key_and_data(), None);
     }
 }

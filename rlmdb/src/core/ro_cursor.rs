@@ -15,8 +15,9 @@
 use crate::cmp::Comparator;
 use crate::consts::*;
 use crate::core::cursor::{
-    corrupted, cursor_first, cursor_get_current, cursor_last, cursor_next, cursor_prev, cursor_set,
-    new_xcursor, node_read, not_found, Cursor, Kv, C_DEL, C_EOF, C_INITIALIZED,
+    corrupted, cursor_first, cursor_get_current, cursor_last, cursor_next, cursor_next_any,
+    cursor_prev, cursor_prev_any, cursor_set, new_xcursor, next_in_page, node_read, not_found,
+    prev_in_page, Cursor, Kv, C_DEL, C_EOF, C_INITIALIZED,
 };
 use crate::core::dbi::{Dbi, TxnDb};
 use crate::core::txn::TxnCore;
@@ -428,15 +429,38 @@ impl<'txn> RoCursor<'txn> {
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Entry<'txn>>> {
         // `self.get(None, None, CursorOp::Next)` without the dispatch on
-        // the operation: scans call this once per item.
-        let rc = cursor_next(self.txn, &mut self.mc, self.mx.as_mut(), CursorOp::Next);
+        // the operation: scans call this once per item. A step within the
+        // page returns at once: it leaves `C_DEL` clear, so `finish` would
+        // have nothing to do.
+        if let Some(kv) = next_in_page(&mut self.mc) {
+            return Ok(Some((kv.key, kv.data)));
+        }
+        self.next_any()
+    }
+
+    /// [`RoCursor::next`] in the cases `next_in_page` leaves to the
+    /// general path (the end of a page, duplicates, overflow pages, …).
+    /// Out of line, so that the step within a page needs no stack frame.
+    #[inline(never)]
+    fn next_any(&mut self) -> Result<Option<Entry<'txn>>> {
+        let rc = cursor_next_any(self.txn, &mut self.mc, self.mx.as_mut(), CursorOp::Next);
         self.finish(rc)
     }
 
     /// `MDB_PREV` (the last item if the cursor is not positioned).
     pub fn prev(&mut self) -> Result<Option<Entry<'txn>>> {
         // As `next`: `self.get(None, None, CursorOp::Prev)`.
-        let rc = cursor_prev(self.txn, &mut self.mc, self.mx.as_mut(), CursorOp::Prev);
+        if let Some(kv) = prev_in_page(&mut self.mc) {
+            return Ok(Some((kv.key, kv.data)));
+        }
+        self.prev_any()
+    }
+
+    /// [`RoCursor::prev`] in the cases `prev_in_page` leaves to the
+    /// general path, out of line as [`RoCursor::next_any`].
+    #[inline(never)]
+    fn prev_any(&mut self) -> Result<Option<Entry<'txn>>> {
+        let rc = cursor_prev_any(self.txn, &mut self.mc, self.mx.as_mut(), CursorOp::Prev);
         self.finish(rc)
     }
 

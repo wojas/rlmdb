@@ -606,6 +606,12 @@ fn put_ls(env: &Environment, db: Dbi, pool: &[u8], nrec: usize) -> Result<()> {
 /// The Lightning Stream sync scan: a full `MDB_NEXT` cursor scan reading
 /// the header transaction id of every value. Returns the number of records
 /// and of those changed since the last sync (`txnid > LS_SYNC_TXNID`).
+///
+/// Not inlined, like C's `ls_changed` (which clang keeps out of line):
+/// inlined into the large `run`, the loop kept its counter on the stack
+/// and reloaded it every iteration, so the two sides compiled the same
+/// loop differently.
+#[inline(never)]
 fn ls_changed(txn: &RoTxn<'_>, db: Dbi) -> Result<(usize, usize)> {
     let (mut cnt, mut changed) = (0usize, 0usize);
     let mut cur = txn.cursor(db)?;

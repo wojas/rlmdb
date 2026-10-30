@@ -754,8 +754,107 @@ pub(crate) fn cursor_last<'t, const N: usize>(
     read_position(txn, mc, mx, DupPos::Last)
 }
 
-/// `mdb_cursor_next` for `op` in `Next`, `NextDup`, `NextNoDup`.
+/// The common case of [`cursor_next`] and [`cursor_prev`] in one pass over
+/// the page: the cursor is on a leaf of a tree without duplicates (neither
+/// past its end nor after a delete), its neighbour on the same page
+/// (`forward`: the next item, else the previous one) has its key and data
+/// in the page, and the cursor moves there and returns it. Returns `None`,
+/// with the cursor unchanged, in every other case, and the caller then
+/// takes the general path from the same state, so the result is the same
+/// either way.
+///
+/// When this succeeds the general path would have done the same: with
+/// `C_EOF` and `C_DEL` clear and no `MDB_DUPSORT`, `mdb_cursor_next` and
+/// `mdb_cursor_prev` move the index by one within the page if they can,
+/// whatever the operation, and then read the item there
+/// ([`read_position`]: a `P_LEAF2` key, a key without data on a
+/// sub-cursor, or a node's key and inline data); the flags stay as they
+/// were. The general path dispatches on the format, checks the stack
+/// index and reads `NUMKEYS` once to move and again in `read_position`,
+/// and checks the key and the data against the page separately; here each
+/// happens once. (`l` is the cursor's layout as a constant, see
+/// `per_format!`.)
+#[inline(always)]
+fn step_in_leaf<'t, const N: usize>(
+    mc: &mut Cursor<'t, N>,
+    forward: bool,
+    l: &'static Layout,
+) -> Option<Kv<'t>> {
+    if mc.flags & (C_INITIALIZED | C_EOF | C_DEL) != C_INITIALIZED
+        || u32::from(mc.db.flags) & MDB_DUPSORT != 0
+    {
+        return None;
+    }
+    let ki = if forward {
+        mc.ki_top() + 1
+    } else {
+        mc.ki_top().checked_sub(1)?
+    };
+    let kv = item_in_leaf(mc, mc.top_page_as(l), ki)?;
+    // `ki < NUMKEYS`, so it fits an `indx_t`.
+    mc.set_ki_top(ki);
+    Some(kv)
+}
+
+/// What [`read_position`] returns for item `ki` of `mp` (the top page of
+/// `mc`), if that needs neither the sub-cursor nor overflow pages; `None`
+/// if it does, and also if the general path would fail there (a branch
+/// page, `ki` out of range, a node outside the page).
+#[inline(always)]
+fn item_in_leaf<'t, const N: usize>(
+    mc: &Cursor<'t, N>,
+    mp: PageRef<'t>,
+    ki: usize,
+) -> Option<Kv<'t>> {
+    if !mp.is_leaf() {
+        return None;
+    }
+    if mp.is_leaf2() {
+        let key = mp.leaf2_key(ki, mc.leaf2_ksize())?;
+        return Some(Kv { key, data: &[] });
+    }
+    let leaf = mp.node(ki)?;
+    if leaf.is_dupdata() || leaf.is_bigdata() {
+        return None;
+    }
+    if mc.flags & C_SUB != 0 {
+        return Some(Kv {
+            key: leaf.key()?,
+            data: &[],
+        });
+    }
+    let (key, data) = leaf.key_and_data()?;
+    Some(Kv { key, data })
+}
+
+/// [`step_in_leaf`] forward: the next item if it is on the same page and
+/// needs neither the sub-cursor nor overflow pages, else `None` with the
+/// cursor unchanged (then [`cursor_next_any`] does the step).
+#[inline(always)]
+pub(crate) fn next_in_page<'t, const N: usize>(mc: &mut Cursor<'t, N>) -> Option<Kv<'t>> {
+    per_format!(mc.format, |l| step_in_leaf(mc, true, l))
+}
+
+/// `mdb_cursor_next` for `op` in `Next`, `NextDup`, `NextNoDup`. Inlined
+/// for the step within a page ([`next_in_page`]); everything else is
+/// [`cursor_next_any`].
+#[inline]
 pub(crate) fn cursor_next<'t, const N: usize>(
+    txn: &'t TxnCore<'_>,
+    mc: &mut Cursor<'t, N>,
+    mx: Option<&mut Cursor<'t, N>>,
+    op: CursorOp,
+) -> Result<Kv<'t>> {
+    match next_in_page(mc) {
+        Some(kv) => Ok(kv),
+        None => cursor_next_any(txn, mc, mx, op),
+    }
+}
+
+/// [`cursor_next`] in every case, including those [`next_in_page`]
+/// leaves to it.
+#[inline(never)]
+pub(crate) fn cursor_next_any<'t, const N: usize>(
     txn: &'t TxnCore<'_>,
     mc: &mut Cursor<'t, N>,
     mx: Option<&mut Cursor<'t, N>>,
@@ -835,8 +934,34 @@ fn cursor_next_in<'t, const N: usize>(
     read_position(txn, mc, mx, DupPos::First)
 }
 
-/// `mdb_cursor_prev` for `op` in `Prev`, `PrevDup`, `PrevNoDup`.
+/// [`step_in_leaf`] backward: the previous item if it is on the same page
+/// and needs neither the sub-cursor nor overflow pages, else `None` with
+/// the cursor unchanged (then [`cursor_prev_any`] does the step).
+#[inline(always)]
+pub(crate) fn prev_in_page<'t, const N: usize>(mc: &mut Cursor<'t, N>) -> Option<Kv<'t>> {
+    per_format!(mc.format, |l| step_in_leaf(mc, false, l))
+}
+
+/// `mdb_cursor_prev` for `op` in `Prev`, `PrevDup`, `PrevNoDup`. Inlined
+/// for the step within a page ([`prev_in_page`]); everything else is
+/// [`cursor_prev_any`].
+#[inline]
 pub(crate) fn cursor_prev<'t, const N: usize>(
+    txn: &'t TxnCore<'_>,
+    mc: &mut Cursor<'t, N>,
+    mx: Option<&mut Cursor<'t, N>>,
+    op: CursorOp,
+) -> Result<Kv<'t>> {
+    match prev_in_page(mc) {
+        Some(kv) => Ok(kv),
+        None => cursor_prev_any(txn, mc, mx, op),
+    }
+}
+
+/// [`cursor_prev`] in every case, including those [`prev_in_page`]
+/// leaves to it.
+#[inline(never)]
+pub(crate) fn cursor_prev_any<'t, const N: usize>(
     txn: &'t TxnCore<'_>,
     mc: &mut Cursor<'t, N>,
     mx: Option<&mut Cursor<'t, N>>,
@@ -1109,4 +1234,192 @@ pub(crate) fn cursor_get_current<'t, const N: usize>(
         key: leaf.key().ok_or_else(corrupted)?,
         data,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Environment;
+    use crate::flags::EnvironmentFlags;
+    use crate::format::layout::{V09, V10};
+    use crate::format::node::{F_DUPDATA, F_SUBDATA};
+    use crate::format::page::{NodeData, PageMut, P_BRANCH, P_LEAF, P_LEAF2};
+
+    /// Size of the hand-built pages.
+    const PS: usize = 512;
+
+    /// A leaf page of `l` with plain items (odd and even key and data
+    /// lengths, an empty key, empty data, a named-DB record), an
+    /// `F_BIGDATA` item (pointing at a page that is not there) and an
+    /// `F_DUPDATA` sub-page.
+    fn leaf(l: &'static Layout) -> Vec<u8> {
+        let mut sub = vec![0u8; l.page_hdr + 2 * 2 + 2 * 10];
+        {
+            let mut p = PageMut::with_layout(&mut sub, l);
+            p.init(0, l.subpage_flags);
+            p.add_node(0, b"d1", NodeData::Inline(b""), 0).unwrap();
+            p.add_node(1, b"d2", NodeData::Inline(b""), 0).unwrap();
+        }
+        let db = Db::empty(0).to_bytes();
+        let items: [(&[u8], NodeData<'_>, u16); 8] = [
+            (b"a", NodeData::Inline(b"one"), 0),
+            (b"bb", NodeData::Inline(b"four"), 0),
+            (b"", NodeData::Inline(b"empty key"), 0),
+            (b"ccc", NodeData::Inline(b""), 0),
+            (
+                b"dd",
+                NodeData::Overflow {
+                    pgno: 1 << 40,
+                    data_len: 9,
+                },
+                0,
+            ),
+            (b"eee", NodeData::Inline(&sub), F_DUPDATA),
+            (b"named", NodeData::Inline(&db), F_SUBDATA),
+            (b"zz", NodeData::Inline(b"last"), 0),
+        ];
+        let mut page = vec![0u8; PS];
+        let mut p = PageMut::with_layout(&mut page, l);
+        p.init(7, P_LEAF);
+        for (i, (k, d, f)) in items.into_iter().enumerate() {
+            p.add_node(i, k, d, f).unwrap();
+        }
+        page
+    }
+
+    /// A `P_LEAF2` page of `l` with five 3-byte keys.
+    fn leaf2(l: &'static Layout) -> Vec<u8> {
+        let mut page = vec![0u8; PS];
+        let mut p = PageMut::with_layout(&mut page, l);
+        p.init(8, P_LEAF | P_LEAF2);
+        p.set_pad(3);
+        p.set_lower((l.empty_lower() + 2 * 5) as u16);
+        p.body_mut()[..15].copy_from_slice(b"k00k01k02k03k04");
+        page
+    }
+
+    /// The pages of [`leaf`] and [`leaf2`] and copies of them with one
+    /// `u16` of the header, the pointer array or a node header replaced by
+    /// a boundary value, or cut short.
+    fn pages(l: &'static Layout) -> Vec<Vec<u8>> {
+        let bogus = [
+            0u16, 1, 2, 3, 7, 8, 15, 16, 17, 23, 24, 25, 0x22, 0x42, 0x100, 509, 511, 512, 513,
+            0x7fff, 0xffff,
+        ];
+        let mut out = Vec::new();
+        for page in [leaf(l), leaf2(l)] {
+            let mp = PageRef::with_layout(&page, l).unwrap();
+            let mut fields: Vec<usize> = (l.page_hdr - 8..l.page_hdr).step_by(2).collect();
+            fields.extend((0..mp.num_keys()).map(|i| l.ptrs_offset() + 2 * i));
+            if !mp.is_leaf2() {
+                for i in 0..mp.num_keys() {
+                    let off = mp.node_offset(i).unwrap();
+                    fields.extend((0..8).step_by(2).map(|f| off + f));
+                }
+            }
+            for &off in &fields {
+                for v in bogus {
+                    let mut p = page.clone();
+                    p[off..off + 2].copy_from_slice(&v.to_ne_bytes());
+                    out.push(p);
+                }
+            }
+            let ptrs_end = l.ptrs_offset() + 2 * mp.num_keys();
+            for cut in [
+                l.page_hdr,
+                l.page_hdr + 3,
+                ptrs_end,
+                ptrs_end + 1,
+                300,
+                PS - 1,
+            ] {
+                out.push(page[..cut].to_vec());
+            }
+            out.push(page);
+        }
+        // Not a leaf at all.
+        let mut branch = leaf(l);
+        PageMut::with_layout(&mut branch, l).set_flags(P_BRANCH);
+        out.push(branch);
+        out
+    }
+
+    /// The parts of a cursor's state a step can change.
+    fn state<const N: usize>(mc: &Cursor<'_, N>) -> (u8, [u16; N], usize, usize) {
+        (mc.flags, mc.ki, mc.snum, mc.top)
+    }
+
+    /// [`step_in_leaf`] either does what the general path does (same item,
+    /// same cursor state afterwards) or leaves the cursor alone, on valid
+    /// and damaged pages of both formats, from every cursor state.
+    #[test]
+    fn step_in_leaf_matches_the_general_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = Environment::builder()
+            .flags(EnvironmentFlags::NO_SYNC)
+            .open(dir.path())
+            .unwrap();
+        let txn = env.begin_ro_txn().unwrap();
+        let core = txn.core();
+        let cursor_flags = [
+            0,
+            C_INITIALIZED,
+            C_INITIALIZED | C_EOF,
+            C_INITIALIZED | C_DEL,
+            C_INITIALIZED | C_SUB,
+            C_INITIALIZED | C_SUB | C_EOF,
+        ];
+        let dbs = [
+            (0, 3),
+            (0, 0),
+            (0, 1000),
+            (MDB_DUPSORT as u16, 3),
+            (MDB_DUPFIXED as u16, 3),
+        ];
+        let (mut fast_steps, mut checked) = (0, 0);
+        for l in [&V09, &V10] {
+            for page in pages(l) {
+                let mp = PageRef::with_layout(&page, l).unwrap();
+                for flags in cursor_flags {
+                    for (db_flags, pad) in dbs {
+                        for ki in 0..mp.num_keys().min(12) + 3 {
+                            for forward in [true, false] {
+                                let db = Db {
+                                    flags: db_flags,
+                                    pad,
+                                    ..Db::empty(0)
+                                };
+                                let mut mc: Cursor<'_> = Cursor::new(db, Comparator::Memn, 0, l);
+                                mc.push(mp).unwrap();
+                                mc.flags = flags;
+                                mc.set_ki_top(ki);
+                                let mut fast = mc.clone();
+                                let got =
+                                    per_format!(l.format, |l| step_in_leaf(&mut fast, forward, l));
+                                let Some(kv) = got else {
+                                    assert_eq!(state(&fast), state(&mc), "declined, but moved");
+                                    continue;
+                                };
+                                let mut slow = mc.clone();
+                                let want = if forward {
+                                    cursor_next_any(core, &mut slow, None, CursorOp::Next)
+                                } else {
+                                    cursor_prev_any(core, &mut slow, None, CursorOp::Prev)
+                                };
+                                let want =
+                                    want.expect("the general path fails where the step does not");
+                                assert_eq!((kv.key, kv.data), (want.key, want.data));
+                                assert_eq!(state(&fast), state(&slow));
+                                fast_steps += 1;
+                            }
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // The step took over a good part of the cases, so the test is not
+        // vacuous.
+        assert!(fast_steps > 10_000, "{fast_steps} of {checked}");
+    }
 }
