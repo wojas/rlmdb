@@ -82,7 +82,12 @@ pub unsafe extern "C" fn mdb_env_open(
         .map_size(config.map_size)
         .max_readers(config.max_readers)
         .max_dbs(config.max_dbs)
-        .flags(EnvironmentFlags::from_bits_retain(flags | config.flags));
+        .flags(EnvironmentFlags::from_bits_retain(flags | config.flags))
+        // The key and data copies of `write.rs` are sized for LMDB 0.9's
+        // limits (511-byte keys, 32 KiB pages). Until `DUAL_FORMAT.md`
+        // stage 4 sizes them per environment, the C API creates and opens
+        // LMDB 0.9 environments only: a 1.0 file is `MDB_VERSION_MISMATCH`.
+        .format(rlmdb::Format::V09);
     match builder.open_with_permissions(OsStr::from_bytes(path.to_bytes()), mode) {
         Ok(opened) => {
             e.set_opened(opened, path.to_owned());
