@@ -19,9 +19,10 @@ except `txn_sync`.
 
 * Reads (other than `DUPSORT` lookups) are at parity with C or faster
   on the server and on macOS; in the arm64 VM `get_4k` is at 1.33x.
-  `ls_scan`, the workload this project cares most about, is now ahead
-  of C everywhere: 0.77x C on the x86-64 server, 0.81x on macOS, 0.89x
-  in the arm64 VM (it was 1.03-1.25x before task L). Plain scans are at
+  `ls_scan`, the workload this project cares most about, is now at or
+  ahead of C everywhere: about 0.9-1.0x C on the x86-64 server (C's
+  time there varies between sessions; see below), 0.81-0.83x on macOS,
+  0.89x in the arm64 VM (it was 1.03-1.25x before task L). Plain scans are at
   0.8-1.0x C, random gets at 0.72-0.99x.
 * Writes: sequential appends are the largest gap (1.75-2.2x C), then
   one-put transactions (1.2-1.45x). On the 4 KiB-page server random
@@ -81,6 +82,19 @@ slower).
 | mixed_readers | 23749632 | 1, *pre-L* | 16.1 (15.8) | 17.5 (16.2) | **1.08** |
 | ls_scan | 5000000 | 2 | 69.3 (61.2) | 53.5 (50.2) | **0.77** |
 | ls_update | 50000 | 2 | 5161 (4839) | 5414 (5242) | **1.05** |
+
+`ls_scan` on this machine: read the ratio as about 0.9-1.0, not 0.77.
+C's time per record varies between sessions more than any other row:
+60.6, 69.3 and 58.1 ns in three sessions with the upstream flags (55.1
+with stronger flags, see "Compiler flags" below), while Rust's was 53-55
+ns in every run after L. In the session above C was slow (its
+median 13 % above its minimum), hence 0.77; the later session gave 0.92.
+The cause is not established: the scan is memory-bound over a 1.15 GB
+database, which makes it sensitive to page placement and cache state in
+the guest, but Rust's scan ran in the same sessions and moved less. The
+plain scans moved with it (`scan_fwd` / `scan_bwd` 0.93 / 0.95 in that
+later session). On macOS `ls_scan` was 0.81 and 0.83 in two sessions,
+with little spread.
 
 Run 1 (before L) had `ls_scan` at 1.03, `scan_fwd` 0.99, `scan_bwd`
 1.11, `ls_update` 1.17 and the other rows of run 2 within a few
@@ -206,8 +220,10 @@ measurements, are in the previous version of this file (`git show
 In order of importance for this project. `DUPSORT` performance is out
 of scope; its rows stay in the tables for completeness.
 
-* **`ls_scan`: done for now.** Rust is ahead of C on all three machines
-  (0.77-0.89x). The step still checks every page and node access against
+* **`ls_scan`: done for now.** Rust is at or ahead of C on all three
+  machines (0.81-0.89x on macOS and in the VM, about 0.9-1.0x on the
+  server, where C's own time varies between sessions; with C built with
+  `-O3 -flto -DNDEBUG` it is at parity there). The step still checks every page and node access against
   the page (`AGENTS.md` section 3), which C does not; the scan waits on
   memory most of the time, so those checks cost little. Left: a page
   change runs the general path after the fast step declines (about 60
@@ -301,3 +317,27 @@ the per-task reports):
   `--only small_txn` and `--dir` on that file system); in the VM,
   `scripts/linux-test.sh run --release -p rlmdb-bench -- --dir
   /tmp/lmdb-bench --reps 3`.
+
+**Compiler flags.** C is built with the upstream Makefile's flags (`-O2
+-g -pthread -W -Wall -Wno-unused-parameter`, no `NDEBUG`), Rust with the
+workspace's release profile (opt-level 3, thin LTO, `codegen-units = 1`);
+neither side uses `-march=native` or `target-cpu=native`. Two
+asymmetries remain: the C bench calls `mdb.c` in another translation
+unit without LTO, while the Rust bench gets library calls inlined
+through LTO; and C keeps its `mdb_assert` checks, since `NDEBUG` is not
+defined. To see what that is worth, the C side was rebuilt on the
+x86-64 server with `-O3 -flto -DNDEBUG` (through `CFLAGS`, which the
+`cc` crate passes on), with the same Rust build, and the groups `ls`,
+`read`, `seq_put`, `rand_put`, `overwrite`, `delete` and `small_txn` run
+back to back with each set of C flags in one session:
+
+| C flags | C `ls_scan` ns/record, median (min) | Rust `ls_scan` ns/record, median (min) | Rust/C (medians) |
+|---|---:|---:|---:|
+| upstream (`-O2`) | 58.1 (55.2) | 53.5 (52.5) | 0.92 |
+| `-O3 -flto -DNDEBUG` | 55.1 (53.8) | 54.8 (53.6) | 1.00 |
+
+The stronger flags make C's `ls_scan` about 5 % faster; every other row
+(scans, gets and all the write workloads) moved by at most 4 %, in both
+directions (`ls_update` the most, 5255 to 5024 ns), which is within
+this session's noise. The upstream flags stay the documented default,
+because they are what the C library ships with.
