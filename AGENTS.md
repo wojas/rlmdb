@@ -114,7 +114,11 @@ deferred until the core has been validated through the C API.
 * The layer is thin: no database logic in `rlmdb-capi`. Lifetimes are
   erased in one place (`erased.rs`); handle ownership is explicit.
 * The tools in `rlmdb-tools` match the C tools' options, output, messages
-  and exit codes; the C tools are their test oracle.
+  and exit codes; the C tools are their test oracle, each release for its
+  own format (C 1.0's for 1.0 files, in `interop/tests/tools10.rs`).
+* `include/rlmdb.h` holds rlmdb's own functions (`rlmdb_*`) and the LMDB
+  1.0 constants (each under `#ifndef`, values copied from 1.0's `lmdb.h`
+  with a comment naming it); `lmdb.h` stays the pristine 0.9.36 header.
 
 ## 6. Performance
 
@@ -169,9 +173,12 @@ deferred until the core has been validated through the C API.
 * Possible later: `MDB_WRITEMAP` (dirty pages are owned buffers today;
   keep the page backing replaceable), the typed Rust API, LMDB 1.0
   features beyond its data file (`MDB_PREVSNAPSHOT`, two-phase commit,
-  checksums, encryption; `DUAL_FORMAT.md` §7). The 1.0 lock file, the
-  format selection of the C API and the tools follow as stages 3 and 4 of
-  `DUAL_FORMAT.md`.
+  checksums, encryption; `DUAL_FORMAT.md` §7) and the format-converting
+  copy (`convert-copy`, §4.3). The C API and the tools handle both formats
+  (stage 4); new environments are 0.9 unless 1.0 is asked for, and the
+  environment variable `RLMDB_DEFAULT_FORMAT` that can ask for it is
+  experimental (keep it out of test environments: the suites assume it is
+  unset, and `scripts/check-all.sh` unsets it).
 * Not unless needed and feasible: 32-bit targets (`compile_error!` today;
   the format depends on `sizeof(size_t)`) and `MDB_VL32`.
 * `MDB_FIXEDMAP`, `MDB_MAPASYNC` and `MDB_NOMEMINIT` are accepted and

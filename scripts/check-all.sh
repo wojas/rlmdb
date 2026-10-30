@@ -11,6 +11,10 @@
 set -u
 here=$(cd "$(dirname "$0")/.." && pwd)
 cd "$here" || exit 1
+# The experimental default-format variable would make the tests create LMDB
+# 1.0 environments where they expect 0.9 ones (the tests that need it set
+# it for their own processes).
+unset RLMDB_DEFAULT_FORMAT
 
 linux=1
 for arg in "$@"; do
