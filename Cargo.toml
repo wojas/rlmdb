@@ -5,6 +5,7 @@ members = [
     "lmdb-capi",
     "lmdb-tools",
     "interop",
+    "bench",
 ]
 
 [workspace.package]
