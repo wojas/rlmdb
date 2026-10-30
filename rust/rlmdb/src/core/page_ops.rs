@@ -228,11 +228,11 @@ pub(crate) fn insert_node(
     if indx > nkeys {
         return None;
     }
-    // Move higher pointers up one slot.
-    for i in (indx..nkeys).rev() {
-        let v = ptr(l, p, i)?;
-        set_ptr(l, p, i + 1, v)?;
-    }
+    // Move higher pointers up one slot (one move of the pointer bytes, as
+    // C's loop over `mp_ptrs` does them one by one).
+    let ptrs = l.ptrs_offset();
+    p.get_mut(ptrs + 2 * indx..ptrs + 2 * (nkeys + 1))?
+        .copy_within(..2 * (nkeys - indx), 2);
     // Adjust free space offsets.
     let ofs = upper(l, p).checked_sub(node_size)?;
     if ofs < lower(l, p) + 2 || ofs + node_size > p.len() {
@@ -325,14 +325,18 @@ pub(crate) fn delete_node(l: &Layout, p: &mut [u8], indx: usize, ksize: usize) -
 
     let node_ofs = ptr(l, p, indx)?;
     let sz = node_size(l, p, node_ofs, pflags & P_LEAF != 0)?;
+    // Drop the pointer and move the nodes below the deleted one up by its
+    // size: stored values, as C's loop over `mp_ptrs` does (`node_ofs` is
+    // the stored value plus `PAGEBASE`; `as u16` truncates as C does).
+    let first = l.ptrs_offset();
+    let ptrs = p.get_mut(first..first + 2 * numkeys)?;
+    let below = node_ofs - l.ptr_base;
     let mut j = 0;
     for i in 0..numkeys {
         if i != indx {
-            let mut v = ptr(l, p, i)?;
-            if v < node_ofs {
-                v += sz;
-            }
-            set_ptr(l, p, j, v)?;
+            let v = usize::from(u16::from_ne_bytes([ptrs[2 * i], ptrs[2 * i + 1]]));
+            let v = if v < below { v + sz } else { v };
+            ptrs[2 * j..2 * j + 2].copy_from_slice(&(v as u16).to_ne_bytes());
             j += 1;
         }
     }
@@ -501,6 +505,120 @@ mod tests {
         let sz = even(NODE_SIZE + 2 + 2);
         insert_node(L, &mut b, 1, sz, b"bb", 0, NodeBody::Inline(b"22")).unwrap();
         assert_eq!(a, b);
+    }
+
+    /// `insert_node` and `delete_node` as they were, moving one pointer at
+    /// a time, for [`pointer_moves_match_the_per_pointer_loop`].
+    fn insert_node_reference(
+        l: &Layout,
+        p: &mut [u8],
+        indx: usize,
+        node_size: usize,
+        key: &[u8],
+        body: NodeBody<'_>,
+    ) -> Option<usize> {
+        let nkeys = num_keys(l, p);
+        if indx > nkeys {
+            return None;
+        }
+        for i in (indx..nkeys).rev() {
+            let v = ptr(l, p, i)?;
+            set_ptr(l, p, i + 1, v)?;
+        }
+        let ofs = upper(l, p).checked_sub(node_size)?;
+        if ofs < lower(l, p) + 2 || ofs + node_size > p.len() {
+            return None;
+        }
+        set_ptr(l, p, indx, ofs)?;
+        set_upper(l, p, ofs);
+        set_lower(l, p, lower(l, p) + 2);
+        put_u16(p, ofs + NODE_KSIZE, key.len() as u16);
+        let NodeBody::Inline(d) = body else {
+            return None;
+        };
+        put_u16(p, ofs + NODE_LO, d.len() as u16);
+        put_u16(p, ofs + NODE_HI, 0);
+        put_u16(p, ofs + NODE_FLAGS, 0);
+        let k = ofs + NODE_SIZE;
+        p.get_mut(k..k + key.len())?.copy_from_slice(key);
+        let dofs = ofs + l.node_data_offset(key.len());
+        p.get_mut(dofs..dofs + d.len())?.copy_from_slice(d);
+        Some(ofs)
+    }
+
+    fn delete_node_reference(l: &Layout, p: &mut [u8], indx: usize) -> Option<()> {
+        let numkeys = num_keys(l, p);
+        if indx >= numkeys {
+            return None;
+        }
+        let node_ofs = ptr(l, p, indx)?;
+        let sz = node_size(l, p, node_ofs, flags(l, p) & P_LEAF != 0)?;
+        let mut j = 0;
+        for i in 0..numkeys {
+            if i != indx {
+                let mut v = ptr(l, p, i)?;
+                if v < node_ofs {
+                    v += sz;
+                }
+                set_ptr(l, p, j, v)?;
+                j += 1;
+            }
+        }
+        let base = upper(l, p);
+        if base > node_ofs || node_ofs + sz > p.len() {
+            return None;
+        }
+        p.copy_within(base..node_ofs, base + sz);
+        set_lower(l, p, lower(l, p) - 2);
+        set_upper(l, p, base + sz);
+        Some(())
+    }
+
+    /// The pointer moves of `insert_node` (one `copy_within`) and
+    /// `delete_node` (one pass over the stored values) leave the pages the
+    /// per-pointer loops of C left, in both layouts, at every index; on a
+    /// page whose `mp_lower` claims more pointers than fit, both fail.
+    #[test]
+    fn pointer_moves_match_the_per_pointer_loop() {
+        for l in [&V09, &crate::format::layout::V10] {
+            for n in 0..12usize {
+                let mut page = vec![0u8; PS];
+                let mut pm = PageMut::with_layout(&mut page, l);
+                pm.init(7, P_LEAF);
+                for i in 0..n {
+                    let k = [b'a' + i as u8; 3];
+                    let v = vec![i as u8; i % 5];
+                    pm.add_node(i, &k[..1 + i % 3], NodeData::Inline(&v), 0)
+                        .unwrap();
+                }
+                for indx in 0..=n + 1 {
+                    let size = even(NODE_SIZE + l.node_key_len(2) + l.node_data_len(3));
+                    let body = NodeBody::Inline(b"xyz");
+                    let mut a = page.clone();
+                    let mut b = page.clone();
+                    let ra = insert_node(l, &mut a, indx, size, b"kk", 0, body);
+                    let rb = insert_node_reference(l, &mut b, indx, size, b"kk", body);
+                    assert_eq!(ra, rb, "insert {n} at {indx}");
+                    if ra.is_some() {
+                        assert_eq!(a, b, "insert {n} at {indx}");
+                    }
+                    let mut a = page.clone();
+                    let mut b = page.clone();
+                    let ra = delete_node(l, &mut a, indx, 0);
+                    let rb = delete_node_reference(l, &mut b, indx);
+                    assert_eq!(ra, rb, "delete {n} at {indx}");
+                    assert_eq!(a, b, "delete {n} at {indx}");
+                }
+                // `mp_lower` beyond the page: both refuse.
+                let mut bad = page.clone();
+                set_lower(l, &mut bad, PS + 64);
+                assert!(
+                    insert_node(l, &mut bad.clone(), 0, 16, b"k", 0, NodeBody::Inline(b""))
+                        .is_none()
+                );
+                assert!(delete_node(l, &mut bad, n.saturating_sub(1), 0).is_none() || n == 0);
+            }
+        }
     }
 
     #[test]

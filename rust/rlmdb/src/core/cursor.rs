@@ -17,7 +17,7 @@
 //! | here | C |
 //! |---|---|
 //! | `Cursor::page_search` | `mdb_page_search`, `mdb_page_search_root` (line 5630) |
-//! | `Cursor::node_search` | `mdb_node_search` (line 5422) |
+//! | `Cursor::node_search`, `search_page` | `mdb_node_search` (line 5422) |
 //! | `Cursor::sibling` | `mdb_cursor_sibling` (line 5956) |
 //! | `cursor_first`, `cursor_last` | `mdb_cursor_first`, `mdb_cursor_last` |
 //! | `cursor_next`, `cursor_prev` | `mdb_cursor_next`, `mdb_cursor_prev` |
@@ -296,23 +296,9 @@ impl<'t, const N: usize> Cursor<'t, N> {
         self.top_page().node(self.ki_top()).ok_or_else(corrupted)
     }
 
-    /// The key at index `i` of `mp`, for `P_LEAF2` and node pages alike,
-    /// plus the bytes from the key to the end of the page (C's integer
-    /// comparators may read past a short stored key).
-    fn key_at(&self, mp: PageRef<'t>, i: usize) -> Result<(&'t [u8], &'t [u8])> {
-        let k = if mp.is_leaf2() {
-            let ks = self.leaf2_ksize();
-            mp.leaf2_key(i, ks).zip(mp.leaf2_key_tail(i, ks))
-        } else {
-            mp.node(i).and_then(|n| Some((n.key()?, n.key_tail())))
-        };
-        k.ok_or_else(corrupted)
-    }
-
     /// Compares `key` with the stored key at index `i` of `mp`.
     fn cmp_at(&self, cmp: Comparator, key: &[u8], mp: PageRef<'t>, i: usize) -> Result<Ordering> {
-        let (k, tail) = self.key_at(mp, i)?;
-        Ok(cmp.compare_in_page(key, k, tail))
+        cmp_at(cmp, key, mp, self.leaf2_ksize(), i)
     }
 
     /// `mdb_cursor_push`.
@@ -345,39 +331,12 @@ impl<'t, const N: usize> Cursor<'t, N> {
 
     /// `mdb_node_search`: binary search of `key` in the top page. Sets
     /// `mc_ki[top]` to the smallest entry `>= key` and returns
-    /// `(found, exact)`: `found` is false if every entry is smaller.
-    /// Branch pages start at index 1 (the first branch key is implicit).
+    /// `(found, exact)` (see [`search_page`]).
+    #[inline]
     pub(crate) fn node_search(&mut self, key: &[u8]) -> Result<(bool, bool)> {
-        let mp = self.top_page();
-        let nkeys = mp.num_keys();
-        let low: isize = if mp.is_leaf() { 0 } else { 1 };
-        let high: isize = nkeys as isize - 1;
-        // Branch pages have no data, so with integer keys alignment is
-        // guaranteed and C uses the faster mdb_cmp_long/mdb_cmp_int, chosen
-        // by the size of the second key on the page.
-        let cmp = if self.cmp.is_cint() && mp.is_branch() {
-            match mp.node(1).map(|n| n.key_size()) {
-                Some(8) => Comparator::Long,
-                _ => Comparator::Int,
-            }
-        } else {
-            self.cmp
-        };
-        // The page layout and the comparator are resolved once per search,
-        // not once per probe; the default order (memcmp) gets its own loop.
-        let (mut i, rc) = match (mp.is_leaf2(), cmp) {
-            (false, Comparator::Memn) => bsearch(low, high, |i| {
-                Ok(cmp_memn(key, mp.node_key(i).ok_or_else(corrupted)?))
-            })?,
-            _ => bsearch(low, high, |i| self.cmp_at(cmp, key, mp, i))?,
-        };
-        if rc == Ordering::Greater {
-            // Found entry is less than the key: skip to the next one.
-            i += 1;
-        }
-        let exact = rc == Ordering::Equal && nkeys > 0;
-        self.set_ki_top(i as usize);
-        Ok(((i as usize) < nkeys, exact))
+        let (i, found, exact) = search_page(self.top_page(), self.cmp, self.leaf2_ksize(), key)?;
+        self.set_ki_top(i);
+        Ok((found, exact))
     }
 
     /// `mdb_page_search`: put the root on the stack and descend to the leaf
@@ -521,6 +480,75 @@ impl<'t, const N: usize> Cursor<'t, N> {
         self.set_ki_top(mp.num_keys().saturating_sub(1));
         Ok(data)
     }
+}
+
+/// The key at index `i` of `mp`, for `P_LEAF2` (keys of `ksize` bytes, the
+/// tree's `md_pad`) and node pages alike, plus the bytes from the key to
+/// the end of the page (C's integer comparators may read past a short
+/// stored key).
+fn key_at<'t>(mp: PageRef<'t>, ksize: usize, i: usize) -> Result<(&'t [u8], &'t [u8])> {
+    let k = if mp.is_leaf2() {
+        mp.leaf2_key(i, ksize).zip(mp.leaf2_key_tail(i, ksize))
+    } else {
+        mp.node(i).and_then(|n| Some((n.key()?, n.key_tail())))
+    };
+    k.ok_or_else(corrupted)
+}
+
+/// Compares `key` with the stored key at index `i` of `mp` (`ksize`: see
+/// [`key_at`]).
+fn cmp_at(
+    cmp: Comparator,
+    key: &[u8],
+    mp: PageRef<'_>,
+    ksize: usize,
+    i: usize,
+) -> Result<Ordering> {
+    let (k, tail) = key_at(mp, ksize, i)?;
+    Ok(cmp.compare_in_page(key, k, tail))
+}
+
+/// `mdb_node_search` (mdb.c line 5422) on page `mp` of a tree ordered by
+/// `cmp` (`ksize`: its `P_LEAF2` key size, `md_pad`): binary search of
+/// `key`. Returns the index of the smallest entry `>= key` (C's
+/// `mc_ki[mc_top]`) and `(found, exact)`: `found` is false if every entry
+/// is smaller. Branch pages start at index 1 (the first branch key is
+/// implicit). Shared by read cursors ([`Cursor::node_search`]) and the
+/// write path's positioning on a write cursor's own stack (`wcursor`).
+pub(crate) fn search_page(
+    mp: PageRef<'_>,
+    cmp: Comparator,
+    ksize: usize,
+    key: &[u8],
+) -> Result<(usize, bool, bool)> {
+    let nkeys = mp.num_keys();
+    let low: isize = if mp.is_leaf() { 0 } else { 1 };
+    let high: isize = nkeys as isize - 1;
+    // Branch pages have no data, so with integer keys alignment is
+    // guaranteed and C uses the faster mdb_cmp_long/mdb_cmp_int, chosen
+    // by the size of the second key on the page.
+    let cmp = if cmp.is_cint() && mp.is_branch() {
+        match mp.node(1).map(|n| n.key_size()) {
+            Some(8) => Comparator::Long,
+            _ => Comparator::Int,
+        }
+    } else {
+        cmp
+    };
+    // The page layout and the comparator are resolved once per search,
+    // not once per probe; the default order (memcmp) gets its own loop.
+    let (mut i, rc) = match (mp.is_leaf2(), cmp) {
+        (false, Comparator::Memn) => bsearch(low, high, |i| {
+            Ok(cmp_memn(key, mp.node_key(i).ok_or_else(corrupted)?))
+        })?,
+        _ => bsearch(low, high, |i| cmp_at(cmp, key, mp, ksize, i))?,
+    };
+    if rc == Ordering::Greater {
+        // Found entry is less than the key: skip to the next one.
+        i += 1;
+    }
+    let exact = rc == Ordering::Equal && nkeys > 0;
+    Ok((i as usize, (i as usize) < nkeys, exact))
 }
 
 /// The binary search loop of `mdb_node_search` over the indices

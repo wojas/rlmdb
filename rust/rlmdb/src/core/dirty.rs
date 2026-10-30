@@ -60,17 +60,18 @@
 //! # Recycled buffers
 //!
 //! The list creates and drops every buffer itself
-//! ([`DirtyPages::alloc_zeroed`], [`DirtyPages::alloc_copy`]; removing,
-//! clearing, merging), so that single-page buffers can be reused instead of
-//! going back to the allocator: C keeps them on `me_dpages`
-//! (`mdb_page_malloc`, `mdb_page_free`, `mdb_dpage_free`). Here a
-//! [`PagePool`] travels with the dirty list: the environment keeps it
-//! between write transactions (under the writer lock), a write transaction
-//! holds it while it runs, and a nested transaction borrows it from its
-//! parent. Committing a big transaction no longer frees thousands of pages
-//! for the next one to allocate again; unlike C's, the pool shrinks to what
-//! the last transaction used and has a cap, so a huge transaction does not
-//! pin its memory forever. Recycling never shows in the data file: a reused
+//! ([`DirtyPages::alloc_zeroed`], [`DirtyPages::alloc_copy`],
+//! [`DirtyPages::alloc_data`]; removing, clearing, merging), so that
+//! buffers can be reused instead of going back to the allocator: C keeps
+//! single pages on `me_dpages` (`mdb_page_malloc`, `mdb_page_free`,
+//! `mdb_dpage_free`); here overflow runs are kept too. A [`PagePool`]
+//! travels with the dirty list: the environment keeps it between write
+//! transactions (under the writer lock), a write transaction holds it while
+//! it runs, and a nested transaction borrows it from its parent.
+//! Committing a big transaction no longer frees thousands of pages for the
+//! next one to allocate again; unlike C's, the pool shrinks to what the
+//! last transaction used and has a cap, so a huge transaction does not pin
+//! its memory forever. Recycling never shows in the data file: a reused
 //! buffer is zero-filled or completely overwritten before it is used.
 //!
 //! # Nested transactions and spilled pages
@@ -117,24 +118,48 @@ const HINTS: usize = 16;
 /// than this still gets this many from the pool and allocates the rest.
 const POOL_MAX_BYTES: usize = 256 << 20;
 
-/// Spare single-page buffers (C's `me_dpages`). Their contents are
-/// arbitrary; whoever takes one zero-fills or overwrites it completely.
+/// The most memory the overflow-run buffers of a [`PagePool`] take, on
+/// top of its single pages.
+const RUN_POOL_MAX_BYTES: usize = 128 << 20;
+
+/// Spare page buffers: single pages (C's `me_dpages`) and overflow runs of
+/// several pages. Their contents are arbitrary; whoever takes one
+/// zero-fills or overwrites it completely.
 ///
-/// Between write transactions the pool keeps as many buffers as the last
-/// transaction used ([`PagePool::trim`]), up to `POOL_MAX_BYTES`: the next
-/// transaction of the same kind then allocates nothing, and after a big one
-/// the memory goes back to the allocator when the next, smaller one ends.
+/// Between write transactions the pool keeps as many single pages as the
+/// last transaction used ([`PagePool::trim`]), up to `POOL_MAX_BYTES`: the
+/// next transaction of the same kind then allocates nothing, and after a
+/// big one the memory goes back to the allocator when the next, smaller
+/// one ends. Overflow runs are kept the same way, per length (as many of
+/// each length as the last transaction asked for), up to
+/// `RUN_POOL_MAX_BYTES` in all. (C frees runs, `mdb_dpage_free`; reusing
+/// them spares the allocator, and the page faults of fresh memory, a
+/// large part of a put of a big value.)
 #[derive(Debug, Default)]
 pub(crate) struct PagePool {
-    /// The page size: only buffers of exactly this length are kept. The
-    /// default pool (0) keeps none.
+    /// The page size: only buffers of a whole number of pages are kept.
+    /// The default pool (0) keeps none.
     page_size: usize,
-    /// How many buffers it keeps at most.
+    /// How many single-page buffers it keeps at most.
     max: usize,
-    /// The spare buffers.
+    /// The spare single-page buffers.
     free: Vec<Box<[u8]>>,
     /// Single-page buffers asked for since the last [`PagePool::trim`]
     /// (from the pool or not).
+    used: usize,
+    /// The spare run buffers by length (a workload has few lengths), each
+    /// with how many runs of that length were asked for since the last
+    /// [`PagePool::trim`].
+    runs: Vec<RunBufs>,
+    /// Bytes in `runs`.
+    run_bytes: usize,
+}
+
+/// The spare overflow-run buffers of one length in a [`PagePool`].
+#[derive(Debug)]
+struct RunBufs {
+    len: usize,
+    bufs: Vec<Box<[u8]>>,
     used: usize,
 }
 
@@ -144,39 +169,90 @@ impl PagePool {
         PagePool {
             page_size,
             max: POOL_MAX_BYTES / page_size.max(1),
-            free: Vec::new(),
-            used: 0,
+            ..PagePool::default()
         }
     }
 
     /// A spare buffer of `len` bytes, if there is one.
     fn take(&mut self, len: usize) -> Option<Box<[u8]>> {
-        if len != self.page_size {
+        if len == self.page_size {
+            self.used += 1;
+            return self.free.pop();
+        }
+        if self.page_size == 0 || len % self.page_size != 0 {
             return None;
         }
-        self.used += 1;
-        self.free.pop()
+        let i = match self.runs.iter().position(|r| r.len == len) {
+            Some(i) => i,
+            None => {
+                self.runs.push(RunBufs {
+                    len,
+                    bufs: Vec::new(),
+                    used: 0,
+                });
+                self.runs.len() - 1
+            }
+        };
+        let r = &mut self.runs[i];
+        r.used += 1;
+        let buf = r.bufs.pop()?;
+        self.run_bytes -= len;
+        Some(buf)
     }
 
-    /// `mdb_page_free`: keeps `buf` if it is one page and the pool is not
-    /// full, else frees it (overflow runs are freed, as by
-    /// `mdb_dpage_free`).
+    /// `mdb_page_free` / `mdb_dpage_free`: keeps `buf` if it is a whole
+    /// number of pages and the pool has room for it, else frees it.
     fn put(&mut self, buf: Box<[u8]>) {
-        if buf.len() == self.page_size && self.free.len() < self.max {
-            self.free.push(buf);
+        let len = buf.len();
+        if len == self.page_size {
+            if self.free.len() < self.max {
+                self.free.push(buf);
+            }
+            return;
+        }
+        if self.page_size == 0
+            || len % self.page_size != 0
+            || self.run_bytes + len > RUN_POOL_MAX_BYTES
+        {
+            return;
+        }
+        self.run_bytes += len;
+        match self.runs.iter_mut().find(|r| r.len == len) {
+            Some(r) => r.bufs.push(buf),
+            None => self.runs.push(RunBufs {
+                len,
+                bufs: vec![buf],
+                used: 0,
+            }),
         }
     }
 
     /// Adds the buffers of `other` (and takes its page size if this pool
     /// has none). Hand-offs between the environment and a transaction,
-    /// where one side is empty, move the list without copying it.
+    /// where one side is empty, move the lists without copying them.
     pub(crate) fn merge(&mut self, mut other: PagePool) {
-        if self.page_size == 0 || other.free.len() > self.free.len() {
+        if self.page_size == 0
+            || other.free.len() + other.runs.len() > self.free.len() + self.runs.len()
+        {
             std::mem::swap(self, &mut other);
         }
         self.used += other.used;
         for buf in other.free {
             self.put(buf);
+        }
+        for r in other.runs {
+            for buf in r.bufs {
+                self.put(buf);
+            }
+            match self.runs.iter_mut().find(|m| m.len == r.len) {
+                Some(m) => m.used += r.used,
+                None if r.used > 0 => self.runs.push(RunBufs {
+                    len: r.len,
+                    bufs: Vec::new(),
+                    used: r.used,
+                }),
+                None => {}
+            }
         }
     }
 
@@ -185,6 +261,14 @@ impl PagePool {
     pub(crate) fn trim(&mut self) {
         self.free.truncate(self.used);
         self.used = 0;
+        for r in &mut self.runs {
+            if r.bufs.len() > r.used {
+                self.run_bytes -= (r.bufs.len() - r.used) * r.len;
+                r.bufs.truncate(r.used);
+            }
+            r.used = 0;
+        }
+        self.runs.retain(|r| !r.bufs.is_empty());
     }
 }
 
@@ -356,6 +440,29 @@ impl DirtyPages {
         }
     }
 
+    /// A buffer of `len` bytes holding `data` at offset `at` and zeros
+    /// everywhere else (a new overflow run), recycled if possible; each
+    /// byte is written once. Hand it to [`DirtyPages::insert`]. `None` if
+    /// `data` does not fit.
+    pub(crate) fn alloc_data(&mut self, len: usize, at: usize, data: &[u8]) -> Option<Box<[u8]>> {
+        let end = at.checked_add(data.len()).filter(|&end| end <= len)?;
+        Some(match self.pool.take(len) {
+            Some(mut buf) => {
+                buf[..at].fill(0);
+                buf[at..end].copy_from_slice(data);
+                buf[end..].fill(0);
+                buf
+            }
+            None => {
+                let mut buf = Vec::with_capacity(len);
+                buf.resize(at, 0);
+                buf.extend_from_slice(data);
+                buf.resize(len, 0);
+                buf.into_boxed_slice()
+            }
+        })
+    }
+
     /// Puts `buf` into an empty slot for page `pgno` (not yet indexed).
     fn occupy(&mut self, pgno: u64, buf: Box<[u8]>) -> PageSlot {
         let entry = Entry {
@@ -417,6 +524,28 @@ impl DirtyPages {
         self.index.clear();
         self.slots.clear();
         self.vacant.clear();
+    }
+
+    /// Calls `f` with every page (number, slot, buffer), in page order.
+    pub(crate) fn for_each_mut(&mut self, mut f: impl FnMut(u64, PageSlot, &mut [u8])) {
+        let DirtyPages { index, slots, .. } = self;
+        for &(pgno, slot) in index.as_slice() {
+            if let Some(buf) = slots[slot.0 as usize].buf.as_deref_mut() {
+                f(pgno, slot, buf);
+            }
+        }
+    }
+
+    /// Empties the list for the next write transaction (see
+    /// `txn_rw::SpareTxn`): the pages are recycled, the pool is trimmed to
+    /// what this transaction used ([`PagePool::trim`]), and the list's own
+    /// vectors keep room for at most `max` pages.
+    pub(crate) fn recycle(&mut self, max: usize) {
+        self.clear();
+        self.pool.trim();
+        self.index.shrink_to(max);
+        self.slots.shrink_to(max);
+        self.vacant.shrink_to(max);
     }
 
     /// Keeps the pages for which `keep` returns `true` (one pass, in page
@@ -542,14 +671,32 @@ mod tests {
         assert!(d.insert(1, b).is_some());
         let b = d.alloc_copy(&[0xbb; 64]);
         assert!(d.insert(2, b).is_some());
-        let b = d.alloc_zeroed(192);
+        let mut b = d.alloc_zeroed(192);
+        b.fill(0xcc);
         assert!(d.insert(3, b).is_some());
+        let mut b = d.alloc_zeroed(192);
+        b.fill(0xdd);
+        assert!(d.insert(4, b).is_some());
+        // Not a whole number of pages: not kept.
+        assert!(d.insert(5, vec![0xee; 100].into_boxed_slice()).is_some());
         d.clear();
-        // The single pages come back, the overflow run does not.
+        // The single pages and the overflow runs come back.
         assert_eq!(d.pool.free.len(), 2);
+        assert_eq!(d.pool.run_bytes, 2 * 192);
         assert_eq!(&*d.alloc_zeroed(64), &[0; 64]);
         assert_eq!(&*d.alloc_copy(&[5; 64]), &[5; 64]);
         assert_eq!(d.pool.free.len(), 0);
+        // A recycled run is zero-filled, or holds the data and zeros only.
+        assert_eq!(&*d.alloc_zeroed(192), &[0; 192]);
+        let run = d.alloc_data(192, 16, &[7; 100]).unwrap();
+        assert!(run[..16].iter().all(|&b| b == 0));
+        assert!(run[16..116].iter().all(|&b| b == 7));
+        assert!(run[116..].iter().all(|&b| b == 0));
+        assert_eq!(d.pool.run_bytes, 0);
+        // A fresh one too, and data that does not fit is refused.
+        let run = d.alloc_data(128, 16, &[9; 112]).unwrap();
+        assert!(run[..16].iter().all(|&b| b == 0) && run[16..].iter().all(|&b| b == 9));
+        assert!(d.alloc_data(128, 16, &[9; 113]).is_none());
         // A pool without a page size keeps nothing.
         let mut pool = d.take_pool();
         let b = d.alloc_zeroed(64);
@@ -558,6 +705,28 @@ mod tests {
         assert_eq!(d.pool.free.len(), 0);
         pool.merge(d.take_pool());
         assert_eq!(pool.page_size, 64);
+    }
+
+    #[test]
+    fn runs_are_kept_as_used_and_within_budget() {
+        let mut pool = PagePool::new(64);
+        for _ in 0..4 {
+            pool.put(vec![0; 192].into_boxed_slice());
+        }
+        pool.put(vec![0; 128].into_boxed_slice());
+        assert_eq!(pool.run_bytes, 4 * 192 + 128);
+        // The last transaction used one 192-byte run: that is what stays.
+        assert!(pool.take(192).is_some());
+        pool.trim();
+        assert_eq!(pool.run_bytes, 192);
+        assert!(pool.take(128).is_none());
+        assert!(pool.take(192).is_some());
+        assert_eq!(pool.run_bytes, 0);
+        // Beyond the budget, runs are freed.
+        let big = RUN_POOL_MAX_BYTES / 64 * 64;
+        pool.put(vec![0; big].into_boxed_slice());
+        pool.put(vec![0; 64 * 3].into_boxed_slice());
+        assert_eq!(pool.run_bytes, big);
     }
 
     #[test]

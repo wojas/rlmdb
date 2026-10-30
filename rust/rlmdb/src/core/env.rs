@@ -52,14 +52,14 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use crate::cmp::CmpFn;
 use crate::consts::*;
 use crate::core::dbi::{Dbi, DbiRegistry};
-use crate::core::dirty::PagePool;
 use crate::core::reader::{LockRegion, ReaderInfo};
 use crate::core::txn::{RoTxn, Transaction};
-use crate::core::txn_rw::RwTxn;
+use crate::core::txn_rw::{RwTxn, SpareTxn};
 use crate::core::{Info, Stat};
 use crate::error::{Error, MdbError, Result};
 use crate::flags::{DatabaseFlags, EnvironmentFlags};
-use crate::format::layout::{Format, Layout, META_SIZE, V10};
+use crate::format::get_u64;
+use crate::format::layout::{Format, Layout, META_LAST_PGNO, META_SIZE, V10};
 use crate::format::meta::{self, pick_newest, Meta, SNIFF_LEN};
 use crate::idl::Idl;
 use crate::os::{self, DataMap};
@@ -291,15 +291,24 @@ pub(crate) struct WriterState {
     /// looked (`mdb_page_alloc`). Only grows; refreshed when it is in the
     /// way.
     pub(crate) pg_oldest: u64,
-    /// `me_dpages`: spare page buffers, kept between write transactions
-    /// (a write transaction's dirty list holds them while it runs).
-    pub(crate) pages: PagePool,
+    /// The containers of the last write transaction, emptied, with the
+    /// spare page buffers (`me_dpages`, a pool for the environment's page
+    /// size), kept for the next one (a write transaction holds them while
+    /// it runs; see `SpareTxn`).
+    pub(crate) spare: Option<SpareTxn>,
     /// `me_pbuf->mp_pad`: the key size field of C's scratch page for
     /// `MDB_DUPSORT` puts, which outlives transactions. A sub-page made from
     /// a single item of a non-`MDB_DUPFIXED` database inherits it (C never
     /// sets it there), so the `mp_pad` it gets depends on earlier puts
-    /// (see `RwTxn::dup_prepare`).
+    /// (see `RwTxn::dup_prepare`). State, not a container: it is kept here
+    /// whatever happens to `spare`.
     pub(crate) pbuf_pad: u16,
+    /// The meta page the last write transaction of this process wrote:
+    /// while the lock file still names its txnid, no other writer has
+    /// committed since, so it is the newest meta page, and the next write
+    /// transaction begins from it without reading it back. Never used
+    /// without a lock file (`MDB_NOLOCK`).
+    pub(crate) last_meta: Option<Meta>,
 }
 
 impl std::fmt::Debug for Environment {
@@ -439,7 +448,8 @@ impl Environment {
             writer: Mutex::new(WriterState {
                 pbuf_pad: 0,
                 pg_oldest: 0,
-                pages: PagePool::new(page_size),
+                spare: Some(SpareTxn::new(page_size)),
+                last_meta: None,
             }),
             page_size,
             map_size: AtomicUsize::new(map_size),
@@ -478,6 +488,19 @@ impl Environment {
         meta.validate_with_layout(self.layout)
             .map_err(|_| MdbError::Corrupted)?;
         Ok(meta)
+    }
+
+    /// `mm_last_pg` and `mm_txnid` of meta page `i` (0 or 1), read with
+    /// volatile reads and not validated: what `mdb_env_write_meta` keeps
+    /// of the meta page it is about to overwrite (`metab`), to write back
+    /// if that write fails. `None` if the page is not readable.
+    pub(crate) fn meta_ids(&self, i: usize) -> Option<(u64, u64)> {
+        let mut buf = [0u8; 16];
+        let off = i * self.page_size + self.layout.meta_offset() + META_LAST_PGNO;
+        if !self.data_map().read_volatile(off, &mut buf) {
+            return None;
+        }
+        Some((get_u64(&buf, 0)?, get_u64(&buf, 8)?))
     }
 
     /// `mdb_env_pick_meta`: the newer of the two meta pages.
@@ -712,11 +735,15 @@ impl Environment {
     /// grew the database (`MDB_MAP_RESIZED`).
     pub fn set_map_size(&self, size: usize) -> Result<()> {
         // C: `if (env->me_txn) return EINVAL;`
-        let _writer = match self.writer.try_lock() {
+        let mut writer = match self.writer.try_lock() {
             Ok(g) => g,
             Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return Err(Error::einval()),
         };
+        // The next write transaction reads its meta page again (this does
+        // not write one, so `last_meta` would still be right; reading is
+        // the simple rule after a change of the map).
+        writer.last_meta = None;
         let meta = self.pick_meta()?;
         let mut size = if size == 0 {
             meta.map_size as usize

@@ -169,8 +169,10 @@ impl<'env> RwTxn<'env> {
             pbuf_pad: self.w.pbuf_pad,
             cursors,
             base_main: None,
+            base_mapsize: self.w.base_mapsize,
             dropped: Vec::new(),
             scratch: std::mem::take(&mut self.w.scratch),
+            flush: Vec::new(),
         };
         self.w.flags |= TXN_HAS_CHILD;
         Ok(RwTxn::from_parts(

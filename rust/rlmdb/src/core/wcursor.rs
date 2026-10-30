@@ -61,10 +61,19 @@
 //! runs the operation, and stores the resulting positions back, page
 //! numbers taken from the page headers. Values a read operation returns
 //! borrow the transaction, so write code copies what it keeps.
+//!
+//! The positioning of every `mdb_put` and `mdb_del` (`MDB_SET`, and
+//! `mdb_cursor_last` for `MDB_APPEND`, on the fresh cursor of a tree
+//! without duplicates) runs on the write cursor's own stack instead
+//! ([`RwTxn::seek_key`], [`RwTxn::seek_last`]): the same steps as the read
+//! path, leaving the same state, without building and storing back a read
+//! cursor, and finding each level's page through its slot.
 
 use crate::cmp::Comparator;
 use crate::consts::*;
-use crate::core::cursor::{corrupted, empty_page, Cursor, C_DEL, C_INITIALIZED, C_SUB};
+use crate::core::cursor::{
+    corrupted, empty_page, node_read, search_page, Cursor, C_DEL, C_EOF, C_INITIALIZED, C_SUB,
+};
 use crate::core::dbi::{DB_DIRTY, DB_DUPDATA, DB_USRVALID, DB_VALID};
 use crate::core::dirty::PageSlot;
 use crate::core::page_ops;
@@ -582,6 +591,104 @@ pub(crate) fn write_back(arena: &mut Arena, c: CRef, mc: &Cursor<'_>, mx: Option
     }
 }
 
+/// `mdb_page_search` and `mdb_page_search_root` (mdb.c line 5630) on the
+/// stack of the unpositioned write cursor `w` itself (see
+/// [`RwTxn::seeks_in_place`]): put the root of the tree with record `db`
+/// (not `P_INVALID`) and key order `cmp` on the stack and descend to the
+/// leaf for `key`, or to the last leaf (`None`, `MDB_PS_LAST`). Returns the
+/// leaf.
+///
+/// These are the steps `Cursor::page_search` takes for an unpositioned
+/// cursor, in the same order, so the stack, the indices and the flags end
+/// up as [`RwTxn::read_op`] would store them back, also when a step fails
+/// (page numbers are taken from the page headers, as there). What is
+/// saved: building the read cursor and storing it back, and most page
+/// lookups. Each level's page is first looked for through the slot the
+/// cursor has for that level (from its last position: the cursor of
+/// `mdb_put` keeps them from put to put, and consecutive operations mostly
+/// pass the same root and branch pages), and the slot found is stored, so
+/// the `mdb_page_touch` that follows needs no search either.
+fn descend<'t>(
+    core: &'t TxnCore<'_>,
+    w: &mut WCursor,
+    db: &Db,
+    cmp: Comparator,
+    key: Option<&[u8]>,
+) -> Result<PageRef<'t>> {
+    let (mut mp, slot) = core.page_and_slot(db.root, w.pg_slot[0])?;
+    w.pg[0] = mp.pgno();
+    w.pg_slot[0] = slot;
+    w.snum = 1;
+    w.top = 0;
+    while mp.is_branch() {
+        let nkeys = mp.num_keys();
+        if nkeys == 0 {
+            return Err(corrupted());
+        }
+        let i = match key {
+            None => nkeys - 1,
+            Some(key) => {
+                let (i, found, exact) = search_page(mp, cmp, db.pad as usize, key)?;
+                w.ki[w.top] = i as u16;
+                let i = w.ki_top();
+                if !found {
+                    nkeys - 1
+                } else if exact {
+                    i
+                } else {
+                    i.checked_sub(1).ok_or_else(corrupted)?
+                }
+            }
+        };
+        let node = mp.node(i).ok_or_else(corrupted)?;
+        let level = w.snum;
+        let hint = w.pg_slot.get(level).copied().unwrap_or(PageSlot::NONE);
+        let (child, slot) = core.page_and_slot(node.child_pgno(), hint)?;
+        w.ki[w.top] = i as u16;
+        // mdb_cursor_push
+        if level >= CURSOR_STACK {
+            return Err(MdbError::CursorFull.into());
+        }
+        w.pg[level] = child.pgno();
+        w.pg_slot[level] = slot;
+        w.ki[level] = 0;
+        w.top = level;
+        w.snum = level + 1;
+        mp = child;
+    }
+    if !mp.is_leaf() {
+        return Err(corrupted());
+    }
+    w.flags |= C_INITIALIZED;
+    w.flags &= !C_EOF;
+    Ok(mp)
+}
+
+/// The key of item `ki` of leaf `mp` of a tree without duplicates
+/// (`ksize`: its `P_LEAF2` key size), read as `read_position` and the end
+/// of `cursor_set` read it for a main cursor without a sub-cursor: a node
+/// with duplicates is corrupt there, and the data is read too (following
+/// `F_BIGDATA`) for its checks.
+fn read_item<'t>(
+    core: &'t TxnCore<'_>,
+    mp: PageRef<'t>,
+    ki: usize,
+    ksize: usize,
+) -> Result<&'t [u8]> {
+    if !mp.is_leaf() {
+        return Err(corrupted());
+    }
+    if mp.is_leaf2() {
+        return mp.leaf2_key(ki, ksize).ok_or_else(corrupted);
+    }
+    let leaf = mp.node(ki).ok_or_else(corrupted)?;
+    if leaf.is_dupdata() {
+        return Err(corrupted());
+    }
+    node_read(core, leaf)?;
+    leaf.key().ok_or_else(corrupted)
+}
+
 /// The record and key order of cursor `c`.
 fn db_and_cmp(core: &TxnCore<'_>, arena: &Arena, c: CRef) -> (Db, Comparator) {
     match arena.cur(c).db {
@@ -672,12 +779,7 @@ impl<'env> RwTxn<'env> {
     /// tracked list if `tracked` (`mdb_cursor_open`, `mdb_put`). The DBI's
     /// record must be fresh.
     pub(crate) fn open_slot(&mut self, dbi: usize, tracked: bool) -> usize {
-        let dup_cmp = {
-            let dbs = self.core.dbs.borrow();
-            let e = &dbs[dbi];
-            (u32::from(e.db.flags) & MDB_DUPSORT != 0)
-                .then(|| e.dup_cmp.unwrap_or(Comparator::Memn))
-        };
+        let dup_cmp = self.core.dbs.borrow()[dbi].dup_order();
         self.w.cursors.open(dbi, dup_cmp, tracked)
     }
 
@@ -843,6 +945,87 @@ impl<'env> RwTxn<'env> {
         let res = f(core, &mut mc, mx.as_deref_mut());
         write_back(&mut self.w.cursors, c, &mc, mx.as_deref());
         res
+    }
+
+    // --- positioning on a write cursor's own stack -------------------------------
+
+    /// Whether `mc` can be positioned on its own stack ([`RwTxn::seek_key`],
+    /// [`RwTxn::seek_last`]) instead of through [`RwTxn::read_op`]: an
+    /// unpositioned main cursor of a tree without duplicates (no
+    /// sub-cursor). That is the cursor `mdb_put` and `mdb_del` open for
+    /// every call; everything else takes the read path.
+    #[inline]
+    pub(crate) fn seeks_in_place(&self, mc: CRef) -> bool {
+        let s = &self.w.cursors.slots[mc.slot];
+        !mc.sub && s.x.is_none() && !s.main.is_init() && matches!(s.main.db, DbRef::Txn(_))
+    }
+
+    /// `mdb_cursor_set` with `MDB_SET` for a cursor that
+    /// [`RwTxn::seeks_in_place`], in a tree with record `db` and key order
+    /// `cmp`: what `cursor_set(.., CursorOp::Set, true)` through
+    /// [`RwTxn::read_op`] does for such a cursor, step for step (see
+    /// [`descend`]), with the same errors and the same cursor state
+    /// afterwards, also when it fails. Returns `false` where that returns
+    /// `MDB_NOTFOUND` (the cursor then sits where `key` would go).
+    pub(crate) fn seek_key(
+        &mut self,
+        mc: CRef,
+        db: &Db,
+        cmp: Comparator,
+        key: &[u8],
+    ) -> Result<bool> {
+        if key.is_empty() {
+            return Err(MdbError::BadValSize.into());
+        }
+        if db.root == P_INVALID {
+            return Ok(false);
+        }
+        let core = &self.core;
+        let w = self.w.cursors.cur_mut(mc);
+        let mp = descend(core, w, db, cmp, Some(key))?;
+        let ksize = db.pad as usize;
+        let (i, _, exact) = search_page(mp, cmp, ksize, key)?;
+        w.ki[w.top] = i as u16;
+        if !exact {
+            return Ok(false);
+        }
+        // set1: the descent left C_INITIALIZED set and C_EOF clear. Read
+        // the item as `cursor_set` does, for its checks.
+        read_item(core, mp, w.ki_top(), ksize)?;
+        Ok(true)
+    }
+
+    /// `mdb_cursor_last` as `mdb_cursor_put` uses it for `MDB_APPEND`, for
+    /// a cursor that [`RwTxn::seeks_in_place`], in a tree with record `db`:
+    /// what `cursor_last_for_append` through [`RwTxn::read_op`] does for
+    /// such a cursor (see [`RwTxn::seek_key`]). Returns `f` of the last key,
+    /// or of `None` for an empty leaf, where the cursor is left before its
+    /// first slot (`mc_ki` 0xffff) as there.
+    pub(crate) fn seek_last<R>(
+        &mut self,
+        mc: CRef,
+        db: &Db,
+        cmp: Comparator,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R> {
+        if db.root == P_INVALID {
+            return Err(MdbError::NotFound.into());
+        }
+        let core = &self.core;
+        let w = self.w.cursors.cur_mut(mc);
+        let mp = descend(core, w, db, cmp, None)?;
+        let nkeys = mp.num_keys();
+        if nkeys == 0 {
+            if !mp.is_leaf() {
+                return Err(corrupted());
+            }
+            w.ki[w.top] = u16::MAX;
+            w.flags |= C_INITIALIZED | C_EOF;
+            return Ok(f(None));
+        }
+        w.ki[w.top] = (nkeys - 1) as u16;
+        w.flags |= C_INITIALIZED | C_EOF;
+        Ok(f(Some(read_item(core, mp, w.ki_top(), db.pad as usize)?)))
     }
 
     /// `mdb_page_search` with `MDB_PS_MODIFY`: descend to the leaf for
@@ -1063,8 +1246,28 @@ impl<'env> RwTxn<'env> {
         let snum = self.cur(mc).snum;
         self.cur_mut(mc).top = 0;
         if snum > 0 {
+            // Most of the time every page on the stack is already dirty in
+            // this transaction's list and the cursor's slots say where:
+            // check that in one pass over the stack. From the first level
+            // where it does not hold, take the general path; the levels
+            // before it are exactly those for which `touch_needed` would
+            // have found nothing to do.
+            let first = {
+                let l = self.layout();
+                let dirty = &self.core.dirty;
+                let w = self.w.cursors.cur(mc);
+                let n = snum.min(CURSOR_STACK);
+                (0..n)
+                    .find(|&level| {
+                        !(level == 0 && w.subp)
+                            && !dirty
+                                .at(w.pg_slot[level], w.pg[level])
+                                .is_some_and(|page| page_ops::flags(l, page) & P_DIRTY != 0)
+                    })
+                    .unwrap_or(snum)
+            };
             let mut rc = Ok(());
-            for level in 0..snum {
+            for level in first..snum {
                 // `page_touch` with `mc_top` at each level in turn; the
                 // common case does not look at `mc_top`.
                 let Some(in_list) = self.touch_needed(mc, level) else {
@@ -1258,5 +1461,147 @@ impl<'env> RwTxn<'env> {
         x.c.pg[0] = sx.c.pg[0];
         x.c.pg_slot[0] = sx.c.pg_slot[0];
         x.c.subp = sx.c.subp;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::cursor::{cursor_last_for_append, cursor_set, CursorOp};
+    use crate::core::{Dbi, Environment, Transaction};
+    use crate::flags::{DatabaseFlags, EnvironmentFlags, WriteFlags};
+    use crate::format::layout::Format;
+
+    /// Keys of 400 bytes, so that a few thousand make a three-level tree
+    /// on any page size; ordered by `i`.
+    fn key(i: u32) -> Vec<u8> {
+        let mut k = vec![b'k'; 400];
+        k[..4].copy_from_slice(&i.to_be_bytes());
+        k
+    }
+
+    fn same_state(a: &WCursor, b: &WCursor) {
+        assert_eq!(
+            (a.snum, a.top, a.flags, a.subp),
+            (b.snum, b.top, b.flags, b.subp)
+        );
+        assert_eq!(a.ki, b.ki);
+        assert_eq!(a.pg[..a.snum], b.pg[..b.snum]);
+    }
+
+    /// Positions two fresh cursors of `dbi`, one on its own stack and one
+    /// through the read path, for `MDB_SET` on `probe` and for
+    /// `mdb_cursor_last`, and checks that results and cursor states agree.
+    fn check(txn: &mut RwTxn<'_>, dbi: usize, probe: &[u8]) {
+        let (a, b) = (txn.open_slot(dbi, false), txn.open_slot(dbi, false));
+        let (ca, cb) = (CRef::main(a), CRef::main(b));
+        assert!(txn.seeks_in_place(ca));
+        let (db, cmp) = (txn.db_of(ca), txn.cmp_of(ca));
+        let got = txn
+            .seek_key(ca, &db, cmp, probe)
+            .map_err(|e| e.to_err_code());
+        let want = match txn.read_op(cb, |t, c, mx| {
+            cursor_set(t, c, mx, None, probe, None, CursorOp::Set, true).map(|_| ())
+        }) {
+            Ok(()) => Ok(true),
+            Err(e) if e.not_found() => Ok(false),
+            Err(e) => Err(e.to_err_code()),
+        };
+        assert_eq!(got, want, "MDB_SET {:?}", &probe[..probe.len().min(4)]);
+        same_state(txn.cur(ca), txn.cur(cb));
+        txn.close_slot(a);
+        txn.close_slot(b);
+
+        let (a, b) = (txn.open_slot(dbi, false), txn.open_slot(dbi, false));
+        let (ca, cb) = (CRef::main(a), CRef::main(b));
+        let got = txn
+            .seek_last(ca, &db, cmp, |k| k.map(<[u8]>::to_vec))
+            .map_err(|e| e.to_err_code());
+        let want = txn
+            .read_op(cb, |t, c, mx| {
+                cursor_last_for_append(t, c, mx).map(|kv| kv.map(|kv| kv.key.to_vec()))
+            })
+            .map_err(|e| e.to_err_code());
+        assert_eq!(got, want, "last");
+        same_state(txn.cur(ca), txn.cur(cb));
+        txn.close_slot(a);
+        txn.close_slot(b);
+    }
+
+    fn probes() -> Vec<Vec<u8>> {
+        let mut p: Vec<Vec<u8>> = [0, 1, 2, 777, 1500, 3001, 5998, 5999, 6000, 9999]
+            .into_iter()
+            .map(key)
+            .collect();
+        p.push(Vec::new());
+        p.push(b"a".to_vec());
+        p.push(vec![0]);
+        p
+    }
+
+    fn check_all(txn: &mut RwTxn<'_>) {
+        for probe in probes() {
+            check(txn, Dbi::MAIN.0 as usize, &probe);
+        }
+    }
+
+    #[test]
+    fn positioning_in_place_matches_the_read_path() {
+        positioning_matches(Format::V09);
+        // LMDB 1.0 (its layout and page header), on 4 KiB pages.
+        positioning_matches(Format::V10);
+    }
+
+    fn positioning_matches(format: Format) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = Environment::builder();
+        builder
+            .map_size(256 << 20)
+            .flags(EnvironmentFlags::NO_SYNC)
+            .format(format);
+        if format == Format::V10 {
+            builder.page_size(4096);
+        }
+        let env = builder.open(dir.path()).unwrap();
+        assert_eq!(env.layout().format, format);
+        let mut txn = env.begin_rw_txn().unwrap();
+        let db = txn.create_db(None, DatabaseFlags::empty()).unwrap();
+        // An empty tree.
+        check_all(&mut txn);
+        for i in 0..3000u32 {
+            txn.put(db, &key(2 * i), b"v", WriteFlags::empty()).unwrap();
+        }
+        let depth = txn.stat(db).unwrap().depth;
+        assert!(depth >= 3, "depth {depth}");
+        // Dirty pages.
+        check_all(&mut txn);
+        txn.commit().unwrap();
+
+        // Clean pages, then some dirty again.
+        let mut txn = env.begin_rw_txn().unwrap();
+        check_all(&mut txn);
+        for i in 0..300u32 {
+            txn.put(db, &key(20 * i + 1), b"w", WriteFlags::empty())
+                .unwrap();
+        }
+        check_all(&mut txn);
+        // Pages dirty in the parent, then in the child too.
+        {
+            let mut child = txn.begin_nested_txn().unwrap();
+            check_all(&mut child);
+            child.put(db, &key(3), b"c", WriteFlags::empty()).unwrap();
+            check_all(&mut child);
+        }
+        txn.abort();
+
+        // Spilled pages.
+        env.set_dirty_limit(64);
+        let mut txn = env.begin_rw_txn().unwrap();
+        for i in 0..3000u32 {
+            txn.put(db, &key(2 * i), b"spill", WriteFlags::empty())
+                .unwrap();
+        }
+        assert!(!txn.core.spilled.is_empty());
+        check_all(&mut txn);
     }
 }

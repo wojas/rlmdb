@@ -270,6 +270,36 @@ impl<'env> TxnCore<'env> {
         }
     }
 
+    /// [`TxnCore::page_by_slot`] that also returns the page's slot in this
+    /// transaction's own dirty list ([`PageSlot::NONE`] if it is not
+    /// there), for a write cursor to remember: `hint` if it still holds the
+    /// page, else the slot the search finds. A write transaction only.
+    #[inline]
+    pub(crate) fn page_and_slot(
+        &self,
+        pgno: u64,
+        hint: PageSlot,
+    ) -> Result<(PageRef<'_>, PageSlot)> {
+        let found = match self.dirty.at(hint, pgno) {
+            Some(buf) => Some((buf, hint)),
+            None => self
+                .dirty
+                .find(pgno)
+                .and_then(|s| Some((self.dirty.at(s, pgno)?, s))),
+        };
+        match found {
+            Some((buf, slot)) => {
+                let page = PageRef::with_layout(&buf[..self.page_size], self.layout)
+                    .ok_or(MdbError::Corrupted)?;
+                Ok((page, slot))
+            }
+            // A page of this transaction's own list is never in its own
+            // spill set, so looking there first is `mdb_page_get`'s order;
+            // otherwise the rest of `locate` finds it.
+            None => Ok((self.page_not_dirty_here(pgno)?, PageSlot::NONE)),
+        }
+    }
+
     /// [`TxnCore::page`] in a write transaction for a page the caller
     /// already looked for in this transaction's own dirty list, and did not
     /// find: the same page, without searching that list again.
