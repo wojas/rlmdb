@@ -14,8 +14,11 @@ sides. Results and analysis: [`RESULTS.md`](RESULTS.md).
   generator (`splitmix64` with fixed seeds): 16-byte keys, 100-byte values
   (zero-copy slices of a fixed random pool), the same random index streams
   and permutations, so both sides store the same data in the same
-  order. `rlmdb-bench --check-data` verifies that: both sides hash
-  everything the generator produces and the driver compares the hashes.
+  order. The `ls` group has a data set of its own (below), generated
+  record by record from the record number, so neither side keeps a copy
+  of it in memory. `rlmdb-bench --check-data` verifies that: both sides
+  hash everything the generator produces and the driver compares the
+  hashes.
 * **Timing**: hand-rolled. Every workload runs one warm-up iteration and
   `--reps` timed ones (`CLOCK_MONOTONIC` / `Instant`); the table shows the
   median and the minimum time per operation, operations per second (from
@@ -63,8 +66,10 @@ The machine this was developed on was shared with other heavy jobs, so
 interleaved rounds were much more repeatable than two separate runs;
 `RESULTS.md` reports both.
 
-The largest data sets are about 0.35 GB (`put_64k`) and 0.2 GB (the
-1M-key databases); only one exists at a time.
+The largest data set is the `ls` group's, about 1.3 GB with 16 KiB
+pages and 1.15 GB with 4 KiB pages at the default `--n`; the others are
+at most about 0.35 GB (`put_64k`) and 0.2 GB (the 1M-key databases).
+Only one exists at a time.
 
 ## Workloads
 
@@ -90,6 +95,24 @@ measure the libraries, not the disk; transactions are committed every
 | | `txn_sync` | `--sync-commits` such transactions with the default (synchronous) commit |
 | `mixed` | `mixed_writer` | `n/2000` commits of 100 random overwrites each, while 4 threads scan |
 | | `mixed_readers` | entries those 4 scanners read during the writer's run (ns per entry over the writer's wall time) |
+| `ls` | `ls_scan` | a Lightning Stream sync scan of the `ls` data set (`5n` records): one read txn, a full `MDB_NEXT` cursor scan reading every value's header txnid and counting those above the last sync (none are); ns per record |
+| | `ls_update` | `5n/100` puts of a new value (fresh header, same-size payload) for random existing `ls` keys (duplicates possible), committed every 10 000 puts; ns per put |
+
+The `ls` group loosely simulates [Lightning Stream](https://github.com/PowerDNS/lightningstream)
+syncing a PowerDNS Authoritative database (synthetic: no Lightning Stream
+code is involved). Its data set has `5n` records (5 million at the
+default `--n`): DNS-name-like keys of 20-40 bytes (`<host>.<zone>.<tld>`,
+random letters plus the record number in base 36, so they are unique and
+in random order) and values of a 24-byte Lightning Stream header
+(timestamp, transaction id, version, extra blocks, flags, padding;
+big-endian) and a 40-100 byte payload. Every header's transaction id is
+at or below the last sync's, so `ls_scan` finds nothing to sync. The
+database is built once per group (untimed; random key order, a commit
+per 10 000 puts); `ls_scan` runs first, then `ls_update`, which like
+`rand_overwrite` writes the same keys in every repetition, each time
+with new values (transaction id of the last sync + 1 + repetition), and
+does not rebuild the database in between. Afterwards an untimed scan
+checks that exactly the updated records are above the last sync.
 
 On macOS (16 KiB pages) 4 KiB values fit in a leaf page; on Linux (4 KiB
 pages) they go to overflow pages. 64 KiB values are overflow pages

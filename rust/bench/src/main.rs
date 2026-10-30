@@ -33,6 +33,7 @@ const GROUPS: &[&str] = &[
     "delete",
     "small_txn",
     "mixed",
+    "ls",
 ];
 
 /// The path of the C benchmark program.
@@ -51,7 +52,7 @@ usage: lmdb-bench [options]
                      (A/B of two rlmdb versions) instead of with C
   --rounds K         run every group K times per side, alternating (default 1)
   --check-data       check that C and Rust generate the same data, and exit
-groups: seq_put rand_put read overwrite dupsort overflow delete small_txn mixed";
+groups: seq_put rand_put read overwrite dupsort overflow delete small_txn mixed ls";
 
 struct Options {
     n: usize,

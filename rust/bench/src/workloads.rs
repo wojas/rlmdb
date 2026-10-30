@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rlmdb::{
-    DatabaseFlags, Dbi, Environment, EnvironmentFlags, Result, RwTxn, Transaction, WriteFlags,
+    DatabaseFlags, Dbi, Environment, EnvironmentFlags, Result, RoTxn, RwTxn, Transaction,
+    WriteFlags,
 };
 
 use crate::data::*;
@@ -21,6 +22,8 @@ const DUPS: usize = 10;
 const READERS: usize = 8;
 const MIXED_READERS: usize = 4;
 const MIXED_BATCH: usize = 100;
+/// `ls_update` puts a new value for one record in this many.
+const LS_UPDATE_DIV: usize = 100;
 
 /// Parameters of a worker run (the command line of `cbench`).
 pub struct Params<'a> {
@@ -65,6 +68,7 @@ pub fn run(group: &str, p: &Params<'_>) -> Result<()> {
         "delete" => delete_group(p, &pool),
         "small_txn" => small_txn_group(p, &pool),
         "mixed" => mixed_group(p, &pool),
+        "ls" => ls_group(p, &pool),
         "datacheck" => {
             println!("DATA {:016x}", datacheck(p.n));
             return Ok(());
@@ -562,5 +566,115 @@ fn mixed_group(p: &Params<'_>, pool: &[u8]) -> Result<()> {
     }
     sw.report("mixed_writer");
     sr.report("mixed_readers");
+    Ok(())
+}
+
+/// A fresh environment holding the `ls` data set of `nrec` records.
+fn build_ls(dir: &Path, pool: &[u8], nrec: usize) -> Result<(Environment, Dbi)> {
+    reset_dir(dir);
+    let env = open_env(dir, EnvironmentFlags::NO_SYNC)?;
+    let db = open_dbi(&env, None, DatabaseFlags::empty())?;
+    put_ls(&env, db, pool, nrec)?;
+    Ok((env, db))
+}
+
+/// The puts of `build_ls`: records `0..nrec` in record order (random key
+/// order), committing every `BATCH` puts.
+fn put_ls(env: &Environment, db: Dbi, pool: &[u8], nrec: usize) -> Result<()> {
+    let (mut k, mut v) = ([0u8; LS_KEYMAX], [0u8; LS_VALMAX]);
+    let mut txn: Option<RwTxn<'_>> = None;
+    for i in 0..nrec {
+        let t = match &mut txn {
+            Some(t) => t,
+            None => txn.insert(env.begin_rw_txn()?),
+        };
+        let kl = ls_key(i as u64, &mut k);
+        let vl = ls_value(pool, i as u64, &mut v);
+        t.put(db, &k[..kl], &v[..vl], WriteFlags::empty())?;
+        if (i + 1) % BATCH == 0 {
+            if let Some(t) = txn.take() {
+                t.commit()?;
+            }
+        }
+    }
+    if let Some(t) = txn {
+        t.commit()?;
+    }
+    Ok(())
+}
+
+/// The Lightning Stream sync scan: a full `MDB_NEXT` cursor scan reading
+/// the header transaction id of every value. Returns the number of records
+/// and of those changed since the last sync (`txnid > LS_SYNC_TXNID`).
+fn ls_changed(txn: &RoTxn<'_>, db: Dbi) -> Result<(usize, usize)> {
+    let (mut cnt, mut changed) = (0usize, 0usize);
+    let mut cur = txn.cursor(db)?;
+    while let Some((_, v)) = cur.next()? {
+        cnt += 1;
+        if ls_txnid(v).expect("value with an LS header") > LS_SYNC_TXNID {
+            changed += 1;
+        }
+    }
+    Ok((cnt, changed))
+}
+
+fn ls_group(p: &Params<'_>, pool: &[u8]) -> Result<()> {
+    let nrec = LS_SCALE * p.n;
+    let (env, db) = build_ls(p.dir, pool, nrec)?;
+
+    let mut s = Samples::default();
+    for it in 0..=p.reps {
+        let txn = env.begin_ro_txn()?;
+        let t0 = Instant::now();
+        let (cnt, changed) = ls_changed(&txn, db)?;
+        s.record(it, t0.elapsed(), cnt);
+        assert_eq!((cnt, changed), (nrec, 0), "ls_scan: records, changed");
+    }
+    s.report("ls_scan");
+
+    let count = nrec / LS_UPDATE_DIV;
+    let idx = rand_idx(S_LS_UPDATE, count, nrec);
+    let keys: Vec<([u8; LS_KEYMAX], usize)> = idx
+        .iter()
+        .map(|&i| {
+            let mut k = [0u8; LS_KEYMAX];
+            let kl = ls_key(u64::from(i), &mut k);
+            (k, kl)
+        })
+        .collect();
+    let mut v = [0u8; LS_VALMAX];
+    let mut s = Samples::default();
+    for it in 0..=p.reps {
+        let t0 = Instant::now();
+        let mut txn: Option<RwTxn<'_>> = None;
+        for (j, (&i, (k, kl))) in idx.iter().zip(&keys).enumerate() {
+            let t = match &mut txn {
+                Some(t) => t,
+                None => txn.insert(env.begin_rw_txn()?),
+            };
+            let vl = ls_update_value(pool, u64::from(i), it as u64, j as u64, &mut v);
+            t.put(db, &k[..*kl], &v[..vl], WriteFlags::empty())?;
+            if (j + 1) % BATCH == 0 {
+                if let Some(t) = txn.take() {
+                    t.commit()?;
+                }
+            }
+        }
+        if let Some(t) = txn {
+            t.commit()?;
+        }
+        s.record(it, t0.elapsed(), count);
+    }
+    s.report("ls_update");
+
+    // Untimed: the next sync would find exactly the updated records.
+    let mut seen = vec![false; nrec];
+    let distinct = idx
+        .iter()
+        .filter(|&&i| !std::mem::replace(&mut seen[i as usize], true))
+        .count();
+    let txn = env.begin_ro_txn()?;
+    let (cnt, changed) = ls_changed(&txn, db)?;
+    assert_eq!((cnt, changed), (nrec, distinct), "after ls_update");
     Ok(())
 }

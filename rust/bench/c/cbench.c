@@ -48,12 +48,15 @@
 #define READERS 8
 #define MIXED_READERS 4
 #define MIXED_BATCH 100
+#define LS_UPDATE_DIV 100
 
 /* ---- data generator (identical to src/data.rs) ------------------------ */
 
 #define SEED_KEYS 0x5eed000000000001ULL
 #define SEED_POOL 0x5eed000000000002ULL
 #define SEED_DUPS 0x5eed000000000003ULL
+#define SEED_LS_KEYS 0x5eed000000000004ULL
+#define SEED_LS_HDR 0x5eed000000000005ULL
 #define S_GET 0x1000000000000000ULL
 #define S_OVERWRITE 0x2000000000000000ULL
 #define S_DELETE 0x3000000000000000ULL
@@ -62,6 +65,7 @@
 #define S_OVF_GET 0x6000000000000000ULL
 #define S_READER 0x7000000000000000ULL
 #define S_MIXED 0x8000000000000000ULL
+#define S_LS_UPDATE 0x9000000000000000ULL
 #define POOL_SIZE (3 * 65536)
 
 static uint8_t pool[POOL_SIZE];
@@ -153,6 +157,120 @@ static void dup_data(uint64_t i, uint64_t j, uint8_t *out)
 	memcpy(out + 8, pool + val_off(i * 16 + j), VALLEN - 8);
 }
 
+/* The ls data set (Lightning Stream style records). Every value starts
+ * with a 24-byte LS header: timestamp of the last change (big-endian ns
+ * since the Unix epoch), transaction id (big-endian), version (0), number
+ * of extra 8-byte blocks (0), flags (2 bytes, bit 0: deleted), 4 bytes
+ * padding. */
+#define LS_SCALE 5
+#define LS_HDRLEN 24
+#define LS_TXNID 8
+#define LS_KEYMAX 40
+#define LS_VALMAX (LS_HDRLEN + 100)
+/* Every freshly built record has a header txnid at or below this one. */
+#define LS_SYNC_TXNID 1000000ULL
+#define LS_TS_BASE 1700000000000000000ULL
+#define LS_NS_PER_TXN 2000000000ULL
+
+static const char *const ls_tlds[8] = { "com", "net", "org", "nl", "de",
+	"uk", "io", "eu" };
+
+static uint64_t get_be64(const uint8_t *p)
+{
+	return (uint64_t)p[0] << 56 | (uint64_t)p[1] << 48 |
+	    (uint64_t)p[2] << 40 | (uint64_t)p[3] << 32 |
+	    (uint64_t)p[4] << 24 | (uint64_t)p[5] << 16 |
+	    (uint64_t)p[6] << 8 | (uint64_t)p[7];
+}
+
+/* The shape word of ls record i: key length, TLD, zone label length,
+ * payload length. */
+static uint64_t ls_shape(uint64_t i)
+{
+	return splitmix64(SEED_LS_KEYS + 64 * i);
+}
+
+/* The key of ls record i into out; returns its length (20-40 bytes):
+ * <host>.<zone>.<tld>, the host label being random letters followed by i
+ * in 6 base-36 digits (unique for i < 36^6, random sort order). */
+static size_t ls_key(uint64_t i, uint8_t *out)
+{
+	static const char b36[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+	uint64_t shape = ls_shape(i), v = i;
+	size_t len = 20 + (size_t)(shape % 21);
+	const char *tld = ls_tlds[(shape >> 16) % 8];
+	size_t tlen = strlen(tld);
+	size_t letters = len - 8 - tlen;
+	size_t zone = 3 + (size_t)((shape >> 24) % (letters - 3));
+	size_t host = letters - zone, j;
+	for (j = 0; j < host; j++)
+		out[j] = (uint8_t)('a' +
+		    splitmix64(SEED_LS_KEYS + 64 * i + 1 + j) % 26);
+	for (j = 6; j > 0; j--) {
+		out[host + j - 1] = (uint8_t)b36[v % 36];
+		v /= 36;
+	}
+	out[host + 6] = '.';
+	for (j = 0; j < zone; j++)
+		out[host + 7 + j] = (uint8_t)('a' +
+		    splitmix64(SEED_LS_KEYS + 64 * i + 1 + host + j) % 26);
+	out[len - tlen - 1] = '.';
+	memcpy(out + len - tlen, tld, tlen);
+	return len;
+}
+
+/* Payload length of ls record i (40-100 bytes, the same for every value
+ * the record gets). */
+static size_t ls_payload_len(uint64_t i)
+{
+	return 40 + (size_t)((ls_shape(i) >> 40) % 61);
+}
+
+static void ls_header(uint8_t *out, uint64_t ts, uint64_t txnid)
+{
+	put_be64(out, ts);
+	put_be64(out + LS_TXNID, txnid);
+	memset(out + 16, 0, LS_HDRLEN - 16);
+}
+
+/* The value of ls record i as built (into out; returns its length): txnid
+ * 1 + h % LS_SYNC_TXNID, a timestamp in that txnid's window (h =
+ * splitmix64(SEED_LS_HDR + i)), payload from the pool at val_off(i). */
+static size_t ls_value(uint64_t i, uint8_t *out)
+{
+	uint64_t h = splitmix64(SEED_LS_HDR + i);
+	uint64_t txnid = 1 + h % LS_SYNC_TXNID;
+	size_t plen = ls_payload_len(i);
+	ls_header(out, LS_TS_BASE + txnid * LS_NS_PER_TXN +
+	    (h >> 32) % LS_NS_PER_TXN, txnid);
+	memcpy(out + LS_HDRLEN, pool + val_off(i), plen);
+	return LS_HDRLEN + plen;
+}
+
+/* The new value of ls record i written by put j of rep it of ls_update:
+ * txnid LS_SYNC_TXNID + 1 + it, timestamp j ns into its window, payload
+ * of the same length at val_off(i + it + 1). */
+static size_t ls_update_value(uint64_t i, uint64_t it, uint64_t j,
+    uint8_t *out)
+{
+	uint64_t txnid = LS_SYNC_TXNID + 1 + it;
+	size_t plen = ls_payload_len(i);
+	ls_header(out, LS_TS_BASE + txnid * LS_NS_PER_TXN + j, txnid);
+	memcpy(out + LS_HDRLEN, pool + val_off(i + it + 1), plen);
+	return LS_HDRLEN + plen;
+}
+
+/* The transaction id in the LS header of v; exits if v is too short to
+ * hold a header. */
+static uint64_t ls_txnid(const MDB_val *v)
+{
+	if (v->mv_size < LS_HDRLEN) {
+		fprintf(stderr, "cbench: value without an LS header\n");
+		exit(1);
+	}
+	return get_be64((const uint8_t *)v->mv_data + LS_TXNID);
+}
+
 /* FNV-1a over n bytes, continuing from h. */
 static uint64_t fnv(uint64_t h, const void *p, size_t n)
 {
@@ -170,9 +288,9 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n)
 static void datacheck(size_t n)
 {
 	uint64_t h = 0xcbf29ce484222325ULL;
-	uint8_t *k, buf[VALLEN];
+	uint8_t *k, buf[VALLEN], lk[LS_KEYMAX], lv[LS_VALMAX];
 	uint32_t *v;
-	size_t i, j;
+	size_t i, j, nls;
 	k = rand_keys(n);
 	h = fnv(h, k, n * KEYLEN);
 	free(k);
@@ -191,6 +309,23 @@ static void datacheck(size_t n)
 			dup_data(i, j, buf);
 			h = fnv(h, buf, VALLEN);
 		}
+	/* The ls data set: every key and value (each preceded by its length
+	 * byte), the stream of ls_update and the values of its first rep. */
+	nls = LS_SCALE * n;
+	for (i = 0; i < nls; i++) {
+		uint8_t len;
+		len = (uint8_t)ls_key(i, lk);
+		h = fnv(h, &len, 1);
+		h = fnv(h, lk, len);
+		len = (uint8_t)ls_value(i, lv);
+		h = fnv(h, &len, 1);
+		h = fnv(h, lv, len);
+	}
+	v = rand_idx(S_LS_UPDATE, nls / 100, nls);
+	h = fnv(h, v, nls / 100 * sizeof(*v));
+	for (j = 0; j < nls / 100; j++)
+		h = fnv(h, lv, ls_update_value(v[j], 0, j, lv));
+	free(v);
 	printf("DATA %016llx\n", (unsigned long long)h);
 }
 
@@ -787,6 +922,137 @@ static void mixed_group(const char *dir, size_t n, int reps)
 	free(keys);
 }
 
+/* A fresh environment holding the ls data set: records 0..nrec put in
+ * record order (random key order), committing every BATCH puts. */
+static MDB_env *build_ls(const char *dir, size_t nrec, MDB_dbi *dbi)
+{
+	MDB_env *env;
+	MDB_txn *txn = NULL;
+	uint8_t kb[LS_KEYMAX], vb[LS_VALMAX];
+	size_t i;
+	reset_dir(dir);
+	env = open_env(dir, MDB_NOSYNC);
+	*dbi = open_dbi(env, NULL, 0);
+	for (i = 0; i < nrec; i++) {
+		MDB_val k, v;
+		if (!txn)
+			CHK(mdb_txn_begin(env, NULL, 0, &txn));
+		k.mv_size = ls_key(i, kb);
+		k.mv_data = kb;
+		v.mv_size = ls_value(i, vb);
+		v.mv_data = vb;
+		CHK(mdb_put(txn, *dbi, &k, &v, 0));
+		if ((i + 1) % BATCH == 0) {
+			CHK(mdb_txn_commit(txn));
+			txn = NULL;
+		}
+	}
+	if (txn)
+		CHK(mdb_txn_commit(txn));
+	return env;
+}
+
+/* The Lightning Stream sync scan: a full MDB_NEXT cursor scan reading the
+ * header txnid of every value. Returns the number of records; *changed
+ * gets the number changed since the last sync (txnid > LS_SYNC_TXNID). */
+static uint64_t ls_changed(MDB_txn *txn, MDB_dbi dbi, uint64_t *changed)
+{
+	MDB_cursor *cur;
+	MDB_val k, v;
+	uint64_t cnt = 0, chg = 0;
+	int rc;
+	CHK(mdb_cursor_open(txn, dbi, &cur));
+	while ((rc = mdb_cursor_get(cur, &k, &v, MDB_NEXT)) == 0) {
+		cnt++;
+		if (ls_txnid(&v) > LS_SYNC_TXNID)
+			chg++;
+	}
+	if (rc != MDB_NOTFOUND)
+		CHK(rc);
+	mdb_cursor_close(cur);
+	*changed = chg;
+	return cnt;
+}
+
+static void ls_group(const char *dir, size_t n, int reps)
+{
+	size_t nrec = LS_SCALE * n, count = nrec / LS_UPDATE_DIV, j;
+	uint32_t *idx = rand_idx(S_LS_UPDATE, count, nrec);
+	uint8_t *keys = malloc(count * LS_KEYMAX), *seen, vb[LS_VALMAX];
+	size_t *klen = malloc(count * sizeof(*klen)), distinct = 0;
+	result r_scan = { 0 }, r_upd = { 0 };
+	MDB_dbi dbi;
+	MDB_env *env = build_ls(dir, nrec, &dbi);
+	MDB_txn *txn;
+	uint64_t cnt, changed;
+	int it;
+
+	for (it = 0; it <= reps; it++) {
+		uint64_t t0;
+		CHK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
+		t0 = now_ns();
+		cnt = ls_changed(txn, dbi, &changed);
+		record(&r_scan, it, now_ns() - t0, cnt);
+		mdb_txn_abort(txn);
+		if (cnt != nrec || changed != 0) {
+			fprintf(stderr, "cbench: ls_scan: %llu records, "
+			    "%llu changed\n", (unsigned long long)cnt,
+			    (unsigned long long)changed);
+			exit(1);
+		}
+	}
+	report("ls_scan", &r_scan);
+
+	for (j = 0; j < count; j++)
+		klen[j] = ls_key(idx[j], keys + j * LS_KEYMAX);
+	for (it = 0; it <= reps; it++) {
+		uint64_t t0 = now_ns();
+		txn = NULL;
+		for (j = 0; j < count; j++) {
+			MDB_val k, v;
+			if (!txn)
+				CHK(mdb_txn_begin(env, NULL, 0, &txn));
+			k.mv_size = klen[j];
+			k.mv_data = keys + j * LS_KEYMAX;
+			v.mv_size = ls_update_value(idx[j], (uint64_t)it, j,
+			    vb);
+			v.mv_data = vb;
+			CHK(mdb_put(txn, dbi, &k, &v, 0));
+			if ((j + 1) % BATCH == 0) {
+				CHK(mdb_txn_commit(txn));
+				txn = NULL;
+			}
+		}
+		if (txn)
+			CHK(mdb_txn_commit(txn));
+		record(&r_upd, it, now_ns() - t0, count);
+	}
+	report("ls_update", &r_upd);
+
+	/* Untimed: the next sync would find exactly the updated records. */
+	seen = calloc(nrec, 1);
+	for (j = 0; j < count; j++)
+		if (!seen[idx[j]]) {
+			seen[idx[j]] = 1;
+			distinct++;
+		}
+	CHK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
+	cnt = ls_changed(txn, dbi, &changed);
+	mdb_txn_abort(txn);
+	if (cnt != nrec || changed != distinct) {
+		fprintf(stderr, "cbench: after ls_update: %llu records, "
+		    "%llu changed, %zu expected\n", (unsigned long long)cnt,
+		    (unsigned long long)changed, distinct);
+		exit(1);
+	}
+
+	mdb_env_close(env);
+	free(seen);
+	free(klen);
+	free(keys);
+	free(idx);
+}
+
 int main(int argc, char **argv)
 {
 	const char *group, *dir;
@@ -826,6 +1092,8 @@ int main(int argc, char **argv)
 		small_txn_group(dir, n, reps, sync_commits);
 	else if (!strcmp(group, "mixed"))
 		mixed_group(dir, n, reps);
+	else if (!strcmp(group, "ls"))
+		ls_group(dir, n, reps);
 	else if (!strcmp(group, "datacheck"))
 		datacheck(n);
 	else {
