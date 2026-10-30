@@ -51,7 +51,9 @@ every change must respect. The details live in:
   (16 KiB on macOS, 4 KiB on Linux). Test on both before claiming done.
 * LMDB 1.0's data file (`MDB_DATA_VERSION 3`, `DUAL_FORMAT.md`) is a
   supported format with the same rules: C 1.0 is its specification and its
-  oracle (`interop`: `mdb_*10`, `cpeer10`, `writeops10`), and a Rust writer
+  oracle (`interop`: `mdb_*10`, `cpeer10`, `writeops10`), C 1.0 and Rust
+  processes share a 1.0 environment as C 0.9 and Rust share a 0.9 one, one
+  process may have environments of both formats open, and a Rust writer
   leaves the pages C 1.0 would, `mp_txnid` included (C 1.0 writers decide
   from it which pages they may change in place). Every format-dependent
   offset, size and decision goes through `format::Layout`; never hard-code
@@ -154,6 +156,19 @@ deferred until the core has been validated through the C API.
 * The LMDB 1.0 oracle (`mdb_stat10`, `cpeer10`, … in `interop`) is built
   from sources that `interop/build.rs` extracts with `git show` at a pinned
   `mdb.RE/1.0` commit, which must be fetched (`interop/README.md`).
+* The interop matrix has four peers: `cpeer` (C 0.9), `cpeer10` (C 1.0),
+  `rpeer` (Rust) and `cpeer_capi` (C on the Rust library); the last two
+  open both formats (`--format 1.0`). Every scenario runs for every
+  (writer, reader) pair that shares a format, with the C peer of that
+  format verifying and auditing: `tests/c_vs_c.rs` … for 0.9,
+  `tests/c10_vs_c10.rs`, `rust_writes_c10_reads.rs`, `rust_vs_rust10.rs`
+  … for 1.0, `pagesize10.rs` at 256 B, 1 KiB and 64 KiB pages,
+  `three_peers*.rs`, and `mixed_formats.rs` (both formats in one
+  process). `cargo test -p rlmdb-interop` runs all of it; `--test
+  c10_writes_rust_reads` one pair; `INTEROP_LOOP_SECS=20` a stress run.
+  A new scenario goes into `interop/src/scenarios` and runs in both
+  formats: take the reference peer, the tools and the page size from the
+  `Pair`, never `Peer::C` or the 0.9 tools directly.
 * Run `scripts/check-all.sh` (fmt, clippy, doc, host tests, then the same
   tests in a Linux container via `scripts/linux-test.sh`) before declaring
   work done. `--no-linux` skips the container only for quick iteration.
@@ -175,7 +190,8 @@ deferred until the core has been validated through the C API.
   features beyond its data file (`MDB_PREVSNAPSHOT`, two-phase commit,
   checksums, encryption; `DUAL_FORMAT.md` §7) and the format-converting
   copy (`convert-copy`, §4.3). The C API and the tools handle both formats
-  (stage 4); new environments are 0.9 unless 1.0 is asked for, and the
+  (stage 4), the interop matrix covers both (stage 5); new environments
+  are 0.9 unless 1.0 is asked for, and the
   environment variable `RLMDB_DEFAULT_FORMAT` that can ask for it is
   experimental (keep it out of test environments: the suites assume it is
   unset, and `scripts/check-all.sh` unsets it).

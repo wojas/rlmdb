@@ -1,11 +1,16 @@
 # Supporting the LMDB 0.9 and 1.0 formats in one rlmdb
 
-Status: investigation, 2026-10-30. Implemented since: stage 1 (the `Layout`
-descriptor), stage 2 (the 1.0 data file: `DESIGN.md`, "The LMDB 1.0 data
-file"; `COMPATIBILITY.md`), stage 3 (the 1.0 lock file) and stage 4
-(defaults, `rlmdb.h`, the C API and the tools for 1.0 environments;
-§4.2–§4.4 describe what was built, §7 what it needed). Open: the
-format-converting copy (§4.3) and the 1.0 features beyond its data file.
+Status: investigation, 2026-10-30; implemented. Stages 1 to 5 of §7 are
+done: the `Layout` descriptor (stage 1), the 1.0 data file (stage 2:
+`DESIGN.md`, "The LMDB 1.0 data file"; `COMPATIBILITY.md`), the 1.0 lock
+file (stage 3), defaults, `rlmdb.h`, the C API and the tools for 1.0
+environments (stage 4) and the interop matrix with C 1.0 (stage 5): every
+cross-process scenario runs for every pair of the C 1.0, Rust and C-on-Rust
+peers on 1.0 environments, also at 256 B, 1 KiB and 64 KiB pages, and one
+process has environments of both formats open next to C peers of both
+releases. §4.2–§4.5 describe what was built, §7 what each stage needed.
+Open: the format-converting copy (§4.3) and the 1.0 features beyond its
+data file (stage 7).
 
 Question: can rlmdb read and write both the LMDB 0.9 (`MDB_DATA_VERSION 1`)
 and the LMDB 1.0 (`MDB_DATA_VERSION 3`) formats from one code base, picking
@@ -383,15 +388,80 @@ format. Needed:
   `MDB_LOCK_FORMAT`, `offsetof` of the lock-file fields and
   `mdb_env_get_maxkeysize` for the host page sizes; the Rust `LockLayout`
   for V10 is checked against it on both macOS and Linux.
-* The write-differential layout checks (`write_differential.rs`,
-  `mtest.rs`) run per format; the page-audit and the cross-process
-  scenarios in `interop/` run with C 0.9, C 1.0 and Rust peers in every
-  combination that shares a format, plus a scenario that opens one of each
-  format in one process.
-* `robust_*` and the mutation tests get 1.0 fixtures (sniffing must not
-  trust the version word blindly: a V09-shaped header claiming 3, and vice
-  versa).
-* `KNOWN_C_BUGS.md` gets a 1.0 column where behaviour differs.
+* The write-differential layout checks run per format
+  (`interop/tests/write_differential10.rs` runs the harness of
+  `rlmdb/tests/common/differential.rs` against `writeops10`), and the page
+  audit and the cross-process scenarios in `interop/` run with C 0.9, C 1.0
+  and Rust peers in every combination that shares a format, plus a
+  scenario that opens one of each format in one process (below).
+* `robust_*` and the mutation tests have 1.0 fixtures: `robust_mutation.rs`
+  bases written in the 1.0 format at 1 KiB, 4 KiB and 64 KiB pages,
+  `robust_io_errors.rs` every case in both formats, and the sniff refuses
+  a 0.9-shaped header claiming version 3 and a 1.0-shaped one claiming 1
+  (`format::meta` unit test `sniff`).
+* `KNOWN_C_BUGS.md` has a section "LMDB 1.0" for what C 1.0 does
+  differently from 0.9 and what rlmdb does about it.
+
+The interop matrix of 1.0, as built (`interop/README.md` has the details):
+
+* **Four peers.** `Peer::C` (`cpeer`, C 0.9), `Peer::C10` (`cpeer10`, the
+  same C program on C 1.0), `Peer::Rust` (`rpeer`) and `Peer::COnRust`
+  (`cpeer_capi`, the C program on rlmdb's `liblmdb.a`). The C peers open
+  their own release's format only; `rpeer` and `cpeer_capi` take
+  `--format 1.0` (`EnvironmentBuilder::format`, and under `LMDB_RUST`
+  `rlmdb_env_set_format`) and `--pagesize N` (`EnvironmentBuilder::page_size`,
+  `rlmdb_env_set_pagesize`; `cpeer10` calls `mdb_env_set_pagesize`). A C
+  peer asked for the other format exits with a usage error.
+* **The format is a property of the environment.** `TestEnv::with_format`
+  and `with_page_size` make every peer command on it carry the options, and
+  `interop::tools` run the C tools of its release (`mdb_stat10` … for 1.0).
+  A `Pair` has a format and an optional page size; its reference peer
+  (`Pair::reference`: `cpeer` or `cpeer10`) verifies and audits as C does
+  in the 0.9 matrix. `scenario_tests!(writer, reader, Format::V10[, page
+  size])` instantiates every scenario.
+* **The pairs.** `c10_vs_c10.rs`, `c10_writes_rust_reads.rs`,
+  `rust_writes_c10_reads.rs`, `c10_writes_conrust_reads.rs`,
+  `conrust_writes_c10_reads.rs`, `rust_vs_rust10.rs`,
+  `conrust_vs_conrust10.rs`, `rust_writes_conrust_reads10.rs`,
+  `conrust_writes_rust_reads10.rs` (the OS page size), `pagesize10.rs`
+  (C 1.0 and Rust in both roles at 256 B, 1 KiB and 64 KiB pages),
+  `three_peers10.rs` (writer loops of all three 1.0 peers at once).
+* **Both formats in one process.** `rpeer formats-loop` keeps a 0.9 and a
+  1.0 environment open and runs a writer loop on each in a thread of its
+  own while its main thread checks snapshots of both;
+  `interop/tests/mixed_formats.rs` runs it next to C 0.9 and C 1.0 writer
+  and reader loops on their environment and audits both.
+  `rlmdb/tests/mixed_formats.rs` does the same within one test process
+  (threads, a 1 KiB-page 1.0 environment, held snapshots, copies).
+* **Page audits** in 1.0 scenarios are `cpeer10 check-freelist`, `rpeer
+  check-freelist` and `cpeer_capi check-freelist`, whose page walk takes
+  the format from the meta page when built with `LMDB_RUST`; `pagecmp`
+  compares 1.0 files including `mp_txnid` and `MDB_ovpage`.
+* **The lock file** tests (`lockfile10.rs`) go through `Environment`: the
+  stage-3 `LockFile` hook, which attached rlmdb's lock-file code to a lock
+  file while `Environment` could not open 1.0 data files, is gone.
+
+What the matrix found: no difference between C 1.0 and rlmdb. Every
+scenario passes for every pair, at every page size and in stress runs
+(`INTEROP_LOOP_SECS=5`), with the same checks as the 0.9 matrix; where a
+scenario failed at a page size other than the OS page size, it failed the
+same way with C 1.0 and with rlmdb writing (identical page counts), and
+the cause was a size assumption of the scenario (a 4 MiB map that 20 KB
+values fill only through page rounding, values of 20 KB that are inline at
+64 KiB, a bound of 16 pages for a free list that needs 44 overflow pages at
+1 KiB, a main DB that is a two-level tree at 256 B), now expressed per page
+size. What the matrix needed was in the peers, C and Rust alike:
+named databases' keys end with NUL in 1.0, so `stat` and `dump --all` of
+both peer programs now recognise `<name>\0` as a database name in 1.0
+environments (they had skipped such keys, all peers in the same way, so
+the audit's comparison with `stat` failed). The known C 1.0
+differences (`KNOWN_C_BUGS.md`, "LMDB 1.0") stay out of the scenarios' way
+or are harmless there: ITS#8447 needs a comparator that calls items of
+different sizes equal, the scenarios do not drop the main DB
+(`tools10.rs` covers it), and C 1.0's `mdb_dump` writes its map address
+into the dump that `dump_load_roundtrip` loads, so `mdb_load10` creates
+the copy with `MDB_FIXEDMAP` and records its own map address in it, which
+the Rust and C peers open without it.
 
 ## 5. Upstream 1.x bugs found by lmdb-go (label `upstream-bug`)
 
@@ -401,12 +471,17 @@ format. Needed:
   Comes from the reader page cache, not the format. rlmdb cannot have it:
   cursors borrow their transaction. It matters for the oracle: the C 1.0
   peer and C programs in tests must close cursors before aborting, or carry
-  lmdb-go's `cursor-close-after-txn.patch`.
+  lmdb-go's `cursor-close-after-txn.patch`. The C peer closes every cursor
+  before its transaction ends (`c/cpeer*.c`), so `cpeer10` does not reach
+  it: the matrix of stage 5 ran without a crash of a C 1.0 program,
+  `cpeer_capi` on rlmdb running the same code.
 * **#44, double free of `mt_u.dirty_list`** when a nested write transaction
   fails to begin under memory pressure (0.9.34+, 1.0.x; ITS#10342 fallout).
   Not format related; rlmdb's nested transactions own their lists. Only
   reachable under `malloc` failure, so it does not affect the differential
-  tests.
+  tests, nor the matrix: `nested_txns`, `reader_loop_during_nested` and
+  the writer loops (a nested transaction in one of six transactions) pass
+  with C 1.0 in every pair.
 * **#47, 0.9.36 regressions.** (a) `MDB_USE_PWRITEV` build break, Linux
   only, irrelevant to rlmdb except when building the oracle with that
   option. (b) ITS#9388 page counts for DUPSORT: this branch's
@@ -465,7 +540,13 @@ format. Needed:
 5. Interop matrix with both C versions (1.0 sources via `git show` of the
    pinned commit, container mount for the common git dir); 1.0 fixtures for
    the robustness tests; docs (`AGENTS.md` §1 and §9, `COMPATIBILITY.md`,
-   `DESIGN.md`).
+   `DESIGN.md`). Done (§4.5): the fourth peer `cpeer10`, the format and
+   page size of test environments, the nine 1.0 pair files, `pagesize10.rs`,
+   `three_peers10.rs`, `formats-loop` and the mixed-format tests, the
+   lock-file tests on `Environment` (the stage-3 `LockFile` hook removed),
+   1.0 mutation bases at 64 KiB pages. It needed the peers to recognise
+   1.0's NUL-terminated database names; it found no difference between C
+   1.0 and rlmdb.
 6. Soon after: the format-converting copy (`convert-copy`), replacing
    `lmdbconvert`.
 7. Later: `MDB_PREVSNAPSHOT`, 2PC, checksums, encryption.
