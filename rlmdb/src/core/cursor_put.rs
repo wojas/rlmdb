@@ -31,6 +31,7 @@ use crate::core::cursor::{
     corrupted, cursor_last_for_append, cursor_set, CursorOp, C_DEL, C_INITIALIZED,
 };
 use crate::core::dbi::DB_DIRTY;
+use crate::core::freelist::PageInit;
 use crate::core::page_ops::{self, even, KeyUpdate, NodeBody};
 use crate::core::txn_rw::{FailOnPanic, RwTxn, TXN_ERROR};
 use crate::core::wcursor::{CRef, SUBPAGE};
@@ -252,7 +253,7 @@ impl<'env> RwTxn<'env> {
             return Err(MdbError::BadValSize.into());
         }
 
-        let pos = self.put_position(mc, key, db.root, flags)?;
+        let pos = self.put_position(mc, key, &db, flags)?;
         if self.cur(mc).flags & C_DEL != 0 {
             self.cur_mut(mc).flags ^= C_DEL;
         }
@@ -329,8 +330,11 @@ impl<'env> RwTxn<'env> {
         }
     }
 
-    /// The positioning step of `mdb_cursor_put`.
-    fn put_position(&mut self, mc: CRef, key: &[u8], root: u64, flags: u32) -> Result<Pos> {
+    /// The positioning step of `mdb_cursor_put` (`db`: the tree's record).
+    /// The cursor of `mdb_put` is positioned on its own stack
+    /// ([`RwTxn::seek_key`], [`RwTxn::seek_last`]), others through the read
+    /// path.
+    fn put_position(&mut self, mc: CRef, key: &[u8], db: &Db, flags: u32) -> Result<Pos> {
         if flags & MDB_CURRENT != 0 {
             if !self.cur(mc).is_init() {
                 return Err(Error::einval());
@@ -343,7 +347,7 @@ impl<'env> RwTxn<'env> {
             }
             return Ok(Pos::Found);
         }
-        if root == P_INVALID {
+        if db.root == P_INVALID {
             // New database, cursor has nothing to point to.
             let w = self.cur_mut(mc);
             w.snum = 0;
@@ -351,39 +355,50 @@ impl<'env> RwTxn<'env> {
             w.flags &= !C_INITIALIZED;
             return Ok(Pos::NoRoot);
         }
-        let rc = if flags & MDB_APPEND != 0 {
-            let cmp = self.cmp_of(mc);
-            let ord = self.read_op(mc, |txn, c, mx| {
-                Ok(match cursor_last_for_append(txn, c, mx)? {
-                    Some(kv) => cmp.compare(key, kv.key),
-                    // An empty tree (see `cursor_last_for_append`): the
-                    // cursor is before its first slot, append there.
-                    None => Ordering::Greater,
-                })
-            })?;
-            if ord == Ordering::Greater {
-                let w = self.cur_mut(mc);
-                w.ki[w.top] = w.ki[w.top].wrapping_add(1);
-                Err(Error::from(MdbError::NotFound))
+        let cmp = self.cmp_of(mc);
+        let in_place = self.seeks_in_place(mc);
+        let found = if flags & MDB_APPEND != 0 {
+            // `None`: an empty tree (see `cursor_last_for_append`); the
+            // cursor is before its first slot, append there.
+            let order = |last: Option<&[u8]>| match last {
+                Some(last) => cmp.compare(key, last),
+                None => Ordering::Greater,
+            };
+            let ord = if in_place {
+                self.seek_last(mc, db, cmp, order)?
             } else {
+                self.read_op(mc, |txn, c, mx| {
+                    cursor_last_for_append(txn, c, mx).map(|kv| order(kv.map(|kv| kv.key)))
+                })?
+            };
+            if ord != Ordering::Greater {
                 // New key is <= last key.
-                Err(MdbError::KeyExist.into())
+                return Err(MdbError::KeyExist.into());
             }
+            let w = self.cur_mut(mc);
+            w.ki[w.top] = w.ki[w.top].wrapping_add(1);
+            false
+        } else if in_place {
+            self.seek_key(mc, db, cmp, key)?
         } else {
             let dcmp = if self.cur(mc).is_sub() {
                 None
             } else {
                 self.dcmp_of(mc)
             };
-            self.read_op(mc, |txn, c, mx| {
+            let rc = self.read_op(mc, |txn, c, mx| {
                 cursor_set(txn, c, mx, dcmp, key, None, CursorOp::Set, true).map(|_| ())
-            })
+            });
+            match rc {
+                Ok(()) => true,
+                Err(e) if e.not_found() => false,
+                Err(e) => return Err(e),
+            }
         };
-        match rc {
-            Ok(()) if flags & MDB_NOOVERWRITE != 0 => Err(MdbError::KeyExist.into()),
-            Ok(()) => Ok(Pos::Found),
-            Err(e) if e.not_found() => Ok(Pos::NotFound),
-            Err(e) => Err(e),
+        match found {
+            true if flags & MDB_NOOVERWRITE != 0 => Err(MdbError::KeyExist.into()),
+            true => Ok(Pos::Found),
+            false => Ok(Pos::NotFound),
         }
     }
 
@@ -631,6 +646,26 @@ impl<'env> RwTxn<'env> {
         let ps = self.psize();
         let l = self.layout();
         let ki = self.cur(mc).ki_top();
+        // The common case, inline data replaced by data of the same size
+        // through a main cursor: the (touched) leaf is looked up once.
+        // Everything else, including what is corrupt, takes the steps
+        // below, from the same state.
+        if flags & MDB_RESERVE == 0 && !self.cur(mc).is_sub() {
+            let page = self.top_page_mut(mc)?;
+            let same = PageRef::with_layout(page, l)
+                .filter(|p| !p.is_leaf2())
+                .and_then(|p| p.node(ki))
+                .is_some_and(|n| {
+                    (u32::from(n.flags()) ^ flags) & u32::from(F_SUBDATA) == 0
+                        && n.flags() & F_BIGDATA == 0
+                        && n.data_size() == item.size
+                });
+            if same {
+                let range = page_ops::node_data_range(l, page, ki).ok_or_else(corrupted)?;
+                page[range].copy_from_slice(item.bytes);
+                return Ok(CurStep::Done);
+            }
+        }
         let (nflags, ksize, olddata_size, ovref) = {
             let page = self.top_page(mc)?;
             let n = page.node(ki).ok_or_else(corrupted)?;
@@ -1140,10 +1175,26 @@ impl<'env> RwTxn<'env> {
     /// `mdb_page_new`: allocate `num` pages and initialise them as an empty
     /// page of type `flags`, counting them in the cursor's DB record.
     pub(crate) fn page_new(&mut self, mc: CRef, flags: u16, num: usize) -> Result<u64> {
-        let np = self.page_alloc(num)?;
+        self.page_new_with(mc, flags, num, PageInit::Zeroed)
+    }
+
+    /// [`RwTxn::page_new`] with the buffer starting as `init` says (before
+    /// the header is set up).
+    pub(crate) fn page_new_with(
+        &mut self,
+        mc: CRef,
+        flags: u16,
+        num: usize,
+        init: PageInit<'_>,
+    ) -> Result<u64> {
+        let (np, slot) = self.page_alloc_with(num, init)?;
         let ps = self.psize();
         let l = self.layout();
-        let page = self.dirty_mut(np)?;
+        let page = match self.core.dirty.resolve(slot, np) {
+            Some(slot) => self.core.dirty.at_mut(slot, np),
+            None => None,
+        }
+        .ok_or_else(corrupted)?;
         page_ops::set_flags(l, page, flags | P_DIRTY);
         page_ops::set_lower(l, page, l.page_hdr);
         page_ops::set_upper(l, page, ps);
@@ -1193,11 +1244,16 @@ impl<'env> RwTxn<'env> {
         let ps = self.psize();
         let l = self.layout();
         let nodemax = self.core.env.node_max();
+        let mut scratch = scratch;
+        // The page is looked up once, and the node goes in through that
+        // reference; only data that needs new overflow pages makes it look
+        // the page up again after allocating them.
+        let mut page: &mut [u8] = match scratch.as_deref_mut() {
+            Some(buf) => buf,
+            None => self.top_page_mut(mc)?,
+        };
         let (is_leaf2, is_leaf, room) = {
-            let p = match scratch.as_deref() {
-                Some(buf) => PageRef::with_layout(buf, l).ok_or_else(corrupted)?,
-                None => self.top_page(mc)?,
-            };
+            let p = PageRef::with_layout(page, l).ok_or_else(corrupted)?;
             (p.is_leaf2(), p.is_leaf(), p.size_left() as isize - 2)
         };
         if is_leaf2 {
@@ -1231,13 +1287,14 @@ impl<'env> RwTxn<'env> {
                 if node_size as isize > room {
                     return self.page_full();
                 }
-                let ofp = self.page_new(mc, P_OVERFLOW, ovpages)?;
-                if flags & MDB_RESERVE == 0 {
-                    let run = self.dirty_mut(ofp)?;
-                    run.get_mut(l.page_hdr..l.page_hdr + d.size)
-                        .ok_or_else(corrupted)?
-                        .copy_from_slice(d.bytes);
-                }
+                // The run is created with the data in it (`MDB_RESERVE`:
+                // zero-filled, for the caller to fill in).
+                let init = if flags & MDB_RESERVE == 0 {
+                    PageInit::Data(d.bytes)
+                } else {
+                    PageInit::Zeroed
+                };
+                let ofp = self.page_new_with(mc, P_OVERFLOW, ovpages, init)?;
                 flags |= u32::from(F_BIGDATA);
                 let r = OverflowRef {
                     pgno: ofp,
@@ -1245,6 +1302,10 @@ impl<'env> RwTxn<'env> {
                     pages: ovpages as u64,
                 };
                 body = NodeBody::Overflow { r, size: d.size };
+                page = match scratch {
+                    Some(buf) => buf,
+                    None => self.top_page_mut(mc)?,
+                };
             } else {
                 node_size += l.node_data_len(d.size);
                 body = if flags & MDB_RESERVE != 0 {
@@ -1258,10 +1319,6 @@ impl<'env> RwTxn<'env> {
         if node_size as isize > room {
             return self.page_full();
         }
-        let page = match scratch {
-            Some(buf) => buf,
-            None => self.top_page_mut(mc)?,
-        };
         page_ops::insert_node(l, page, indx, node_size, key, flags as u16, body)
             .ok_or_else(corrupted)?;
         Ok(())

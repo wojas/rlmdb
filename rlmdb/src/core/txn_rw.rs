@@ -37,7 +37,7 @@ use crate::core::dbi::{
     db_name_key, name_id, Dbi, DbiRegistry, DbiSlot, NamedDb, TxnDb, DB_DIRTY, DB_NEW, DB_STALE,
     DB_USRVALID, DB_VALID,
 };
-use crate::core::dirty::PagePool;
+use crate::core::dirty::{DirtyPages, PagePool, PageSlot};
 use crate::core::env::{Environment, WriterState};
 use crate::core::nested::{End, Nested};
 use crate::core::reader::LockRegion;
@@ -47,6 +47,7 @@ use crate::core::wcursor::{read_cursors, write_back, Arena, CRef};
 use crate::core::Stat;
 use crate::error::{Error, MdbError, Result};
 use crate::flags::{DatabaseFlags, WriteFlags};
+use crate::format::meta::Meta;
 use crate::format::Db;
 use crate::idl::Idl;
 
@@ -94,6 +95,9 @@ pub(crate) struct WriteState {
     /// The main DB record of the snapshot a top-level transaction began on
     /// (to tell which named DBs exist again after an abort).
     pub(crate) base_main: Option<Db>,
+    /// `mm_mapsize` of the meta page a top-level transaction began from
+    /// (for `mdb_env_write_meta`).
+    pub(crate) base_mapsize: u64,
     /// Handles closed by `drop_db` in this transaction (or its committed
     /// children): slot index, the environment slot and its sequence number
     /// before the close, so that a nested transaction that aborts can
@@ -103,11 +107,66 @@ pub(crate) struct WriteState {
     /// and splits (C's `me_pbuf` and stack buffers), see
     /// [`RwTxn::take_scratch`]. A nested transaction borrows them.
     pub(crate) scratch: Vec<Vec<u8>>,
+    /// The pages `RwTxn::page_flush` writes at commit (page number, slot,
+    /// bytes), kept so that its memory is reused.
+    pub(crate) flush: Vec<(u64, PageSlot, usize)>,
 }
 
 /// How many spare buffers [`WriteState::scratch`] keeps: enough for a
 /// `DUPSORT` put (two) that splits a leaf and its parent (two each).
 const SCRATCH_BUFS: usize = 8;
+
+/// How many entries the lists of a [`SpareTxn`] keep room for: the
+/// allocations of an ordinary transaction are kept, those of a huge one
+/// (more pages than this) go back to the allocator.
+const SPARE_ENTRIES: usize = 4096;
+
+/// How many cursor slots a [`SpareTxn`] keeps.
+const SPARE_CURSORS: usize = 16;
+
+/// The containers of a top-level write transaction, kept by the
+/// environment between write transactions (`WriterState::spare`, under
+/// the writer lock): [`RwTxn::begin`] takes them, and the end of the
+/// transaction empties them and gives them back, so that the next write
+/// transaction fills the same memory instead of allocating it again. C
+/// allocates its write transaction, with its dirty list and free list,
+/// once per environment (`me_txn0`, `me_dirty_list`, `me_free_pgs`); a
+/// small transaction here allocated a dozen vectors and freed them again.
+/// The dirty list brings its spare page buffers (C's `me_dpages`).
+///
+/// What is kept is bounded: lists keep room for up to `SPARE_ENTRIES`
+/// entries and the cursor arena up to `SPARE_CURSORS` slots; the page
+/// buffers follow the page pool's own policy (`PagePool::trim`).
+#[derive(Debug, Default)]
+pub(crate) struct SpareTxn {
+    /// The DBI table (`TxnCore::dbs`).
+    dbs: Vec<TxnDb>,
+    /// The dirty list, empty, with its spare page buffers.
+    dirty: DirtyPages,
+    /// `mt_free_pgs`.
+    free_pgs: Idl,
+    /// `mt_loose_pgs`.
+    loose: Vec<u64>,
+    /// The cursor arena, every slot free.
+    cursors: Arena,
+    /// The scratch buffers of puts and splits.
+    scratch: Vec<Vec<u8>>,
+    /// The list of pages to write at commit.
+    flush: Vec<(u64, PageSlot, usize)>,
+}
+
+impl SpareTxn {
+    /// Nothing kept yet, for an environment with pages of `page_size`
+    /// bytes.
+    pub(crate) fn new(page_size: usize) -> SpareTxn {
+        let mut dirty = DirtyPages::new();
+        dirty.give_pool(PagePool::new(page_size));
+        SpareTxn {
+            dirty,
+            ..SpareTxn::default()
+        }
+    }
+}
 
 /// Wraps a write transaction for a mutating operation: if the operation
 /// panics (a user comparator, `set_compare`/`set_dupsort`), dropping the
@@ -229,20 +288,32 @@ impl<'env> RwTxn<'env> {
         let (last, meta) = match shared {
             Some(l) => {
                 let t = l.txnid();
-                (t, env.read_meta((t & 1) as usize)?)
+                match lock.state.last_meta {
+                    // This process wrote the newest meta page (see
+                    // `WriterState::last_meta`).
+                    Some(m) if m.txnid == t => (t, m),
+                    _ => (t, env.read_meta((t & 1) as usize)?),
+                }
             }
             None => {
                 let m = env.pick_meta()?;
                 (m.txnid, m)
             }
         };
-        let mut core = TxnCore::new(env, Vec::new());
-        core.set_snapshot(last.wrapping_add(1), &meta)?;
-        // The spare page buffers are the transaction's until it ends. (The
-        // environment keeps an empty pool meanwhile, so that it still has
-        // one if the transaction is leaked.)
-        let pages = std::mem::replace(&mut lock.state.pages, PagePool::new(env.page_size()));
-        core.dirty.give_pool(pages);
+        // The environment's spare containers (and page buffers) are the
+        // transaction's until it ends.
+        let mut spare = lock
+            .state
+            .spare
+            .take()
+            .unwrap_or_else(|| SpareTxn::new(env.page_size()));
+        let mut core = TxnCore::new(env, std::mem::take(&mut spare.dbs));
+        if let Err(e) = core.set_snapshot(last.wrapping_add(1), &meta) {
+            spare.dbs = std::mem::take(core.dbs.get_mut());
+            lock.state.spare = Some(spare);
+            return Err(e);
+        }
+        core.dirty = spare.dirty;
         let pg_oldest = lock.state.pg_oldest;
         let pbuf_pad = lock.state.pbuf_pad;
         Ok(RwTxn {
@@ -251,7 +322,13 @@ impl<'env> RwTxn<'env> {
                 dirty_room: env.dirty_limit(),
                 pg_oldest,
                 pbuf_pad,
+                free_pgs: spare.free_pgs,
+                loose: spare.loose,
+                cursors: spare.cursors,
+                scratch: spare.scratch,
+                flush: spare.flush,
                 base_main: Some(meta.dbs[MAIN_DBI as usize]),
+                base_mapsize: meta.map_size,
                 ..WriteState::default()
             },
             lock: Some(lock),
@@ -310,9 +387,47 @@ impl<'env> RwTxn<'env> {
         if let Some(mut lock) = self.lock.take() {
             lock.state.pg_oldest = self.w.pg_oldest;
             lock.state.pbuf_pad = self.w.pbuf_pad;
-            let mut pages = self.core.dirty.take_pool();
-            pages.trim();
-            lock.state.pages.merge(pages);
+            lock.state.spare = Some(self.spare());
+        }
+    }
+
+    /// After `mdb_env_write_meta` wrote `meta` and published its txnid:
+    /// remember it for the next write transaction (see
+    /// `WriterState::last_meta`). Top-level transactions only.
+    pub(crate) fn wrote_meta(&mut self, meta: Meta) {
+        if let Some(lock) = &mut self.lock {
+            lock.state.last_meta = lock.shared.is_some().then_some(meta);
+        }
+    }
+
+    /// The emptied containers of this (top-level) transaction, for the
+    /// environment to keep (see [`SpareTxn`]).
+    fn spare(&mut self) -> SpareTxn {
+        let mut dirty = std::mem::take(&mut self.core.dirty);
+        dirty.recycle(SPARE_ENTRIES);
+        let mut dbs = std::mem::take(self.core.dbs.get_mut());
+        dbs.clear();
+        let mut free_pgs = std::mem::take(&mut self.w.free_pgs);
+        free_pgs.clear();
+        free_pgs.shrink_to(SPARE_ENTRIES);
+        let mut loose = std::mem::take(&mut self.w.loose);
+        loose.clear();
+        loose.shrink_to(SPARE_ENTRIES);
+        let mut cursors = std::mem::take(&mut self.w.cursors);
+        if cursors.len() > SPARE_CURSORS {
+            cursors = Arena::default();
+        }
+        let mut flush = std::mem::take(&mut self.w.flush);
+        flush.clear();
+        flush.shrink_to(SPARE_ENTRIES);
+        SpareTxn {
+            dbs,
+            dirty,
+            free_pgs,
+            loose,
+            cursors,
+            scratch: std::mem::take(&mut self.w.scratch),
+            flush,
         }
     }
 
@@ -721,7 +836,7 @@ impl<'env> RwTxn<'env> {
         self.check_usable()?;
         let entry = self.core.refreshed(db, entry)?;
         check_reserve(entry.db.flags, flags)?;
-        let slot = self.open_slot(db.0 as usize, true);
+        let slot = self.w.cursors.open(db.0 as usize, entry.dup_order(), true);
         let c = CRef::main(slot);
         let rc = self.put_at(c, key, data, flags);
         let loc = match rc {

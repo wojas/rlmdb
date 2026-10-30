@@ -63,6 +63,12 @@ impl Idl {
         self.ids.clear();
     }
 
+    /// Lowers the capacity to `max` IDs if it is larger (`Vec::shrink_to`):
+    /// what a list kept between write transactions holds on to.
+    pub fn shrink_to(&mut self, max: usize) {
+        self.ids.shrink_to(max);
+    }
+
     /// `mdb_midl_search`: the 0-based position of the first ID that is
     /// `<= id` (i.e. where `id` is or would be inserted to keep the
     /// descending order). Equal to `len()` if every ID is greater.
@@ -95,23 +101,53 @@ impl Idl {
     /// `mdb_midl_xmerge`: merge the descending list `merge` into this
     /// descending list, keeping it sorted. Duplicates are kept.
     pub fn xmerge(&mut self, merge: &Idl) {
-        // C merges in place from the back; a forward merge yields the same
-        // sequence for sorted inputs.
-        let mut out = Vec::with_capacity(self.ids.len() + merge.ids.len());
-        let (mut i, mut j) = (0, 0);
-        let (a, b) = (&self.ids, &merge.ids);
-        while i < a.len() && j < b.len() {
-            if a[i] > b[j] {
-                out.push(a[i]);
-                i += 1;
-            } else {
-                out.push(b[j]);
-                j += 1;
+        self.xmerge_ids(merge.ids.len(), merge.ids.iter().rev().copied());
+    }
+
+    /// [`Idl::xmerge`] of the IDs of an encoded free-DB record (as
+    /// [`Idl::to_bytes`] encodes them), without decoding it into a list
+    /// first. Returns `None`, merging nothing, if `buf` is shorter than its
+    /// count claims (as [`Idl::from_bytes`] does).
+    pub fn xmerge_encoded(&mut self, buf: &[u8]) -> Option<()> {
+        let ids = Idl::encoded_ids(buf)?;
+        self.xmerge_ids(ids.len(), ids.rev());
+        Some(())
+    }
+
+    /// The IDs of an encoded free-DB record (see [`Idl::from_bytes`]).
+    pub fn encoded_ids(
+        buf: &[u8],
+    ) -> Option<impl DoubleEndedIterator<Item = u64> + ExactSizeIterator + Clone + '_> {
+        let n = usize::try_from(get_u64(buf, 0)?).ok()?;
+        let end = n.checked_add(1)?.checked_mul(8)?;
+        let ids = buf.get(8..end)?;
+        Some(
+            ids.chunks_exact(8)
+                .map(|c| u64::from_ne_bytes(c.try_into().unwrap_or([0; 8]))),
+        )
+    }
+
+    /// The merge of `mdb_midl_xmerge`, in place and from the back as in C:
+    /// `merge` yields the `n` IDs to merge in ascending order (the list's
+    /// end first). The list grows by `n` without a new allocation if it
+    /// has the room.
+    fn xmerge_ids(&mut self, n: usize, mut merge: impl Iterator<Item = u64>) {
+        let mut j = self.ids.len();
+        self.ids.resize(j + n, 0);
+        let ids = &mut self.ids[..];
+        let mut k = ids.len();
+        for merge_id in merge.by_ref() {
+            while j > 0 && ids[j - 1] < merge_id {
+                ids[k - 1] = ids[j - 1];
+                k -= 1;
+                j -= 1;
+            }
+            ids[k - 1] = merge_id;
+            k -= 1;
+            if k == 0 {
+                break;
             }
         }
-        out.extend_from_slice(&a[i..]);
-        out.extend_from_slice(&b[j..]);
-        self.ids = out;
     }
 
     /// The run search of `mdb_page_alloc`: the 1-based C index `i` of the
@@ -166,11 +202,32 @@ impl Idl {
     /// Encodes as stored in the free DB: `[count, ids...]`, native endian.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity((self.ids.len() + 1) * 8);
-        out.extend_from_slice(&(self.ids.len() as u64).to_ne_bytes());
-        for id in &self.ids {
+        Idl::encode_append(&self.ids, &mut out);
+        out
+    }
+
+    /// Appends `ids` encoded as [`Idl::to_bytes`] encodes them to `out`.
+    pub fn encode_append(ids: &[u64], out: &mut Vec<u8>) {
+        out.extend_from_slice(&(ids.len() as u64).to_ne_bytes());
+        for id in ids {
             out.extend_from_slice(&id.to_ne_bytes());
         }
-        out
+    }
+
+    /// Writes the IDs encoded as [`Idl::to_bytes`] encodes them into
+    /// `out`, which must be exactly that long (C copies the list into the
+    /// space it reserved for it). `false`, with nothing written, if it is
+    /// not.
+    pub fn encode_into(&self, out: &mut [u8]) -> bool {
+        if out.len() != (self.ids.len() + 1) * 8 {
+            return false;
+        }
+        let (count, rest) = out.split_at_mut(8);
+        count.copy_from_slice(&(self.ids.len() as u64).to_ne_bytes());
+        for (dst, id) in rest.chunks_exact_mut(8).zip(&self.ids) {
+            dst.copy_from_slice(&id.to_ne_bytes());
+        }
+        true
     }
 
     /// Decodes a free-DB record. Returns `None` if the buffer is shorter than
@@ -300,6 +357,12 @@ impl<V> Id2List<V> {
         self.items.clear();
     }
 
+    /// Lowers the capacity to `max` entries if it is larger
+    /// (`Vec::shrink_to`).
+    pub fn shrink_to(&mut self, max: usize) {
+        self.items.shrink_to(max);
+    }
+
     /// Keeps only the entries for which `keep` returns `true`, in one pass
     /// (C compacts the list in place the same way in `mdb_page_flush`).
     pub fn retain(&mut self, mut keep: impl FnMut(u64, &mut V) -> bool) {
@@ -384,6 +447,49 @@ mod tests {
         idl.append_range(10, 3);
         assert_eq!(idl.as_slice(), &[100, 12, 11, 10]);
         assert!(idl.is_sorted_desc());
+    }
+
+    /// The in-place merge from the back gives what a forward merge into a
+    /// new list gives, for lists of every length up to 6 (with equal IDs
+    /// too, as a corrupt free DB could hold), from a list or straight from
+    /// an encoded record; a record shorter than its count merges nothing.
+    #[test]
+    fn xmerge_in_place_matches_a_forward_merge() {
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        for la in 0..7 {
+            for lb in 0..7 {
+                for _ in 0..20 {
+                    let mut list = |n: usize| {
+                        let mut v: Vec<u64> = (0..n)
+                            .map(|_| {
+                                rng ^= rng << 13;
+                                rng ^= rng >> 7;
+                                rng ^= rng << 17;
+                                rng % 16
+                            })
+                            .collect();
+                        v.sort_unstable_by(|a, b| b.cmp(a));
+                        v
+                    };
+                    let (a, b) = (list(la), list(lb));
+                    let mut want = a.clone();
+                    want.extend_from_slice(&b);
+                    want.sort_unstable_by(|x, y| y.cmp(x));
+                    let mut got = Idl::from_vec(a.clone());
+                    got.xmerge(&Idl::from_vec(b.clone()));
+                    assert_eq!(got.as_slice(), &want[..], "{a:?} + {b:?}");
+                    let mut enc = Idl::from_vec(a.clone());
+                    let rec = Idl::from_vec(b.clone()).to_bytes();
+                    assert_eq!(enc.xmerge_encoded(&rec), Some(()));
+                    assert_eq!(enc.as_slice(), &want[..]);
+                    let mut short = Idl::from_vec(a.clone());
+                    if !b.is_empty() {
+                        assert_eq!(short.xmerge_encoded(&rec[..rec.len() - 1]), None);
+                        assert_eq!(short.as_slice(), &a[..]);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -478,6 +584,23 @@ mod tests {
         let mut huge = bytes.clone();
         huge[..8].copy_from_slice(&u64::MAX.to_ne_bytes());
         assert_eq!(Idl::from_bytes(&huge), None);
+    }
+
+    #[test]
+    fn encode_into_and_append_match_to_bytes() {
+        for ids in [vec![], vec![5], vec![9, 7, 3]] {
+            let idl = Idl::from_vec(ids.clone());
+            let want = idl.to_bytes();
+            let mut out = vec![0xaa; want.len()];
+            assert!(idl.encode_into(&mut out));
+            assert_eq!(out, want);
+            let mut wrong = vec![0xaa; want.len() + 8];
+            assert!(!idl.encode_into(&mut wrong));
+            assert!(wrong.iter().all(|&b| b == 0xaa));
+            let mut app = vec![1, 2];
+            Idl::encode_append(&ids, &mut app);
+            assert_eq!(&app[2..], &want[..]);
+        }
     }
 
     #[test]

@@ -45,6 +45,25 @@ fn txnid_key(key: &[u8]) -> Result<u64> {
     get_u64(key, 0).ok_or_else(corrupted)
 }
 
+/// How the buffer of a newly allocated page starts (see
+/// [`RwTxn::page_alloc_with`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PageInit<'a> {
+    /// Zero-filled (a reused loose page keeps its old contents, as in C).
+    Zeroed,
+    /// A copy of a whole page (`mdb_page_touch`, see
+    /// [`RwTxn::page_alloc_copy`]).
+    Copy(&'a [u8]),
+    /// This data right after the page header and zeros everywhere else:
+    /// the data of a new overflow run (`mdb_node_add`). The same bytes as
+    /// zero-filling the run and copying the data in, but each written once
+    /// (C's `mdb_page_malloc` zeroes only the last page of a run, which
+    /// the data does not reach, and `mdb_node_add` copies the data). A
+    /// reused loose page gets the data and keeps the rest of its old
+    /// contents, as it does when zero-filling is asked for.
+    Data(&'a [u8]),
+}
+
 impl<'env> RwTxn<'env> {
     /// `mdb_page_alloc`: allocate `num` contiguous pages and return the
     /// first page number. The buffer is in the dirty list, zero-filled (a
@@ -60,7 +79,8 @@ impl<'env> RwTxn<'env> {
     /// 3. new pages at the end of the file (`MDB_MAP_FULL` if the map is
     ///    too small).
     pub(crate) fn page_alloc(&mut self, num: usize) -> Result<u64> {
-        self.page_alloc_init(num, None).map(|(pgno, _)| pgno)
+        self.page_alloc_with(num, PageInit::Zeroed)
+            .map(|(pgno, _)| pgno)
     }
 
     /// [`RwTxn::page_alloc`] of one page whose contents start as a copy of
@@ -69,25 +89,33 @@ impl<'env> RwTxn<'env> {
     /// (the same bytes; the zero fill was a sizeable part of every write).
     /// Also returns the page's slot in the dirty list.
     pub(crate) fn page_alloc_copy(&mut self, src: &[u8]) -> Result<(u64, PageSlot)> {
-        self.page_alloc_init(1, Some(src))
+        self.page_alloc_with(1, PageInit::Copy(src))
     }
 
-    /// The page number and its slot in the dirty list ([`PageSlot::NONE`]
-    /// for a reused loose page that is not initialised here).
-    fn page_alloc_init(&mut self, num: usize, init: Option<&[u8]>) -> Result<(u64, PageSlot)> {
+    /// [`RwTxn::page_alloc`] with the buffer starting as `init` says.
+    /// Returns the page number and its slot in the dirty list
+    /// ([`PageSlot::NONE`] for a reused loose page that is not initialised
+    /// here).
+    pub(crate) fn page_alloc_with(
+        &mut self,
+        num: usize,
+        init: PageInit<'_>,
+    ) -> Result<(u64, PageSlot)> {
         // If there are any loose pages, just use them.
         if num == 1 {
             if let Some(pgno) = self.w.loose.pop() {
-                let mut slot = PageSlot::NONE;
-                if let Some(src) = init {
-                    slot = self.core.dirty.find(pgno).ok_or_else(corrupted)?;
-                    self.core
-                        .dirty
-                        .at_mut(slot, pgno)
-                        .and_then(|page| page.get_mut(..src.len()))
-                        .ok_or_else(corrupted)?
-                        .copy_from_slice(src);
-                }
+                let (at, src) = match init {
+                    PageInit::Zeroed => return Ok((pgno, PageSlot::NONE)),
+                    PageInit::Copy(src) => (0, src),
+                    PageInit::Data(data) => (self.layout().page_hdr, data),
+                };
+                let slot = self.core.dirty.find(pgno).ok_or_else(corrupted)?;
+                self.core
+                    .dirty
+                    .at_mut(slot, pgno)
+                    .and_then(|page| page.get_mut(at..at + src.len()))
+                    .ok_or_else(corrupted)?
+                    .copy_from_slice(src);
                 return Ok((pgno, slot));
             }
         }
@@ -120,12 +148,23 @@ impl<'env> RwTxn<'env> {
                 pgno
             }
         };
+        let len = self.psize() * num;
         let mut buf = match init {
-            Some(src) => {
-                debug_assert_eq!(src.len(), self.psize() * num);
+            PageInit::Zeroed => self.core.dirty.alloc_zeroed(len),
+            PageInit::Copy(src) => {
+                debug_assert_eq!(src.len(), len);
                 self.core.dirty.alloc_copy(src)
             }
-            None => self.core.dirty.alloc_zeroed(self.psize() * num),
+            PageInit::Data(data) => {
+                let hdr = self.layout().page_hdr;
+                match self.core.dirty.alloc_data(len, hdr, data) {
+                    Some(buf) => buf,
+                    None => {
+                        self.w.flags |= TXN_ERROR;
+                        return Err(corrupted());
+                    }
+                }
+            }
         };
         crate::core::page_ops::set_pgno(&mut buf, pgno);
         // mdb_page_dirty
@@ -217,20 +256,16 @@ impl<'env> RwTxn<'env> {
                     break;
                 }
             }
-            let idl = Idl::from_bytes(kv.data).ok_or_else(corrupted)?;
+            let mut ids = Idl::encoded_ids(kv.data).ok_or_else(corrupted)?;
             // C trusts the record. A meta page or a page past the snapshot
             // would be handed out and overwritten (or its offset overflow).
-            if idl
-                .as_slice()
-                .iter()
-                .any(|&p| p < NUM_METAS as u64 || p >= core.next_pgno)
-            {
+            if ids.any(|p| p < NUM_METAS as u64 || p >= core.next_pgno) {
                 return Err(corrupted());
             }
             w.pglast = last;
-            // Merge in descending sorted order.
+            // Merge in descending sorted order (straight from the record).
             let mop = w.pghead.get_or_insert_with(Idl::new);
-            mop.xmerge(&idl);
+            mop.xmerge_encoded(kv.data).ok_or_else(corrupted)?;
             mop_len = mop.len();
         }
         Ok(None)
@@ -403,9 +438,13 @@ impl<'env> RwTxn<'env> {
                     }
                 }
                 self.w.free_pgs.sort();
-                let bytes = self.w.free_pgs.to_bytes();
                 let loc = self.data_loc(mc)?;
-                self.loc_mut(loc)?.copy_from_slice(&bytes);
+                let ids = std::mem::take(&mut self.w.free_pgs);
+                let written = self.loc_mut(loc).map(|out| ids.encode_into(out));
+                self.w.free_pgs = ids;
+                if !written? {
+                    return Err(corrupted());
+                }
                 continue;
             }
 
@@ -484,13 +523,11 @@ impl<'env> RwTxn<'env> {
             }
             let len = len as usize;
             // The record holds the `len` lowest remaining page numbers.
-            let ids = Idl::from_vec(mop[mop_len - len..mop_len].to_vec());
-            self.put_at(
-                mc,
-                &id.to_ne_bytes(),
-                PutData::bytes(&ids.to_bytes()),
-                MDB_CURRENT,
-            )?;
+            let mut ids = self.take_scratch();
+            Idl::encode_append(&mop[mop_len - len..mop_len], &mut ids);
+            let rc = self.put_at(mc, &id.to_ne_bytes(), PutData::bytes(&ids), MDB_CURRENT);
+            self.give_scratch(ids);
+            rc?;
             mop_len -= len;
             if mop_len == 0 {
                 return Ok(());

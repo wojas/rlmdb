@@ -259,6 +259,16 @@ pub(crate) struct TxnDb {
     pub(crate) name_id: u64,
 }
 
+impl TxnDb {
+    /// The duplicate order of a `MDB_DUPSORT` database (for its
+    /// sub-cursors), `None` for any other.
+    #[inline]
+    pub(crate) fn dup_order(&self) -> Option<Comparator> {
+        (u32::from(self.db.flags) & MDB_DUPSORT != 0)
+            .then(|| self.dup_cmp.unwrap_or(Comparator::Memn))
+    }
+}
+
 /// A fingerprint of a database name (FNV-1a, never 0).
 pub(crate) fn name_id(name: &[u8]) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;

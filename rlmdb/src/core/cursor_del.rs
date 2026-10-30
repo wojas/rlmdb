@@ -921,10 +921,20 @@ impl<'env> RwTxn<'env> {
             flags |= MDB_NODUPDATA;
             CursorOp::Set
         };
-        let dcmp = self.dcmp_of(mc);
-        self.read_op(mc, |txn, c, mx| {
-            cursor_set(txn, c, mx, dcmp, key, data, op, true).map(|_| ())
-        })?;
+        if data.is_none() && self.seeks_in_place(mc) {
+            // The cursor of `mdb_del` in a tree without duplicates: on its
+            // own stack.
+            let db = self.db_of(mc);
+            let cmp = self.cmp_of(mc);
+            if !self.seek_key(mc, &db, cmp, key)? {
+                return Err(MdbError::NotFound.into());
+            }
+        } else {
+            let dcmp = self.dcmp_of(mc);
+            self.read_op(mc, |txn, c, mx| {
+                cursor_set(txn, c, mx, dcmp, key, data, op, true).map(|_| ())
+            })?;
+        }
         // Let page_split know about this cursor if needed: delete will
         // trigger a rebalance; if it needs to move a node from one page to
         // another, it will have to update the parent's separator key(s).

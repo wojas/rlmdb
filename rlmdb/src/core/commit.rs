@@ -21,10 +21,12 @@
 use crate::consts::*;
 use crate::core::cursor_put::PutData;
 use crate::core::dbi::DB_DIRTY;
+use crate::core::dirty::PageSlot;
+use crate::core::page_ops;
 use crate::core::txn_rw::{RwTxn, TXN_DIRTY, TXN_ERROR, TXN_FINISHED, TXN_HAS_CHILD, TXN_SPILLS};
 use crate::core::wcursor::CRef;
 use crate::error::{MdbError, Result};
-use crate::format::layout::{META_MAPSIZE, META_SIZE};
+use crate::format::layout::{Layout, META_MAPSIZE, META_SIZE};
 use crate::format::meta::Meta;
 use crate::format::node::F_SUBDATA;
 use crate::format::page::{P_DIRTY, P_KEEP, P_LOOSE, P_OVERFLOW};
@@ -99,79 +101,91 @@ impl<'env> RwTxn<'env> {
     /// data file, clearing `P_DIRTY` in each first. Loose pages (and
     /// `P_KEEP` ones, which lose the mark) stay dirty and in the list;
     /// written pages leave it.
+    ///
+    /// As in C, one pass over the list prepares the pages, then they are
+    /// written; each page is reached through its slot, without a search.
     pub(crate) fn page_flush(&mut self) -> Result<()> {
         let l = self.layout();
-        let mut pgnos: Vec<u64> = Vec::with_capacity(self.core.dirty.len());
-        self.core.dirty.retain(|pgno, page| {
-            let flags = crate::core::page_ops::flags(l, page);
+        let ps = self.psize();
+        let txnid = self.core.txnid;
+        let mut runs = std::mem::take(&mut self.w.flush);
+        runs.clear();
+        self.core.dirty.for_each_mut(|pgno, slot, page| {
+            let flags = page_ops::flags(l, page);
             // Don't flush this page yet.
             if flags & (P_LOOSE | P_KEEP) != 0 {
-                crate::core::page_ops::set_flags(l, page, flags & !P_KEEP);
+                page_ops::set_flags(l, page, flags & !P_KEEP);
             } else {
-                pgnos.push(pgno);
+                runs.push((pgno, slot, prepare_page(l, ps, page, flags, txnid)));
             }
-            true
         });
-        self.write_pages(&pgnos)
+        let rc = self.write_runs(&runs);
+        self.w.flush = runs;
+        rc
     }
 
-    /// The writing part of `mdb_page_flush`: write the dirty pages `pgnos`
-    /// (ascending) with `P_DIRTY` cleared and the header finalised for the
-    /// format ([`Layout::stamp_clean_page`](crate::format::Layout::stamp_clean_page)),
-    /// contiguous runs batched into one `pwritev` of up to
-    /// `MDB_COMMIT_PAGES` buffers, then drop them from the dirty list
-    /// (`mt_dirty_room` grows accordingly). Used by commit and by
-    /// `mdb_page_spill`.
+    /// The writing part of `mdb_page_flush` for the dirty pages `pgnos`
+    /// (ascending), used by `mdb_page_spill`: clear `P_DIRTY` in each and
+    /// finalise its header for the format, write them and drop them from
+    /// the dirty list (see [`RwTxn::page_flush`]).
     pub(crate) fn write_pages(&mut self, pgnos: &[u64]) -> Result<()> {
-        let ps = self.psize();
         let l = self.layout();
+        let ps = self.psize();
         let txnid = self.core.txnid;
-        // Pass 1: clear the dirty flags and size the runs.
-        let mut writes: Vec<(u64, usize)> = Vec::with_capacity(pgnos.len());
+        let mut runs = Vec::with_capacity(pgnos.len());
         for &pgno in pgnos {
-            let page = self.dirty_mut(pgno)?;
-            let flags = crate::core::page_ops::flags(l, page);
-            crate::core::page_ops::set_flags(l, page, flags & !P_DIRTY);
-            l.stamp_clean_page(page, txnid);
-            let npages = if flags & P_OVERFLOW != 0 {
-                crate::core::page_ops::overflow_pages(l, page).unwrap_or(1) as usize
-            } else {
-                1
-            };
-            writes.push((pgno, npages * ps));
+            let slot = self.core.dirty.find(pgno).ok_or(MdbError::Corrupted)?;
+            let page = self
+                .core
+                .dirty
+                .at_mut(slot, pgno)
+                .ok_or(MdbError::Corrupted)?;
+            let flags = page_ops::flags(l, page);
+            runs.push((pgno, slot, prepare_page(l, ps, page, flags, txnid)));
         }
+        self.write_runs(&runs)
+    }
 
-        // Pass 2: write them, contiguous runs batched.
+    /// Writes the prepared dirty pages `runs` (page number, slot in the
+    /// dirty list, bytes; ascending), contiguous runs batched into one
+    /// `pwritev` of up to `MDB_COMMIT_PAGES` buffers (C's `iov` array,
+    /// here on the stack too), then drops them from the dirty list
+    /// (`mt_dirty_room` grows accordingly).
+    fn write_runs(&mut self, runs: &[(u64, PageSlot, usize)]) -> Result<()> {
+        let ps = self.psize();
         let file = self.core.env.data_file();
-        let mut batch: Vec<&[u8]> = Vec::with_capacity(COMMIT_PAGES);
+        let dirty = &self.core.dirty;
+        let mut batch: [&[u8]; COMMIT_PAGES] = [&[]; COMMIT_PAGES];
+        let mut n = 0;
         let mut wpos = 0u64;
         let mut wsize = 0usize;
         let mut next_pos = u64::MAX;
-        for &(pgno, size) in &writes {
+        for &(pgno, slot, size) in runs {
             let pos = pgno * ps as u64;
-            if pos != next_pos || batch.len() == COMMIT_PAGES || wsize + size > MAX_WRITE {
-                write_batch(file, &batch, wpos, wsize)?;
-                batch.clear();
+            if pos != next_pos || n == COMMIT_PAGES || wsize + size > MAX_WRITE {
+                write_batch(file, &batch[..n], wpos, wsize)?;
+                n = 0;
                 wpos = pos;
                 wsize = 0;
             }
-            let buf = self.core.dirty.get(pgno).ok_or(MdbError::Corrupted)?;
-            batch.push(buf.get(..size).ok_or(MdbError::Corrupted)?);
+            let buf = dirty.at(slot, pgno).ok_or(MdbError::Corrupted)?;
+            batch[n] = buf.get(..size).ok_or(MdbError::Corrupted)?;
+            n += 1;
             next_pos = pos + size as u64;
             wsize += size;
         }
-        write_batch(file, &batch, wpos, wsize)?;
+        write_batch(file, &batch[..n], wpos, wsize)?;
 
-        // Pass 3: drop the written pages from the dirty list (both lists
-        // are ascending).
-        let mut next = writes.iter().map(|w| w.0).peekable();
+        // Drop the written pages from the dirty list (both lists are
+        // ascending).
+        let mut next = runs.iter().map(|w| w.0).peekable();
         self.core.dirty.retain(|pgno, _| {
             while next.peek().is_some_and(|&w| w < pgno) {
                 next.next();
             }
             next.peek() != Some(&pgno)
         });
-        self.w.dirty_room += writes.len();
+        self.w.dirty_room += runs.len();
         Ok(())
     }
 
@@ -186,12 +200,13 @@ impl<'env> RwTxn<'env> {
         let txnid = self.core.txnid;
         let toggle = (txnid & 1) as usize;
         let flags = env.raw_flags();
-        // Persist any increases of mapsize config.
-        let mapsize = env
-            .read_meta(toggle ^ 1)?
-            .map_size
-            .max(env.map_size() as u64);
-        let old = env.read_meta(toggle).ok();
+        // Persist any increases of mapsize config. Meta page `toggle ^ 1`
+        // is the one this transaction began from (it holds txnid - 1), and
+        // only a writer changes meta pages, so its map size is still the
+        // one read at begin.
+        let mapsize = self.w.base_mapsize.max(env.map_size() as u64);
+        // `metab`: what to write back if the write fails.
+        let old = env.meta_ids(toggle);
         let dbs = self.core.dbs.borrow();
         let l = env.layout();
         let mut meta = Meta {
@@ -219,9 +234,9 @@ impl<'env> RwTxn<'env> {
         if let Err(e) = os::write_all_at(fd, bytes, off) {
             // On a failure, the page cache still contains the new data.
             // Write some old data back, to prevent it from being used.
-            if let Some(old) = old {
-                meta.last_pgno = old.last_pgno;
-                meta.txnid = old.txnid;
+            if let Some((last_pgno, txnid)) = old {
+                meta.last_pgno = last_pgno;
+                meta.txnid = txnid;
                 meta.write(&mut buf);
                 let _ = os::write_all_at(env.data_file(), &buf[META_MAPSIZE..], off);
             }
@@ -237,8 +252,25 @@ impl<'env> RwTxn<'env> {
         if let Some(lock) = env.lock_region() {
             lock.set_txnid(txnid);
         }
+        self.wrote_meta(meta);
         Ok(())
     }
+}
+
+/// Prepares dirty page `page` (flags `flags`, pages of `ps` bytes) for
+/// writing as `mdb_page_flush` does: clears `P_DIRTY` and finalises the
+/// header for the format
+/// ([`Layout::stamp_clean_page`](crate::format::Layout::stamp_clean_page)).
+/// Returns how many bytes to write (the whole run for overflow pages).
+fn prepare_page(l: &Layout, ps: usize, page: &mut [u8], flags: u16, txnid: u64) -> usize {
+    page_ops::set_flags(l, page, flags & !P_DIRTY);
+    l.stamp_clean_page(page, txnid);
+    let npages = if flags & P_OVERFLOW != 0 {
+        page_ops::overflow_pages(l, page).unwrap_or(1) as usize
+    } else {
+        1
+    };
+    npages * ps
 }
 
 /// Writes one batch of contiguous pages at `pos` (`pwritev`, or `pwrite`
