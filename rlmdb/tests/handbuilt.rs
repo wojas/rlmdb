@@ -10,9 +10,9 @@ mod common;
 use common::*;
 use rlmdb::consts::{MDB_DUPSORT, P_INVALID};
 use rlmdb::format::node::{F_DUPDATA, F_SUBDATA};
-use rlmdb::format::page::{NodeData, P_DIRTY, P_LEAF, P_SUBP};
+use rlmdb::format::page::{NodeData, P_BRANCH, P_DIRTY, P_LEAF, P_SUBP};
 use rlmdb::format::{overflow_pages_for, Db, Meta, PageMut};
-use rlmdb::{Dbi, Transaction};
+use rlmdb::{Dbi, Error, MdbError, Transaction};
 
 const PS: usize = 4096;
 
@@ -284,5 +284,158 @@ fn corrupt_pages_give_errors_not_panics() {
         eprintln!("{what}: {}", outcomes[..5].join(" "));
         drop(txn);
         drop(env);
+    }
+}
+
+/// A file of `PS`-byte pages: the meta pages, then `pages` (page 2 on),
+/// with the main DB record `main`.
+fn file_of(pages: &[Vec<u8>], main: Db) -> Vec<u8> {
+    let mut m0 = Meta::new_env(PS as u32, 1 << 20, 0);
+    m0.dbs[0].root = P_INVALID;
+    let mut m1 = m0;
+    m1.txnid = 1;
+    m1.last_pgno = 1 + pages.len() as u64;
+    m1.dbs[1] = main;
+    let mut file = vec![0u8; 2 * PS];
+    m0.write_initial_pages(&mut file, PS);
+    m1.write(&mut file[PS + 16..]);
+    for page in pages {
+        file.extend_from_slice(page);
+    }
+    file
+}
+
+/// Pages `first..` of a chain: `depth - 1` branch pages with a single
+/// child each, then a leaf holding `leaf` (keys with their data).
+fn chain(first: u64, depth: usize, leaf: &[(&[u8], &[u8])]) -> Vec<Vec<u8>> {
+    let mut pages = Vec::new();
+    for level in 0..depth as u64 - 1 {
+        let mut buf = vec![0u8; PS];
+        let mut p = PageMut::new(&mut buf);
+        p.init(first + level, P_BRANCH);
+        p.add_node(0, b"", NodeData::Child(first + level + 1), 0)
+            .unwrap();
+        pages.push(buf);
+    }
+    let mut buf = vec![0u8; PS];
+    let mut p = PageMut::new(&mut buf);
+    p.init(first + depth as u64 - 1, P_LEAF);
+    for (i, (k, v)) in leaf.iter().enumerate() {
+        p.add_node(i, k, NodeData::Inline(v), 0).unwrap();
+    }
+    pages.push(buf);
+    pages
+}
+
+/// `get` uses short cursor stacks for shallow trees and falls back to
+/// C's 32 levels: on trees deeper than the short stack, with a truthful
+/// or a lying `md_depth`, and on a sub-DB of duplicates deeper than it,
+/// it must find what a cursor finds, and fail beyond 32 levels with
+/// `MDB_CURSOR_FULL` as C does.
+#[test]
+fn deep_trees_and_short_get_stacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("env");
+    std::fs::create_dir(&path).unwrap();
+    let full = |r: rlmdb::Result<Option<&[u8]>>| match r {
+        Err(Error::Mdb(MdbError::CursorFull)) => true,
+        r => panic!("expected MDB_CURSOR_FULL, got {r:?}"),
+    };
+
+    let leaf: &[(&[u8], &[u8])] = &[(b"a", b"1"), (b"key", b"value"), (b"z", b"26")];
+    for (depth, recorded) in [
+        (1, 1),
+        (8, 8),
+        (9, 9),
+        (12, 12),
+        (12, 2),
+        (32, 32),
+        (32, 1),
+        (33, 33),
+        (33, 3),
+    ] {
+        let main = Db {
+            depth: recorded,
+            entries: leaf.len() as u64,
+            root: 2,
+            ..Db::default()
+        };
+        std::fs::write(path.join("data.mdb"), file_of(&chain(2, depth, leaf), main)).unwrap();
+        let env = open_ro(&path, 2);
+        let txn = env.begin_ro_txn().unwrap();
+        let mut c = txn.cursor(Dbi::MAIN).unwrap();
+        if depth <= 32 {
+            for (k, v) in leaf {
+                assert_eq!(
+                    txn.get(Dbi::MAIN, k).unwrap(),
+                    Some(*v),
+                    "depth {depth}/{recorded}"
+                );
+                assert_eq!(c.set(k).unwrap(), Some((*k, *v)));
+            }
+            assert_eq!(txn.get(Dbi::MAIN, b"nope").unwrap(), None);
+        } else {
+            assert!(full(txn.get(Dbi::MAIN, b"key")), "depth {depth}/{recorded}");
+            assert!(matches!(
+                c.set(b"key"),
+                Err(Error::Mdb(MdbError::CursorFull))
+            ));
+        }
+    }
+
+    // A DUPSORT database "dups" whose key "k" has its duplicates in a
+    // sub-DB of `depth` levels (pages 4..).
+    for depth in [9, 32, 33] {
+        let sub = Db {
+            depth: depth as u16,
+            entries: 2,
+            root: 4,
+            ..Db::default()
+        };
+        let dups = Db {
+            flags: MDB_DUPSORT as u16,
+            depth: 1,
+            entries: 2,
+            root: 3,
+            ..Db::default()
+        };
+        let mut pages = vec![vec![0u8; PS], vec![0u8; PS]];
+        let mut p = PageMut::new(&mut pages[0]);
+        p.init(2, P_LEAF);
+        p.add_node(0, b"dups", NodeData::Inline(&dups.to_bytes()), F_SUBDATA)
+            .unwrap();
+        let mut p = PageMut::new(&mut pages[1]);
+        p.init(3, P_LEAF);
+        p.add_node(
+            0,
+            b"k",
+            NodeData::Inline(&sub.to_bytes()),
+            F_DUPDATA | F_SUBDATA,
+        )
+        .unwrap();
+        pages.extend(chain(4, depth, &[(b"d1", b""), (b"d2", b"")]));
+        let main = Db {
+            depth: 1,
+            entries: 1,
+            root: 2,
+            ..Db::default()
+        };
+        std::fs::write(path.join("data.mdb"), file_of(&pages, main)).unwrap();
+        let env = open_ro(&path, 2);
+        let db = env.open_db(Some("dups")).unwrap();
+        let txn = env.begin_ro_txn().unwrap();
+        let mut c = txn.cursor(db).unwrap();
+        if depth <= 32 {
+            assert_eq!(
+                txn.get(db, b"k").unwrap(),
+                Some(&b"d1"[..]),
+                "sub-DB depth {depth}"
+            );
+            assert_eq!(c.set(b"k").unwrap(), Some((&b"k"[..], &b"d1"[..])));
+            assert_eq!(c.next_dup().unwrap(), Some((&b"k"[..], &b"d2"[..])));
+        } else {
+            assert!(full(txn.get(db, b"k")), "sub-DB depth {depth}");
+            assert!(matches!(c.set(b"k"), Err(Error::Mdb(MdbError::CursorFull))));
+        }
     }
 }

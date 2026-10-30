@@ -31,11 +31,18 @@ use crate::core::dbi::{init_txn_dbs, Dbi, TxnDb, DB_USRVALID, DB_VALID};
 use crate::core::dirty::{DirtyPages, Layer, SpillSet};
 use crate::core::env::Environment;
 use crate::core::Stat;
-use crate::error::{MdbError, Result};
+use crate::error::{Error, MdbError, Result};
 use crate::flags::DatabaseFlags;
 use crate::format::meta::Meta;
 use crate::format::{overflow_pages_for, PageRef};
 use crate::os::DataMap;
+
+/// Capacity of the page stacks of the temporary cursors of
+/// [`Transaction::get`] (`mdb_get`); see [`TxnCore::get`]. Only trees of
+/// very long keys on small pages get deeper: with 16-byte keys a tree of
+/// 4 KiB pages has 4 levels at a million entries, with 511-byte keys
+/// (7 per branch page) it passes 8 levels at a few hundred thousand.
+const GET_STACK: usize = 8;
 
 /// Operations shared by read and write transactions.
 pub trait Transaction {
@@ -97,9 +104,15 @@ pub trait Transaction {
 /// All page access goes through `TxnCore::page` and
 /// `TxnCore::overflow_data`. A write transaction keeps its dirty pages in
 /// `dirty`, which both consult first (`mdb_page_get`), so cursors work
-/// unchanged on read and write transactions.
+/// unchanged on read and write transactions. A read transaction has no
+/// written pages, so both go straight to the map.
 pub(crate) struct TxnCore<'env> {
     pub(crate) env: &'env Environment,
+    /// `true` for a read transaction (`MDB_RDONLY`): `dirty`, `spilled`
+    /// and `parents` stay empty, and page lookups skip them.
+    read_only: bool,
+    /// The environment's page size (`me_psize`), used on every lookup.
+    page_size: usize,
     /// The data map current when the transaction began. Kept alive by the
     /// transaction so that [`Environment::set_map_size`] cannot invalidate
     /// the slices it hands out.
@@ -138,6 +151,8 @@ impl<'env> TxnCore<'env> {
     pub(crate) fn new(env: &'env Environment, dbs: Vec<TxnDb>) -> TxnCore<'env> {
         TxnCore {
             env,
+            read_only: false,
+            page_size: env.page_size(),
             map: env.data_map(),
             txnid: 0,
             next_pgno: 0,
@@ -145,6 +160,14 @@ impl<'env> TxnCore<'env> {
             dirty: DirtyPages::new(),
             spilled: SpillSet::new(),
             parents: Vec::new(),
+        }
+    }
+
+    /// [`TxnCore::new`] for a read transaction.
+    fn new_read_only(env: &'env Environment, dbs: Vec<TxnDb>) -> TxnCore<'env> {
+        TxnCore {
+            read_only: true,
+            ..TxnCore::new(env, dbs)
         }
     }
 
@@ -211,17 +234,33 @@ impl<'env> TxnCore<'env> {
     /// transaction or an ancestor, else the mapped page. Meta pages are
     /// never returned (they change under readers), nor pages past the
     /// snapshot's end (`MDB_PAGE_NOTFOUND`).
+    #[inline]
     pub(crate) fn page(&self, pgno: u64) -> Result<PageRef<'_>> {
-        let ps = self.env.page_size();
-        if let Some(buf) = self.dirty_buf(pgno) {
-            return PageRef::new(&buf[..ps]).ok_or_else(|| MdbError::Corrupted.into());
+        if self.read_only {
+            self.mapped_page(pgno)
+        } else {
+            self.written_or_mapped_page(pgno)
         }
+    }
+
+    /// [`TxnCore::page`] for a write transaction.
+    fn written_or_mapped_page(&self, pgno: u64) -> Result<PageRef<'_>> {
+        if let Some(buf) = self.dirty_buf(pgno) {
+            return PageRef::new(&buf[..self.page_size]).ok_or_else(|| MdbError::Corrupted.into());
+        }
+        self.mapped_page(pgno)
+    }
+
+    /// The mapped page `pgno` of the snapshot: the end of `mdb_page_get`.
+    #[inline]
+    fn mapped_page(&self, pgno: u64) -> Result<PageRef<'_>> {
         if pgno < NUM_METAS as u64 {
             return Err(MdbError::Corrupted.into());
         }
         if pgno >= self.next_pgno {
             return Err(MdbError::PageNotFound.into());
         }
+        let ps = self.page_size;
         let off = usize::try_from(pgno)
             .ok()
             .and_then(|p| p.checked_mul(ps))
@@ -233,9 +272,14 @@ impl<'env> TxnCore<'env> {
     /// The data of an `F_BIGDATA` node: `len` bytes starting 16 bytes into
     /// the overflow run at `pgno` (`mdb_node_read`).
     pub(crate) fn overflow_data(&self, pgno: u64, len: usize) -> Result<&[u8]> {
-        let ps = self.env.page_size();
+        let ps = self.page_size;
         let npages = overflow_pages_for(len, ps) as u64;
-        let bytes = match self.dirty_buf(pgno) {
+        let written = if self.read_only {
+            None
+        } else {
+            self.dirty_buf(pgno)
+        };
+        let bytes = match written {
             Some(buf) => buf,
             None => {
                 if pgno < NUM_METAS as u64 {
@@ -270,10 +314,38 @@ impl<'env> TxnCore<'env> {
     }
 
     /// `mdb_get`: a `MDB_SET` on a temporary cursor.
+    ///
+    /// For a tree of at most [`GET_STACK`] levels (`md_depth`) the cursor,
+    /// and the sub-cursor of a `MDB_DUPSORT` database, get stacks of that
+    /// size instead of C's [`CURSOR_STACK`], which spares filling the
+    /// unused slots on every call (see [`Cursor`]). A tree deeper than its
+    /// record says (a corrupt one), or a sub-DB of duplicates deeper than
+    /// the short stack, makes that search fail with `MDB_CURSOR_FULL`; the
+    /// lookup is then repeated with full stacks. That gives exactly C's
+    /// result: the search only reads the snapshot.
     pub(crate) fn get(&self, dbi: Dbi, key: &[u8]) -> Result<Option<&[u8]>> {
         let entry = self.fresh_dbi(dbi, DB_USRVALID)?;
-        let mut mc = Cursor::new(entry.db, entry.key_cmp, 0);
-        let mut mx = cursor::new_xcursor(&entry);
+        if usize::from(entry.db.depth) <= GET_STACK {
+            match self.get_with_stack::<GET_STACK>(&entry, key) {
+                Err(Error::Mdb(MdbError::CursorFull)) => {}
+                rc => return rc,
+            }
+        }
+        self.get_deep(&entry, key)
+    }
+
+    /// [`TxnCore::get`] with full stacks.
+    #[cold]
+    #[inline(never)]
+    fn get_deep(&self, entry: &TxnDb, key: &[u8]) -> Result<Option<&[u8]>> {
+        self.get_with_stack::<CURSOR_STACK>(entry, key)
+    }
+
+    /// The lookup of [`TxnCore::get`] with cursors of `N` levels.
+    #[inline]
+    fn get_with_stack<const N: usize>(&self, entry: &TxnDb, key: &[u8]) -> Result<Option<&[u8]>> {
+        let mut mc = Cursor::<N>::unpositioned(entry.db, entry.key_cmp, 0);
+        let mut mx = cursor::new_xcursor::<N>(entry);
         match cursor::cursor_set(
             self,
             &mut mc,
@@ -321,7 +393,7 @@ impl<'env> RoTxn<'env> {
         // Built before the snapshot is taken so that Drop releases the slot
         // if anything below fails.
         let mut txn = RoTxn {
-            core: TxnCore::new(env, Vec::new()),
+            core: TxnCore::new_read_only(env, Vec::new()),
             slot,
         };
         txn.take_snapshot()?;
@@ -466,7 +538,7 @@ impl<'env> InactiveTxn<'env> {
         let slot = self.slot.take();
         let dbs = std::mem::take(&mut self.dbs);
         let mut txn = RoTxn {
-            core: TxnCore::new(self.env, dbs),
+            core: TxnCore::new_read_only(self.env, dbs),
             slot,
         };
         if let (Some(lock), Some(i)) = (self.env.lock_region(), slot) {
