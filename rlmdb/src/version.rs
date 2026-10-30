@@ -25,9 +25,8 @@ use crate::consts;
 ///   (`MDB_DATA_VERSION 1`, `MDB_LOCK_VERSION 1`). Present.
 /// * `format-1.0`: the LMDB 1.0 data file format (`MDB_DATA_VERSION 3`):
 ///   environments that C LMDB 1.0 reads and writes, written as it writes
-///   them. Present. Until rlmdb writes 1.0's version 2 lock file
-///   (`MDB_LOCK_VERSION 2`, `DUAL_FORMAT.md` stage 3), a C 1.0 process and
-///   rlmdb cannot have one environment open at the same time.
+///   them, with 1.0's version 2 lock file (`MDB_LOCK_VERSION 2`), so a C
+///   1.0 process and rlmdb can have one environment open at the same time.
 ///   [`VersionInfo::v10`] is reported exactly when this token is present.
 /// * `split-freelist`: the free-list work of the `freelist-split` branch.
 /// * `convert-copy`: a compacting copy that re-encodes the environment in
