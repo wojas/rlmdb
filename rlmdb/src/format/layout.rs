@@ -26,6 +26,7 @@
 //! …). They stay for the 0.9-only tools and tests that decode pages
 //! directly.
 
+use super::lockfile::LockLayout;
 use super::page::P_DIRTY;
 use super::{get_u64, put_u64};
 use crate::consts::MDB_MINKEYS;
@@ -173,7 +174,7 @@ pub struct OverflowRef {
 /// and nodes carry a `&'static Layout`, so the format costs one pointer
 /// and a load per field instead of a type parameter on every structure.
 ///
-/// The lock file is not described here yet: it is still always version 1.
+/// The lock file follows the data format: [`Layout::lock`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct Layout {
     /// The format this describes.
@@ -233,6 +234,13 @@ pub const fn even(n: usize) -> usize {
 }
 
 impl Layout {
+    /// The lock-file layout of the format: version 1 for 0.9, version 2
+    /// for 1.0 (`format::lockfile`).
+    #[inline(always)]
+    pub const fn lock(&self) -> &'static LockLayout {
+        LockLayout::of(self.format)
+    }
+
     // --- page header ------------------------------------------------------
 
     /// Offset of `mp_txnid` (u64): `Some(8)` in 1.0, `None` in 0.9, whose

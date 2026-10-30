@@ -15,6 +15,13 @@
 //!   validate magic and format. The exclusive opener downgrades to shared at
 //!   the end of the open (`LockRegion::downgrade`, `mdb_env_share_locks`),
 //!   publishing the current txnid in `mti_txnid` first.
+//! * The lock file has the version of the environment's data format
+//!   ([`LockLayout`]: version 1 for LMDB 0.9, version 2 for LMDB 1.0,
+//!   `mdb_env_setup_locks` at mdb10.c line 5957). The protocol is the same in
+//!   both; only the offsets, the `mti_format` word and, on macOS, how the
+//!   semaphores are named differ. A table of the other version is
+//!   `MDB_VERSION_MISMATCH` while someone else holds the file, and is
+//!   re-initialised in our version by an exclusive opener, as C does.
 //! * Reader liveness: each process holds an exclusive lock on byte `pid` of
 //!   the lock file once it has started a read transaction
 //!   (`mdb_reader_pid(Pidset)`); `LockRegion::reader_check` probes those
@@ -33,7 +40,11 @@ use std::sync::Mutex;
 
 use crate::consts::MDB_MAGIC;
 use crate::error::{Error, MdbError, Result};
-use crate::format::lockfile::{self, *};
+use crate::format::layout::Format;
+use crate::format::lockfile::{
+    self, LockLayout, TxnInfoSnapshot, READER_PID, READER_TID, READER_TXNID, TXNINFO_FORMAT,
+    TXNINFO_MAGIC,
+};
 use crate::os::shared_lock::{LockStatus, SharedLocks, SharedMutex};
 use crate::os::{self, LockKind, LockMap};
 
@@ -74,6 +85,8 @@ pub(crate) struct LockRegion {
     /// before the descriptor (and with it our record locks) goes away.
     map: LockMap,
     file: File,
+    /// Where the fields are: the lock-file version of the data format.
+    layout: &'static LockLayout,
     /// Number of reader slots in the mapping (`me_maxreaders`).
     max_readers: u32,
     /// Our process id (`me_pid`).
@@ -88,14 +101,22 @@ pub(crate) struct LockRegion {
 }
 
 impl LockRegion {
-    /// Opens (creating if needed) and maps the lock file at `path`, as
-    /// `mdb_env_setup_locks` does. Returns `Ok(None)` for a read-only
-    /// environment on a read-only file system (no lock file is used then).
+    /// Opens (creating if needed) and maps the lock file at `path`, with
+    /// the layout `layout`, as `mdb_env_setup_locks` does. Returns
+    /// `Ok(None)` for a read-only environment on a read-only file system
+    /// (no lock file is used then).
+    ///
+    /// The exclusive opener writes a fresh table of `layout`'s version,
+    /// whatever the file held. Everyone else validates the table: wrong
+    /// magic is `MDB_INVALID`, a `mti_format` other than
+    /// [`LockLayout::lock_format`] (the other version, or the same version
+    /// built for another platform) is `MDB_VERSION_MISMATCH`.
     pub(crate) fn open(
         path: &Path,
         mode: u32,
         max_readers: u32,
         read_only: bool,
+        layout: &'static LockLayout,
     ) -> Result<Option<LockRegion>> {
         let file = match OpenOptions::new()
             .read(true)
@@ -119,13 +140,13 @@ impl LockRegion {
         };
 
         let size = os::file_size(&file)? as usize;
-        let wanted = lock_file_size(max_readers);
+        let wanted = layout.file_size(max_readers);
         let (len, max_readers) = if size < wanted && exclusive {
             os::ftruncate(&file, wanted as u64)?;
             (wanted, max_readers)
         } else {
             // Use the table size of the existing file, whatever we asked for.
-            let n = readers_in_file(size);
+            let n = layout.readers_in_file(size);
             if n == 0 {
                 return Err(MdbError::Invalid.into());
             }
@@ -135,26 +156,27 @@ impl LockRegion {
         let map = LockMap::map(&file, len)?;
         let locks = if exclusive {
             // Nobody else is using the table: (re)initialise it.
-            let locks = SharedLocks::create(&map, &file, mode)?;
+            let locks = SharedLocks::create(&map, &file, mode, layout)?;
             map.store_u32(TXNINFO_MAGIC, MDB_MAGIC);
-            map.store_u32(TXNINFO_FORMAT, LOCK_FORMAT);
-            map.store_u64(TXNINFO_TXNID, 0);
-            map.store_u32(TXNINFO_NUMREADERS, 0);
+            map.store_u32(TXNINFO_FORMAT, layout.lock_format);
+            map.store_u64(layout.txnid, 0);
+            map.store_u32(layout.num_readers, 0);
             locks
         } else {
             if map.load_u32(TXNINFO_MAGIC) != MDB_MAGIC {
                 return Err(MdbError::Invalid.into());
             }
-            if map.load_u32(TXNINFO_FORMAT) != LOCK_FORMAT {
+            if map.load_u32(TXNINFO_FORMAT) != layout.lock_format {
                 return Err(MdbError::VersionMismatch.into());
             }
-            SharedLocks::attach(&map)?
+            SharedLocks::attach(&map, layout)?
         };
 
         Ok(Some(LockRegion {
             locks: Some(locks),
             map,
             file,
+            layout,
             max_readers,
             pid: os::getpid(),
             exclusive: Mutex::new(exclusive),
@@ -173,7 +195,7 @@ impl LockRegion {
     /// openers in.
     pub(crate) fn downgrade(&self, txnid: u64) -> Result<()> {
         let mut excl = self.exclusive.lock().unwrap_or_else(|e| e.into_inner());
-        self.map.store_u64(TXNINFO_TXNID, txnid);
+        self.map.store_u64(self.layout.txnid, txnid);
         os::lock_byte(&self.file, 0, LockKind::Shared, false)?;
         *excl = false;
         Ok(())
@@ -225,17 +247,30 @@ impl LockRegion {
 
     /// `mti_txnid`: the last committed transaction.
     pub(crate) fn txnid(&self) -> u64 {
-        self.map.load_u64(TXNINFO_TXNID)
+        self.map.load_u64(self.layout.txnid)
     }
 
     /// Sets `mti_txnid` (writers after commit, and dead-writer recovery).
     pub(crate) fn set_txnid(&self, txnid: u64) {
-        self.map.store_u64(TXNINFO_TXNID, txnid)
+        self.map.store_u64(self.layout.txnid, txnid)
     }
 
     /// `mti_numreaders` as stored (may exceed our slot count if corrupt).
     pub(crate) fn raw_num_readers(&self) -> u32 {
-        self.map.load_u32(TXNINFO_NUMREADERS)
+        self.map.load_u32(self.layout.num_readers)
+    }
+
+    /// `mti_format` as stored.
+    fn lock_format(&self) -> u32 {
+        self.map.load_u32(TXNINFO_FORMAT)
+    }
+
+    /// A copy of the header (`mt1` and `mt2`, everything before the reader
+    /// table), read through the mapping. (Reading the file through another
+    /// descriptor would drop this process's record locks when that
+    /// descriptor is closed.)
+    fn header(&self) -> Option<TxnInfoSnapshot> {
+        TxnInfoSnapshot::read(&self.map.read_bytes(0, self.layout.readers), self.layout)
     }
 
     /// `mti_numreaders`, clamped to the slots we have mapped so that a
@@ -247,27 +282,31 @@ impl LockRegion {
     // --- slot fields ------------------------------------------------------
 
     fn slot_pid(&self, i: usize) -> i32 {
-        self.map.load_i32(reader_offset(i) + READER_PID)
+        self.map.load_i32(self.layout.reader_offset(i) + READER_PID)
     }
 
     fn set_slot_pid(&self, i: usize, pid: i32) {
-        self.map.store_i32(reader_offset(i) + READER_PID, pid)
+        self.map
+            .store_i32(self.layout.reader_offset(i) + READER_PID, pid)
     }
 
     pub(crate) fn slot_txnid(&self, i: usize) -> u64 {
-        self.map.load_u64(reader_offset(i) + READER_TXNID)
+        self.map
+            .load_u64(self.layout.reader_offset(i) + READER_TXNID)
     }
 
     pub(crate) fn set_slot_txnid(&self, i: usize, txnid: u64) {
-        self.map.store_u64(reader_offset(i) + READER_TXNID, txnid)
+        self.map
+            .store_u64(self.layout.reader_offset(i) + READER_TXNID, txnid)
     }
 
     fn slot_tid(&self, i: usize) -> u64 {
-        self.map.load_u64(reader_offset(i) + READER_TID)
+        self.map.load_u64(self.layout.reader_offset(i) + READER_TID)
     }
 
     fn set_slot_tid(&self, i: usize, tid: u64) {
-        self.map.store_u64(reader_offset(i) + READER_TID, tid)
+        self.map
+            .store_u64(self.layout.reader_offset(i) + READER_TID, tid)
     }
 
     // --- the reader mutex ---------------------------------------------------
@@ -324,7 +363,7 @@ impl LockRegion {
         self.set_slot_tid(i, os::thread_id());
         if i == nr {
             nr += 1;
-            self.map.store_u32(TXNINFO_NUMREADERS, nr as u32);
+            self.map.store_u32(self.layout.num_readers, nr as u32);
         }
         self.close_readers.fetch_max(nr as u32, Ordering::SeqCst);
         self.set_slot_pid(i, self.pid);
@@ -492,6 +531,119 @@ impl Drop for ReaderTableGuard<'_> {
     }
 }
 
+/// Not part of the API: the lock file of an environment on its own, without
+/// the data file, in the lock-file version of a given data [`Format`].
+///
+/// For the cross-process tests in `interop`, which attach rlmdb's lock-file
+/// code to a lock file a C LMDB 1.0 process uses (and let C attach to one
+/// rlmdb created) while [`Environment`](crate::Environment) cannot open a
+/// 1.0 environment yet. Everything goes through the same `LockRegion` an
+/// environment uses; only the meta pages are missing, so a writer whose
+/// predecessor died keeps the `mti_txnid` it finds.
+#[doc(hidden)]
+pub struct LockFile {
+    region: LockRegion,
+}
+
+#[doc(hidden)]
+impl LockFile {
+    /// Opens (creating if needed) the lock file at `path` as a writable
+    /// environment of format `format` would (`mdb_env_setup_locks`), with
+    /// room for `max_readers` slots if we create the table. If we are the
+    /// only user we initialise the table and stay exclusive until
+    /// [`LockFile::downgrade`].
+    pub fn open(path: &Path, format: Format, max_readers: u32) -> Result<LockFile> {
+        let layout = LockLayout::of(format);
+        let region = LockRegion::open(path, 0o644, max_readers, false, layout)?
+            .ok_or_else(|| Error::errno(libc::EROFS))?;
+        Ok(LockFile { region })
+    }
+
+    /// The layout the file was opened with.
+    pub fn layout(&self) -> &'static LockLayout {
+        self.region.layout
+    }
+
+    /// `true` if we initialised the table and still hold the file
+    /// exclusively.
+    pub fn is_exclusive(&self) -> bool {
+        self.region.is_exclusive()
+    }
+
+    /// `mdb_env_share_locks`: publish `txnid` and let other openers in.
+    pub fn downgrade(&self, txnid: u64) -> Result<()> {
+        self.region.downgrade(txnid)
+    }
+
+    /// `mti_format` as stored.
+    pub fn lock_format(&self) -> u32 {
+        self.region.lock_format()
+    }
+
+    /// The header as stored, decoded with [`LockFile::layout`]. Use this,
+    /// not a read of the file, while the `LockFile` is open: closing
+    /// another descriptor of the file drops this process's record locks.
+    pub fn header(&self) -> TxnInfoSnapshot {
+        // The mapping is never shorter than the header.
+        self.region.header().expect("lock file header")
+    }
+
+    /// `mti_txnid`.
+    pub fn txnid(&self) -> u64 {
+        self.region.txnid()
+    }
+
+    /// `mti_numreaders` as stored.
+    pub fn num_readers(&self) -> u32 {
+        self.region.raw_num_readers()
+    }
+
+    /// `me_maxreaders`: the slots in the table.
+    pub fn max_readers(&self) -> u32 {
+        self.region.max_readers()
+    }
+
+    /// `mdb_reader_list`.
+    pub fn reader_list(&self) -> Vec<ReaderInfo> {
+        self.region.reader_list()
+    }
+
+    /// `mdb_reader_check`.
+    pub fn reader_check(&self) -> Result<usize> {
+        self.region.reader_check()
+    }
+
+    /// What a read transaction does with the table: claim a slot under the
+    /// reader mutex and publish the current `mti_txnid` in it. Returns the
+    /// slot and the txnid.
+    pub fn begin_read(&self) -> Result<(usize, u64)> {
+        let slot = self.region.acquire_slot()?;
+        Ok((slot, self.region.publish_current_txnid(slot)))
+    }
+
+    /// Ends a read transaction begun with [`LockFile::begin_read`] and frees
+    /// its slot.
+    pub fn end_read(&self, slot: usize) {
+        self.region.release_slot(slot);
+    }
+
+    /// Locks the writer mutex, blocking (on Linux it must be unlocked on
+    /// the same thread).
+    pub fn lock_writer(&self) -> Result<()> {
+        self.region.lock_writer(|| Ok(self.region.txnid()))
+    }
+
+    /// Unlocks the writer mutex.
+    pub fn unlock_writer(&self) {
+        self.region.unlock_writer()
+    }
+
+    /// What a writer publishes after a commit: `mti_txnid`.
+    pub fn set_txnid(&self, txnid: u64) {
+        self.region.set_txnid(txnid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,16 +669,28 @@ mod tests {
         );
     }
 
+    use crate::format::lockfile::{LockObjects, LOCK_V09, LOCK_V10};
+
+    fn open(path: &Path, layout: &'static LockLayout) -> Result<LockRegion> {
+        Ok(LockRegion::open(path, 0o644, 4, false, layout)?.unwrap())
+    }
+
     #[test]
     fn fresh_table() {
+        for layout in [&LOCK_V09, &LOCK_V10] {
+            fresh_table_of(layout);
+        }
+    }
+
+    fn fresh_table_of(layout: &'static LockLayout) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lock.mdb");
-        let region = LockRegion::open(&path, 0o644, 4, false).unwrap().unwrap();
+        let region = open(&path, layout).unwrap();
         assert!(region.is_exclusive());
         assert_eq!(region.max_readers(), 4);
         assert_eq!(
             std::fs::metadata(&path).unwrap().len() as usize,
-            lock_file_size(4)
+            layout.file_size(4)
         );
         region.downgrade(7).unwrap();
         assert!(!region.is_exclusive());
@@ -554,5 +718,43 @@ mod tests {
         ));
         // Our own slots are never "stale".
         assert_eq!(region.reader_check().unwrap(), 0);
+
+        // The header is where the layout says, with the version's format
+        // word.
+        let h = region.header().unwrap();
+        assert_eq!(h.magic, MDB_MAGIC);
+        assert_eq!(h.format, layout.lock_format);
+        assert_eq!(h.txnid, 7);
+        assert_eq!(h.num_readers, 4);
+        assert_eq!(
+            h.mutex_id.is_some(),
+            layout.objects == LockObjects::SemaphoreHash
+        );
+        region.lock_writer(|| Ok(7)).unwrap();
+        region.unlock_writer();
+    }
+
+    /// An exclusive opener re-initialises a table of the other version in
+    /// its own. (Refusing it while another process holds the file needs a
+    /// second process: `interop/tests/lockfile10.rs`.)
+    #[test]
+    fn exclusive_opener_reinitialises_other_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock.mdb");
+        for layout in [&LOCK_V09, &LOCK_V10, &LOCK_V09, &LOCK_V10] {
+            let region = open(&path, layout).unwrap();
+            assert!(region.is_exclusive());
+            assert_eq!(region.lock_format(), layout.lock_format);
+            region.downgrade(5).unwrap();
+            let slot = region.acquire_slot().unwrap();
+            assert_eq!(slot, 0, "numreaders was reset");
+            assert_eq!(region.publish_current_txnid(slot), 5);
+            let h = region.header().unwrap();
+            assert_eq!(
+                (h.format, h.txnid, h.num_readers),
+                (layout.lock_format, 5, 1)
+            );
+            assert_eq!(region.reader_list().len(), 1);
+        }
     }
 }

@@ -12,13 +12,19 @@
 //!   `pthread_mutex_lock` returns `EOWNERDEAD` and the caller must repair
 //!   state and call [`SharedMutex::mark_consistent`] (`mdb_mutex_failed`,
 //!   line 10463).
-//! * **macOS** (`MDB_USE_POSIX_SEM`): two POSIX named semaphores whose names,
-//!   `"/MDBr<hash>"` and `"/MDBw<hash>"`, are stored in the lock file at the
-//!   same offsets. `<hash>` is `mdb_hash_enc` of `(st_dev, st_ino)` of the
-//!   lock file (lines 4823-4880). The exclusive opener `sem_unlink`s stale
-//!   semaphores, then creates both with `O_CREAT|O_EXCL` and value 1; later
-//!   openers `sem_open(name, 0)` using the names *read from the file*.
-//!   Semaphores are not robust; C has the same limitation.
+//! * **macOS** (`MDB_USE_POSIX_SEM`): two POSIX named semaphores,
+//!   `"/MDBr<hash>"` and `"/MDBw<hash>"`, where `<hash>` encodes an FNV-1a
+//!   hash of `(st_dev, st_ino)` of the lock file. The exclusive opener
+//!   `sem_unlink`s stale semaphores, then creates both with
+//!   `O_CREAT|O_EXCL` and value 1; later openers `sem_open(name, 0)`. How
+//!   the names reach them depends on the lock-file version
+//!   ([`LockObjects`]): version 1 (LMDB 0.9) stores the names themselves at
+//!   the mutex offsets (`mdb_hash_enc`, lines 4823-4880), version 2 (LMDB
+//!   1.0) stores the 64-bit hash `mtb_mutexid` and every opener derives
+//!   the names from the stored value (`mdb_env_mname_init`, `MUTEXNAME`,
+//!   mdb10.c lines 5935-5945 and 6064-6095). Either way, what is in the
+//!   file is read, never recomputed. Semaphores are not robust; C has the
+//!   same limitation.
 //!
 //! A mutex locked here must be unlocked by the same thread on Linux (pthread
 //! mutex ownership); the reader-table mutex is only held inside one
@@ -29,9 +35,7 @@ use std::fs::File;
 use std::io;
 
 use super::unix::LockMap;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use crate::format::lockfile::MNAME_LEN;
-use crate::format::lockfile::{TXNINFO_RMUTEX, TXNINFO_WMUTEX};
+use crate::format::lockfile::{LockLayout, LockObjects};
 
 /// Outcome of a successful [`SharedMutex::lock`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +95,23 @@ mod imp {
         }
     }
 
+    /// The reader and writer mutexes of a lock file of layout `layout`
+    /// (`mti_rmutex`, `mti_wmutex`). `EINVAL` if the layout does not keep
+    /// pthread mutexes, which only a layout of another platform could.
+    fn mutexes(
+        map: &LockMap,
+        layout: &LockLayout,
+    ) -> io::Result<(*mut libc::pthread_mutex_t, *mut libc::pthread_mutex_t)> {
+        match (layout.objects, layout.wlock) {
+            (LockObjects::PthreadMutexes, Some(w))
+                if layout.rlock_size == std::mem::size_of::<libc::pthread_mutex_t>() =>
+            {
+                Ok((mutex_at(map, layout.rlock), mutex_at(map, w)))
+            }
+            _ => Err(io::Error::from_raw_os_error(libc::EINVAL)),
+        }
+    }
+
     impl SharedMutex {
         /// Locks the mutex, blocking.
         pub fn lock(&self) -> io::Result<LockStatus> {
@@ -119,11 +140,15 @@ mod imp {
     }
 
     impl SharedLocks {
-        /// Initialises both mutexes in a lock file we hold exclusively
-        /// (`mdb_env_setup_locks`, `*excl > 0` branch).
-        pub fn create(map: &LockMap, _file: &File, _mode: u32) -> io::Result<SharedLocks> {
-            let r = mutex_at(map, TXNINFO_RMUTEX);
-            let w = mutex_at(map, TXNINFO_WMUTEX);
+        /// Initialises both mutexes in a lock file of layout `layout` that
+        /// we hold exclusively (`mdb_env_setup_locks`, `*excl > 0` branch).
+        pub fn create(
+            map: &LockMap,
+            _file: &File,
+            _mode: u32,
+            layout: &LockLayout,
+        ) -> io::Result<SharedLocks> {
+            let (r, w) = mutexes(map, layout)?;
             // SAFETY: r and w point at properly sized and aligned
             // pthread_mutex_t storage in the mapping. Nobody else uses the
             // lock file while we hold the exclusive fcntl lock, so
@@ -163,14 +188,11 @@ mod imp {
         }
 
         /// Uses the mutexes another process initialised.
-        pub fn attach(map: &LockMap) -> io::Result<SharedLocks> {
+        pub fn attach(map: &LockMap, layout: &LockLayout) -> io::Result<SharedLocks> {
+            let (r, w) = mutexes(map, layout)?;
             Ok(SharedLocks {
-                rmutex: SharedMutex {
-                    mutex: mutex_at(map, TXNINFO_RMUTEX),
-                },
-                wmutex: SharedMutex {
-                    mutex: mutex_at(map, TXNINFO_WMUTEX),
-                },
+                rmutex: SharedMutex { mutex: r },
+                wmutex: SharedMutex { mutex: w },
             })
         }
 
@@ -181,7 +203,7 @@ mod imp {
 }
 
 // ===========================================================================
-// macOS: POSIX named semaphores, names stored in the lock file.
+// macOS: POSIX named semaphores, named in (v1) or after (v2) the lock file.
 // ===========================================================================
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -271,7 +293,9 @@ mod imp {
         }
     }
 
-    /// `mdb_hash_val`: 64-bit FNV-1a over `bytes`, starting from `hval`.
+    /// `mdb_hash_val`: 64-bit FNV-1a over `bytes`, starting from `hval`
+    /// (1.0's `mdb_hash` is the same function, starting from
+    /// [`HASH_INIT`]).
     pub fn hash_val(bytes: &[u8], mut hval: u64) -> u64 {
         for &b in bytes {
             hval ^= u64::from(b);
@@ -292,12 +316,36 @@ mod imp {
     const A85: &[u8; 85] =
         b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
 
-    /// `mdb_pack85`: five base-85 digits of `l`, least significant first.
+    /// `mdb_pack85` of LMDB 0.9: five base-85 digits of `l`, least
+    /// significant first.
     fn pack85(mut l: u64, out: &mut Vec<u8>) {
         for _ in 0..5 {
             out.push(A85[(l % 85) as usize]);
             l /= 85;
         }
+    }
+
+    /// `mdb_pack85` of LMDB 1.0 (mdb10.c line 5920): up to ten base-85
+    /// digits of `l`, least significant first, stopping early when the
+    /// rest is 0 (so a hash of 0 gives no digits at all).
+    fn pack85_v10(mut l: u64, out: &mut Vec<u8>) {
+        for _ in 0..10 {
+            if l == 0 {
+                break;
+            }
+            out.push(A85[(l % 85) as usize]);
+            l /= 85;
+        }
+    }
+
+    /// `MUTEXNAME(env, ch)` of LMDB 1.0 after `mdb_env_mname_init`: the
+    /// semaphore name `"/MDB"`, `ch` (`b'r'` or `b'w'`), then
+    /// `mdb_pack85` of the stored `mti_mutexid`.
+    pub fn mutex_name_v10(mutex_id: u64, ch: u8) -> io::Result<CString> {
+        let mut name = b"/MDB".to_vec();
+        name.push(ch);
+        pack85_v10(mutex_id, &mut name);
+        CString::new(name).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))
     }
 
     /// `mdb_hash_enc`: the 10-character encoding of the FNV-1a hash of
@@ -313,9 +361,11 @@ mod imp {
 
     /// The bytes C hashes: `struct { dev_t dev; ino_t ino; }`. On macOS
     /// `dev_t` is 4 bytes and `ino_t` 8, so the C struct has 4 bytes of
-    /// padding that C leaves *uninitialised*; the resulting names are
-    /// therefore not reproducible, which is why every opener after the
-    /// first reads them from the lock file. We use zero padding.
+    /// padding. LMDB 0.9 leaves them *uninitialised*, so its names are not
+    /// reproducible, which is why every opener after the first reads them
+    /// from the lock file; LMDB 1.0 zeroes the struct first (mdb10.c line
+    /// 6075) but still stores the hash rather than have others recompute
+    /// it. We use zero padding.
     pub fn lock_file_id_bytes(dev: u64, ino: u64) -> [u8; 16] {
         let mut b = [0u8; 16];
         b[0..4].copy_from_slice(&(dev as i32).to_ne_bytes());
@@ -323,8 +373,8 @@ mod imp {
         b
     }
 
-    fn read_name(map: &LockMap, offset: usize) -> io::Result<CString> {
-        let raw = map.read_bytes(offset, MNAME_LEN);
+    fn read_name(map: &LockMap, offset: usize, len: usize) -> io::Result<CString> {
+        let raw = map.read_bytes(offset, len);
         let end = raw
             .iter()
             .position(|&b| b == 0)
@@ -336,18 +386,45 @@ mod imp {
         map.write_bytes(offset, name.as_bytes_with_nul());
     }
 
+    fn einval() -> io::Error {
+        io::Error::from_raw_os_error(libc::EINVAL)
+    }
+
     impl SharedLocks {
-        /// Creates both semaphores for a lock file we hold exclusively and
-        /// records their names in it (`mdb_env_setup_locks`, `*excl > 0`).
-        pub fn create(map: &LockMap, file: &File, mode: u32) -> io::Result<SharedLocks> {
+        /// Creates both semaphores for a lock file of layout `layout` that
+        /// we hold exclusively, and records in it what the other openers
+        /// need to find them (`mdb_env_setup_locks`, `*excl > 0`): the names
+        /// (version 1) or the hash they are derived from (version 2).
+        pub fn create(
+            map: &LockMap,
+            file: &File,
+            mode: u32,
+            layout: &LockLayout,
+        ) -> io::Result<SharedLocks> {
             let md = file.metadata()?;
-            let enc = hash_enc(&lock_file_id_bytes(md.dev(), md.ino()));
-            let rname = CString::new(format!("/MDBr{enc}"))
-                .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-            let wname = CString::new(format!("/MDBw{enc}"))
-                .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-            write_name(map, TXNINFO_RMUTEX, &rname);
-            write_name(map, TXNINFO_WMUTEX, &wname);
+            let id = lock_file_id_bytes(md.dev(), md.ino());
+            let (rname, wname) = match (layout.objects, layout.wlock) {
+                (LockObjects::SemaphoreNames, Some(wlock)) => {
+                    let enc = hash_enc(&id);
+                    let rname = CString::new(format!("/MDBr{enc}")).map_err(|_| einval())?;
+                    let wname = CString::new(format!("/MDBw{enc}")).map_err(|_| einval())?;
+                    if rname.as_bytes_with_nul().len() > layout.rlock_size {
+                        return Err(einval());
+                    }
+                    write_name(map, layout.rlock, &rname);
+                    write_name(map, wlock, &wname);
+                    (rname, wname)
+                }
+                (LockObjects::SemaphoreHash, _) if layout.rlock_size == 8 => {
+                    let mutex_id = hash_val(&id, HASH_INIT);
+                    map.store_u64(layout.rlock, mutex_id);
+                    (
+                        mutex_name_v10(mutex_id, b'r')?,
+                        mutex_name_v10(mutex_id, b'w')?,
+                    )
+                }
+                _ => return Err(einval()),
+            };
             // Clean up after a previous run, if needed.
             SharedMutex::unlink(&rname);
             SharedMutex::unlink(&wname);
@@ -356,10 +433,26 @@ mod imp {
             Ok(SharedLocks { rmutex, wmutex })
         }
 
-        /// Opens the semaphores named in the lock file.
-        pub fn attach(map: &LockMap) -> io::Result<SharedLocks> {
-            let rmutex = SharedMutex::open(read_name(map, TXNINFO_RMUTEX)?, None)?;
-            let wmutex = SharedMutex::open(read_name(map, TXNINFO_WMUTEX)?, None)?;
+        /// Opens the semaphores another process created: named in the
+        /// lock file (version 1), or named after the hash stored in it
+        /// (version 2).
+        pub fn attach(map: &LockMap, layout: &LockLayout) -> io::Result<SharedLocks> {
+            let (rname, wname) = match (layout.objects, layout.wlock) {
+                (LockObjects::SemaphoreNames, Some(wlock)) => (
+                    read_name(map, layout.rlock, layout.rlock_size)?,
+                    read_name(map, wlock, layout.rlock_size)?,
+                ),
+                (LockObjects::SemaphoreHash, _) if layout.rlock_size == 8 => {
+                    let mutex_id = map.load_u64(layout.rlock);
+                    (
+                        mutex_name_v10(mutex_id, b'r')?,
+                        mutex_name_v10(mutex_id, b'w')?,
+                    )
+                }
+                _ => return Err(einval()),
+            };
+            let rmutex = SharedMutex::open(rname, None)?;
+            let wmutex = SharedMutex::open(wname, None)?;
             Ok(SharedLocks { rmutex, wmutex })
         }
 
@@ -397,6 +490,31 @@ mod imp {
             let mut out = Vec::new();
             pack85(85 * 2 + 1, &mut out);
             assert_eq!(out, b"12000");
+        }
+
+        /// 1.0's names: `"/MDB"`, the lock letter, then the hash in up to
+        /// ten base-85 digits, least significant first, without trailing
+        /// zero digits (mdb10.c `mdb_pack85`, `MUTEXNAME`).
+        #[test]
+        fn v10_names() {
+            let name = |id, ch| mutex_name_v10(id, ch).unwrap().into_bytes();
+            assert_eq!(name(85 * 2 + 1, b'r'), b"/MDBr12");
+            assert_eq!(name(85 * 2 + 1, b'w'), b"/MDBw12");
+            assert_eq!(name(0, b'r'), b"/MDBr");
+            assert_eq!(name(84, b'r'), b"/MDBr~");
+            // 85^10 > 2^64: every 64-bit hash fits in ten digits, and the
+            // largest needs all ten.
+            let max = name(u64::MAX, b'w');
+            assert_eq!(max.len(), 5 + 10);
+            assert!(max[5..].iter().all(|c| A85.contains(c)));
+            // The whole hash is encoded, not two 32-bit halves as in 0.9.
+            let mut l = u64::MAX;
+            let mut digits = Vec::new();
+            while l != 0 {
+                digits.push(A85[(l % 85) as usize]);
+                l /= 85;
+            }
+            assert_eq!(&max[5..], &digits[..]);
         }
     }
 }

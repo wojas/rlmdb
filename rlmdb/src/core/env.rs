@@ -305,9 +305,12 @@ impl Environment {
         // Declared first so that it is dropped last on every error path.
         let registration = Registration::new(path, no_sub_dir)?;
 
+        // Lock-file version (dual-format stage 3): it follows the data
+        // format, version 1 for 0.9 and version 2 for 1.0.
+        let lock_layout = layout.lock();
         let mut lock = None;
         if !read_only && !no_lock {
-            lock = LockRegion::open(&lock_path, mode, opts.max_readers, false)?;
+            lock = LockRegion::open(&lock_path, mode, opts.max_readers, false, lock_layout)?;
         }
         let data_file = if read_only {
             File::open(&data_path)?
@@ -321,7 +324,7 @@ impl Environment {
         };
         if read_only && !no_lock {
             // For RDONLY, get the lock file after we know the data file exists.
-            lock = LockRegion::open(&lock_path, mode, opts.max_readers, true)?;
+            lock = LockRegion::open(&lock_path, mode, opts.max_readers, true, lock_layout)?;
         }
 
         // mdb_env_open2
