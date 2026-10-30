@@ -5,7 +5,8 @@
 symbols of LMDB 0.9.36 with the same ABI, error codes and flag values, so
 existing C programs compile against `include/lmdb.h` (the unmodified 0.9.36
 header, with one comment added on top) and link against the Rust library
-unchanged.
+unchanged. `include/rlmdb.h` declares the few functions rlmdb has beyond
+`lmdb.h` (see "`rlmdb.h`: version and capabilities" below).
 
 Status (stage 4): every function of `lmdb.h` is implemented, read and
 write side. The unmodified upstream programs `mtest.c` .. `mtest6.c`,
@@ -58,6 +59,59 @@ All 56 functions of `lmdb.h` are implemented (module in parentheses):
 `mdb_set_relfunc`/`mdb_set_relctx` are validated and ignored, as LMDB 0.9
 never calls the function; `mdb_env_set_assert` stores the callback, which
 is never called (the core reports errors instead of asserting).
+
+## `rlmdb.h`: version and capabilities
+
+`include/rlmdb.h` includes `lmdb.h` and declares rlmdb's own functions
+(module `version`), for programs that want to know which library they run
+on and what it supports. C LMDB does not have them, so a program that calls
+them needs this library.
+
+```c
+#include "rlmdb.h"
+
+typedef struct rlmdb_version_info {
+	unsigned	size;		/* sizeof(rlmdb_version_info) of the library */
+	int		rlmdb_major, rlmdb_minor, rlmdb_patch;	/* the rlmdb version */
+	int		lmdb_major, lmdb_minor, lmdb_patch;	/* what mdb_version() reports: 0, 9, 85 */
+	int		v09_major, v09_minor, v09_patch;	/* C release the 0.9 format and API match: 0, 9, 36 */
+	int		v10_major, v10_minor, v10_patch;	/* C release the 1.0 format matches: 0, 0, 0 for now */
+	const char *const *capabilities;		/* sorted, NULL-terminated */
+} rlmdb_version_info;
+
+const rlmdb_version_info *rlmdb_version(void);	/* static, never freed */
+const char *rlmdb_version_string(void);		/* static, one line */
+int rlmdb_has_capability(const char *name);	/* 1 or 0; 0 for NULL */
+```
+
+* `rlmdb_version()` returns a static structure. Fields are only ever
+  appended; `size` tells a program compiled against a newer header which
+  fields the library has.
+* `rlmdb_version_string()` returns everything in one line, for logs and
+  bug reports:
+  `rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; caps: format-0.9)`.
+  Once the 1.0 format exists, `; format 1.0 = LMDB 1.0.2` follows the 0.9
+  part.
+* `rlmdb_has_capability(name)` tests for one capability token. Tokens are
+  short lower-case names, added when a feature lands and kept while it
+  exists. Today there is one, `format-0.9`; planned are `format-1.0`,
+  `split-freelist`, `convert-copy`, `prevsnapshot`, `txn-prepare`,
+  `checksum`, `encrypt` and `default-format-env`. `v10_*` stays 0, 0, 0
+  until `format-1.0` is there.
+
+The Rust side is `rlmdb::version_info()`, from which the C structure and
+strings are filled once, at first use.
+
+**`mdb_version()` reports 0.9.85**, and the string
+`LMDB 0.9.85: (rlmdb 0.1.0)` (the rlmdb version where C has its release
+date). The patch level is above every real 0.9 release, so a program can
+tell rlmdb from C LMDB, and the version stays in the 0.9 series that rlmdb
+is a drop-in for. The shipped `lmdb.h` keeps `MDB_VERSION_PATCH 36`
+(`MDB_VERSION_STRING` is `LMDB 0.9.36: (Aug 6, 2026)`): it is unmodified,
+and a run-time patch level above the header's is the normal case for LMDB
+(a program built against an older 0.9 header runs with a newer 0.9
+library); `mdb_version()` is what programs are told to check. Major and
+minor agree with the header.
 
 ## Write side
 
@@ -126,6 +180,7 @@ point into the memory map or the transaction's dirty pages (zero copy).
 
 | Area | C LMDB | This library |
 |---|---|---|
+| `mdb_version()` | The header's version: 0, 9, 36 and `MDB_VERSION_STRING`, `LMDB 0.9.36: (Aug 6, 2026)`. | 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)` (see "`rlmdb.h`: version and capabilities"); `lmdb.h` still says 0.9.36. |
 | Threads | Without `MDB_NOTLS` a thread may hold one read transaction at a time (`MDB_BAD_RSLOT` otherwise) and a read transaction is tied to its thread. | Always behaves like `MDB_NOTLS`: any number of read transactions per thread, usable from any thread (one at a time). `MDB_NOTLS` is accepted. A superset of C. |
 | Opening one environment twice in a process | Allowed but unsafe (closing one handle drops the other's locks). | `mdb_env_open` fails with `EBUSY`. |
 | `MDB_FIXEDMAP`, `MDB_WRITEMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT` | Honoured. | Accepted and ignored (`mdb_env_get_flags` reports them). A new environment records map address 0 (`KNOWN_C_BUGS.md` #9); a C-created `MDB_FIXEDMAP` environment's recorded address is reported by `mdb_env_info`. |
@@ -258,6 +313,13 @@ environments.
 * `tests/capi_read.rs`: `tests/c/capi_read.c` checks every read-side
   function and its error codes; it must pass against the C library and the
   Rust library.
+* `tests/capi_version.rs`: `tests/c/capi_version.c` checks `rlmdb.h`
+  against the Rust library (there is no C oracle): the structure's `size`
+  and numbers, the sorted, NULL-terminated capability list,
+  `rlmdb_has_capability` (also with NULL and unknown names),
+  `rlmdb_version_string()` equal to the Rust `Display` line and
+  `mdb_version`'s string. The same program is compiled as C++ and linked,
+  which checks the header's `extern "C"` guards.
 * `tests/capi_write.rs`: `tests/c/capi_write.c` checks every write-side
   function and its error codes against both libraries: transactions
   (visibility, empty commits, read-only environments), database handles

@@ -35,7 +35,12 @@ Implemented and tested against the C library on macOS (arm64) and Linux
 * **`rlmdb-capi`**: all 56 functions of `lmdb.h`. The unmodified upstream
   `mtest.c` .. `mtest6.c`, `mdb_stat.c`, `mdb_dump.c`, `mdb_load.c` and
   `mdb_copy.c` run against it and give the same results as against C,
-  down to the page numbers on the free list.
+  down to the page numbers on the free list. `mdb_version()` reports
+  0.9.85, so programs can tell it from C LMDB; `rlmdb.h` adds
+  `rlmdb_version()`, `rlmdb_version_string()` and
+  `rlmdb_has_capability()` (rlmdb's version, the C release each format
+  matches, capability tokens), which `rlmdb::version_info()` provides on
+  the Rust side.
 * **`rlmdb-tools`**: `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` with the
   same options, output, messages and exit codes as the C tools, plus
   `mdb_drop` (not part of 0.9.36; modelled on 1.0's).
@@ -125,7 +130,8 @@ cc -I rust/rlmdb-capi/include -o mtest libraries/liblmdb/mtest.c \
 With the shared library, the loader must find it at run time
 (`LD_LIBRARY_PATH` on Linux; on macOS the dylib's install name is its
 absolute build path, or use `DYLD_LIBRARY_PATH`). Behaviour, the deviations
-from C and the thread rule for write transactions are in
+from C, the thread rule for write transactions and `rlmdb.h` (rlmdb's
+version and capability functions, next to `lmdb.h`) are in
 [`rlmdb-capi/README.md`](rlmdb-capi/README.md).
 
 ### `rlmdb-tools`
@@ -210,7 +216,7 @@ rust/
     src/format/       on-disk structures over byte slices
     src/os/           all unsafe code: mmap, file locks, shared mutexes
     tests/            C-written files, differential and interop tests
-  rlmdb-capi/          liblmdb.{a,so,dylib}: the C ABI; include/lmdb.h
+  rlmdb-capi/          liblmdb.{a,so,dylib}: the C ABI; include/lmdb.h, rlmdb.h
     tests/c/          C test programs run against both libraries
   rlmdb-tools/         mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop
   interop/            cross-process test bed: C and Rust peers, scenarios

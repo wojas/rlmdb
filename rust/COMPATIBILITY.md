@@ -136,6 +136,12 @@ of it changes the files or what another process concludes about them.
   `mdb_load` keeps the first database's flags (#1) and handles `-a`,
   `format=print` and odd lines correctly (#23–#26), `mdb_stat -r` exits 0
   (#2).
+* Version: `mdb_version()` reports 0.9.85 and `LMDB 0.9.85: (rlmdb
+  <version>)`, and the tools' `-V` prints that string; the shipped `lmdb.h`
+  stays the 0.9.36 header. The patch level, above every C 0.9 release,
+  tells rlmdb apart. `rlmdb_version()` (`rlmdb-capi/include/rlmdb.h`;
+  `rlmdb::version_info()` in Rust) reports the rest: rlmdb's version, the
+  C release the file format matches (0.9.36) and capability tokens.
 * Through the C API (`rlmdb-capi/README.md`, "Differences from C LMDB
   0.9.36"): opening one environment twice in a process is `EBUSY`; NULL
   handles and use after free return `EINVAL` instead of crashing;
@@ -169,5 +175,7 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 | Nested transactions | `rlmdb/tests/nested_txn.rs` (written by one side, checked by the other), `interop` `nested_txns`, `reader_loop_during_nested`, `rlmdb-capi/tests/c/capi_write.c` |
 | Copies byte-identical to `mdb_copy [-c]` | `rlmdb/tests/env_copy.rs`, `rlmdb-tools/tests/copy_drop.rs`, `interop` `copy_dump_equal` |
 | The C API behaves as C (return codes, outputs, traces) | `rlmdb-capi/tests/c/capi_read.c`, `capi_write.c` (run against both libraries; traces must be identical; `DIFFERS()`/`DEVIATION()` mark the documented deviations), `rlmdb-capi/tests/tools.rs` (upstream `mdb_stat.c`/`mdb_dump.c` linked against both print the same) |
-| The tools behave as C's | `rlmdb-tools/tests/*.rs` (every option on every environment: same stdout, stderr, exit code; loaded environments identical as C sees them) |
+| The tools behave as C's | `rlmdb-tools/tests/*.rs` (every option on every environment: same stdout, stderr, exit code; loaded environments identical as C sees them; `-V` prints rlmdb's version line where C prints its own) |
+| `mdb_version` reports 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)`; major and minor equal `lmdb.h`'s | `rlmdb-capi/tests/c/capi_read.c` (`MDB_VERSION_STRING` and 0.9.36 for C, 0.9.85 for Rust), `capi_version.c`, unit tests in `rlmdb/src/version.rs`, `rlmdb-capi/src/version.rs`, `rlmdb-tools/src/common.rs` |
+| `rlmdb.h`: `rlmdb_version()` (struct `size`, numbers, sorted NULL-terminated capabilities), `rlmdb_version_string()` (the `Display` line of `rlmdb::VersionInfo`), `rlmdb_has_capability()`; usable from C++ | `rlmdb-capi/tests/capi_version.rs` (`tests/c/capi_version.c` built as C and as C++, against the Rust library) |
 | Corrupt input never crashes | `rlmdb` `format::page` unit tests (`corrupt_pointers_do_not_panic`), `rlmdb/tests/handbuilt.rs` (`corrupt_pages_give_errors_not_panics`) |

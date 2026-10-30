@@ -1,7 +1,8 @@
 //! The C API of LMDB 0.9 (`lmdb.h`), implemented over the Rust [`rlmdb`]
 //! crate: `liblmdb.a` / `liblmdb.so` / `liblmdb.dylib` built from this crate
 //! are drop-in replacements for the C library, so existing C programs link
-//! against them unchanged. `include/lmdb.h` is the unmodified 0.9.36 header.
+//! against them unchanged. `include/lmdb.h` is the unmodified 0.9.36 header;
+//! `include/rlmdb.h` declares the few functions of rlmdb's own.
 //!
 //! This layer is deliberately thin: argument validation (the same checks,
 //! in the same order, with the same return codes as `mdb.c`), translation
@@ -10,7 +11,8 @@
 //!
 //! # Modules (grouped like the sections of `lmdb.h`)
 //!
-//! * `mdb_version`, `mdb_strerror` in [`version`].
+//! * `mdb_version`, `mdb_strerror`, and `rlmdb.h`'s `rlmdb_version`,
+//!   `rlmdb_version_string`, `rlmdb_has_capability` in [`version`].
 //! * `mdb_env_*`, `mdb_reader_list`, `mdb_reader_check` in [`env`](mod@env).
 //! * `mdb_txn_*` in [`txn`].
 //! * `mdb_dbi_*`, `mdb_stat`, `mdb_set_compare` & co., `mdb_cmp`,

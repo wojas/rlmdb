@@ -82,6 +82,11 @@ unusual input is affected; `mdb_dump` output loads identically):
 
 Other differences:
 
+* **`-V`** prints `LMDB 0.9.85: (rlmdb 0.1.0)` (the rlmdb version in the
+  parentheses) where C prints `LMDB 0.9.36: (Aug 6, 2026)`: the string
+  rlmdb's `mdb_version()` returns. Its patch level is above every C 0.9
+  release so that rlmdb can be told apart (`../rlmdb-capi/README.md`,
+  "`rlmdb.h`: version and capabilities").
 * **`mdb_drop`** is not part of LMDB 0.9.36. This one is LMDB's own
   `mdb_drop` as first added (2017, before the 1.0 options `-L` and the
   crypto options `-m`/`-w`): same options, messages and exit codes. The
@@ -120,7 +125,10 @@ sub-pages and sub-databases, a `MDB_NOSUBDIR` environment.
   plus usage errors and `getopt` edge cases: identical stdout, stderr and
   exit code (`-f` output files too). Database names C refuses (empty:
   `MDB_BAD_VALSIZE`; over 511 bytes: `MDB_NOTFOUND` when opening,
-  `MDB_BAD_VALSIZE` when `mdb_load` creates) give the same errors.
+  `MDB_BAD_VALSIZE` when `mdb_load` creates) give the same errors. The one
+  exception, in every test that compares the tools: where the C tool
+  prints its version line for `-V`, the Rust tool must print its own
+  (`version_line` and `assert_runs_equal` in `tests/common/mod.rs`).
 * `load.rs`: crafted dumps in both encodings, loads into existing
   environments, `-T`, `-N`, `-a` (sorted and unsorted input, several
   batches), malformed input (header errors, truncated lines, bad

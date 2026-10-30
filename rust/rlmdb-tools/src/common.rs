@@ -12,8 +12,13 @@ use rlmdb::{Dbi, Error, RwTxn, Transaction};
 use crate::cfmt::{err_code, io_errno, strerror};
 use crate::output::{eprint_bytes, Output};
 
-/// `MDB_VERSION_STRING` of LMDB 0.9.36, which `-V` prints.
-pub const VERSION_STRING: &str = "LMDB 0.9.36: (Aug 6, 2026)";
+/// What `-V` prints: the string `mdb_version` returns,
+/// `LMDB 0.9.85: (rlmdb <version>)`
+/// ([`rlmdb::VersionInfo::mdb_version_string`]). The C tools print their
+/// library's `MDB_VERSION_STRING` the same way.
+pub fn version_string() -> String {
+    rlmdb::version_info().mdb_version_string()
+}
 
 /// `EXIT_FAILURE`.
 pub const EXIT_FAILURE: i32 = 1;
@@ -43,9 +48,10 @@ impl Tool {
         EXIT_FAILURE
     }
 
-    /// `printf("%s\n", MDB_VERSION_STRING)` for `-V`; returns exit code 0.
+    /// The version line for `-V`, as C's `printf("%s\n",
+    /// MDB_VERSION_STRING)` (with [`version_string`]); returns exit code 0.
     pub fn version(&mut self) -> i32 {
-        self.out.print(format_args!("{VERSION_STRING}\n"));
+        self.out.print(format_args!("{}\n", version_string()));
         0
     }
 
@@ -123,7 +129,10 @@ pub fn create_db(
 mod tests {
     use super::*;
 
-    /// The version string is the one of the C headers this crate mirrors.
+    /// The version string has the shape of the C headers' and their major
+    /// and minor version; the patch level is rlmdb's (above the header's,
+    /// so that rlmdb can be told apart from C LMDB) and the rlmdb version
+    /// stands where C has its release date.
     #[test]
     fn version_matches_lmdb_h() {
         let h = std::fs::read_to_string(
@@ -139,12 +148,14 @@ mod tests {
                 .to_owned()
         };
         let expected = format!(
-            "LMDB {}.{}.{}: ({})",
+            "LMDB {}.{}.{}: (rlmdb {})",
             field("MDB_VERSION_MAJOR"),
             field("MDB_VERSION_MINOR"),
-            field("MDB_VERSION_PATCH"),
-            field("MDB_VERSION_DATE")
+            rlmdb::consts::MDB_VERSION_PATCH,
+            env!("CARGO_PKG_VERSION")
         );
-        assert_eq!(VERSION_STRING, expected);
+        assert_eq!(version_string(), expected);
+        let c_patch: i32 = field("MDB_VERSION_PATCH").parse().unwrap();
+        assert!(rlmdb::consts::MDB_VERSION_PATCH > c_patch);
     }
 }

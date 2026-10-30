@@ -149,7 +149,7 @@ fn errors_and_usage() {
         assert_eq!((r.code, r.stdout.len()), (0, 0));
         assert_eq!(
             fs::read(dir.path().join("out.txt")).unwrap(),
-            b"LMDB 0.9.36: (Aug 6, 2026)\n"
+            version_line(imp)
         );
     }
 }
