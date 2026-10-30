@@ -33,7 +33,8 @@ cargo run --release -p rlmdb-bench -- --only read,dupsort --reps 9
 cargo run --release -p rlmdb-bench -- --impl rust --only rand_put --raw
 cargo run --release -p rlmdb-bench -- --help
 # Linux (4 KiB pages), in the Docker container of scripts/linux-test.sh;
-# environments go to the container's /tmp, not the bind-mounted workspace:
+# environments go to the container's /tmp (a tmpfs in the VM's memory, see
+# scripts/linux-test.sh), not the bind-mounted workspace:
 scripts/linux-test.sh run --release -p rlmdb-bench -- --dir /tmp/lmdb-bench
 ```
 

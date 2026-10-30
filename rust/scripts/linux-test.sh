@@ -7,6 +7,13 @@
 #   default: test --workspace
 # Environment:
 #   LINUX_TEST_IMAGE  image to use (default rust:1-bookworm)
+#   LINUX_TEST_TMPFS  size of the tmpfs mounted at /tmp in the container
+#                     (default 4g; empty or 0 leaves /tmp on the VM disk)
+#
+# /tmp, where tests and benchmarks create their environments, is a tmpfs in
+# the VM's memory: the alternatives inside the VM are its virtual disk
+# (overlay on a disk image) or the virtiofs host mount, and neither is a
+# local file system. fsync workloads are therefore not meaningful here.
 #
 # The workspace is bind-mounted read-write at /work; build output goes to a
 # named volume so host and container builds never mix, and the cargo
@@ -26,6 +33,8 @@ set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 repo=$(cd "$here/.." && pwd)
 image=${LINUX_TEST_IMAGE:-rust:1-bookworm}
+tmpfs=${LINUX_TEST_TMPFS-4g}
+case $tmpfs in ""|0) tmpfs_mount= ;; *) tmpfs_mount="--tmpfs /tmp:exec,size=$tmpfs" ;; esac
 # Docker Desktop's credential helper is not installed on this machine, so use
 # a scratch config and talk to the Lima docker socket directly.
 export DOCKER_CONFIG=${DOCKER_CONFIG:-/tmp/lmdb-rs-dockercfg}
@@ -49,7 +58,9 @@ if git_common=$(cd "$repo" && git rev-parse --git-common-dir 2>/dev/null); then
     *) git_mount=$git_common ;;
   esac
 fi
+# shellcheck disable=SC2086  # $tmpfs_mount is two words or empty
 exec docker run --rm -i \
+  $tmpfs_mount \
   -v "$repo:/work" \
   ${git_mount:+-v "$git_mount:$git_mount:ro"} \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
