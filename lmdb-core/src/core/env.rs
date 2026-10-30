@@ -326,7 +326,8 @@ impl Environment {
         }
 
         let map =
-            DataMap::map_readonly(data_file.try_clone()?, map_size, flags & MDB_NORDAHEAD != 0)?;
+            DataMap::map_readonly(data_file.try_clone()?, map_size, flags & MDB_NORDAHEAD != 0)?
+                .with_meta_pages(NUM_METAS * page_size);
 
         let meta_file = if read_only {
             None
@@ -430,9 +431,10 @@ impl Environment {
     }
 
     /// Lowers the dirty-list capacity for write transactions that begin
-    /// later, so tests can make small transactions spill.
-    #[cfg(test)]
-    pub(crate) fn set_dirty_limit(&self, pages: usize) {
+    /// later, so tests can make small transactions spill. Not part of the
+    /// API: for this crate's tests (including the integration tests).
+    #[doc(hidden)]
+    pub fn set_dirty_limit(&self, pages: usize) {
         self.dirty_limit.store(pages.max(16), Ordering::Relaxed);
     }
 
@@ -534,7 +536,11 @@ impl Environment {
         let mut cursor = txn.cursor(Dbi::FREE)?;
         let mut pages = 0usize;
         while let Some((_, data)) = cursor.next()? {
-            pages += Idl::encoded_len(data).ok_or(MdbError::Corrupted)? as usize;
+            let n = Idl::encoded_len(data).ok_or(MdbError::Corrupted)?;
+            pages = usize::try_from(n)
+                .ok()
+                .and_then(|n| pages.checked_add(n))
+                .ok_or(MdbError::Corrupted)?;
         }
         Ok(pages)
     }
@@ -618,7 +624,8 @@ impl Environment {
             .ok_or(MdbError::Invalid)?;
         size = size.max(min_size);
         let random = self.raw_flags() & MDB_NORDAHEAD != 0;
-        let map = DataMap::map_readonly(self.data_file.try_clone()?, size, random)?;
+        let map = DataMap::map_readonly(self.data_file.try_clone()?, size, random)?
+            .with_meta_pages(NUM_METAS * self.page_size);
         let mut current = self.map.write().unwrap_or_else(|e| e.into_inner());
         *current = Arc::new(map);
         self.map_size.store(size, Ordering::SeqCst);

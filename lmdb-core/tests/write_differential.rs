@@ -558,6 +558,25 @@ impl Driver<'_> {
             }
         }
         if cl != rl {
+            let prev = self.prev.as_ref().map(|(_, l)| l.as_str());
+            if let Some(n) = stale_eof(&op, prev, &cl, &rl) {
+                // KNOWN_C_BUGS.md #28: C's cursor kept a C_EOF from before
+                // and stopped although items were added after it; put it
+                // where Rust's (correctly) went.
+                if let Some((k, d)) = item_of(&rl, n) {
+                    self.heal.push_back(if self.dupsort {
+                        format!("g:{n}:{MDB_GET_BOTH}:{k}:{d}")
+                    } else {
+                        format!("g:{n}:{MDB_SET}:{k}")
+                    });
+                }
+                eprintln!("NOTE: {tag}: stale C_EOF in C at step {i} (known bug #28)");
+                self.prev = Some((op, rl));
+                self.i += 1;
+                return true;
+            }
+        }
+        if cl != rl {
             if known_c_bug(&op, &cl, &rl) {
                 // C's result came from an unchecked node read; the states
                 // agree only if C changed nothing.
@@ -1058,6 +1077,47 @@ fn stale_subcursors(op: &str, cl: &str, rl: &str) -> Option<Vec<usize>> {
         stale.push(n);
     }
     (!stale.is_empty()).then_some(stale)
+}
+
+/// `KNOWN_C_BUGS.md` #28: C's cursor kept a `C_EOF` from an earlier move
+/// (`MDB_LAST`, a failed `MDB_NEXT`, an `MDB_SET` that did not clear it)
+/// although items were added after it since: `MDB_NEXT` & co. report
+/// `MDB_NOTFOUND`, and `MDB_GET_MULTIPLE` fetches nothing and stays put,
+/// where Rust moves on. Returns the cursor if that is the only difference
+/// (`prev`: the agreed output of the step before).
+fn stale_eof(op: &str, prev: Option<&str>, cl: &str, rl: &str) -> Option<usize> {
+    let f: Vec<&str> = op.split(':').collect();
+    if f[0] != "g" {
+        return None;
+    }
+    let n: usize = f[1].parse().ok()?;
+    let opn: u32 = f[2].parse().ok()?;
+    let (c_parts, r_parts): (Vec<&str>, Vec<&str>) =
+        (cl.split(" | ").collect(), rl.split(" | ").collect());
+    if c_parts.len() != r_parts.len() || c_parts.len() <= n + 1 {
+        return None;
+    }
+    let others_agree = c_parts[1..]
+        .iter()
+        .zip(&r_parts[1..])
+        .enumerate()
+        .all(|(i, (c, r))| i == n || c == r);
+    if !others_agree {
+        return None;
+    }
+    if [MDB_NEXT, MDB_NEXT_DUP, MDB_NEXT_NODUP, MDB_NEXT_MULTIPLE].contains(&opn) {
+        return (c_parts[0] == "g rc=-30798" && r_parts[0] == "g rc=0").then_some(n);
+    }
+    if opn == MDB_GET_MULTIPLE {
+        let before = prev?.split(" | ").nth(n + 1)?;
+        let key = |x: &str| x.split(" d=").next().map(str::to_owned);
+        let ok = c_parts[0] == "g rc=0"
+            && r_parts[0] == "g rc=0"
+            && c_parts[n + 1] == before
+            && key(c_parts[n + 1]) == key(r_parts[n + 1]);
+        return ok.then_some(n);
+    }
+    None
 }
 
 /// C results that come from reading an unchecked node past the end of a

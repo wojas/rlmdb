@@ -98,7 +98,7 @@ impl<'env> RwTxn<'env> {
             let db = self.db_mut(mc);
             db.root = pp;
             new_root = Some(usize::from(db.depth));
-            db.depth += 1;
+            db.depth = db.depth.wrapping_add(1);
             // Add left (implicit) pointer.
             if let Err(e) = self.node_add(mc, 0, &[], None, mp, 0) {
                 // Undo the pre-push.
@@ -107,7 +107,7 @@ impl<'env> RwTxn<'env> {
                 w.ki[0] = w.ki[1];
                 let db = self.db_mut(mc);
                 db.root = mp;
-                db.depth -= 1;
+                db.depth = db.depth.wrapping_sub(1);
                 return Err(e);
             }
             let w = self.cur_mut(mc);
@@ -206,7 +206,10 @@ impl<'env> RwTxn<'env> {
                         if i as usize == newindx {
                             psize += nsize;
                         } else {
-                            let node = node_at(&src, copy_ptrs[i as usize])?;
+                            // A corrupt page can be "full" with too few
+                            // keys for the scan (C reads garbage here).
+                            let ptr = *copy_ptrs.get(i as usize).ok_or_else(corrupted)?;
+                            let node = node_at(&src, ptr)?;
                             psize += NODE_SIZE + node.key_size() + 2;
                             if is_leaf {
                                 psize += if node.flags() & F_BIGDATA != 0 {
@@ -227,7 +230,8 @@ impl<'env> RwTxn<'env> {
                 sepkey = if si == newindx {
                     newkey.to_vec()
                 } else {
-                    let node = node_at(&src, copy_ptrs[si])?;
+                    let ptr = *copy_ptrs.get(si).ok_or_else(corrupted)?;
+                    let node = node_at(&src, ptr)?;
                     node.key().ok_or_else(corrupted)?.to_vec()
                 };
             }
@@ -276,7 +280,7 @@ impl<'env> RwTxn<'env> {
                 }
                 w.pg[ptop] = m.pg[ptop];
                 if m.ki[ptop] != 0 {
-                    w.ki[ptop] = m.ki[ptop] - 1;
+                    w.ki[ptop] = m.ki[ptop].wrapping_sub(1);
                 } else {
                     // Find right page's left sibling.
                     w.ki[ptop] = m.ki[ptop];
@@ -391,7 +395,7 @@ impl<'env> RwTxn<'env> {
         {
             let w = self.cur_mut(mc);
             w.pg[top] = rp;
-            w.ki[ptop] += 1;
+            w.ki[ptop] = w.ki[ptop].wrapping_add(1);
         }
         let w = self.cur(mc);
         if self.cur(mn).pg[ptop] != w.pg[ptop]
@@ -534,11 +538,11 @@ impl<'env> RwTxn<'env> {
             }
             if w3.top >= top && w3.pg[top] == mp {
                 if usize::from(w3.ki[top]) >= newindx && nflags & SPLIT_REPLACE == 0 {
-                    w3.ki[top] += 1;
+                    w3.ki[top] = w3.ki[top].wrapping_add(1);
                 }
                 if usize::from(w3.ki[top]) >= nkeys {
                     w3.pg[top] = rp;
-                    w3.ki[top] -= nkeys as u16;
+                    w3.ki[top] = w3.ki[top].wrapping_sub(nkeys as u16);
                     w3.ki[..top].copy_from_slice(&m.ki[..top]);
                     w3.pg[..top].copy_from_slice(&m.pg[..top]);
                 }
@@ -547,7 +551,7 @@ impl<'env> RwTxn<'env> {
                 && w3.pg[ptop] == mc_pg_ptop
                 && w3.ki[ptop] >= mc_ki_ptop
             {
-                w3.ki[ptop] += 1;
+                w3.ki[ptop] = w3.ki[ptop].wrapping_add(1);
             }
         }
         Ok(())

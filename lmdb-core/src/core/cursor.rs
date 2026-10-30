@@ -33,7 +33,7 @@
 
 use std::cmp::Ordering;
 
-use crate::cmp::Comparator;
+use crate::cmp::{cmp_memn, Comparator};
 use crate::consts::*;
 use crate::core::dbi::TxnDb;
 use crate::core::txn::TxnCore;
@@ -59,12 +59,16 @@ pub(crate) const PS_FIRST: u8 = 4;
 /// `MDB_PS_LAST`: descend to the last leaf.
 pub(crate) const PS_LAST: u8 = 8;
 
-/// A header-only page used to fill unused cursor stack slots.
-static EMPTY_PAGE: [u8; 16] = [0; 16];
+/// A header-only page used to fill unused cursor stack slots. A constant,
+/// so that filling a cursor's stack with it compiles to plain stores.
+const EMPTY_PAGE: PageRef<'static> = match PageRef::new(&[0; 16]) {
+    Some(p) => p,
+    // 16 bytes hold exactly a header, so `new` cannot fail.
+    None => unreachable!(),
+};
 
 pub(crate) fn empty_page() -> PageRef<'static> {
-    // EMPTY_PAGE holds exactly a header, so `new` cannot fail.
-    PageRef::new(&EMPTY_PAGE).unwrap_or_else(|| unreachable!())
+    EMPTY_PAGE
 }
 
 pub(crate) fn not_found() -> Error {
@@ -120,27 +124,32 @@ impl<'t> Cursor<'t> {
         }
     }
 
-    /// Rebuilds a cursor from the state of a write cursor (`wcursor`):
-    /// `pages[i]` for the `snum` pushed levels, the indices, and for a
-    /// sub-cursor over a `P_SUBP` sub-page that sub-page.
+    /// Loads the state of a write cursor (`wcursor`) into a cursor fresh
+    /// from [`Cursor::new`]: its flags, the indices, `snum` and `top`, for
+    /// a sub-cursor over a `P_SUBP` sub-page that sub-page, and `page(i)`
+    /// as the page of each of the `snum` levels. Done in place: cursors are
+    /// some 700 bytes, and the write path rebuilds them for every read
+    /// operation, so moving them around is measurably slow.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_parts(
-        db: Db,
-        cmp: Comparator,
+    #[inline]
+    pub(crate) fn load(
+        &mut self,
         flags: u8,
-        pages: &[PageRef<'t>],
         ki: &[u16; CURSOR_STACK],
         snum: usize,
         top: usize,
         subpage: Option<PageRef<'t>>,
-    ) -> Cursor<'t> {
-        let mut c = Cursor::new(db, cmp, flags);
-        c.pg[..pages.len()].copy_from_slice(pages);
-        c.ki = *ki;
-        c.snum = snum;
-        c.top = top;
-        c.subpage = subpage;
-        c
+        mut page: impl FnMut(usize) -> Result<PageRef<'t>>,
+    ) -> Result<()> {
+        self.flags = flags;
+        self.ki = *ki;
+        self.snum = snum;
+        self.top = top;
+        self.subpage = subpage;
+        for (i, slot) in self.pg.iter_mut().enumerate().take(snum) {
+            *slot = page(i)?;
+        }
+        Ok(())
     }
 
     /// `mc_pg[i]`.
@@ -255,10 +264,8 @@ impl<'t> Cursor<'t> {
     pub(crate) fn node_search(&mut self, key: &[u8]) -> Result<(bool, bool)> {
         let mp = self.top_page();
         let nkeys = mp.num_keys();
-        let mut low: isize = if mp.is_leaf() { 0 } else { 1 };
-        let mut high: isize = nkeys as isize - 1;
-        let mut i: isize = 0;
-        let mut rc = Ordering::Equal;
+        let low: isize = if mp.is_leaf() { 0 } else { 1 };
+        let high: isize = nkeys as isize - 1;
         // Branch pages have no data, so with integer keys alignment is
         // guaranteed and C uses the faster mdb_cmp_long/mdb_cmp_int, chosen
         // by the size of the second key on the page.
@@ -270,15 +277,14 @@ impl<'t> Cursor<'t> {
         } else {
             self.cmp
         };
-        while low <= high {
-            i = (low + high) >> 1;
-            rc = self.cmp_at(cmp, key, mp, i as usize)?;
-            match rc {
-                Ordering::Equal => break,
-                Ordering::Greater => low = i + 1,
-                Ordering::Less => high = i - 1,
-            }
-        }
+        // The page layout and the comparator are resolved once per search,
+        // not once per probe; the default order (memcmp) gets its own loop.
+        let (mut i, rc) = match (mp.is_leaf2(), cmp) {
+            (false, Comparator::Memn) => bsearch(low, high, |i| {
+                Ok(cmp_memn(key, mp.node_key(i).ok_or_else(corrupted)?))
+            })?,
+            _ => bsearch(low, high, |i| self.cmp_at(cmp, key, mp, i))?,
+        };
         if rc == Ordering::Greater {
             // Found entry is less than the key: skip to the next one.
             i += 1;
@@ -428,6 +434,30 @@ impl<'t> Cursor<'t> {
         self.set_ki_top(mp.num_keys().saturating_sub(1));
         Ok(data)
     }
+}
+
+/// The binary search loop of `mdb_node_search` over the indices
+/// `low..=high`: `probe(i)` compares the search key with entry `i`. Returns
+/// the last index probed and its result (`Equal` at once on a match;
+/// `(0, Equal)` if the range is empty).
+#[inline(always)]
+fn bsearch(
+    mut low: isize,
+    mut high: isize,
+    mut probe: impl FnMut(usize) -> Result<Ordering>,
+) -> Result<(isize, Ordering)> {
+    let mut i: isize = 0;
+    let mut rc = Ordering::Equal;
+    while low <= high {
+        i = (low + high) >> 1;
+        rc = probe(i as usize)?;
+        match rc {
+            Ordering::Equal => break,
+            Ordering::Greater => low = i + 1,
+            Ordering::Less => high = i - 1,
+        }
+    }
+    Ok((i, rc))
 }
 
 /// A sub-cursor for `entry` if it is a `MDB_DUPSORT` database
@@ -605,7 +635,13 @@ pub(crate) fn cursor_next<'t>(
     }
     let mp = mc.top_page();
     if mc.flags & C_EOF != 0 {
-        if mc.ki_top() + 1 >= mp.num_keys() {
+        // C returns MDB_NOTFOUND at once for a cursor on the last item of
+        // its page. In a write transaction the key may have got more
+        // duplicates since, or the tree a page to the right (MDB_APPEND),
+        // so look (KNOWN_C_BUGS.md #28; MDB_PREV_MULTIPLE also leaves a
+        // sub-cursor so marked on an earlier page). Only a cursor past its
+        // page's end stops here.
+        if mc.ki_top() >= mp.num_keys() {
             return Err(not_found());
         }
         mc.flags ^= C_EOF;

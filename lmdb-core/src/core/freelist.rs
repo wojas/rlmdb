@@ -60,9 +60,27 @@ impl<'env> RwTxn<'env> {
     /// 3. new pages at the end of the file (`MDB_MAP_FULL` if the map is
     ///    too small).
     pub(crate) fn page_alloc(&mut self, num: usize) -> Result<u64> {
+        self.page_alloc_init(num, None)
+    }
+
+    /// [`RwTxn::page_alloc`] of one page whose contents start as a copy of
+    /// `src` (a whole page), for `mdb_page_touch`: a new buffer is made by
+    /// copying `src` instead of zero-filling it first and copying after
+    /// (the same bytes; the zero fill was a sizeable part of every write).
+    pub(crate) fn page_alloc_copy(&mut self, src: &[u8]) -> Result<u64> {
+        self.page_alloc_init(1, Some(src))
+    }
+
+    fn page_alloc_init(&mut self, num: usize, init: Option<&[u8]>) -> Result<u64> {
         // If there are any loose pages, just use them.
         if num == 1 {
             if let Some(pgno) = self.w.loose.pop() {
+                if let Some(src) = init {
+                    self.dirty_mut(pgno)?
+                        .get_mut(..src.len())
+                        .ok_or_else(corrupted)?
+                        .copy_from_slice(src);
+                }
                 return Ok(pgno);
             }
         }
@@ -95,7 +113,13 @@ impl<'env> RwTxn<'env> {
                 pgno
             }
         };
-        let mut buf = alloc_pages(self.psize(), num);
+        let mut buf = match init {
+            Some(src) => {
+                debug_assert_eq!(src.len(), self.psize() * num);
+                Box::<[u8]>::from(src)
+            }
+            None => alloc_pages(self.psize(), num),
+        };
         crate::core::page_ops::set_pgno(&mut buf, pgno);
         // mdb_page_dirty
         if !self.core.dirty.insert(pgno, buf) {
@@ -187,6 +211,15 @@ impl<'env> RwTxn<'env> {
                 }
             }
             let idl = Idl::from_bytes(kv.data).ok_or_else(corrupted)?;
+            // C trusts the record. A meta page or a page past the snapshot
+            // would be handed out and overwritten (or its offset overflow).
+            if idl
+                .as_slice()
+                .iter()
+                .any(|&p| p < NUM_METAS as u64 || p >= core.next_pgno)
+            {
+                return Err(corrupted());
+            }
             w.pglast = last;
             // Merge in descending sorted order.
             let mop = w.pghead.get_or_insert_with(Idl::new);
@@ -212,15 +245,30 @@ impl<'env> RwTxn<'env> {
         Ok(())
     }
 
+    /// The length of the overflow run at `pgno` (`mp_pages`), checked
+    /// against the pages of the transaction: a corrupt count must not make
+    /// the free list grow by billions of entries (C fails with `ENOMEM` at
+    /// best).
+    pub(crate) fn overflow_run_pages(&self, pgno: u64) -> Result<usize> {
+        let n = self.core.page(pgno)?.overflow_pages();
+        if n == 0
+            || pgno
+                .checked_add(u64::from(n))
+                .is_none_or(|end| end > self.core.next_pgno)
+        {
+            return Err(MdbError::Corrupted.into());
+        }
+        Ok(n as usize)
+    }
+
     /// `mdb_ovpage_free`: free the overflow run starting at `pgno`. A run
     /// allocated in this transaction (dirty, or spilled by it) goes straight
     /// back to `pghead` (if the free DB is in use); otherwise it goes on the
     /// free list. Not in nested transactions: they would need to hide the
     /// run in their ancestors' dirty and spill lists.
     pub(crate) fn ovpage_free(&mut self, mc: CRef, pgno: u64) -> Result<()> {
-        let page = self.core.page(pgno)?;
-        let ovpages = page.overflow_pages() as usize;
-        let dirty = page.flags() & P_DIRTY != 0;
+        let ovpages = self.overflow_run_pages(pgno)?;
+        let dirty = self.core.page(pgno)?.flags() & P_DIRTY != 0;
         let spilled = !dirty && self.core.spilled.contains(&pgno);
         if self.w.pghead.is_some() && !self.has_parent() && (dirty || spilled) {
             if spilled {

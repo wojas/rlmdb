@@ -927,6 +927,32 @@ pub fn rust_cursorops(txn: &RoTxn<'_>, db: Dbi, ops: &[String]) -> Vec<String> {
     out
 }
 
+/// `KNOWN_C_BUGS.md` #28 in a read transaction: `ops` ends with a forward
+/// move on which C reported `MDB_NOTFOUND` without moving while Rust found
+/// an item, or C left the key after a recent `prev_multiple` while Rust
+/// stayed on it. `c`, `r`: C's and Rust's lines for the previous op and for
+/// this one.
+fn stale_sub_eof(ops: &[String], c: (&str, &str), r: (&str, &str)) -> bool {
+    let name = ops.last().map_or("", |o| o.split(':').next().unwrap_or(""));
+    if !matches!(name, "next" | "next_dup" | "next_multiple") {
+        return false;
+    }
+    let recent = ops.iter().rev().skip(1).take(8);
+    let had_prev_multiple = recent
+        .take_while(|o| !o.contains(':') && *o != "first_dup" && *o != "first")
+        .any(|o| o == "prev_multiple");
+    let key = |l: &str| {
+        l.split("| cur rc=0 k=")
+            .nth(1)
+            .and_then(|k| k.split(' ').next())
+            .map(str::to_owned)
+    };
+    let cur = |l: &str| l.split_once(" | ").map(|x| x.1.to_owned());
+    let c_stopped = c.1.starts_with(&format!("{name} rc=-30798 ")) && cur(c.0) == cur(c.1);
+    let r_found = r.1.starts_with(&format!("{name} rc=0 "));
+    (c_stopped && r_found) || (had_prev_multiple && key(r.0).is_some() && key(r.0) == key(r.1))
+}
+
 /// Runs the same random cursor operations through C and Rust and asserts
 /// identical results and positions.
 pub fn differential(
@@ -991,6 +1017,34 @@ pub fn differential(
                 );
                 c_bugs += 1;
                 break;
+            }
+            // KNOWN_C_BUGS.md #28: a C_EOF left by MDB_LAST & co. (on a
+            // sub-cursor that MDB_PREV_MULTIPLE then moved back a page) or by
+            // a failed MDB_NEXT_NODUP (on a key with more duplicates) makes
+            // C's next forward move skip the key's other duplicates; Rust
+            // moves to the next one. Stop comparing.
+            if cl != rl
+                && i > 0
+                && stale_sub_eof(&ops[..=i], (&c_lines[i - 1], cl), (&r_lines[i - 1], rl))
+            {
+                eprintln!("NOTE: known C bug #28 (stale C_EOF) at op {i}: C {cl}, Rust {rl}");
+                c_bugs += 1;
+                break;
+            }
+            if cl != rl {
+                // KNOWN_C_BUGS.md #27: on a key with a single item that the
+                // cursor reached from a key with duplicates, C's
+                // MDB_GET_MULTIPLE returns the other key's duplicates.
+                let (c_op, c_cur) = cl.split_once(" | ").unwrap();
+                let (r_op, r_cur) = rl.split_once(" | ").unwrap();
+                if c_op.starts_with("get_multiple rc=0 d=")
+                    && r_op == "get_multiple rc=0 d="
+                    && c_cur == r_cur
+                {
+                    eprintln!("NOTE: known C bug #27 (stale GET_MULTIPLE) at op {i}");
+                    compared += 1;
+                    continue;
+                }
             }
             if cl != rl {
                 // C leaves `data` untouched in a few successful cases

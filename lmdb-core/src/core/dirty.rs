@@ -30,6 +30,7 @@
 //! `pgno << 1` values with the low bit marking deleted entries; a set of
 //! page numbers has the same meaning.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 
 use crate::idl::Id2List;
@@ -47,10 +48,19 @@ pub(crate) struct Layer {
     pub(crate) spilled: SpillSet,
 }
 
+/// Number of remembered positions in [`DirtyPages`].
+const HINTS: usize = 16;
+
 /// The dirty-page list of a write transaction.
 #[derive(Debug, Default)]
 pub(crate) struct DirtyPages {
     list: Id2List<Box<[u8]>>,
+    /// Where pages were last found in `list`, by `pgno % HINTS`. Only a
+    /// hint: the page number stored at the position is checked before use
+    /// (inserts and removals shift positions), so a stale hint just means
+    /// a binary search. The write path looks up the same few pages (root,
+    /// branch, leaf) many times per operation; this spares most searches.
+    hint: [Cell<u32>; HINTS],
 }
 
 impl DirtyPages {
@@ -75,13 +85,26 @@ impl DirtyPages {
         if self.list.is_empty() {
             return None;
         }
-        self.list.get(pgno).map(|b| &b[..])
+        let hint = &self.hint[pgno as usize % HINTS];
+        if let Some(b) = self.list.get_at(hint.get() as usize, pgno) {
+            return Some(b);
+        }
+        let i = self.list.search(pgno);
+        let b = self.list.get_at(i, pgno)?;
+        hint.set(i as u32);
+        Some(b)
     }
 
     /// Mutable access to the buffer of dirty page `pgno`.
     #[inline]
     pub(crate) fn get_mut(&mut self, pgno: u64) -> Option<&mut [u8]> {
-        self.list.get_mut(pgno).map(|b| &mut b[..])
+        let hint = &self.hint[pgno as usize % HINTS];
+        let mut i = hint.get() as usize;
+        if self.list.get_at(i, pgno).is_none() {
+            i = self.list.search(pgno);
+            hint.set(i as u32);
+        }
+        self.list.get_at_mut(i, pgno).map(|b| &mut b[..])
     }
 
     /// `true` if `pgno` is dirty.

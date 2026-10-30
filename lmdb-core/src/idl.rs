@@ -126,7 +126,7 @@ impl Idl {
         }
         loop {
             let pgno = self.ids[i - 1];
-            if self.ids[i - 1 - n2] == pgno + n2 as u64 {
+            if self.ids[i - 1 - n2] == pgno.wrapping_add(n2 as u64) {
                 return Some(i);
             }
             i -= 1;
@@ -247,6 +247,22 @@ impl<V> Id2List<V> {
     /// Mutable access to the value stored for `id`, if any.
     pub fn get_mut(&mut self, id: u64) -> Option<&mut V> {
         let i = self.search(id);
+        self.get_at_mut(i, id)
+    }
+
+    /// The value at position `i`, if the ID stored there is `id` (for
+    /// callers that remember where they found an ID last time).
+    #[inline]
+    pub fn get_at(&self, i: usize, id: u64) -> Option<&V> {
+        match self.items.get(i) {
+            Some((k, v)) if *k == id => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Mutable [`Id2List::get_at`].
+    #[inline]
+    pub fn get_at_mut(&mut self, i: usize, id: u64) -> Option<&mut V> {
         match self.items.get_mut(i) {
             Some((k, v)) if *k == id => Some(v),
             _ => None,

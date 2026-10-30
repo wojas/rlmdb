@@ -59,7 +59,7 @@ pub struct PageRef<'a> {
 impl<'a> PageRef<'a> {
     /// Wraps a page. Returns `None` if `buf` cannot even hold a header.
     #[inline]
-    pub fn new(buf: &'a [u8]) -> Option<PageRef<'a>> {
+    pub const fn new(buf: &'a [u8]) -> Option<PageRef<'a>> {
         if buf.len() < PAGE_HDR_SIZE {
             return None;
         }
@@ -178,6 +178,19 @@ impl<'a> PageRef<'a> {
     pub fn node(&self, i: usize) -> Option<NodeRef<'a>> {
         let off = self.node_offset(i)?;
         NodeRef::new(self.buf.get(off..)?)
+    }
+
+    /// `NODEKEY(NODEPTR(p, i))`: the key of node `i`; the same as
+    /// `self.node(i)?.key()` (`None` in the same cases), without building
+    /// the [`NodeRef`]. Used by binary searches.
+    #[inline]
+    pub fn node_key(&self, i: usize) -> Option<&'a [u8]> {
+        let off = self.node_offset(i)?;
+        // The key size field ends where the node header does, so reading
+        // it checks that the header lies within the page, as `node` does.
+        let ksize = usize::from(get_u16(self.buf, off.checked_add(NODE_KSIZE)?)?);
+        let start = off + NODE_DATA;
+        self.buf.get(start..start.checked_add(ksize)?)
     }
 
     /// `LEAF2KEY(p, i, ks)`: key `i` of a `P_LEAF2` page with `ksize`-byte keys.

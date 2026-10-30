@@ -178,10 +178,16 @@ impl Environment {
             let mut freecount = 0u64;
             let mut c = txn.cursor(Dbi::FREE)?;
             while let Some((_, data)) = c.next()? {
-                freecount += Idl::encoded_len(data).ok_or(MdbError::Corrupted)?;
+                freecount =
+                    freecount.wrapping_add(Idl::encoded_len(data).ok_or(MdbError::Corrupted)?);
             }
             let free = core.dbs.borrow()[FREE_DBI as usize].db;
-            freecount += free.branch_pages + free.leaf_pages + free.overflow_pages;
+            // size_t arithmetic, as in C: a corrupt count fails the page
+            // count check at the end instead.
+            freecount = freecount
+                .wrapping_add(free.branch_pages)
+                .wrapping_add(free.leaf_pages)
+                .wrapping_add(free.overflow_pages);
             new_root = core.next_pgno.wrapping_sub(1).wrapping_sub(freecount);
             meta1.last_pgno = new_root;
             meta1.dbs[MAIN_DBI as usize] = main;
@@ -202,6 +208,7 @@ impl Environment {
         }
         w.wlen[0] = 2 * ps;
 
+        w.nesting = 1;
         let walked = w.cwalk(core, root, false)?;
         if walked != new_root {
             // Page leak or corrupt DB.
@@ -261,7 +268,15 @@ struct CopyWriter<'o, W: Write> {
     /// `mc_next_pgno`: the number the next page written gets.
     next_pgno: u64,
     ps: usize,
+    /// How many `cwalk`s are running (the main DB, a named DB, its
+    /// duplicates' sub-DBs). C recurses without a limit, so a corrupt
+    /// sub-DB record pointing back up the tree overflows its stack.
+    nesting: usize,
 }
+
+/// The deepest valid `cwalk` nesting: main DB, named DB, sub-DB of
+/// duplicates.
+const MAX_CWALK_NESTING: usize = 3;
 
 impl<'o, W: Write> CopyWriter<'o, W> {
     fn new(out: &'o mut W, ps: usize) -> Self {
@@ -272,6 +287,7 @@ impl<'o, W: Write> CopyWriter<'o, W> {
             toggle: 0,
             next_pgno: NUM_METAS as u64,
             ps,
+            nesting: 0,
         }
     }
 
@@ -418,7 +434,13 @@ impl<'o, W: Write> CopyWriter<'o, W> {
             } else if node.is_subdata() {
                 let data = node.inline_data().ok_or(MdbError::Corrupted)?;
                 let mut db = Db::read(data).ok_or(MdbError::Corrupted)?;
-                db.root = self.cwalk(txn, db.root, node.is_dupdata())?;
+                if self.nesting >= MAX_CWALK_NESTING {
+                    return Err(MdbError::Corrupted.into());
+                }
+                self.nesting += 1;
+                let walked = self.cwalk(txn, db.root, node.is_dupdata());
+                self.nesting -= 1;
+                db.root = walked?;
                 let c = copy.get_or_insert_with(|| leaf.to_vec());
                 let range = page_ops::node_data_range(c, i).ok_or(MdbError::Corrupted)?;
                 db.write(c.get_mut(range).ok_or(MdbError::Corrupted)?);

@@ -69,7 +69,8 @@ mod imp {
 
     // SAFETY: a process-shared mutex is designed to be used from any thread
     // of any process; the pointer stays valid while the owning `LockMap`
-    // lives (SharedLocks is always dropped before its map, see core::env).
+    // lives (LockRegion closes its SharedLocks before its LockMap is
+    // unmapped, see core::reader).
     unsafe impl Send for SharedMutex {}
     // SAFETY: as above; pthread mutex operations are thread-safe.
     unsafe impl Sync for SharedMutex {}

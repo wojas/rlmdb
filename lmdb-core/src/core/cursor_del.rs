@@ -19,7 +19,7 @@ use crate::core::cursor_put::{NodeVal, MDB_NOSPILL};
 use crate::core::dbi::{DB_DIRTY, DB_STALE};
 use crate::core::page_ops;
 use crate::core::split::node_body;
-use crate::core::txn_rw::{RwTxn, TXN_DIRTY, TXN_ERROR};
+use crate::core::txn_rw::{FailOnPanic, RwTxn, TXN_DIRTY, TXN_ERROR};
 use crate::core::wcursor::{CRef, SUBPAGE};
 use crate::error::{Error, MdbError, Result};
 use crate::format::layout::PAGE_HDR_SIZE;
@@ -51,6 +51,15 @@ impl<'env> RwTxn<'env> {
     /// `_mdb_cursor_del`: delete the item at `mc`; with `MDB_NODUPDATA` all
     /// duplicates of its key.
     pub(crate) fn del_at(&mut self, mc: CRef, flags: u32) -> Result<()> {
+        let mut txn = FailOnPanic(self);
+        let rc = txn.del_at0(mc, flags);
+        if let Err(e) = &rc {
+            txn.fail_unless_clean(e);
+        }
+        rc
+    }
+
+    fn del_at0(&mut self, mc: CRef, flags: u32) -> Result<()> {
         self.check_usable()?;
         if !self.cur(mc).is_init() {
             return Err(Error::einval());
@@ -100,6 +109,11 @@ impl<'env> RwTxn<'env> {
         };
         if nflags & F_DUPDATA != 0 {
             let mx = CRef::sub(mc.slot);
+            if mc.sub || !self.w.cursors.slot(mc.slot).is_some_and(|s| s.x.is_some()) {
+                // F_DUPDATA in a database without MDB_DUPSORT, or among
+                // duplicates (C would follow a NULL sub-cursor).
+                return fail(self, MdbError::Corrupted.into());
+            }
             if flags & MDB_NODUPDATA != 0 {
                 // C uses the sub-cursor's record as it is, which is stale if
                 // the sub-cursor was never set up for this key (after a
@@ -213,7 +227,7 @@ impl<'env> RwTxn<'env> {
                 }
                 continue;
             } else if w3.ki[top] > ki {
-                w3.ki[top] -= 1;
+                w3.ki[top] = w3.ki[top].wrapping_sub(1);
             }
         }
         self.rebalance(mc)?;
@@ -241,10 +255,13 @@ impl<'env> RwTxn<'env> {
             if self.page_id(m3, top) != mp || self.cur(m3).ki[top] < mc_ki {
                 continue;
             }
+            // Did the delete put m3 on this node (it was on the deleted
+            // one, or past the end of the page)?
+            let mut moved = m3 == mc || self.cur(m3).flags & C_DEL != 0;
             // If m3 points past last node in page, find next sibling.
             if usize::from(self.cur(m3).ki[top]) >= nkeys {
                 match self.read_op(m3, |txn, c, _| c.sibling(txn, true)) {
-                    Ok(()) => {}
+                    Ok(()) => moved = true,
                     Err(e) if e.not_found() => {
                         self.cur_mut(m3).flags |= C_EOF;
                         continue;
@@ -252,10 +269,10 @@ impl<'env> RwTxn<'env> {
                     Err(e) => return Err(e),
                 }
             }
-            if !m3.sub
-                && self.w.cursors.slot(s).is_some_and(|sl| sl.x.is_some())
-                && self.cur(m3).flags & C_EOF == 0
-            {
+            // (C also skips cursors with C_EOF here; m3 is on an item now,
+            // and C_EOF may be left from before, e.g. by an MDB_SET that
+            // did not clear it: KNOWN_C_BUGS.md #28.)
+            if !m3.sub && self.w.cursors.slot(s).is_some_and(|sl| sl.x.is_some()) {
                 let nflags = {
                     let p = self.top_page(m3)?;
                     p.node(self.cur(m3).ki_top()).ok_or_else(corrupted)?.flags()
@@ -267,12 +284,22 @@ impl<'env> RwTxn<'env> {
                 // subDB) its sub-page is found through m3 anyway.
                 if nflags & F_DUPDATA != 0 {
                     let mx = CRef::sub(s);
-                    if !self.cur(mx).is_init() {
+                    // (A cursor the delete moved here starts at the first
+                    // duplicate even if its sub-cursor still looks set up:
+                    // the deleting cursor's can be left from an earlier
+                    // key, KNOWN_C_BUGS.md #18.)
+                    if moved || !self.cur(mx).is_init() {
                         self.xcursor_init1(m3)?;
                         self.read_op(mx, |txn, c, _| cursor_first(txn, c, None).map(|_| ()))?;
                     }
                 }
-                self.cur_mut(CRef::sub(s)).flags |= C_DEL;
+                // Its next MDB_NEXT must not skip the node's first
+                // duplicate. C marks the sub-cursor of every cursor at or
+                // after the deleted node, so one that stayed on its item
+                // returns that item again (KNOWN_C_BUGS.md #29).
+                if moved {
+                    self.cur_mut(CRef::sub(s)).flags |= C_DEL;
+                }
             }
         }
         self.cur_mut(mc).flags |= C_DEL;
@@ -377,16 +404,19 @@ impl<'env> RwTxn<'env> {
             rc = self.node_move(mn, mc, fromleft);
             if fromleft {
                 // If we inserted on left, bump position up.
-                oldki += 1;
+                oldki = oldki.wrapping_add(1);
             }
         } else {
             if !fromleft {
                 rc = self.page_merge(mn, mc);
             } else {
-                oldki += nkeys as u16;
+                // indx_t arithmetic, as in C (a corrupt page can hold
+                // more keys than fit).
+                oldki = oldki.wrapping_add(nkeys as u16);
                 let t = self.cur(mn).top;
-                let add = self.cur(mc).ki[t] + 1;
-                self.cur_mut(mn).ki[t] += add;
+                let add = self.cur(mc).ki[t].wrapping_add(1);
+                let ki = &mut self.cur_mut(mn).ki[t];
+                *ki = ki.wrapping_add(add);
                 // We want rebalance to find mn when doing fixups.
                 self.w
                     .cursors
@@ -467,8 +497,8 @@ impl<'env> RwTxn<'env> {
             let depth = {
                 let db = self.db_mut(mc);
                 db.root = root;
-                db.depth -= 1;
-                db.branch_pages -= 1;
+                db.depth = db.depth.wrapping_sub(1);
+                db.branch_pages = db.branch_pages.wrapping_sub(1);
                 usize::from(db.depth)
             };
             {
@@ -614,9 +644,9 @@ impl<'env> RwTxn<'env> {
         {
             let db = self.db_mut(csrc);
             if src_is_leaf {
-                db.leaf_pages -= 1;
+                db.leaf_pages = db.leaf_pages.wrapping_sub(1);
             } else {
-                db.branch_pages -= 1;
+                db.branch_pages = db.branch_pages.wrapping_sub(1);
             }
         }
         // Adjust other cursors pointing to mp.
@@ -642,10 +672,10 @@ impl<'env> RwTxn<'env> {
             }
             if w3.pg[top] == psrc {
                 w3.pg[top] = pdst;
-                w3.ki[top] += nkeys as u16;
+                w3.ki[top] = w3.ki[top].wrapping_add(nkeys as u16);
                 w3.ki[top - 1] = cdst_ki_up;
             } else if w3.pg[top - 1] == csrc_pg_up && w3.ki[top - 1] > csrc_ki_up {
-                w3.ki[top - 1] -= 1;
+                w3.ki[top - 1] = w3.ki[top - 1].wrapping_sub(1);
             }
         }
         let snum = self.cur(cdst).snum;
@@ -821,12 +851,12 @@ impl<'env> RwTxn<'env> {
                     continue;
                 }
                 if m3 != cdst && w3.pg[top] == mpd && w3.ki[top] >= cdst_ki {
-                    w3.ki[top] += 1;
+                    w3.ki[top] = w3.ki[top].wrapping_add(1);
                 }
                 if m3 != csrc && w3.pg[top] == mps && w3.ki[top] == csrc_ki {
                     w3.pg[top] = cdst_pg;
                     w3.ki[top] = cdst_ki;
-                    w3.ki[top - 1] += 1;
+                    w3.ki[top - 1] = w3.ki[top - 1].wrapping_add(1);
                 }
             } else {
                 // Adding on the right, bump others down.
@@ -841,9 +871,9 @@ impl<'env> RwTxn<'env> {
                     if w3.ki[top] == 0 {
                         w3.pg[top] = cdst_pg;
                         w3.ki[top] = cdst_ki;
-                        w3.ki[top - 1] -= 1;
+                        w3.ki[top - 1] = w3.ki[top - 1].wrapping_sub(1);
                     } else {
-                        w3.ki[top] -= 1;
+                        w3.ki[top] = w3.ki[top].wrapping_sub(1);
                     }
                 }
             }
@@ -860,9 +890,10 @@ impl<'env> RwTxn<'env> {
         data: Option<&[u8]>,
         flags: u32,
     ) -> Result<()> {
-        let slot = self.open_slot(dbi, false);
-        let rc = self.del0_with(CRef::main(slot), key, data, flags);
-        self.close_slot(slot);
+        let mut txn = FailOnPanic(self);
+        let slot = txn.open_slot(dbi, false);
+        let rc = txn.del0_with(CRef::main(slot), key, data, flags);
+        txn.close_slot(slot);
         rc
     }
 
@@ -907,6 +938,10 @@ impl<'env> RwTxn<'env> {
     /// closed for every transaction at once, as in C; if this is a nested
     /// transaction that aborts, it is reopened (KNOWN_C_BUGS.md #20).
     pub(crate) fn mdb_drop(&mut self, dbi: usize, del: bool) -> Result<()> {
+        FailOnPanic(self).mdb_drop0(dbi, del)
+    }
+
+    fn mdb_drop0(&mut self, dbi: usize, del: bool) -> Result<()> {
         let slot = self.open_slot(dbi, true);
         let mc = CRef::main(slot);
         let subs = u32::from(self.db_of(mc).flags) & MDB_DUPSORT != 0;
@@ -998,7 +1033,7 @@ impl<'env> RwTxn<'env> {
                     };
                     if nflags & crate::format::node::F_BIGDATA != 0 {
                         let pg = ov.ok_or_else(corrupted)?;
-                        let pages = self.core.page(pg)?.overflow_pages() as usize;
+                        let pages = self.overflow_run_pages(pg)?;
                         self.w.free_pgs.append_range(pg, pages);
                         let db = self.db_mut(mc);
                         db.overflow_pages = db.overflow_pages.wrapping_sub(pages as u64);
