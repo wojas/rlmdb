@@ -265,7 +265,7 @@ impl<'env> RwTxn<'env> {
             } else {
                 data.size
             };
-            self.spill_check(mc, Some((key.len(), rsize)))?;
+            self.spill_check(mc, db.depth, Some((key.len(), rsize)))?;
         }
 
         if pos == Pos::NoRoot {
@@ -293,8 +293,16 @@ impl<'env> RwTxn<'env> {
         let mut first = true;
         loop {
             let item = data.item(mcount);
-            let (done_rc, did_insert_data) =
-                self.put_item(mc, key, item, &mut flags, insert_key, insert_data, first)?;
+            let (done_rc, did_insert_data) = self.put_item(
+                mc,
+                &db,
+                key,
+                item,
+                &mut flags,
+                insert_key,
+                insert_data,
+                first,
+            )?;
             insert_data = did_insert_data;
             if let Some(rc) = done_rc {
                 return rc.map(|()| mcount);
@@ -404,15 +412,20 @@ impl<'env> RwTxn<'env> {
     }
 
     /// The start of `mdb_page_spill`: estimate how many pages the operation
-    /// of `mc` may dirty (`kd` = key and data size of a put) and spill
-    /// dirty pages to disk if the dirty list does not have room for that
-    /// many.
-    pub(crate) fn spill_check(&mut self, mc: CRef, kd: Option<(usize, usize)>) -> Result<()> {
+    /// of `mc` may dirty (`depth` = its tree's `md_depth`, `kd` = key and
+    /// data size of a put) and spill dirty pages to disk if the dirty list
+    /// does not have room for that many.
+    pub(crate) fn spill_check(
+        &mut self,
+        mc: CRef,
+        depth: u16,
+        kd: Option<(usize, usize)>,
+    ) -> Result<()> {
         if self.cur(mc).is_sub() {
             return Ok(());
         }
         let ps = self.psize();
-        let mut i = usize::from(self.db_of(mc).depth);
+        let mut i = usize::from(depth);
         // Named DBs also dirty the main DB.
         if self.cur(mc).dbi >= CORE_DBS as usize {
             i += usize::from(self.core.dbs.borrow()[MAIN_DBI as usize].db.depth);
@@ -429,13 +442,16 @@ impl<'env> RwTxn<'env> {
     }
 
     /// One pass of `mdb_cursor_put` from the insert/overwrite decision on
-    /// (the body that `MDB_MULTIPLE` repeats via `goto more`). Returns
-    /// `(Some(rc), _)` when the put is finished with `rc`, else
-    /// `(None, insert_data)` for the caller's bookkeeping.
+    /// (the body that `MDB_MULTIPLE` repeats via `goto more`). `db` is the
+    /// tree's record as the put began (only its flags and `md_pad` are
+    /// used, which a put does not change). Returns `(Some(rc), _)` when the
+    /// put is finished with `rc`, else `(None, insert_data)` for the
+    /// caller's bookkeeping.
     #[allow(clippy::too_many_arguments)]
     fn put_item(
         &mut self,
         mc: CRef,
+        db: &Db,
         key: &[u8],
         item: NodeVal<'_>,
         flags: &mut u32,
@@ -443,7 +459,6 @@ impl<'env> RwTxn<'env> {
         insert_data: bool,
         first: bool,
     ) -> Result<(Option<Result<()>>, bool)> {
-        let db = self.db_of(mc);
         let dupsort = u32::from(db.flags) & MDB_DUPSORT != 0;
         let mut do_sub = None;
         // The node data a `DupStep::NewSub` built (a scratch buffer).

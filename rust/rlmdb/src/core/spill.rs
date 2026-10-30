@@ -184,7 +184,7 @@ impl<'env> RwTxn<'env> {
         }
         // Otherwise, if belonging to a parent txn, the page remains spilled
         // until the child commits.
-        if !self.core.dirty.insert(pgno, buf) {
+        if self.core.dirty.insert(pgno, buf).is_none() {
             return Err(MdbError::Corrupted.into());
         }
         self.w.dirty_room -= 1;
@@ -451,6 +451,201 @@ mod tests {
             }
             assert_eq!(got.len(), n);
         }
+    }
+
+    /// A database's contents, as the slot tests below expect them.
+    type Model = std::collections::BTreeMap<Vec<u8>, Vec<u8>>;
+
+    /// The key under cursor `c`.
+    fn current(t: &mut RwTxn<'_>, c: crate::core::CursorId) -> Vec<u8> {
+        let (k, _) = t
+            .cursor_get(c, None, None, CursorOp::GetCurrent)
+            .unwrap()
+            .unwrap();
+        k.to_vec()
+    }
+
+    /// Overwrites the item under each cursor (`MDB_CURRENT`, same size).
+    fn overwrite(t: &mut RwTxn<'_>, cur: &[crate::core::CursorId], tag: u32, model: &mut Model) {
+        for &c in cur {
+            let k = current(t, c);
+            let v = value(u32::from_be_bytes(k[..].try_into().unwrap()), tag, 200);
+            t.cursor_put(c, &k, &v, WriteFlags::CURRENT).unwrap();
+            model.insert(k, v);
+        }
+    }
+
+    /// Moves cursor `c` `n` items with `op`, wrapping around at the ends.
+    fn step(t: &mut RwTxn<'_>, c: crate::core::CursorId, op: CursorOp, n: usize) {
+        for _ in 0..n {
+            if t.cursor_get(c, None, None, op).unwrap().is_none() {
+                let wrap = if op == CursorOp::Next {
+                    CursorOp::First
+                } else {
+                    CursorOp::Last
+                };
+                t.cursor_get(c, None, None, wrap).unwrap().unwrap();
+            }
+        }
+    }
+
+    /// Puts new keys from `start` on until a put spills; returns the next
+    /// key.
+    fn fill(t: &mut RwTxn<'_>, db: Dbi, start: u32, model: &mut Model) -> u32 {
+        let next = fill_until_spill(t, db, start, 200);
+        for i in start..next {
+            model.insert(key(i).to_vec(), value(i, 0, 200));
+        }
+        next
+    }
+
+    /// Write cursors remember where their pages are in the dirty list
+    /// (slot hints, see the `dirty` module), and a hint must never lead
+    /// to a wrong page. Here the parent's cursors write through children
+    /// that copy the parent's pages, spill (their own pages, and pages the
+    /// cursors held before), unspill what the parent spilled, and commit or
+    /// abort; the parent spills pages its cursors touched before and writes
+    /// through them again after each child. Every write is checked against
+    /// a model, the cursors' positions after an abort against where they
+    /// were, and the result by a page audit.
+    #[test]
+    fn cursor_slots_survive_spills_and_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path(), 128);
+        let mut t = env.begin_rw_txn().unwrap();
+        let db = t.create_db(Some("h"), DatabaseFlags::CREATE).unwrap();
+        let mut model = Model::new();
+        for i in 0..300u32 {
+            t.put(db, &key(i), &value(i, 0, 200), WriteFlags::empty())
+                .unwrap();
+            model.insert(key(i).to_vec(), value(i, 0, 200));
+        }
+        let cur = [t.open_cursor(db).unwrap(), t.open_cursor(db).unwrap()];
+        t.cursor_get(cur[0], Some(&key(10)), None, CursorOp::Set)
+            .unwrap()
+            .unwrap();
+        t.cursor_get(cur[1], Some(&key(290)), None, CursorOp::Set)
+            .unwrap()
+            .unwrap();
+        let mut next = 1000u32;
+        for round in 0..8u32 {
+            overwrite(&mut t, &cur, round, &mut model);
+            // Leave the touched pages behind and spill.
+            step(&mut t, cur[0], CursorOp::Next, 25);
+            step(&mut t, cur[1], CursorOp::Prev, 25);
+            next = fill(&mut t, db, next, &mut model);
+            overwrite(&mut t, &cur, 10 + round, &mut model);
+
+            let saved = model.clone();
+            let at = [current(&mut t, cur[0]), current(&mut t, cur[1])];
+            let commit = round % 2 == 0;
+            {
+                let mut c = t.begin_nested_txn().unwrap();
+                overwrite(&mut c, &cur, 20 + round, &mut model);
+                step(&mut c, cur[0], CursorOp::Next, 40);
+                step(&mut c, cur[1], CursorOp::Prev, 40);
+                overwrite(&mut c, &cur, 30 + round, &mut model);
+                next = fill(&mut c, db, next, &mut model);
+                step(&mut c, cur[0], CursorOp::Prev, 60);
+                overwrite(&mut c, &cur, 40 + round, &mut model);
+                // Delete under one cursor, then put it on a key again.
+                let k = current(&mut c, cur[1]);
+                c.cursor_del(cur[1], WriteFlags::empty()).unwrap();
+                model.remove(&k);
+                c.cursor_get(cur[1], Some(&k), None, CursorOp::SetRange)
+                    .unwrap()
+                    .unwrap();
+                overwrite(&mut c, &cur, 50 + round, &mut model);
+                if commit {
+                    c.commit().unwrap();
+                } else {
+                    c.abort();
+                }
+            }
+            if !commit {
+                model = saved;
+                assert_eq!(current(&mut t, cur[0]), at[0], "round {round}");
+                assert_eq!(current(&mut t, cur[1]), at[1], "round {round}");
+            }
+            overwrite(&mut t, &cur, 60 + round, &mut model);
+            step(&mut t, cur[0], CursorOp::Next, 3);
+            overwrite(&mut t, &cur, 70 + round, &mut model);
+            let mut c = t.cursor(db).unwrap();
+            let mut got = Model::new();
+            while let Some((k, v)) = c.next().unwrap() {
+                got.insert(k.to_vec(), v.to_vec());
+            }
+            assert!(got == model, "round {round}");
+        }
+        assert!(!t.core.spilled.is_empty(), "no spill");
+        for c in cur {
+            t.close_cursor(c);
+        }
+        t.commit().unwrap();
+        audit(&env);
+        let want: Pairs = model.into_iter().collect();
+        assert!(contents(&env, db) == want);
+    }
+
+    /// The case slot hints are checked for: a cursor leaves a dirty page
+    /// by moving (its slot stays in the cursor), the page is spilled (its
+    /// slot emptied), written again (unspilled into another slot) and the
+    /// cursor comes back. Reading and writing through it must see the new
+    /// version, not whatever its old slot holds.
+    #[test]
+    fn cursor_returns_to_a_spilled_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path(), 1024);
+        let db = {
+            let mut t = env.begin_rw_txn().unwrap();
+            let db = t.create_db(Some("r"), DatabaseFlags::CREATE).unwrap();
+            for i in 0..2000u32 {
+                t.put(db, &key(i), &value(i, 0, 200), WriteFlags::empty())
+                    .unwrap();
+            }
+            t.commit().unwrap();
+            db
+        };
+        let mut model: Model = contents(&env, db).into_iter().collect();
+        let mut t = env.begin_rw_txn().unwrap();
+        let c = t.open_cursor(db).unwrap();
+        for round in 0..4u32 {
+            // Dirty the cursor's leaf through it, then move away.
+            t.cursor_get(c, Some(&key(100 + 400 * round)), None, CursorOp::Set)
+                .unwrap()
+                .unwrap();
+            overwrite(&mut t, &[c], round, &mut model);
+            let left = current(&mut t, c);
+            step(&mut t, c, CursorOp::Next, 150);
+            // A page dirtied later, so that the old leaf's slot is not the
+            // first one reused below.
+            let last = key(1999).to_vec();
+            let v = value(1999, round, 200);
+            t.put(db, &last, &v, WriteFlags::empty()).unwrap();
+            model.insert(last, v);
+            // Spill everything not under a cursor, the old leaf too.
+            let m0 = crate::core::wcursor::CRef::main(t.open_slot(db.0 as usize, false));
+            t.page_spill(m0, 1 << 20).unwrap();
+            t.close_slot(m0.slot);
+            // Write the old leaf again: it comes back in another slot.
+            let v = value(7, 20 + round, 200);
+            t.put(db, &left, &v, WriteFlags::empty()).unwrap();
+            model.insert(left.clone(), v.clone());
+            // Back to it, through the cursor's old slot hint.
+            step(&mut t, c, CursorOp::Prev, 150);
+            let (k, got) = t
+                .cursor_get(c, None, None, CursorOp::GetCurrent)
+                .unwrap()
+                .unwrap();
+            assert_eq!((k, got), (&left[..], &v[..]), "round {round}");
+            overwrite(&mut t, &[c], 40 + round, &mut model);
+        }
+        assert!(!t.core.spilled.is_empty(), "no spill");
+        t.close_cursor(c);
+        t.commit().unwrap();
+        audit(&env);
+        let want: Pairs = model.into_iter().collect();
+        assert!(contents(&env, db) == want);
     }
 
     /// C's limitation, kept (`KNOWN_C_BUGS.md`): a child starts with its

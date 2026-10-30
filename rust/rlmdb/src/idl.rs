@@ -196,7 +196,8 @@ impl Idl {
 }
 
 /// A list of `(pgno, value)` pairs sorted ascending by page number
-/// (`MDB_ID2L`), used for dirty pages. `V` is the page buffer type.
+/// (`MDB_ID2L`), used for dirty pages. `V` is what a page number maps to
+/// (for dirty pages, the slot holding the page's buffer).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Id2List<V> {
     items: Vec<(u64, V)>,
