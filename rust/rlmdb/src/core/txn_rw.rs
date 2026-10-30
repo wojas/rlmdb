@@ -614,9 +614,7 @@ impl<'env> RwTxn<'env> {
     /// with `MdbError::BadDbi`.
     ///
     /// The main DB cannot be deleted: for [`Dbi::MAIN`] this is
-    /// [`RwTxn::clear_db`] (which, as in C, does not free the pages of the
-    /// named databases recorded in it). `EINVAL` for the free DB or an
-    /// unknown handle.
+    /// [`RwTxn::clear_db`]. `EINVAL` for the free DB or an unknown handle.
     pub fn drop_db(&mut self, db: Dbi) -> Result<()> {
         let dbi = self.drop_checks(db)?;
         self.mdb_drop(dbi, true)
@@ -626,6 +624,15 @@ impl<'env> RwTxn<'env> {
     /// free list (as for [`RwTxn::drop_db`]), its record is reset to an
     /// empty tree with the same flags and written at commit, and cursors on
     /// it become unpositioned. The handle stays valid.
+    ///
+    /// Emptying the main DB of an environment with named databases differs
+    /// between the formats, as between C 0.9 and C 1.0. LMDB 0.9 removes
+    /// their records but frees none of their pages, which leak
+    /// (`KNOWN_C_BUGS.md` #21). LMDB 1.0 deletes every named database first
+    /// ([`RwTxn::drop_db`], so their pages are freed), and fails with
+    /// `MdbError::DbisBusy` while a handle of a named database is open in the
+    /// environment (unless the main DB is `DUP_SORT` or `INTEGER_KEY`, which
+    /// rules out named databases).
     pub fn clear_db(&mut self, db: Dbi) -> Result<()> {
         let dbi = self.drop_checks(db)?;
         self.mdb_drop(dbi, false)
@@ -863,6 +870,18 @@ impl<'env> RwTxn<'env> {
         let (mc, mx) = ro.parts();
         write_back(&mut self.w.cursors, c, mc, mx);
         res
+    }
+
+    /// `mdb_cursor_is_db` (LMDB 1.0) on a handle: `true` if the cursor is
+    /// on the record of a named database (see [`RoCursor::current_is_db`]).
+    pub fn cursor_is_db(&mut self, id: CursorId) -> Result<bool> {
+        let slot = self.cursor_slot(id)?;
+        let c = CRef::main(slot);
+        let dbi = self.cur(c).dbi;
+        let dcmp = self.core.dbs.borrow()[dbi].dup_cmp;
+        let core = &self.core;
+        let (mc, mx) = read_cursors(core, &self.w.cursors, c)?;
+        Ok(RoCursor::from_parts(core, Dbi(dbi as u32), mc, mx, dcmp).current_is_db())
     }
 
     /// `mdb_cursor_put` on a handle (see [`RwCursor::put`]).

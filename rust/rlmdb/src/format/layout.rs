@@ -154,6 +154,25 @@ impl Format {
             Format::V10 => &V10,
         }
     }
+
+    /// The name of the format as users write it: `"0.9"` or `"1.0"` (the
+    /// values of `RLMDB_DEFAULT_FORMAT` and of the tools' `-F`).
+    pub const fn name(self) -> &'static str {
+        match self {
+            Format::V09 => "0.9",
+            Format::V10 => "1.0",
+        }
+    }
+
+    /// The format called `name` ([`Format::name`]): exactly `"0.9"` or
+    /// `"1.0"`, else `None`.
+    pub fn from_name(name: &[u8]) -> Option<Format> {
+        match name {
+            b"0.9" => Some(Format::V09),
+            b"1.0" => Some(Format::V10),
+            _ => None,
+        }
+    }
 }
 
 /// The overflow reference stored as the data of an `F_BIGDATA` node: just
@@ -355,6 +374,17 @@ impl Layout {
         matches!(self.format, Format::V10)
     }
 
+    /// Whether `mdb_drop` of the main DB first deletes the named databases
+    /// recorded in it (`mdb_drop(txn, i, 1)` for each, freeing their pages),
+    /// and refuses with `MDB_DBIS_BUSY` while a named database is open (1.0,
+    /// mdb.c 1.0 `mdb_drop`), instead of only emptying the main DB, which
+    /// leaks the named databases' pages (0.9, `KNOWN_C_BUGS.md` #21). Which
+    /// pages are free afterwards depends on it.
+    #[inline(always)]
+    pub const fn drops_named_dbs_with_main(&self) -> bool {
+        matches!(self.format, Format::V10)
+    }
+
     // --- nodes -------------------------------------------------------------
 
     /// The bytes a key of `ksize` bytes takes in a node: `ksize`, or
@@ -505,6 +535,27 @@ impl Layout {
 mod tests {
     use super::*;
     use crate::format::page::{P_LEAF, P_SUBP};
+
+    #[test]
+    fn format_names() {
+        for f in [Format::V09, Format::V10] {
+            assert_eq!(Format::from_name(f.name().as_bytes()), Some(f));
+        }
+        assert_eq!(Format::V09.name(), "0.9");
+        assert_eq!(Format::V10.name(), "1.0");
+        for bad in [
+            &b""[..],
+            b"0.9 ",
+            b" 1.0",
+            b"1",
+            b"10",
+            b"1.0.2",
+            b"0.90",
+            b"V10",
+        ] {
+            assert_eq!(Format::from_name(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn v09_numbers() {

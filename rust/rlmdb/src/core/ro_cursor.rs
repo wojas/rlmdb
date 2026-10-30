@@ -191,6 +191,23 @@ impl<'txn> RoCursor<'txn> {
         current_has_dups(&self.mc)
     }
 
+    /// `mdb_cursor_is_db` (LMDB 1.0): `true` if the cursor is on the record
+    /// of a named database (an `F_SUBDATA` node without `F_DUPDATA`), which
+    /// only the main DB has. `mdb_dump -a` and `mdb_stat -a` of 1.0 list
+    /// the named databases with it.
+    pub fn current_is_db(&self) -> bool {
+        let mc = &self.mc;
+        if !mc.is_initialized() || mc.depth() == 0 {
+            return false;
+        }
+        let page = mc.top_page();
+        !page.is_leaf2()
+            && page.node(mc.ki_top()).is_some_and(|n| {
+                n.flags() & (crate::format::node::F_DUPDATA | crate::format::node::F_SUBDATA)
+                    == crate::format::node::F_SUBDATA
+            })
+    }
+
     /// `mdb_cursor_get`: perform `op`. `key` is required by `Set`, `SetKey`,
     /// `SetRange`, `GetBoth` and `GetBothRange`; `data` by `GetBoth` and
     /// `GetBothRange` (`EINVAL` if missing). Returns `Ok(None)` for
