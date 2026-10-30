@@ -11,12 +11,18 @@
 //! 4. `mdb_env_open2`: read both meta pages with `pread`
 //!    (`mdb_env_read_header`); an empty file is a new environment whose two
 //!    meta pages are written immediately (`mdb_env_init_meta`), with the OS
-//!    page size capped at 32 KiB. The map size is the configured one, else the
-//!    one recorded in the meta (1 MiB for a new file), raised to cover all
-//!    pages in use. Then map the file read-only.
+//!    page size capped at the format's `MAX_PAGESIZE` (32 KiB for LMDB 0.9).
+//!    The map size is the configured one, else the one recorded in the meta
+//!    (1 MiB for a new file), raised to cover all pages in use. Then map the
+//!    file read-only.
 //! 5. Open the `O_DSYNC` descriptor used for meta-page writes (`me_mfd`).
 //! 6. If we initialised the lock table, publish the current txnid and
 //!    downgrade to a shared lock (`mdb_env_share_locks`).
+//!
+//! The data-file format of the environment ([`Format`]) decides the page
+//! layout; the environment keeps its [`Layout`] and every transaction reads
+//! pages through it. Every environment is LMDB 0.9 for now: a request for
+//! [`Format::V10`] fails at open with `ENOTSUP` (`DUAL_FORMAT.md` §7).
 //!
 //! Dropping an [`Environment`] mirrors `mdb_env_close0`: unmap the data
 //! file, close the descriptors, clear any reader slots this process still
@@ -40,8 +46,7 @@ use crate::core::txn_rw::RwTxn;
 use crate::core::{Info, Stat};
 use crate::error::{Error, MdbError, Result};
 use crate::flags::{DatabaseFlags, EnvironmentFlags};
-use crate::format;
-use crate::format::layout::{META_OFFSET_IN_PAGE, META_SIZE, PAGE_HDR_SIZE};
+use crate::format::layout::{Format, Layout, META_SIZE, V09, V10};
 use crate::format::meta::{pick_newest, Meta};
 use crate::idl::Idl;
 use crate::os::{self, DataMap};
@@ -133,6 +138,7 @@ pub struct EnvironmentBuilder {
     max_readers: u32,
     max_dbs: u32,
     flags: EnvironmentFlags,
+    format: Option<Format>,
 }
 
 impl Default for EnvironmentBuilder {
@@ -142,6 +148,7 @@ impl Default for EnvironmentBuilder {
             max_readers: DEFAULT_READERS,
             max_dbs: 0,
             flags: EnvironmentFlags::empty(),
+            format: None,
         }
     }
 }
@@ -179,6 +186,14 @@ impl EnvironmentBuilder {
     /// Environment flags.
     pub fn flags(&mut self, flags: EnvironmentFlags) -> &mut Self {
         self.flags = flags;
+        self
+    }
+
+    /// The data-file format to use. Only [`Format::V09`] is implemented so
+    /// far: opening with [`Format::V10`] fails with `ENOTSUP`. Without a
+    /// request the environment is LMDB 0.9.
+    pub fn format(&mut self, format: Format) -> &mut Self {
+        self.format = Some(format);
         self
     }
 
@@ -226,7 +241,11 @@ pub struct Environment {
     /// exercise spilling with small transactions.
     dirty_limit: AtomicUsize,
     max_readers: u32,
+    /// The page layout of the environment's data-file format.
+    layout: &'static Layout,
     node_max: usize,
+    /// `me_maxkey` / `ENV_MAXKEY`: checked on every put.
+    max_key: usize,
     path: PathBuf,
     _registration: Registration,
 }
@@ -247,6 +266,7 @@ impl std::fmt::Debug for Environment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Environment")
             .field("path", &self.path)
+            .field("format", &self.layout.format)
             .field("page_size", &self.page_size)
             .field("map_size", &self.map_size())
             .finish_non_exhaustive()
@@ -265,6 +285,14 @@ impl Environment {
         if flags & !(CHANGEABLE | CHANGELESS) != 0 || opts.max_readers < 1 {
             return Err(Error::einval());
         }
+        // The 1.0 layout is described (`layout::V10`) but the engine does
+        // not write it yet: refuse it before touching any file
+        // (DUAL_FORMAT.md §7, stage 2). Sniffing an existing file and the
+        // process default come with stage 4.
+        let layout: &'static Layout = match opts.format {
+            None | Some(Format::V09) => &V09,
+            Some(Format::V10) => return Err(Error::errno(libc::ENOTSUP)),
+        };
         let read_only = flags & MDB_RDONLY != 0;
         if read_only {
             // Silently ignore WRITEMAP when we're only getting read access.
@@ -297,18 +325,19 @@ impl Environment {
         }
 
         // mdb_env_open2
-        let (page_size, mut meta, new_env) = match read_header(&data_file)? {
+        let max_pagesize = layout.max_pagesize;
+        let (page_size, mut meta, new_env) = match read_header(&data_file, layout)? {
             Some(meta) => (meta.page_size() as usize, meta, false),
             None => {
-                let ps = os::os_page_size().min(MAX_PAGESIZE);
+                let ps = os::os_page_size().min(max_pagesize);
                 (
                     ps,
-                    Meta::new_env(ps as u32, DEFAULT_MAPSIZE as u64, flags),
+                    Meta::new_env_with_layout(layout, ps as u32, DEFAULT_MAPSIZE as u64, flags),
                     true,
                 )
             }
         };
-        if !page_size.is_power_of_two() || !(MIN_PAGESIZE..=MAX_PAGESIZE).contains(&page_size) {
+        if !page_size.is_power_of_two() || !(MIN_PAGESIZE..=max_pagesize).contains(&page_size) {
             return Err(MdbError::Invalid.into());
         }
         let mut map_size = opts.map_size.unwrap_or(meta.map_size as usize);
@@ -325,7 +354,7 @@ impl Environment {
             // mdb_env_init_meta: write both meta pages before mapping, so the
             // file is valid even if the rest of the open fails.
             let mut buf = vec![0u8; 2 * page_size];
-            meta.write_initial_pages(&mut buf, page_size);
+            meta.write_initial_pages_with_layout(&mut buf, page_size, layout);
             os::write_all_at(&data_file, &buf, 0)?;
         }
 
@@ -363,7 +392,9 @@ impl Environment {
             map_size: AtomicUsize::new(map_size),
             dirty_limit: AtomicUsize::new(MDB_IDL_UM_MAX),
             max_readers,
-            node_max: format::node_max(page_size),
+            layout,
+            node_max: layout.node_max(page_size),
+            max_key: layout.max_key_size(page_size),
             path: path.to_path_buf(),
             _registration: registration,
         };
@@ -385,13 +416,14 @@ impl Environment {
         let mut buf = [0u8; META_SIZE];
         if !self
             .data_map()
-            .read_volatile(i * self.page_size + META_OFFSET_IN_PAGE, &mut buf)
+            .read_volatile(i * self.page_size + self.layout.meta_offset(), &mut buf)
         {
             return Err(MdbError::Corrupted.into());
         }
         std::sync::atomic::fence(Ordering::SeqCst);
         let meta = Meta::read(&buf).ok_or(MdbError::Corrupted)?;
-        meta.validate().map_err(|_| MdbError::Corrupted)?;
+        meta.validate_with_layout(self.layout)
+            .map_err(|_| MdbError::Corrupted)?;
         Ok(meta)
     }
 
@@ -448,6 +480,12 @@ impl Environment {
     /// `me_nodemax`: largest node that stays inline in a page.
     pub(crate) fn node_max(&self) -> usize {
         self.node_max
+    }
+
+    /// The page layout of the environment's data-file format.
+    #[inline]
+    pub(crate) fn layout(&self) -> &'static Layout {
+        self.layout
     }
 
     /// `me_mfd`: the `O_DSYNC` descriptor for meta page writes (`None` for
@@ -585,9 +623,15 @@ impl Environment {
         self.max_readers
     }
 
-    /// `mdb_env_get_maxkeysize`: 511.
+    /// `mdb_env_get_maxkeysize`: the largest key (and `DUP_SORT` data
+    /// item) this environment writes, 511 for LMDB 0.9.
     pub fn max_key_size(&self) -> usize {
-        MDB_MAXKEYSIZE
+        self.max_key
+    }
+
+    /// The data-file format of the environment.
+    pub fn format(&self) -> Format {
+        self.layout.format
     }
 
     /// The page size of the database (`ms_psize`).
@@ -685,22 +729,26 @@ impl Environment {
     }
 }
 
-/// `mdb_env_read_header`: read both meta pages with `pread` and return the
-/// newer valid one, or `None` for an empty file (a new environment).
-fn read_header(file: &File) -> Result<Option<Meta>> {
-    const SIZE: usize = PAGE_HDR_SIZE + META_SIZE; // sizeof(MDB_metabuf)
+/// `mdb_env_read_header`: read both meta pages of the format `layout`
+/// describes with `pread` and return the newer valid one, or `None` for an
+/// empty file (a new environment).
+fn read_header(file: &File, layout: &Layout) -> Result<Option<Meta>> {
+    // sizeof(MDB_metabuf): the page header and the meta. The buffer is
+    // sized for the largest header (1.0's).
+    let size = layout.meta_offset() + META_SIZE;
+    let mut storage = [0u8; V10.page_hdr + META_SIZE];
+    let buf = storage.get_mut(..size).ok_or(MdbError::Invalid)?;
     let mut best: Option<Meta> = None;
     let mut off = 0u64;
     for _ in 0..NUM_METAS {
-        let mut buf = [0u8; SIZE];
-        let n = os::read_at(file, &mut buf, off)?;
-        if n != SIZE {
+        let n = os::read_at(file, buf, off)?;
+        if n != size {
             if n == 0 && off == 0 {
                 return Ok(None);
             }
             return Err(MdbError::Invalid.into());
         }
-        let meta = Meta::read_page(&buf).map_err(MdbError::from)?;
+        let meta = Meta::read_page_with_layout(buf, layout).map_err(MdbError::from)?;
         match best {
             Some(b) if meta.txnid <= b.txnid => {}
             _ => best = Some(meta),

@@ -141,8 +141,8 @@ impl<'txn> RoCursor<'txn> {
         RoCursor {
             txn,
             dbi,
-            mc: Cursor::new(entry.db, entry.key_cmp, 0),
-            mx: new_xcursor(entry),
+            mc: Cursor::new(entry.db, entry.key_cmp, 0, txn.layout),
+            mx: new_xcursor(entry, txn.layout),
             dcmp: entry.dup_cmp,
         }
     }

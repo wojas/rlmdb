@@ -47,7 +47,6 @@ use crate::core::wcursor::{read_cursors, write_back, Arena, CRef};
 use crate::core::Stat;
 use crate::error::{Error, MdbError, Result};
 use crate::flags::{DatabaseFlags, WriteFlags};
-use crate::format::layout::PAGE_HDR_SIZE;
 use crate::format::Db;
 use crate::idl::Idl;
 
@@ -726,15 +725,17 @@ impl<'env> RwTxn<'env> {
         let page = self.top_page(c)?;
         let ki = self.cur(c).ki_top();
         let node = page.node(ki).ok_or(MdbError::Corrupted)?;
+        let l = page.layout();
         if node.is_bigdata() {
             return Ok(DataLoc {
                 pgno: node.overflow_pgno().ok_or(MdbError::Corrupted)?,
-                start: PAGE_HDR_SIZE,
+                // METADATA(omp): the data follows the page header.
+                start: l.page_hdr,
                 len: node.data_size(),
             });
         }
-        let range =
-            crate::core::page_ops::node_data_range(page.bytes(), ki).ok_or(MdbError::Corrupted)?;
+        let range = crate::core::page_ops::node_data_range(l, page.bytes(), ki)
+            .ok_or(MdbError::Corrupted)?;
         Ok(DataLoc {
             pgno: self.cur(c).pg_top(),
             start: range.start,

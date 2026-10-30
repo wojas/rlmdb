@@ -167,6 +167,7 @@ pub mod version;
 
 pub use crate::core::*;
 pub use crate::error::{strerror, BoxedError};
+pub use crate::format::Format;
 pub use crate::version::{version_info, VersionInfo};
 
 /// What `mdb_version` reports, `(major, minor, patch)`: `(0, 9, 85)`, the

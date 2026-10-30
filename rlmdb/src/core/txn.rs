@@ -34,7 +34,7 @@ use crate::core::Stat;
 use crate::error::{Error, MdbError, Result};
 use crate::flags::DatabaseFlags;
 use crate::format::meta::Meta;
-use crate::format::{overflow_pages_for, PageRef};
+use crate::format::{Layout, PageRef};
 use crate::os::DataMap;
 
 /// Capacity of the page stacks of the temporary cursors of
@@ -113,6 +113,9 @@ pub(crate) struct TxnCore<'env> {
     read_only: bool,
     /// The environment's page size (`me_psize`), used on every lookup.
     page_size: usize,
+    /// The environment's page layout, given to every page this
+    /// transaction hands out.
+    pub(crate) layout: &'static Layout,
     /// The data map current when the transaction began. Kept alive by the
     /// transaction so that [`Environment::set_map_size`] cannot invalidate
     /// the slices it hands out.
@@ -153,6 +156,7 @@ impl<'env> TxnCore<'env> {
             env,
             read_only: false,
             page_size: env.page_size(),
+            layout: env.layout(),
             map: env.data_map(),
             txnid: 0,
             next_pgno: 0,
@@ -246,7 +250,8 @@ impl<'env> TxnCore<'env> {
     /// [`TxnCore::page`] for a write transaction.
     fn written_or_mapped_page(&self, pgno: u64) -> Result<PageRef<'_>> {
         if let Some(buf) = self.dirty_buf(pgno) {
-            return PageRef::new(&buf[..self.page_size]).ok_or_else(|| MdbError::Corrupted.into());
+            return PageRef::with_layout(&buf[..self.page_size], self.layout)
+                .ok_or_else(|| MdbError::Corrupted.into());
         }
         self.mapped_page(pgno)
     }
@@ -266,14 +271,14 @@ impl<'env> TxnCore<'env> {
             .and_then(|p| p.checked_mul(ps))
             .ok_or(MdbError::PageNotFound)?;
         let bytes = self.map.slice(off, ps).ok_or(MdbError::PageNotFound)?;
-        PageRef::new(bytes).ok_or_else(|| MdbError::Corrupted.into())
+        PageRef::with_layout(bytes, self.layout).ok_or_else(|| MdbError::Corrupted.into())
     }
 
-    /// The data of an `F_BIGDATA` node: `len` bytes starting 16 bytes into
-    /// the overflow run at `pgno` (`mdb_node_read`).
+    /// The data of an `F_BIGDATA` node: `len` bytes starting right after
+    /// the page header of the overflow run at `pgno` (`mdb_node_read`).
     pub(crate) fn overflow_data(&self, pgno: u64, len: usize) -> Result<&[u8]> {
         let ps = self.page_size;
-        let npages = overflow_pages_for(len, ps) as u64;
+        let npages = self.layout.overflow_pages_for(len, ps) as u64;
         let written = if self.read_only {
             None
         } else {
@@ -299,7 +304,7 @@ impl<'env> TxnCore<'env> {
                     .ok_or(MdbError::PageNotFound)?
             }
         };
-        let page = PageRef::new(bytes).ok_or(MdbError::Corrupted)?;
+        let page = PageRef::with_layout(bytes, self.layout).ok_or(MdbError::Corrupted)?;
         if !page.is_overflow() {
             return Err(MdbError::Corrupted.into());
         }
@@ -344,8 +349,8 @@ impl<'env> TxnCore<'env> {
     /// The lookup of [`TxnCore::get`] with cursors of `N` levels.
     #[inline]
     fn get_with_stack<const N: usize>(&self, entry: &TxnDb, key: &[u8]) -> Result<Option<&[u8]>> {
-        let mut mc = Cursor::<N>::unpositioned(entry.db, entry.key_cmp, 0);
-        let mut mx = cursor::new_xcursor::<N>(entry);
+        let mut mc = Cursor::<N>::unpositioned(entry.db, entry.key_cmp, 0, self.layout);
+        let mut mx = cursor::new_xcursor::<N>(entry, self.layout);
         match cursor::cursor_set(
             self,
             &mut mc,

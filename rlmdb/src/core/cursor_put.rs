@@ -33,10 +33,10 @@ use crate::core::page_ops::{self, even, KeyUpdate, NodeBody};
 use crate::core::txn_rw::{FailOnPanic, RwTxn, TXN_ERROR};
 use crate::core::wcursor::{CRef, SUBPAGE};
 use crate::error::{Error, MdbError, Result};
-use crate::format::layout::{NODE_SIZE, PAGE_HDR_SIZE};
+use crate::format::layout::{Layout, OverflowRef, NODE_SIZE};
 use crate::format::node::{F_BIGDATA, F_DUPDATA, F_SUBDATA};
 use crate::format::page::{P_BRANCH, P_DIRTY, P_LEAF, P_LEAF2, P_OVERFLOW, P_SUBP};
-use crate::format::{get_u64, overflow_pages_for, put_u16, put_u32, Db};
+use crate::format::{Db, PageRef};
 
 /// `MDB_NOSPILL`: do not spill pages to disk if the transaction is getting
 /// full (internal put/del flag).
@@ -109,7 +109,7 @@ impl<'a> PutData<'a> {
 }
 
 /// Node data for [`RwTxn::node_add`]: `size` bytes, given by `bytes` (empty
-/// for `MDB_RESERVE`, the 8-byte overflow page number for `F_BIGDATA`).
+/// for `MDB_RESERVE`, the stored overflow reference for `F_BIGDATA`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct NodeVal<'a> {
     pub(crate) size: usize,
@@ -140,19 +140,23 @@ impl<'env> RwTxn<'env> {
     /// item of `size` bytes fit where the sub-cursor's current item is
     /// (after that one is deleted)?
     fn current_dup_fits(&self, mc: CRef, fp: &[u8], size: usize) -> bool {
+        let l = self.layout();
         let x = self.cur(CRef::sub(mc.slot));
-        if !x.is_init() || !x.subp || page_ops::flags(fp) & P_LEAF2 != 0 {
+        if !x.is_init() || !x.subp || page_ops::flags(l, fp) & P_LEAF2 != 0 {
             return true; // C's own checks apply
         }
-        let Some(fpr) = crate::format::PageRef::new(fp) else {
+        let Some(fpr) = PageRef::with_layout(fp, l) else {
             return true;
         };
         let Some(node) = fpr.node(x.ki_top()) else {
             return true;
         };
         let oldk = node.key_size();
+        // Room of the old node and its pointer against that of the new one
+        // (sub-page nodes have no data).
         oldk == size
-            || page_ops::size_left(fp) + even(NODE_SIZE + oldk) + 2 >= even(NODE_SIZE + size + 2)
+            || page_ops::size_left(l, fp) + even(l.leaf_size(oldk, 0)) + 2
+                >= even(l.leaf_size(size, 0) + 2)
     }
 }
 
@@ -165,19 +169,26 @@ enum CurStep {
 }
 
 /// `mdb_leaf_size`: bytes a leaf node takes (data on overflow pages counts
-/// as a page number), including its pointer, `EVEN`.
-pub(crate) fn leaf_size(nodemax: usize, ksize: usize, dsize: usize) -> usize {
-    let mut sz = NODE_SIZE + ksize + dsize;
+/// as an overflow reference), including its pointer, `EVEN`.
+pub(crate) fn leaf_size(l: &Layout, nodemax: usize, ksize: usize, dsize: usize) -> usize {
+    let mut sz = l.leaf_size(ksize, dsize);
     if sz > nodemax {
         // put on overflow page
-        sz -= dsize - 8;
+        sz -= dsize - l.ovpage_size;
     }
     even(sz + 2)
 }
 
 /// `mdb_branch_size`: bytes a branch node takes, including its pointer.
-pub(crate) fn branch_size(ksize: usize) -> usize {
-    NODE_SIZE + ksize + 2
+/// 0.9 does not round this up (the node itself is `EVEN`), 1.0 does
+/// (mdb.c 1.0, line 9334); split decisions depend on it.
+pub(crate) fn branch_size(l: &Layout, ksize: usize) -> usize {
+    let sz = l.branch_size(ksize) + 2;
+    if l.even_nodes {
+        even(sz)
+    } else {
+        sz
+    }
 }
 
 impl<'env> RwTxn<'env> {
@@ -220,7 +231,9 @@ impl<'env> RwTxn<'env> {
         let nospill = flags & MDB_NOSPILL != 0;
         flags &= !MDB_NOSPILL;
         self.check_usable()?;
-        if key.len().wrapping_sub(1) >= MDB_MAXKEYSIZE {
+        // ENV_MAXKEY(env)
+        let max_key = self.core.env.max_key_size();
+        if key.len().wrapping_sub(1) >= max_key {
             return Err(MdbError::BadValSize.into());
         }
         let db = self.db_of(mc);
@@ -230,7 +243,7 @@ impl<'env> RwTxn<'env> {
             // key size of 0 and corrupts them (KNOWN_C_BUGS.md #17).
             return Err(MdbError::Incompatible.into());
         }
-        if dupsort && data.size.wrapping_sub(1) >= MDB_MAXKEYSIZE {
+        if dupsort && data.size.wrapping_sub(1) >= max_key {
             return Err(MdbError::BadValSize.into());
         }
         if data.size > MAXDATASIZE {
@@ -265,8 +278,9 @@ impl<'env> RwTxn<'env> {
             let leaf2 = u32::from(db.flags) & (MDB_DUPSORT | MDB_DUPFIXED) == MDB_DUPFIXED;
             self.set_dbflag(mc, DB_DIRTY);
             if leaf2 {
+                let l = self.layout();
                 let p = self.dirty_mut(np)?;
-                page_ops::set_flags(p, page_ops::flags(p) | P_LEAF2);
+                page_ops::set_flags(l, p, page_ops::flags(l, p) | P_LEAF2);
             }
             self.cur_mut(mc).flags |= C_INITIALIZED;
         } else {
@@ -377,7 +391,8 @@ impl<'env> RwTxn<'env> {
             if node.is_subdata() {
                 Db::read(data).ok_or_else(corrupted)?.pad as usize
             } else {
-                crate::format::PageRef::new(data)
+                // A sub-page has the layout of the page it is stored in.
+                PageRef::with_layout(data, node.layout())
                     .ok_or_else(corrupted)?
                     .pad() as usize
             }
@@ -404,7 +419,7 @@ impl<'env> RwTxn<'env> {
         }
         // For puts, roughly factor in the key+data size.
         if let Some((k, d)) = kd {
-            i += (NODE_SIZE + k + d + ps) / ps;
+            i += (self.layout().leaf_size(k, d) + ps) / ps;
         }
         i += i; // double it for good measure
         if self.w.dirty_room > i {
@@ -437,7 +452,7 @@ impl<'env> RwTxn<'env> {
         if insert_key {
             // The key does not exist.
             let nodemax = self.core.env.node_max();
-            if dupsort && NODE_SIZE + key.len() + item.size > nodemax {
+            if dupsort && self.layout().leaf_size(key.len(), item.size) > nodemax {
                 // Too big for a node, insert in sub-DB.
                 match self.dup_prepare(mc, item, flags, true, true)? {
                     DupStep::NewSub {
@@ -459,8 +474,8 @@ impl<'env> RwTxn<'env> {
                     return Err(MdbError::BadValSize.into());
                 }
                 let ki = self.cur(mc).ki_top();
+                let start = self.layout().page_hdr + ki * ksize;
                 let page = self.top_page_mut(mc)?;
-                let start = PAGE_HDR_SIZE + ki * ksize;
                 page.get_mut(start..start + ksize)
                     .ok_or_else(corrupted)?
                     .copy_from_slice(key);
@@ -592,6 +607,7 @@ impl<'env> RwTxn<'env> {
         flags: u32,
     ) -> Result<CurStep> {
         let ps = self.psize();
+        let l = self.layout();
         let ki = self.cur(mc).ki_top();
         let (nflags, ksize, olddata_size, ovpgno) = {
             let page = self.top_page(mc)?;
@@ -605,7 +621,7 @@ impl<'env> RwTxn<'env> {
         if nflags & F_BIGDATA != 0 {
             // Overflow page overwrites need special handling.
             let pg = ovpgno.ok_or_else(corrupted)?;
-            let dpages = overflow_pages_for(item.size, ps);
+            let dpages = l.overflow_pages_for(item.size, ps);
             let (ovpages, mut dirty) = {
                 let omp = self.core.page(pg)?;
                 (omp.overflow_pages() as usize, omp.flags() & P_DIRTY != 0)
@@ -627,10 +643,10 @@ impl<'env> RwTxn<'env> {
                     self.copy_ancestor_page(pg)?;
                 }
                 let page = self.top_page_mut(mc)?;
-                page_ops::set_node_dsize(page, ki, item.size).ok_or_else(corrupted)?;
+                page_ops::set_node_dsize(l, page, ki, item.size).ok_or_else(corrupted)?;
                 if flags & MDB_RESERVE == 0 {
                     let run = self.dirty_mut(pg)?;
-                    run.get_mut(PAGE_HDR_SIZE..PAGE_HDR_SIZE + item.size)
+                    run.get_mut(l.page_hdr..l.page_hdr + item.size)
                         .ok_or_else(corrupted)?
                         .copy_from_slice(item.bytes);
                 }
@@ -645,13 +661,14 @@ impl<'env> RwTxn<'env> {
             }
             if !self.cur(mc).is_sub() {
                 let page = self.top_page_mut(mc)?;
-                let range = page_ops::node_data_range(page, ki).ok_or_else(corrupted)?;
+                let range = page_ops::node_data_range(l, page, ki).ok_or_else(corrupted)?;
                 page[range].copy_from_slice(item.bytes);
                 return Ok(CurStep::Done);
             }
             if key.len() == ksize {
                 let page = self.top_page_mut(mc)?;
-                let off = page_ops::ptr(page, ki).ok_or_else(corrupted)? + NODE_SIZE;
+                // NODEKEY: the key follows the node header.
+                let off = page_ops::ptr(l, page, ki).ok_or_else(corrupted)? + NODE_SIZE;
                 page.get_mut(off..off + ksize)
                     .ok_or_else(corrupted)?
                     .copy_from_slice(key);
@@ -694,6 +711,7 @@ impl<'env> RwTxn<'env> {
         olddata: &mut Vec<u8>,
     ) -> Result<DupStep> {
         let ps = self.psize();
+        let l = self.layout();
         let nodemax = self.core.env.node_max();
         let dbflags = u32::from(self.db_of(mc).flags);
         let dupfixed = dbflags & MDB_DUPFIXED != 0;
@@ -710,12 +728,13 @@ impl<'env> RwTxn<'env> {
         if big_new {
             // Set up an empty "old sub-page" for prep_subDB to expand to a
             // full page.
+            // (P_DIRTY: the sub-DB root built from it is a dirty page.)
             let mut h = self.take_scratch();
-            h.resize(PAGE_HDR_SIZE, 0);
-            page_ops::set_flags(&mut h, P_LEAF | P_DIRTY);
-            put_u16(&mut h, crate::format::layout::PAGE_PAD, item.size as u16);
-            page_ops::set_lower(&mut h, PAGE_HDR_SIZE);
-            page_ops::set_upper(&mut h, PAGE_HDR_SIZE);
+            h.resize(l.page_hdr, 0);
+            page_ops::set_flags(l, &mut h, P_LEAF | P_DIRTY);
+            page_ops::set_pad(l, &mut h, item.size as u16);
+            page_ops::set_lower(l, &mut h, l.page_hdr);
+            page_ops::set_upper(l, &mut h, l.page_hdr);
             fp = h;
             xsize = 0;
         } else {
@@ -743,8 +762,8 @@ impl<'env> RwTxn<'env> {
                     return Ok(DupStep::Current);
                 }
                 // Make sub-page header for the dup items, with dummy body.
-                let mut size = PAGE_HDR_SIZE + olddata.len() + item.size;
-                let mut pflags = P_LEAF | P_DIRTY | P_SUBP;
+                let mut size = l.page_hdr + olddata.len() + item.size;
+                let mut pflags = l.subpage_flags;
                 let mut pad = 0;
                 if dupfixed {
                     pflags |= P_LEAF2;
@@ -756,10 +775,10 @@ impl<'env> RwTxn<'env> {
                 let mut h = self.take_scratch();
                 h.resize(size, 0);
                 page_ops::set_pgno(&mut h, leaf_pgno);
-                put_u16(&mut h, crate::format::layout::PAGE_PAD, pad as u16);
-                page_ops::set_flags(&mut h, pflags);
-                page_ops::set_lower(&mut h, PAGE_HDR_SIZE);
-                page_ops::set_upper(&mut h, size);
+                page_ops::set_pad(l, &mut h, pad as u16);
+                page_ops::set_flags(l, &mut h, pflags);
+                page_ops::set_lower(l, &mut h, l.page_hdr);
+                page_ops::set_upper(l, &mut h, size);
                 fp = h;
                 xsize = size;
                 dkey = Some(std::mem::take(olddata));
@@ -783,17 +802,14 @@ impl<'env> RwTxn<'env> {
                 }
                 if !fits {
                     if !dupfixed {
-                        let left = page_ops::size_left(olddata);
+                        let left = page_ops::size_left(l, olddata);
                         offset = even(NODE_SIZE + 2 + item.size);
                         // If there's enough space, just use it, else grow
                         // by whatever we need.
                         offset = offset.saturating_sub(left);
                     } else {
-                        offset = usize::from(
-                            crate::format::get_u16(olddata, crate::format::layout::PAGE_PAD)
-                                .unwrap_or(0),
-                        );
-                        if page_ops::size_left(olddata) < offset {
+                        offset = usize::from(page_ops::pad(l, olddata));
+                        if page_ops::size_left(l, olddata) < offset {
                             offset *= 4; // space for 4 more
                         } else {
                             // Big enough MDB_DUPFIXED sub-page.
@@ -803,9 +819,9 @@ impl<'env> RwTxn<'env> {
                 }
                 if fits {
                     let page = self.top_page_mut(mc)?;
-                    let range = page_ops::node_data_range(page, ki).ok_or_else(corrupted)?;
+                    let range = page_ops::node_data_range(l, page, ki).ok_or_else(corrupted)?;
                     let sp = &mut page[range];
-                    page_ops::set_flags(sp, page_ops::flags(sp) | P_DIRTY);
+                    page_ops::set_flags(l, sp, page_ops::flags(l, sp) | l.subpage_dirty());
                     page_ops::set_pgno(sp, leaf_pgno);
                     let x = &mut self.cur_mut(CRef::sub(mc.slot));
                     x.pg[0] = SUBPAGE;
@@ -820,9 +836,9 @@ impl<'env> RwTxn<'env> {
                 fp = std::mem::take(olddata);
             }
         }
-        let olddata_size = if big_new { PAGE_HDR_SIZE } else { fp.len() };
-        let mut fp_flags = page_ops::flags(&fp);
-        let fp_pad = crate::format::get_u16(&fp, crate::format::layout::PAGE_PAD).unwrap_or(0);
+        let olddata_size = if big_new { l.page_hdr } else { fp.len() };
+        let mut fp_flags = page_ops::flags(l, &fp);
+        let fp_pad = page_ops::pad(l, &fp);
 
         let (xdata, sub_root) = if to_subdb {
             // Too big for a sub-page, convert to sub-DB (prep_subDB).
@@ -838,7 +854,7 @@ impl<'env> RwTxn<'env> {
             }
             dummy.depth = 1;
             dummy.leaf_pages = 1;
-            dummy.entries = page_ops::num_keys(&fp) as u64;
+            dummy.entries = page_ops::num_keys(l, &fp) as u64;
             let mp = self.page_alloc(1)?;
             offset = ps - olddata_size;
             *flags |= u32::from(F_DUPDATA | F_SUBDATA);
@@ -846,8 +862,14 @@ impl<'env> RwTxn<'env> {
             let db = self.db_mut(mc);
             db.leaf_pages = db.leaf_pages.wrapping_add(1);
             let page = self.dirty_mut(mp)?;
-            build_subpage(&mut page[..ps], &fp, olddata_size, fp_flags, fp_pad, offset)
-                .ok_or_else(corrupted)?;
+            let sub = SubpageSrc {
+                fp: &fp,
+                olddata_size,
+                fp_flags,
+                fp_pad,
+            };
+            // A regular dirty page: P_DIRTY in every format.
+            build_subpage(l, &mut page[..ps], sub, offset, P_DIRTY).ok_or_else(corrupted)?;
             self.give_scratch(fp);
             let mut rec = self.take_scratch();
             rec.extend_from_slice(&dummy.to_bytes());
@@ -860,8 +882,13 @@ impl<'env> RwTxn<'env> {
             let mut mp = self.take_scratch();
             mp.resize(xsize, 0);
             page_ops::set_pgno(&mut mp, leaf_pgno);
-            build_subpage(&mut mp, &fp, olddata_size, fp_flags, fp_pad, offset)
-                .ok_or_else(corrupted)?;
+            let sub = SubpageSrc {
+                fp: &fp,
+                olddata_size,
+                fp_flags,
+                fp_pad,
+            };
+            build_subpage(l, &mut mp, sub, offset, l.subpage_dirty()).ok_or_else(corrupted)?;
             self.give_scratch(fp);
             (mp, None)
         };
@@ -896,7 +923,7 @@ impl<'env> RwTxn<'env> {
         let nsize = if is_leaf2 {
             key.len()
         } else {
-            leaf_size(nodemax, key.len(), rdata.size)
+            leaf_size(self.layout(), nodemax, key.len(), rdata.size)
         };
         if room < nsize {
             if flags & u32::from(F_DUPDATA | F_SUBDATA) == u32::from(F_DUPDATA) {
@@ -1055,8 +1082,9 @@ impl<'env> RwTxn<'env> {
         db.leaf_pages = db
             .leaf_pages
             .wrapping_add(new.leaf_pages.wrapping_sub(old.leaf_pages));
+        let l = self.layout();
         let page = self.top_page_mut(mc)?;
-        let range = page_ops::node_data_range(page, ki).ok_or_else(corrupted)?;
+        let range = page_ops::node_data_range(l, page, ki).ok_or_else(corrupted)?;
         new.write(&mut page[range]);
         Ok(())
     }
@@ -1068,12 +1096,13 @@ impl<'env> RwTxn<'env> {
     pub(crate) fn page_new(&mut self, mc: CRef, flags: u16, num: usize) -> Result<u64> {
         let np = self.page_alloc(num)?;
         let ps = self.psize();
+        let l = self.layout();
         let page = self.dirty_mut(np)?;
-        page_ops::set_flags(page, flags | P_DIRTY);
-        page_ops::set_lower(page, PAGE_HDR_SIZE);
-        page_ops::set_upper(page, ps);
+        page_ops::set_flags(l, page, flags | P_DIRTY);
+        page_ops::set_lower(l, page, l.page_hdr);
+        page_ops::set_upper(l, page, ps);
         if flags & P_OVERFLOW != 0 {
-            put_u32(page, crate::format::layout::PAGE_OVERFLOW_PAGES, num as u32);
+            page_ops::set_overflow_pages(l, page, num as u32);
         }
         let db = self.db_mut(mc);
         if flags & P_BRANCH != 0 {
@@ -1116,10 +1145,11 @@ impl<'env> RwTxn<'env> {
         flags: u32,
     ) -> Result<()> {
         let ps = self.psize();
+        let l = self.layout();
         let nodemax = self.core.env.node_max();
         let (is_leaf2, is_leaf, room) = {
             let p = match scratch.as_deref() {
-                Some(buf) => crate::format::PageRef::new(buf).ok_or_else(corrupted)?,
+                Some(buf) => PageRef::with_layout(buf, l).ok_or_else(corrupted)?,
                 None => self.top_page(mc)?,
             };
             (p.is_leaf2(), p.is_leaf(), p.size_left() as isize - 2)
@@ -1135,43 +1165,42 @@ impl<'env> RwTxn<'env> {
                 Some(buf) => buf,
                 None => self.top_page_mut(mc)?,
             };
-            return page_ops::insert_leaf2(page, indx, key, ksize)
+            return page_ops::insert_leaf2(l, page, indx, key, ksize)
                 .ok_or_else(|| MdbError::PageFull.into());
         }
-        let mut node_size = NODE_SIZE + key.len();
+        let mut node_size = NODE_SIZE + l.node_key_len(key.len());
         let mut flags = flags;
         let mut body = NodeBody::Branch(pgno);
         if is_leaf {
             let d = data.ok_or_else(corrupted)?;
             if flags & u32::from(F_BIGDATA) != 0 {
                 // Data already on overflow page.
-                node_size += 8;
-                let ov = get_u64(d.bytes, 0).ok_or_else(corrupted)?;
-                body = NodeBody::Overflow {
-                    pgno: ov,
-                    size: d.size,
-                };
+                node_size += l.ovpage_size;
+                let r = l.read_overflow_ref(d.bytes).ok_or_else(corrupted)?;
+                body = NodeBody::Overflow { r, size: d.size };
             } else if node_size + d.size > nodemax {
                 // Put data on overflow page.
-                let ovpages = overflow_pages_for(d.size, ps);
-                node_size = even(node_size + 8);
+                let ovpages = l.overflow_pages_for(d.size, ps);
+                node_size = even(node_size + l.ovpage_size);
                 if node_size as isize > room {
                     return self.page_full();
                 }
                 let ofp = self.page_new(mc, P_OVERFLOW, ovpages)?;
                 if flags & MDB_RESERVE == 0 {
                     let run = self.dirty_mut(ofp)?;
-                    run.get_mut(PAGE_HDR_SIZE..PAGE_HDR_SIZE + d.size)
+                    run.get_mut(l.page_hdr..l.page_hdr + d.size)
                         .ok_or_else(corrupted)?
                         .copy_from_slice(d.bytes);
                 }
                 flags |= u32::from(F_BIGDATA);
-                body = NodeBody::Overflow {
+                let r = OverflowRef {
                     pgno: ofp,
-                    size: d.size,
+                    txnid: self.core.txnid,
+                    pages: ovpages as u64,
                 };
+                body = NodeBody::Overflow { r, size: d.size };
             } else {
-                node_size += d.size;
+                node_size += l.node_data_len(d.size);
                 body = if flags & MDB_RESERVE != 0 {
                     NodeBody::Reserve(d.size)
                 } else {
@@ -1187,7 +1216,7 @@ impl<'env> RwTxn<'env> {
             Some(buf) => buf,
             None => self.top_page_mut(mc)?,
         };
-        page_ops::insert_node(page, indx, node_size, key, flags as u16, body)
+        page_ops::insert_node(l, page, indx, node_size, key, flags as u16, body)
             .ok_or_else(corrupted)?;
         Ok(())
     }
@@ -1200,8 +1229,9 @@ impl<'env> RwTxn<'env> {
     /// `mdb_node_del` on the top page of `mc`.
     pub(crate) fn node_del(&mut self, mc: CRef, ksize: usize) -> Result<()> {
         let ki = self.cur(mc).ki_top();
+        let l = self.layout();
         let page = self.top_page_mut(mc)?;
-        page_ops::delete_node(page, ki, ksize).ok_or_else(corrupted)
+        page_ops::delete_node(l, page, ki, ksize).ok_or_else(corrupted)
     }
 
     /// `mdb_update_key` (mdb.c line 7962): replace the key of the branch
@@ -1209,8 +1239,9 @@ impl<'env> RwTxn<'env> {
     /// delete the node and re-insert it with a split.
     pub(crate) fn update_key(&mut self, mc: CRef, key: &[u8]) -> Result<()> {
         let ki = self.cur(mc).ki_top();
+        let l = self.layout();
         let page = self.top_page_mut(mc)?;
-        match page_ops::update_key(page, ki, key).ok_or_else(corrupted)? {
+        match page_ops::update_key(l, page, ki, key).ok_or_else(corrupted)? {
             KeyUpdate::Done => Ok(()),
             KeyUpdate::NeedsSplit => {
                 // Not enough space left, do a delete and split.
@@ -1226,36 +1257,55 @@ impl<'env> RwTxn<'env> {
     }
 }
 
-/// Builds a (sub-)page `mp` from the old sub-page `fp` (`olddata_size`
-/// bytes) grown by `offset` bytes (the `if (mp != fp)` block of
-/// `mdb_cursor_put`): same header with `mp_upper += offset`, the nodes moved
-/// to the end and their pointers shifted, or the `P_LEAF2` keys copied.
-fn build_subpage(
-    mp: &mut [u8],
-    fp: &[u8],
+/// The old sub-page `fp` that [`build_subpage`] grows: its bytes (of which
+/// the first `olddata_size` are the sub-page; a header only when a new key
+/// goes straight to a sub-DB), and its flags and `mp_pad` as the caller
+/// adjusted them.
+struct SubpageSrc<'a> {
+    fp: &'a [u8],
     olddata_size: usize,
     fp_flags: u16,
     fp_pad: u16,
+}
+
+/// Builds a (sub-)page `mp` from the old sub-page `fp` grown by `offset`
+/// bytes (the `if (mp != fp)` block of `mdb_cursor_put`): same header with
+/// `mp_upper += offset`, the nodes moved to the end and their pointers
+/// shifted, or the `P_LEAF2` keys copied. `dirty` is the `P_DIRTY` bit the
+/// new page gets: always for a sub-DB root (an ordinary dirty page),
+/// [`Layout::subpage_dirty`] for a sub-page.
+fn build_subpage(
+    l: &Layout,
+    mp: &mut [u8],
+    src: SubpageSrc<'_>,
     offset: usize,
+    dirty: u16,
 ) -> Option<()> {
-    let nkeys = page_ops::num_keys(fp);
-    let fp_upper = page_ops::upper(fp);
-    page_ops::set_flags(mp, fp_flags | P_DIRTY);
-    put_u16(mp, crate::format::layout::PAGE_PAD, fp_pad);
-    page_ops::set_lower(mp, page_ops::lower(fp));
+    let SubpageSrc {
+        fp,
+        olddata_size,
+        fp_flags,
+        fp_pad,
+    } = src;
+    let nkeys = page_ops::num_keys(l, fp);
+    let fp_upper = page_ops::upper(l, fp);
+    page_ops::set_flags(l, mp, fp_flags | dirty);
+    page_ops::set_pad(l, mp, fp_pad);
+    page_ops::set_lower(l, mp, page_ops::lower(l, fp));
     let mp_upper = fp_upper + offset;
-    page_ops::set_upper(mp, mp_upper);
+    page_ops::set_upper(l, mp, mp_upper);
     if fp_flags & P_LEAF2 != 0 {
         let len = nkeys * usize::from(fp_pad);
-        mp.get_mut(PAGE_HDR_SIZE..PAGE_HDR_SIZE + len)?
-            .copy_from_slice(fp.get(PAGE_HDR_SIZE..PAGE_HDR_SIZE + len)?);
+        let hdr = l.page_hdr;
+        mp.get_mut(hdr..hdr + len)?
+            .copy_from_slice(fp.get(hdr..hdr + len)?);
     } else {
         let tail = fp.get(fp_upper..olddata_size)?;
         mp.get_mut(mp_upper..mp_upper + tail.len())?
             .copy_from_slice(tail);
         for i in 0..nkeys {
-            let v = page_ops::ptr(fp, i)? + offset;
-            put_u16(mp, crate::format::layout::PAGE_PTRS + 2 * i, v as u16);
+            let v = page_ops::ptr(l, fp, i)? + offset;
+            page_ops::set_ptr(l, mp, i, v)?;
         }
     }
     Some(())
@@ -1264,13 +1314,26 @@ fn build_subpage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::layout::{V09, V10};
 
     #[test]
     fn sizes() {
-        let nodemax = crate::format::node_max(4096);
-        assert_eq!(leaf_size(nodemax, 3, 5), even(8 + 3 + 5 + 2));
+        let l = &V09;
+        let nodemax = l.node_max(4096);
+        assert_eq!(leaf_size(l, nodemax, 3, 5), even(8 + 3 + 5 + 2));
         // Data too big for the node: only a page number is stored inline.
-        assert_eq!(leaf_size(nodemax, 3, 5000), even(8 + 3 + 8 + 2));
-        assert_eq!(branch_size(5), 15);
+        assert_eq!(leaf_size(l, nodemax, 3, 5000), even(8 + 3 + 8 + 2));
+        assert_eq!(branch_size(l, 5), 15);
+    }
+
+    #[test]
+    fn sizes_v10() {
+        let l = &V10;
+        let nodemax = l.node_max(4096);
+        assert_eq!(leaf_size(l, nodemax, 3, 5), even(8 + 4 + 6 + 2));
+        // LEAFSIZE - dsize + sizeof(MDB_ovpage): the rounding of an odd
+        // dsize stays in, as in C.
+        assert_eq!(leaf_size(l, nodemax, 3, 5001), even(8 + 4 + 1 + 24 + 2));
+        assert_eq!(branch_size(l, 5), 16);
     }
 }

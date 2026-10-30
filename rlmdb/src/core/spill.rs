@@ -57,11 +57,12 @@ impl<'env> RwTxn<'env> {
             if need == 0 {
                 break;
             }
+            let l = self.core.layout;
             let flags = self
                 .core
                 .dirty
                 .get(pgno)
-                .map_or(0, crate::core::page_ops::flags);
+                .map_or(0, |p| page_ops::flags(l, p));
             if flags & (P_LOOSE | P_KEEP) != 0 || keep.binary_search(&pgno).is_ok() {
                 continue;
             }
@@ -90,9 +91,10 @@ impl<'env> RwTxn<'env> {
     fn pages_to_keep(&self, m0: CRef) -> Result<Vec<u64>> {
         const MASK: u16 = P_SUBP | P_DIRTY | P_LOOSE | P_KEEP;
         let mut keep = Vec::new();
+        let l = self.core.layout;
         let mut mark = |pgno: u64| {
             if let Some(page) = self.core.dirty.get(pgno) {
-                if page_ops::flags(page) & MASK == P_DIRTY {
+                if page_ops::flags(l, page) & MASK == P_DIRTY {
                     keep.push(pgno);
                 }
             }
@@ -172,9 +174,10 @@ impl<'env> RwTxn<'env> {
             .map
             .slice(off, num * ps)
             .ok_or(MdbError::PageNotFound)?;
+        let l = self.core.layout;
         let mut buf = self.core.dirty.alloc_copy(src);
-        let flags = page_ops::flags(&buf);
-        page_ops::set_flags(&mut buf, flags | P_DIRTY);
+        let flags = page_ops::flags(l, &buf);
+        page_ops::set_flags(l, &mut buf, flags | P_DIRTY);
         if level == 1 {
             // If in current txn, this page is no longer spilled.
             self.core.spilled.remove(&pgno);

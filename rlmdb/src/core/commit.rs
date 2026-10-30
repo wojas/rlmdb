@@ -24,7 +24,7 @@ use crate::core::dbi::DB_DIRTY;
 use crate::core::txn_rw::{RwTxn, TXN_DIRTY, TXN_ERROR, TXN_FINISHED, TXN_HAS_CHILD, TXN_SPILLS};
 use crate::core::wcursor::CRef;
 use crate::error::{MdbError, Result};
-use crate::format::layout::{META_MAPSIZE, META_OFFSET_IN_PAGE, META_SIZE};
+use crate::format::layout::{META_MAPSIZE, META_SIZE};
 use crate::format::meta::Meta;
 use crate::format::node::F_SUBDATA;
 use crate::format::page::{P_DIRTY, P_KEEP, P_LOOSE, P_OVERFLOW};
@@ -100,12 +100,13 @@ impl<'env> RwTxn<'env> {
     /// `P_KEEP` ones, which lose the mark) stay dirty and in the list;
     /// written pages leave it.
     pub(crate) fn page_flush(&mut self) -> Result<()> {
+        let l = self.layout();
         let mut pgnos: Vec<u64> = Vec::with_capacity(self.core.dirty.len());
         self.core.dirty.retain(|pgno, page| {
-            let flags = crate::core::page_ops::flags(page);
+            let flags = crate::core::page_ops::flags(l, page);
             // Don't flush this page yet.
             if flags & (P_LOOSE | P_KEEP) != 0 {
-                crate::core::page_ops::set_flags(page, flags & !P_KEEP);
+                crate::core::page_ops::set_flags(l, page, flags & !P_KEEP);
             } else {
                 pgnos.push(pgno);
             }
@@ -115,21 +116,25 @@ impl<'env> RwTxn<'env> {
     }
 
     /// The writing part of `mdb_page_flush`: write the dirty pages `pgnos`
-    /// (ascending) with `P_DIRTY` cleared, contiguous runs batched into one
-    /// `pwritev` of up to `MDB_COMMIT_PAGES` buffers, then drop them from
-    /// the dirty list (`mt_dirty_room` grows accordingly). Used by commit
-    /// and by `mdb_page_spill`.
+    /// (ascending) with `P_DIRTY` cleared and the header finalised for the
+    /// format ([`Layout::stamp_clean_page`](crate::format::Layout::stamp_clean_page)),
+    /// contiguous runs batched into one `pwritev` of up to
+    /// `MDB_COMMIT_PAGES` buffers, then drop them from the dirty list
+    /// (`mt_dirty_room` grows accordingly). Used by commit and by
+    /// `mdb_page_spill`.
     pub(crate) fn write_pages(&mut self, pgnos: &[u64]) -> Result<()> {
         let ps = self.psize();
+        let l = self.layout();
+        let txnid = self.core.txnid;
         // Pass 1: clear the dirty flags and size the runs.
         let mut writes: Vec<(u64, usize)> = Vec::with_capacity(pgnos.len());
         for &pgno in pgnos {
             let page = self.dirty_mut(pgno)?;
-            let flags = crate::core::page_ops::flags(page);
-            crate::core::page_ops::set_flags(page, flags & !P_DIRTY);
+            let flags = crate::core::page_ops::flags(l, page);
+            crate::core::page_ops::set_flags(l, page, flags & !P_DIRTY);
+            l.stamp_clean_page(page, txnid);
             let npages = if flags & P_OVERFLOW != 0 {
-                crate::format::get_u32(page, crate::format::layout::PAGE_OVERFLOW_PAGES)
-                    .unwrap_or(1) as usize
+                crate::core::page_ops::overflow_pages(l, page).unwrap_or(1) as usize
             } else {
                 1
             };
@@ -188,9 +193,10 @@ impl<'env> RwTxn<'env> {
             .max(env.map_size() as u64);
         let old = env.read_meta(toggle).ok();
         let dbs = self.core.dbs.borrow();
+        let l = env.layout();
         let mut meta = Meta {
             magic: MDB_MAGIC,
-            version: MDB_DATA_VERSION,
+            version: l.data_version,
             address: 0,
             map_size: mapsize,
             dbs: [dbs[FREE_DBI as usize].db, dbs[MAIN_DBI as usize].db],
@@ -201,7 +207,7 @@ impl<'env> RwTxn<'env> {
         let mut buf = [0u8; META_SIZE];
         meta.write(&mut buf);
         let bytes = &buf[META_MAPSIZE..];
-        let off = (toggle * ps + META_OFFSET_IN_PAGE + META_MAPSIZE) as u64;
+        let off = (toggle * ps + l.meta_offset() + META_MAPSIZE) as u64;
 
         // Write to the SYNC fd unless NO_SYNC/NO_META_SYNC. (The meta fd
         // goes to the same file, but writing to it also syncs to disk.)
