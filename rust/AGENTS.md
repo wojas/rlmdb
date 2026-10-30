@@ -18,6 +18,10 @@ every change must respect. The details live in:
 * The data file (`MDB_DATA_VERSION 1`) and the lock file
   (`MDB_LOCK_VERSION 1`) are specified by the C source. A C process and a
   Rust process must be able to use one environment at the same time.
+* The lock-file version follows the data format: version 1 with 0.9 data
+  files, version 2 (LMDB 1.0's, `format::lockfile::LOCK_V10`) with 1.0 data
+  files. Both are per-platform layouts; every access goes through the
+  `LockLayout` of the environment's format, never through fixed offsets.
 * Hard invariants, never negotiable: every structure C reads is laid out
   as C expects; no page is lost or shared (the peers' page audit checks
   this after every scenario); a page freed in a transaction is not reused
@@ -40,7 +44,8 @@ every change must respect. The details live in:
   in a short ledger. Never diverge as a side effect of another change.
 * Never recompute what C reads from the file. Example: macOS semaphore
   names are stored in the lock file with uninitialised padding, so they are
-  read, not derived.
+  read, not derived; in lock-file version 2 they are derived from the hash
+  stored in the file (`mtb_mutexid`), which is read, not recomputed.
 * Platform ABI is part of the contract: `sizeof(pthread_mutex_t)` and the
   reader-table offset differ between Linux and macOS, and page sizes differ
   (16 KiB on macOS, 4 KiB on Linux). Test on both before claiming done.

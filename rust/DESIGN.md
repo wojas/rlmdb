@@ -178,9 +178,18 @@ the environment open, so for now the two take turns on a 1.0 environment.
 
 ### Lock file (`<path>/lock.mdb`, or `<path>-lock` with `MDB_NOSUBDIR`)
 
-`MDB_txninfo` (line 779). Layout is `CACHELINE` (64) padded and depends on the
-platform's shared-lock primitive, which **must match the C build on the same
-platform**:
+The lock-file version follows the data format: LMDB 0.9 data files
+(`MDB_DATA_VERSION 1`) use `MDB_LOCK_VERSION 1`, LMDB 1.0 data files
+(`MDB_DATA_VERSION 3`) use `MDB_LOCK_VERSION 2`. `format::lockfile::LockLayout`
+describes one version on this platform (statics `LOCK_V09`, `LOCK_V10`;
+`Layout::lock()` picks it), and the reader table code takes every offset from
+it. File locking, reader slots, the mutex/semaphore protocol and the
+reader-check are the same in both; the header layout, the `mti_format` word
+and the macOS semaphore naming differ. Both are `CACHELINE` (64) padded and
+depend on the platform's shared-lock primitive, which **must match the C
+build on the same platform**.
+
+Version 1 (LMDB 0.9), `MDB_txninfo` (line 779):
 
 * **Linux** (`MDB_USE_POSIX_MUTEX`): header = `magic:u32, format:u32,
   rmutex: pthread_mutex_t, txnid:u64, numreaders:u32`, padded to a multiple
@@ -202,6 +211,49 @@ platform**:
   with 4 bytes of uninitialised padding (line 4996), so the names cannot be
   recomputed: later openers read them from the lock file.
 * `format == MDB_LOCK_VERSION + (MDB_PIDLOCK << 16) == 0x10001` on Unix.
+
+Version 2 (LMDB 1.0, `mdb.RE/1.0` at 4865523, "mdb10.c", lines 865-1017):
+
+* Header = `magic:u32, format:u32, txnid:u64 (8), numreaders:u32 (16)`, then
+  the reader lock, aligned: the `txnid` and `numreaders` moved in front of it.
+* **Linux**: `rmutex: pthread_mutex_t` at 24, `sizeof(MDB_txbody)` 72 on
+  aarch64 glibc (64 on x86-64), padded to 128 (64); `wmutex` at 128 (64),
+  padded to 64; readers at 192 (128). Robust process-shared mutexes as in
+  version 1.
+* **macOS**: `mutexid: u64` at 24, `sizeof(MDB_txbody)` 32, padded to 64;
+  there is no writer-lock cache line, so the readers start at 64. The
+  semaphore names are derived from the stored hash (`MUTEXNAME`, lines
+  5920-5945): `"/MDB"`, `'r'` or `'w'`, then `mdb_pack85(mutexid)`, up to ten
+  base-85 digits, least significant first, stopping when the rest is 0 (not
+  0.9's two five-digit halves). The exclusive opener computes the hash, 64-bit
+  FNV-1a of `struct { dev_t; ino_t; }` of the lock file, zeroed first (lines
+  6064-6084), and stores it; every other opener reads it from the file and
+  never recomputes it.
+* `format == 2 + (MDB_lock_desc << 12)` (lines 969-1017), where
+  `MDB_lock_desc` encodes the cache line, `sizeof(pid_t)`, `sizeof(pthread_t)`,
+  `sizeof(MDB_txbody) / 64`, the lock type (named semaphores, or the size and
+  alignment of `pthread_mutex_t`), `sizeof(txnid_t)`, `sizeof(MDB_reader)` and
+  `MDB_PIDLOCK`. `lockfile.rs` computes it with the C formula from the
+  platform's constants: `0x28570002` on macOS (measured on arm64),
+  `0x2cd82002` on Linux aarch64 glibc (measured), `0x2c2f6002` on Linux
+  x86-64 glibc (measured once in an emulated x86-64 container, with the
+  offsets in the table; not covered by the test runs).
+
+| | macOS v1 | macOS v2 | Linux aarch64 v1 | v2 | Linux x86-64 v1 | v2 |
+|---|---|---|---|---|---|---|
+| `mti_format` | `0x10001` | `0x28570002` | `0x10001` | `0x2cd82002` | `0x10001` | `0x2c2f6002` |
+| `mti_txnid`, `mti_numreaders` | 40, 48 | 8, 16 | 56, 64 | 8, 16 | 48, 56 | 8, 16 |
+| reader lock: offset, size | 8, 32 | 24, 8 | 8, 48 | 24, 48 | 8, 40 | 24, 40 |
+| writer lock | 64 | none | 128 | 128 | 64 | 64 |
+| `mti_readers` | 128 | 64 | 192 | 192 | 128 | 128 |
+
+Both versions:
+
+* A table of the other version (or of the same version built for another
+  platform) has a different `mti_format`: a non-exclusive opener fails with
+  `MDB_VERSION_MISMATCH`; an exclusive opener re-initialises the table in its
+  own version, as C does. The data format is therefore decided before the
+  lock file is touched (`DUAL_FORMAT.md` §4.2).
 * Reader slot (`MDB_reader`, 64 bytes): `txnid:u64` at 0, `pid:i32` at 8,
   `tid:u64 (pthread_t)` at 16 (after padding); rest padding. Free slot ⇔ `pid == 0`. `txnid == !0` marks a
   slot owned but not in a txn.
@@ -264,7 +316,8 @@ src/format/         pure parsing/serialisation of on-disk structures over &[u8]
                     overflow_ref()
   meta.rs           Meta (+ Db) read/write per layout, pick newest
   db.rs             Db (MDB_db) read/write
-  lockfile.rs       Txninfo/Reader layout constants and accessors
+  lockfile.rs       LockLayout: MDB_txninfo/MDB_reader layout of lock-file
+                    versions 1 and 2 on this platform, header/slot snapshots
 src/idl.rs          sorted id lists (MDB_IDL semantics) and dirty lists (ID2L)
 src/cmp.rs          the five comparators + Comparator enum
 src/os/             ALL unsafe lives here. mod.rs selects unix; unix.rs: DataMap

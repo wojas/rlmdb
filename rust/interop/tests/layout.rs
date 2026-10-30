@@ -3,9 +3,14 @@
 //!
 //! These numbers are what the Rust implementation must reproduce;
 //! `rust_layout_matches_c` compares every one of them with the constants of
-//! the `lmdb` crate (`rlmdb::consts`, `rlmdb::format::layout`).
+//! the `lmdb` crate (`rlmdb::consts`, `rlmdb::format::layout`) and, for the
+//! lock file, with the version 1 descriptor the library uses
+//! (`rlmdb::format::lockfile::LOCK_V09`).
 
 use interop::tools::{c_layout, Layout};
+
+#[path = "common/lock_lines.rs"]
+mod lock_lines;
 
 fn layout() -> &'static Layout {
     c_layout().expect("layout_dump")
@@ -217,9 +222,10 @@ fn lock_file_header() {
 
 /// Every value `layout_dump` prints that has a counterpart in the Rust
 /// library, as the library sees it: constants from `rlmdb::consts` and
-/// `rlmdb::format::layout`, and sizes of the fields of its decoded structs.
-/// On Linux the lock-file offsets depend on `sizeof(pthread_mutex_t)`, which
-/// both sides take from the platform's C headers (`libc` on the Rust side).
+/// `rlmdb::format::layout`, sizes of the fields of its decoded structs, and
+/// the lock-file lines of `lock_lines`. On Linux the lock-file offsets
+/// depend on `sizeof(pthread_mutex_t)`, which both sides take from the
+/// platform's C headers (`libc` on the Rust side).
 fn rust_layout() -> Vec<(String, u64)> {
     use rlmdb::consts as c;
     use rlmdb::format::layout as l;
@@ -232,11 +238,6 @@ fn rust_layout() -> Vec<(String, u64)> {
     } else {
         align_of::<libc::pthread_mutex_t>()
     };
-    let (rlock, wlock) = if sem {
-        ("mtb_rmname", "mt2_wmname")
-    } else {
-        ("mtb_rmutex", "mt2_wmutex")
-    };
     let hdr = [0u8; l::PAGE_HDR_SIZE];
     let pg = PageRef::new(&hdr).unwrap();
     let nd = rlmdb::format::NodeRef::new(&hdr).unwrap();
@@ -247,21 +248,17 @@ fn rust_layout() -> Vec<(String, u64)> {
         thread: 0,
         txnid: None,
     };
-    let txbody = (l::TXNINFO_NUMREADERS + 4).next_multiple_of(8.max(mutex_align));
 
-    let mut v: Vec<(String, usize)> = vec![
+    let v: Vec<(String, usize)> = vec![
         ("MDB_ROBUST_SUPPORTED".into(), usize::from(!sem)),
         ("MDB_MAGIC".into(), c::MDB_MAGIC as usize),
         ("MDB_DATA_VERSION".into(), c::MDB_DATA_VERSION as usize),
-        ("MDB_LOCK_VERSION".into(), c::MDB_LOCK_VERSION as usize),
-        ("MDB_LOCK_FORMAT".into(), l::LOCK_FORMAT as usize),
         ("MDB_PIDLOCK".into(), c::MDB_PIDLOCK as usize),
         ("PAGEHDRSZ".into(), l::PAGE_HDR_SIZE),
         ("NODESIZE".into(), l::NODE_SIZE),
         ("MDB_MAXKEYSIZE".into(), c::MDB_MAXKEYSIZE),
         ("MDB_MINKEYS".into(), c::MDB_MINKEYS),
         ("CACHELINE".into(), c::CACHELINE),
-        ("MNAME_LEN".into(), l::MNAME_LEN),
         ("DEFAULT_READERS".into(), c::DEFAULT_READERS as usize),
         ("DEFAULT_MAPSIZE".into(), c::DEFAULT_MAPSIZE),
         ("MAX_PAGESIZE".into(), c::MAX_PAGESIZE),
@@ -435,103 +432,17 @@ fn rust_layout() -> Vec<(String, u64)> {
             "offsetof(MDB_metabuf.mb_metabuf.mm_meta)".into(),
             l::META_OFFSET_IN_PAGE,
         ),
-        // MDB_reader / MDB_rxbody
-        (
-            "sizeof(MDB_rxbody)".into(),
-            l::READER_TID + size_of_val(&reader.thread),
-        ),
-        ("sizeof(MDB_reader)".into(), l::READER_SIZE),
-        // MDB_txninfo / MDB_txbody
-        ("sizeof(MDB_txbody)".into(), txbody),
-        ("offsetof(MDB_txbody.mtb_magic)".into(), l::TXNINFO_MAGIC),
-        ("sizeof(MDB_txbody.mtb_magic)".into(), 4),
-        ("offsetof(MDB_txbody.mtb_format)".into(), l::TXNINFO_FORMAT),
-        (
-            "sizeof(MDB_txbody.mtb_format)".into(),
-            size_of_val(&l::LOCK_FORMAT),
-        ),
-        (format!("offsetof(MDB_txbody.{rlock})"), l::TXNINFO_RMUTEX),
-        (format!("sizeof(MDB_txbody.{rlock})"), l::MNAME_LEN),
-        ("offsetof(MDB_txbody.mtb_txnid)".into(), l::TXNINFO_TXNID),
-        (
-            "sizeof(MDB_txbody.mtb_txnid)".into(),
-            size_of_val(&meta.txnid),
-        ),
-        (
-            "offsetof(MDB_txbody.mtb_numreaders)".into(),
-            l::TXNINFO_NUMREADERS,
-        ),
-        ("sizeof(MDB_txbody.mtb_numreaders)".into(), size_of::<u32>()),
-        // One reader slot is part of the C struct.
-        (
-            "sizeof(MDB_txninfo)".into(),
-            l::READERS_OFFSET + l::READER_SIZE,
-        ),
-        ("offsetof(MDB_txninfo.mt1)".into(), 0),
-        ("sizeof(MDB_txninfo.mt1)".into(), l::TXNINFO_HEADER_SIZE),
-        ("offsetof(MDB_txninfo.mt2)".into(), l::TXNINFO_WMUTEX),
-        (
-            "sizeof(MDB_txninfo.mt2)".into(),
-            l::READERS_OFFSET - l::TXNINFO_WMUTEX,
-        ),
-        (
-            format!("offsetof(MDB_txninfo.mt2.{wlock})"),
-            l::TXNINFO_WMUTEX,
-        ),
-        (format!("sizeof(MDB_txninfo.mt2.{wlock})"), l::MNAME_LEN),
-        (
-            "offsetof(MDB_txninfo.mti_readers)".into(),
-            l::READERS_OFFSET,
-        ),
-        ("sizeof(MDB_txninfo.mti_readers)".into(), l::READER_SIZE),
-        (
-            "offsetof(MDB_txninfo.mti_readers[1])".into(),
-            lockfile::reader_offset(1),
-        ),
-        ("sizeof(MDB_txninfo.mti_readers[1])".into(), l::READER_SIZE),
     ];
-    // The reader slot fields, under both C names.
-    for prefix in ["MDB_rxbody", "MDB_reader.mru.mrx"] {
-        v.extend([
-            (format!("offsetof({prefix}.mrb_txnid)"), l::READER_TXNID),
-            (
-                format!("sizeof({prefix}.mrb_txnid)"),
-                size_of_val(&meta.txnid),
-            ),
-            (format!("offsetof({prefix}.mrb_pid)"), l::READER_PID),
-            (
-                format!("sizeof({prefix}.mrb_pid)"),
-                size_of_val(&reader.pid),
-            ),
-            (format!("offsetof({prefix}.mrb_tid)"), l::READER_TID),
-            (
-                format!("sizeof({prefix}.mrb_tid)"),
-                size_of_val(&reader.thread),
-            ),
-        ]);
-    }
-    // The lock-file header fields, also under MDB_txninfo.mt1.mtb.
-    for field in [
-        "mtb_magic",
-        "mtb_format",
-        rlock,
-        "mtb_txnid",
-        "mtb_numreaders",
-    ] {
-        let off = v
-            .iter()
-            .find(|(n, _)| *n == format!("offsetof(MDB_txbody.{field})"))
-            .map(|(_, x)| *x)
-            .unwrap();
-        let size = v
-            .iter()
-            .find(|(n, _)| *n == format!("sizeof(MDB_txbody.{field})"))
-            .map(|(_, x)| *x)
-            .unwrap();
-        v.push((format!("offsetof(MDB_txninfo.mt1.mtb.{field})"), off));
-        v.push((format!("sizeof(MDB_txninfo.mt1.mtb.{field})"), size));
-    }
-    v.into_iter().map(|(n, x)| (n, x as u64)).collect()
+    // The lock file: the descriptor of version 1, and the constants the
+    // library still has for it agree with it.
+    let lock = &lockfile::LOCK_V09;
+    assert_eq!(lock.lock_format, l::LOCK_FORMAT);
+    assert_eq!(lock.version, c::MDB_LOCK_VERSION);
+    assert_eq!(lock.readers, l::READERS_OFFSET);
+    assert_eq!(lock.rlock_size, l::MNAME_LEN);
+    let mut v: Vec<(String, u64)> = v.into_iter().map(|(n, x)| (n, x as u64)).collect();
+    v.extend(lock_lines::rust_lock_lines(lock));
+    v
 }
 
 /// `layout_dump` values without a counterpart in the Rust library, and why.

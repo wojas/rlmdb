@@ -12,11 +12,10 @@
 //! * C 1.0 and rlmdb taking turns on one environment (each writes with the
 //!   other's pages under it, then the C page audit and the contents).
 //!
-//! rlmdb still writes the version 1 lock file (`DUAL_FORMAT.md` stage 3),
-//! which a C 1.0 process rejects while rlmdb holds the environment open:
-//! the tests run one side after the other (each opener re-initialises the
-//! lock file, as C does when it opens alone). The concurrent scenarios at
-//! the end are `#[ignore]`d until stage 3 lands.
+//! The scenarios at the end have both sides open at once: rlmdb writes
+//! 1.0's version 2 lock file (`interop/tests/lockfile10.rs` checks its
+//! layout), so a C 1.0 reader pins pages against an rlmdb writer and the
+//! reverse, and both see each other's reader slots.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -320,8 +319,8 @@ fn rlmdb_reads_c10_files_at_every_page_size() {
             Some(&dump_text(&dbs, ps)),
         );
         audit10(dir.path());
-        // NO_LOCK: the C tools below must be able to open the environment
-        // while rlmdb has it open (DUAL_FORMAT.md stage 3).
+        // NO_LOCK: a read-only look at the file; the C tools below open
+        // the environment while this handle exists.
         let env = Environment::builder()
             .max_dbs(4)
             .flags(EnvironmentFlags::READ_ONLY | EnvironmentFlags::NO_LOCK)
@@ -566,10 +565,14 @@ fn c10_and_rlmdb_take_turns() {
     }
 }
 
-/// `hold-reader` of a peer on `env`: the process and its snapshot's txnid.
-fn hold_reader(peer: &Path, env: &Path) -> (std::process::Child, u64) {
+/// `hold-reader` of a peer on `env`, with `dataset` (`<db> <count>
+/// <seed>` of the peer's `fill`, verified in the snapshot when the reader
+/// is released: a failure is the process's exit status): the process and
+/// its snapshot's txnid.
+fn hold_reader(peer: &Path, env: &Path, dataset: &[&str]) -> (std::process::Child, u64) {
     let mut child = Command::new(peer)
-        .args(["hold-reader", path_str(env), "--until-stdin"])
+        .args(["hold-reader", path_str(env), "60", "--until-stdin"])
+        .args(dataset)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -589,46 +592,92 @@ fn hold_reader(peer: &Path, env: &Path) -> (std::process::Child, u64) {
 /// A C 1.0 reader holds a snapshot while rlmdb writes: rlmdb must see the
 /// reader slot in the (version 2) lock file and not reuse the snapshot's
 /// pages; afterwards the snapshot C held is intact.
-///
-/// Ignored until rlmdb writes LMDB 1.0's lock file (`DUAL_FORMAT.md` stage
-/// 3): today C 1.0 refuses rlmdb's version 1 lock file
-/// (`MDB_VERSION_MISMATCH`) while both are open.
 #[test]
-#[ignore = "needs the version 2 lock file (DUAL_FORMAT.md stage 3)"]
 fn c10_reader_pins_pages_against_rlmdb_writer() {
     let ps = 4096;
     let dir = tmp();
     writeops10(dir.path(), 0, ps, &script(5, 100));
-    let (mut reader, txnid) = hold_reader(bins::cpeer10(), dir.path());
+    // A dataset the C reader verifies in its snapshot when released; rlmdb
+    // rewrites that database underneath it.
+    let dataset = ["held", "2000", "7"];
+    let fill = Command::new(bins::cpeer10())
+        .args(["fill", path_str(dir.path())])
+        .args(dataset)
+        .output()
+        .unwrap();
+    assert!(
+        fill.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fill.stderr)
+    );
+    let (mut reader, txnid) = hold_reader(bins::cpeer10(), dir.path(), &dataset);
     let env = Environment::builder()
         .max_dbs(4)
         .map_size(268_435_456)
         .open(dir.path())
         .unwrap();
     let before = c10_records(dir.path(), Some("t"));
+    let held_keys: Vec<Vec<u8>> = {
+        let txn = env.begin_ro_txn().unwrap();
+        let db = txn.open_db(Some("held")).unwrap();
+        let mut c = txn.cursor(db).unwrap();
+        let mut keys = Vec::new();
+        while let Some((k, _)) = c.next().unwrap() {
+            keys.push(k.to_vec());
+        }
+        keys
+    };
+    assert_eq!(held_keys.len(), 2000);
     for round in 0..5 {
         rust_turn(&env, round * 300, (round + 1) * 300, ps);
+        // Free the snapshot's pages of `held`: delete some keys, resize
+        // the values of the rest.
+        let mut txn = env.begin_rw_txn().unwrap();
+        let held = txn.create_db(Some("held"), DatabaseFlags::empty()).unwrap();
+        for (i, k) in held_keys.iter().enumerate() {
+            if (i + round as usize) % 7 == 0 {
+                txn.del(held, k, None).unwrap();
+            } else {
+                txn.put(
+                    held,
+                    k,
+                    &vec![b'x'; 40 + round as usize * 30],
+                    WriteFlags::empty(),
+                )
+                .unwrap();
+            }
+        }
+        txn.commit().unwrap();
     }
     let txn = env.begin_ro_txn().unwrap();
     assert!(txn.id() > txnid);
     drop(txn);
-    // The held snapshot still reads as it did.
-    let out = Command::new(bins::cpeer10())
-        .args(["verify", path_str(dir.path())])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
+    // Released, the C reader verifies its snapshot of `held` as it was.
     drop(reader.stdin.take());
-    reader.wait().unwrap();
+    let out = reader.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "C 1.0's snapshot changed under rlmdb's writes:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     drop(env);
     audit10(dir.path());
     assert_ne!(before, c10_records(dir.path(), Some("t")));
+    // The control: the same verification of the current contents fails.
+    let now = Command::new(bins::cpeer10())
+        .args(["verify", path_str(dir.path())])
+        .args(dataset)
+        .output()
+        .unwrap();
+    assert!(
+        !now.status.success(),
+        "rlmdb's writes to `held` are visible"
+    );
 }
 
 /// rlmdb holds a read transaction while C 1.0 writes: C must honour
 /// rlmdb's reader slot, and rlmdb's snapshot stays readable.
 #[test]
-#[ignore = "needs the version 2 lock file (DUAL_FORMAT.md stage 3)"]
 fn rlmdb_reader_pins_pages_against_c10_writer() {
     let ps = 4096;
     let dir = tmp();
@@ -654,7 +703,6 @@ fn rlmdb_reader_pins_pages_against_c10_writer() {
 /// C 1.0 and rlmdb write the same environment in turns while both keep it
 /// open (C's `hold-env` keeps its environment open across rlmdb's commits).
 #[test]
-#[ignore = "needs the version 2 lock file (DUAL_FORMAT.md stage 3)"]
 fn c10_and_rlmdb_share_an_open_environment() {
     let ps = 4096;
     let dir = tmp();

@@ -570,8 +570,7 @@ impl LockMap {
     }
 
     /// Copies `len` bytes at `offset` (volatile byte reads), e.g. a
-    /// semaphore name.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+    /// semaphore name or the header.
     pub fn read_bytes(&self, offset: usize, len: usize) -> Vec<u8> {
         let p = self.checked_ptr(offset, 1);
         assert!(offset + len <= self.len, "lock file read out of bounds");

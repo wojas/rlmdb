@@ -30,8 +30,8 @@
 //! layout; the environment keeps its [`Layout`] and every transaction reads
 //! and writes pages through it. The size-derived limits (`me_nodemax`, the
 //! maximum key size, `me_maxfree_1pg`) follow from the layout and the page
-//! size. The lock file is the version 1 one in both formats for now
-//! (`DUAL_FORMAT.md` §7, stage 3).
+//! size. The lock file version follows the format too
+//! (`format::lockfile::LockLayout`): version 1 for 0.9, version 2 for 1.0.
 //!
 //! Dropping an [`Environment`] mirrors `mdb_env_close0`: unmap the data
 //! file, close the descriptors, clear any reader slots this process still
@@ -338,9 +338,12 @@ impl Environment {
             Some(_) => return Err(Error::einval()),
         };
 
+        // Lock-file version (dual-format stage 3): it follows the data
+        // format, version 1 for 0.9 and version 2 for 1.0.
+        let lock_layout = layout.lock();
         let mut lock = None;
         if !read_only && !no_lock {
-            lock = LockRegion::open(&lock_path, mode, opts.max_readers, false)?;
+            lock = LockRegion::open(&lock_path, mode, opts.max_readers, false, lock_layout)?;
         }
         let data_file = if read_only {
             File::open(&data_path)?
@@ -354,7 +357,7 @@ impl Environment {
         };
         if read_only && !no_lock {
             // For RDONLY, get the lock file after we know the data file exists.
-            lock = LockRegion::open(&lock_path, mode, opts.max_readers, true)?;
+            lock = LockRegion::open(&lock_path, mode, opts.max_readers, true, lock_layout)?;
         }
 
         // mdb_env_open2
