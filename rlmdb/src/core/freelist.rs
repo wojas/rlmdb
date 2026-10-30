@@ -36,6 +36,7 @@ use crate::core::txn_rw::{RwTxn, TXN_ERROR};
 use crate::core::wcursor::CRef;
 use crate::error::{MdbError, Result};
 use crate::format::get_u64;
+use crate::format::layout::{Format, OverflowRef};
 use crate::format::page::{P_DIRTY, P_LOOSE};
 use crate::idl::Idl;
 
@@ -268,6 +269,27 @@ impl<'env> RwTxn<'env> {
             return Err(MdbError::Corrupted.into());
         }
         Ok(n as usize)
+    }
+
+    /// The length of the overflow run that reference `r` points to, as
+    /// `mdb_drop0` frees it: 0.9 reads `mp_pages` from the run's first page
+    /// ([`RwTxn::overflow_run_pages`]); 1.0 trusts the reference's
+    /// `op_pages` and does not read the page. Either way the run must lie
+    /// within the transaction's pages.
+    pub(crate) fn dropped_run_pages(&self, r: OverflowRef) -> Result<usize> {
+        match self.layout().format {
+            Format::V09 => self.overflow_run_pages(r.pgno),
+            Format::V10 => {
+                if r.pages == 0
+                    || r.pgno
+                        .checked_add(r.pages)
+                        .is_none_or(|end| end > self.core.next_pgno)
+                {
+                    return Err(MdbError::Corrupted.into());
+                }
+                usize::try_from(r.pages).map_err(|_| MdbError::Corrupted.into())
+            }
+        }
     }
 
     /// `mdb_ovpage_free`: free the overflow run starting at `pgno`. A run

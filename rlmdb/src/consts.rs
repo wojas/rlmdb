@@ -191,11 +191,46 @@ pub const MDB_BAD_TXN: c_int = -30782;
 pub const MDB_BAD_VALSIZE: c_int = -30781;
 /// `MDB_BAD_DBI`: the specified DBI was changed unexpectedly.
 pub const MDB_BAD_DBI: c_int = -30780;
-/// `MDB_PROBLEM` from LMDB 1.0 / mdb.master3; not produced by 0.9, kept for
-/// parity with heed's `MdbError::Problem`.
-pub const MDB_PROBLEM: c_int = -30779;
 /// `MDB_LAST_ERRCODE` of LMDB 0.9 (`MDB_BAD_DBI`).
 pub const MDB_LAST_ERRCODE: c_int = MDB_BAD_DBI;
+
+// The codes LMDB 1.0 adds after `MDB_BAD_DBI` (`lmdb.h` of `mdb.RE/1.0`),
+// with their upstream names and values. 0.9's `mdb_strerror` does not know
+// them; this crate's [`strerror`](crate::strerror) does.
+
+/// `MDB_PROBLEM` (LMDB 1.0): unexpected problem - txn should abort. Also
+/// heed's `MdbError::Problem`.
+pub const MDB_PROBLEM: c_int = -30779;
+/// `MDB_BAD_CHECKSUM` (LMDB 1.0): page checksum incorrect. rlmdb returns it
+/// for a 1.0 environment whose pages carry checksums, which it does not
+/// implement.
+pub const MDB_BAD_CHECKSUM: c_int = -30778;
+/// `MDB_CRYPTO_FAIL` (LMDB 1.0): encryption/decryption failed.
+pub const MDB_CRYPTO_FAIL: c_int = -30777;
+/// `MDB_ENV_ENCRYPTION` (LMDB 1.0): environment encryption mismatch. rlmdb
+/// returns it for an encrypted 1.0 environment, which it cannot read.
+pub const MDB_ENV_ENCRYPTION: c_int = -30776;
+/// `MDB_TXN_PENDING` (LMDB 1.0): transaction was already prepared.
+pub const MDB_TXN_PENDING: c_int = -30775;
+/// `MDB_CANT_ROLLBACK` (LMDB 1.0): environment can't rollback the last
+/// transaction.
+pub const MDB_CANT_ROLLBACK: c_int = -30774;
+/// `MDB_DBIS_BUSY` (LMDB 1.0): can't drop main DBI while other DBIs are open.
+pub const MDB_DBIS_BUSY: c_int = -30773;
+/// `MDB_SHORT_WRITE` (LMDB 1.0): write was incomplete.
+pub const MDB_SHORT_WRITE: c_int = -30772;
+/// `MDB_ENV_BUSY` (LMDB 1.0): env is busy, can't use previous snapshot.
+pub const MDB_ENV_BUSY: c_int = -30771;
+/// `MDB_IS_READONLY` (LMDB 1.0): env or txn is read-only, can't write.
+pub const MDB_IS_READONLY: c_int = -30770;
+/// `MDB_ADDR_BUSY` (LMDB 1.0): requested map address is unavailable.
+pub const MDB_ADDR_BUSY: c_int = -30769;
+/// `MDB_LAST_ERRCODE` of LMDB 1.0 (`MDB_ADDR_BUSY`).
+pub const MDB_LAST_ERRCODE_V10: c_int = MDB_ADDR_BUSY;
+
+/// `MDB_ENCRYPT` (LMDB 1.0 environment flag, also recorded in the meta
+/// page's `mm_flags`): the pages are encrypted.
+pub const MDB_ENCRYPT: u32 = 0x2000;
 
 // ---------------------------------------------------------------------------
 // Format constants from mdb.c.
@@ -203,7 +238,8 @@ pub const MDB_LAST_ERRCODE: c_int = MDB_BAD_DBI;
 
 /// `MDB_MAGIC`: stamp at the start of the meta and the lock file.
 pub const MDB_MAGIC: u32 = 0xBEEF_C0DE;
-/// `MDB_DATA_VERSION`: data file format version.
+/// `MDB_DATA_VERSION` of LMDB 0.9: the data file format version (1.0's is 3,
+/// [`Layout::data_version`](crate::format::Layout::data_version)).
 pub const MDB_DATA_VERSION: u32 = 1;
 /// `MDB_LOCK_VERSION`: lock file format version.
 pub const MDB_LOCK_VERSION: u32 = 1;
@@ -211,7 +247,10 @@ pub const MDB_LOCK_VERSION: u32 = 1;
 pub const MDB_PIDLOCK: u32 = 1;
 /// `MDB_LOCK_FORMAT`: `MDB_LOCK_VERSION + (MDB_PIDLOCK << 16)` on Unix.
 pub const MDB_LOCK_FORMAT: u32 = MDB_LOCK_VERSION + (MDB_PIDLOCK << 16);
-/// `MDB_MAXKEYSIZE`: largest key (and `MDB_DUPSORT` data item) we write.
+/// `MDB_MAXKEYSIZE`: largest key (and `MDB_DUPSORT` data item) of an LMDB 0.9
+/// environment. LMDB 1.0 computes it from the page size
+/// ([`Layout::max_key_size`](crate::format::Layout::max_key_size),
+/// [`Environment::max_key_size`](crate::Environment::max_key_size)).
 pub const MDB_MAXKEYSIZE: usize = 511;
 /// `MAXDATASIZE`: node data sizes are stored in 32 bits.
 pub const MAXDATASIZE: usize = 0xffff_ffff;

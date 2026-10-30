@@ -109,15 +109,21 @@ fn build_with_c(c: &common::CTools, name: &str, dir: &Path) -> Vec<String> {
     }
 }
 
-/// The same shapes written by the Rust writer (used when the C tools are
-/// unavailable).
-fn build_with_rust(name: &str, dir: &Path) -> Vec<String> {
-    let env = Environment::builder()
+/// The same shapes written by the Rust writer: in the LMDB 0.9 format when
+/// the C tools are unavailable, and in the LMDB 1.0 format with pages of
+/// `v10_page_size` bytes for the `*10` bases (the 1.0 C tools are only
+/// built by `interop`; `interop/tests/format10.rs` checks that C 1.0 reads
+/// what this writes).
+fn build_with_rust(name: &str, dir: &Path, v10_page_size: Option<usize>) -> Vec<String> {
+    let mut builder = Environment::builder();
+    builder
         .map_size(64 << 20)
         .max_dbs(8)
-        .flags(EnvironmentFlags::NO_SYNC)
-        .open(dir)
-        .unwrap();
+        .flags(EnvironmentFlags::NO_SYNC);
+    if let Some(ps) = v10_page_size {
+        builder.format(rlmdb::Format::V10).page_size(ps);
+    }
+    let env = builder.open(dir).unwrap();
     let mut txn = env.begin_rw_txn().unwrap();
     let names: Vec<String> = match name {
         "big" => {
@@ -218,9 +224,14 @@ fn base(name: &'static str) -> &'static Base {
         return b;
     }
     let dir = tempfile::tempdir().unwrap();
-    let names = match common::c_tools() {
-        Some(c) => build_with_c(c, name, dir.path()),
-        None => build_with_rust(name, dir.path()),
+    let names = match (name, common::c_tools()) {
+        // LMDB 1.0 bases: small pages for deep trees and many overflow
+        // pages.
+        ("main10", _) => build_with_rust("main", dir.path(), Some(1024)),
+        ("named10", _) => build_with_rust("named", dir.path(), Some(1024)),
+        ("big10", _) => build_with_rust("big", dir.path(), Some(4096)),
+        (_, Some(c)) => build_with_c(c, name, dir.path()),
+        (_, None) => build_with_rust(name, dir.path(), None),
     };
     let data = std::fs::read(dir.path().join("data.mdb")).unwrap();
     let b: &'static Base = Box::leak(Box::new(Base { name, data, names }));
@@ -233,10 +244,19 @@ fn base(name: &'static str) -> &'static Base {
 // ---------------------------------------------------------------------------
 
 /// A data file image with page-level helpers for the structure-aware
-/// mutations.
+/// mutations, in the layout of its format (taken from the first meta page:
+/// LMDB 0.9 has a 16-byte page header with offsets from the page start,
+/// 1.0 a 24-byte one with `mp_lower`, `mp_upper` and `mp_ptrs[]` relative
+/// to its end and node data after the key padded to an even length).
 struct Img {
     buf: Vec<u8>,
     ps: usize,
+    /// `PAGEHDRSZ`: 16 or 24.
+    hdr: usize,
+    /// `PAGEBASE`: 0 or 24.
+    pbase: usize,
+    /// Whether node data starts after the key padded to an even length.
+    even: bool,
 }
 
 const P_BRANCH: u16 = 0x01;
@@ -248,6 +268,53 @@ const F_SUBDATA: u16 = 0x02;
 const F_DUPDATA: u16 = 0x04;
 
 impl Img {
+    /// The image of data file `buf` (of a valid base environment).
+    fn new(buf: Vec<u8>) -> Img {
+        let magic_at =
+            |off: usize| buf.get(off..off + 4) == Some(&0xBEEF_C0DEu32.to_ne_bytes()[..]);
+        let (hdr, pbase, even) = if magic_at(16) {
+            (16, 0, false)
+        } else {
+            (24, 24, true)
+        };
+        assert!(magic_at(hdr), "base is not an LMDB data file");
+        // mm_psize: mm_dbs[FREE_DBI].md_pad, at 24 in MDB_meta.
+        let ps = u32::from_ne_bytes(buf[hdr + 24..hdr + 28].try_into().unwrap()) as usize;
+        Img {
+            buf,
+            ps,
+            hdr,
+            pbase,
+            even,
+        }
+    }
+
+    /// Offset of `mp_pad` in a page.
+    fn f_pad(&self) -> usize {
+        self.hdr - 8
+    }
+
+    /// Offset of `mp_flags`.
+    fn f_flags(&self) -> usize {
+        self.hdr - 6
+    }
+
+    /// Offset of `mp_lower` (and of `mp_pages` on overflow pages).
+    fn f_lower(&self) -> usize {
+        self.hdr - 4
+    }
+
+    /// Offset of `mp_upper`.
+    fn f_upper(&self) -> usize {
+        self.hdr - 2
+    }
+
+    /// Offset of the data of the node at absolute offset `n`.
+    fn node_data(&self, n: usize) -> usize {
+        let ks = self.get16(n + 6).unwrap_or(0) as usize;
+        n + 8 + if self.even { (ks + 1) & !1 } else { ks }
+    }
+
     fn npages(&self) -> usize {
         self.buf.len() / self.ps
     }
@@ -277,7 +344,7 @@ impl Img {
     }
 
     fn flags(&self, pg: usize) -> u16 {
-        self.get16(pg * self.ps + 10).unwrap_or(0)
+        self.get16(pg * self.ps + self.f_flags()).unwrap_or(0)
     }
 
     /// Pages 2.. classified by their header (overflow runs skipped).
@@ -291,7 +358,7 @@ impl Img {
             }
             if f & P_OVERFLOW != 0 {
                 let n = u32::from_ne_bytes(
-                    self.buf[pg * self.ps + 12..pg * self.ps + 16]
+                    self.buf[pg * self.ps + self.f_lower()..pg * self.ps + self.f_lower() + 4]
                         .try_into()
                         .unwrap(),
                 ) as usize;
@@ -307,12 +374,12 @@ impl Img {
     /// the page.
     fn nodes(&self, pg: usize) -> Vec<usize> {
         let base = pg * self.ps;
-        let lower = self.get16(base + 12).unwrap_or(0) as usize;
-        let n = lower.saturating_sub(16) / 2;
+        let lower = self.get16(base + self.f_lower()).unwrap_or(0) as usize;
+        let n = lower.saturating_sub(self.hdr - self.pbase) / 2;
         (0..n.min(self.ps / 2))
             .filter_map(|i| {
-                let ptr = self.get16(base + 16 + 2 * i)? as usize;
-                (ptr >= 16 && ptr + 8 <= self.ps).then_some(base + ptr)
+                let ptr = self.get16(base + self.hdr + 2 * i)? as usize + self.pbase;
+                (ptr >= self.hdr && ptr + 8 <= self.ps).then_some(base + ptr)
             })
             .collect()
     }
@@ -439,13 +506,11 @@ fn mutate(rng: &mut Rng, img: &mut Img) -> String {
             let Some(pg) = pick(rng, &pages) else {
                 return "lower/upper: no page".into();
             };
-            let field = if rng.below(2) == 0 { 12 } else { 14 };
+            let lower = rng.below(2) == 0;
+            let field = if lower { img.f_lower() } else { img.f_upper() };
             let v = bogus_u16(rng, ps);
             img.put16(pg * ps + field, v);
-            format!(
-                "pg={pg} {} = {v}",
-                if field == 12 { "lower" } else { "upper" }
-            )
+            format!("pg={pg} {} = {v}", if lower { "lower" } else { "upper" })
         }
         9 => {
             let pages = img.pages_with(|f| f & (P_BRANCH | P_LEAF) != 0 && f & P_LEAF2 == 0);
@@ -461,7 +526,7 @@ fn mutate(rng: &mut Rng, img: &mut Img) -> String {
                 3 => (ps - 4) as u16,
                 _ => bogus_u16(rng, ps),
             };
-            img.put16(pg * ps + 16 + 2 * i, v);
+            img.put16(pg * ps + img.hdr + 2 * i, v);
             format!("pg={pg} ptr[{i}] = {v}")
         }
         10 => {
@@ -489,9 +554,8 @@ fn mutate(rng: &mut Rng, img: &mut Img) -> String {
             let Some(n) = pick(rng, &nodes) else {
                 return "ovpgno: no node".into();
             };
-            let ks = img.get16(n + 6).unwrap_or(0) as usize;
             let target = bogus_pgno(rng, img, n / ps);
-            img.put64(n + 8 + ks, target);
+            img.put64(img.node_data(n), target);
             format!("bigdata node at {n} -> pgno {target}")
         }
         12 => {
@@ -514,7 +578,7 @@ fn mutate(rng: &mut Rng, img: &mut Img) -> String {
                 return "leaf2: no page".into();
             };
             let v = [0u16, 1, 3, ps as u16, (ps / 2) as u16, 0xffff][rng.below(6)];
-            img.put16(pg * ps + 8, v);
+            img.put16(pg * ps + img.f_pad(), v);
             format!("leaf2 pg={pg} ksize = {v}")
         }
         14 => {
@@ -529,16 +593,16 @@ fn mutate(rng: &mut Rng, img: &mut Img) -> String {
                 3 => (np - pg + 5) as u32,
                 _ => rng.next() as u32,
             };
-            img.put32(pg * ps + 12, v);
+            img.put32(pg * ps + img.f_lower(), v);
             format!("overflow pg={pg} pages = {v}")
         }
         15 => {
             // A DB record: in a meta page, or the data of an F_SUBDATA node.
             let recs: Vec<usize> = {
-                let mut v = vec![16 + 24, 16 + 72, ps + 16 + 24, ps + 16 + 72];
+                let h = img.hdr;
+                let mut v = vec![h + 24, h + 72, ps + h + 24, ps + h + 72];
                 for n in img.leaf_nodes_with(|f| f & F_SUBDATA != 0) {
-                    let ks = img.get16(n + 6).unwrap_or(0) as usize;
-                    v.push(n + 8 + ks);
+                    v.push(img.node_data(n));
                 }
                 v
             };
@@ -558,7 +622,7 @@ fn mutate(rng: &mut Rng, img: &mut Img) -> String {
             format!("db record at {r} {what} = {value:#x}")
         }
         16 => {
-            let m = rng.below(2) * ps + 16;
+            let m = rng.below(2) * ps + img.hdr;
             let (what, off, v): (&str, usize, u64) = match rng.below(7) {
                 0 => ("mapsize", 16, [0u64, 4096, 1 << 62, 3][rng.below(4)]),
                 1 => (
@@ -568,7 +632,8 @@ fn mutate(rng: &mut Rng, img: &mut Img) -> String {
                 ),
                 2 => ("txnid", 128, [0u64, 1, u64::MAX, 1 << 40][rng.below(4)]),
                 3 => ("magic", 0, rng.next() & 0xffff_ffff),
-                4 => ("version", 4, [0u64, 2, 999][rng.below(3)]),
+                // Including the other format's version word.
+                4 => ("version", 4, [0u64, 1, 2, 3, 999][rng.below(5)]),
                 5 => (
                     "psize",
                     24,
@@ -599,7 +664,7 @@ fn mutate(rng: &mut Rng, img: &mut Img) -> String {
                 0x4002,
                 rng.next() as u16,
             ][rng.below(13)];
-            img.put16(pg * ps + 10, v);
+            img.put16(pg * ps + img.f_flags(), v);
             format!("pg={pg} flags = {v:#x}")
         }
         18 => {
@@ -608,9 +673,9 @@ fn mutate(rng: &mut Rng, img: &mut Img) -> String {
             let Some(n) = pick(rng, &nodes) else {
                 return "subpage: no node".into();
             };
-            let ks = img.get16(n + 6).unwrap_or(0) as usize;
-            let sp = n + 8 + ks;
-            let field = [8, 10, 12, 14, 16, 18][rng.below(6)];
+            let sp = img.node_data(n);
+            // mp_pad, mp_flags, mp_lower, mp_upper, mp_ptrs[0..2].
+            let field = img.hdr - 8 + 2 * rng.below(6);
             let v = bogus_u16(rng, ps);
             img.put16(sp + field, v);
             format!("subpage at {sp} field+{field} = {v}")
@@ -669,7 +734,7 @@ fn mutate_all(rng: &mut Rng, img: &mut Img) -> String {
             let pages = img.pages_with(|f| f & P_OVERFLOW != 0);
             for &pg in &pages {
                 let v = [0u32, u32::MAX, 1 << 20, (img.npages() + 3 - pg) as u32][rng.below(4)];
-                img.put32(pg * ps + 12, v);
+                img.put32(pg * ps + img.f_lower(), v);
             }
             format!("all {} overflow runs: bogus page counts", pages.len())
         }
@@ -690,9 +755,8 @@ fn mutate_all(rng: &mut Rng, img: &mut Img) -> String {
         2 => {
             let nodes = img.leaf_nodes_with(|f| f & F_BIGDATA != 0);
             for &n in &nodes {
-                let ks = img.get16(n + 6).unwrap_or(0) as usize;
                 let t = bogus_pgno(rng, img, n / ps);
-                img.put64(n + 8 + ks, t);
+                img.put64(img.node_data(n), t);
             }
             format!("all {} overflow pgnos", nodes.len())
         }
@@ -700,7 +764,7 @@ fn mutate_all(rng: &mut Rng, img: &mut Img) -> String {
             let pages = img.pages_with(|f| f & P_LEAF2 != 0);
             for &pg in &pages {
                 let v = [0u16, 1, 3, ps as u16, 0xffff][rng.below(5)];
-                img.put16(pg * ps + 8, v);
+                img.put16(pg * ps + img.f_pad(), v);
             }
             format!("key size of all {} LEAF2 pages", pages.len())
         }
@@ -708,7 +772,11 @@ fn mutate_all(rng: &mut Rng, img: &mut Img) -> String {
             let pages = img.pages_with(|f| f & (P_BRANCH | P_LEAF) != 0);
             for &pg in &pages {
                 if rng.below(3) == 0 {
-                    let field = if rng.below(2) == 0 { 12 } else { 14 };
+                    let field = if rng.below(2) == 0 {
+                        img.f_lower()
+                    } else {
+                        img.f_upper()
+                    };
                     let v = bogus_u16(rng, ps);
                     img.put16(pg * ps + field, v);
                 }
@@ -1183,11 +1251,7 @@ enum Outcome {
 /// thread.
 fn run_case(base: &'static Base, seed: u64, scratch: &Path) -> (Outcome, Vec<String>) {
     let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
-    let ps = u32::from_ne_bytes(base.data[40..44].try_into().unwrap()) as usize;
-    let mut img = Img {
-        buf: base.data.clone(),
-        ps,
-    };
+    let mut img = Img::new(base.data.clone());
     let mut what = Vec::new();
     if rng.below(8) == 0 {
         // One structural mutation applied to every page it can hit.
@@ -1311,6 +1375,23 @@ fn robust_mutation_overflow_values() {
     run_base("big", 3_000_000);
 }
 
+/// The same mutations on LMDB 1.0 files (24-byte page headers, header-relative
+/// pointers, even-padded nodes, 24-byte overflow references), 1 KiB pages.
+#[test]
+fn robust_mutation_main_db_v10() {
+    run_base("main10", 4_000_000);
+}
+
+#[test]
+fn robust_mutation_named_dbs_v10() {
+    run_base("named10", 5_000_000);
+}
+
+#[test]
+fn robust_mutation_overflow_values_v10() {
+    run_base("big10", 6_000_000);
+}
+
 /// The data file is valid but the meta pages lie about the map size: the
 /// map is raised to cover the pages in use, and nothing reads past the
 /// file.
@@ -1363,11 +1444,7 @@ fn damaged_copy(
     want: impl Fn(u16) -> bool,
     f: impl Fn(&mut Img, usize),
 ) -> tempfile::TempDir {
-    let ps = u32::from_ne_bytes(base.data[40..44].try_into().unwrap()) as usize;
-    let mut img = Img {
-        buf: base.data.clone(),
-        ps,
-    };
+    let mut img = Img::new(base.data.clone());
     for pg in img.pages_with(want) {
         f(&mut img, pg);
     }
@@ -1390,13 +1467,18 @@ fn open_damaged(dir: &Path) -> Environment {
 /// snapshot first (C would try and fail with `ENOMEM`).
 #[test]
 fn robust_huge_overflow_counts() {
-    for count in [u32::MAX, 1 << 20] {
-        let base = base("big");
+    for (name, count) in [
+        ("big", u32::MAX),
+        ("big", 1 << 20),
+        ("big10", u32::MAX),
+        ("big10", 1 << 20),
+    ] {
+        let base = base(name);
         let dir = damaged_copy(
             base,
             |f| f & P_OVERFLOW != 0,
             |img, pg| {
-                let off = pg * img.ps + 12;
+                let off = pg * img.ps + img.f_lower();
                 img.put32(off, count);
             },
         );
@@ -1431,5 +1513,37 @@ fn robust_huge_overflow_counts() {
         let mut txn = env.begin_rw_txn().unwrap();
         let _ = txn.drop_db(Dbi::MAIN);
         txn.abort();
+    }
+}
+
+/// LMDB 1.0's overflow references carry the run length (`op_pages`), which
+/// `mdb_drop` trusts instead of the page: absurd lengths in every reference
+/// must fail cleanly (checked against the snapshot), not allocate a free
+/// list of that size or free pages that are not the run's.
+#[test]
+fn robust_huge_overflow_refs_v10() {
+    let base = base("big10");
+    for (field, value) in [(16, u64::MAX), (16, 1 << 40), (16, 0), (8, u64::MAX)] {
+        let mut img = Img::new(base.data.clone());
+        for n in img.leaf_nodes_with(|f| f & F_BIGDATA != 0) {
+            // MDB_ovpage { op_pgno, op_txnid at 8, op_pages at 16 }.
+            let d = img.node_data(n);
+            img.put64(d + field, value);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data.mdb"), &img.buf).unwrap();
+        let env = open_damaged(dir.path());
+        assert_eq!(env.format(), rlmdb::Format::V10);
+        let mut txn = env.begin_rw_txn().unwrap();
+        let _ = txn.clear_db(Dbi::MAIN);
+        let _ = txn.commit();
+        let mut txn = env.begin_rw_txn().unwrap();
+        let keys: Vec<Vec<u8>> = (0..240u32)
+            .map(|i| format!("k{i:06}").into_bytes())
+            .collect();
+        for k in &keys {
+            let _ = txn.put(Dbi::MAIN, k, &[9u8; 9000], WriteFlags::empty());
+        }
+        let _ = txn.commit();
     }
 }

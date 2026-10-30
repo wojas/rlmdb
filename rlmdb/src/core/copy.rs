@@ -44,7 +44,7 @@ use crate::core::env::Environment;
 use crate::core::page_ops;
 use crate::core::txn::{Transaction, TxnCore};
 use crate::error::{Error, MdbError, Result};
-use crate::format::layout::Layout;
+use crate::format::layout::{Format, Layout, OverflowRef};
 use crate::format::meta::Meta;
 use crate::format::page::{P_LEAF2, P_META};
 use crate::format::{put_u16, put_u64, Db, PageRef};
@@ -439,15 +439,25 @@ impl<'o, W: Write> CopyWriter<'o, W> {
             let page = PageRef::with_layout(leaf, l).ok_or(MdbError::Corrupted)?;
             let node = page.node(i).ok_or(MdbError::Corrupted)?;
             if node.is_bigdata() {
-                let pg = node.overflow_pgno().ok_or(MdbError::Corrupted)?;
-                let omp = txn.page(pg)?;
-                let pages = omp.overflow_pages() as usize;
-                let run = overflow_run(txn, pg, pages, self.ps)?;
+                let r = node.overflow_ref().ok_or(MdbError::Corrupted)?;
+                let omp = txn.page(r.pgno)?;
+                // 0.9 takes the run length from the page, 1.0 from the
+                // reference's `op_pages` (the same in a sound file).
+                let pages = match l.format {
+                    Format::V09 => omp.overflow_pages() as usize,
+                    Format::V10 => usize::try_from(r.pages).map_err(|_| MdbError::Corrupted)?,
+                };
+                let run = overflow_run(txn, r.pgno, pages, self.ps)?;
                 let new = self.put_overflow(run, pages)?;
                 let c = copy.get_or_insert_with(|| leaf.to_vec());
-                // (1.0 also sets op_txnid to 1 here, mdb.c 1.0 line 11420:
-                // left to the 1.0 write path.)
-                page_ops::set_node_overflow_pgno(l, c, i, new).ok_or(MdbError::Corrupted)?;
+                // The new page number; 1.0 also writes the run as txn 1
+                // and keeps op_pages (mdb.c 1.0, lines 11418-11420).
+                let moved = OverflowRef {
+                    pgno: new,
+                    txnid: 1,
+                    pages: r.pages,
+                };
+                page_ops::set_node_overflow_ref(l, c, i, moved).ok_or(MdbError::Corrupted)?;
             } else if node.is_subdata() {
                 let data = node.inline_data().ok_or(MdbError::Corrupted)?;
                 let mut db = Db::read(data).ok_or(MdbError::Corrupted)?;

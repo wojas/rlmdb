@@ -2,7 +2,8 @@
 //! [`Error`] (shaped like `heed::Error`).
 //!
 //! C LMDB functions return either `0`, one of its own negative codes
-//! (`MDB_KEYEXIST` … `MDB_BAD_DBI`), or an `errno` value. We keep both kinds
+//! (`MDB_KEYEXIST` … `MDB_BAD_DBI`; LMDB 1.0 adds `MDB_PROBLEM` …
+//! `MDB_ADDR_BUSY`), or an `errno` value. We keep both kinds
 //! distinguishable and losslessly convertible back to a C `int`
 //! ([`Error::to_err_code`]), because the C API crate must return exactly what
 //! C LMDB returns:
@@ -70,6 +71,34 @@ pub enum MdbError {
     /// `MDB_PROBLEM` (LMDB 1.0 only): unexpected problem - txn should abort.
     /// Never produced by this implementation; present for heed parity.
     Problem,
+    /// `MDB_BAD_CHECKSUM` (LMDB 1.0 only): page checksum incorrect. Returned
+    /// when a 1.0 environment records page checksums, which are not
+    /// implemented.
+    BadChecksum,
+    /// `MDB_CRYPTO_FAIL` (LMDB 1.0 only): encryption/decryption failed.
+    CryptoFail,
+    /// `MDB_ENV_ENCRYPTION` (LMDB 1.0 only): environment encryption mismatch.
+    /// Returned for an encrypted 1.0 environment, which cannot be read.
+    EnvEncryption,
+    /// `MDB_TXN_PENDING` (LMDB 1.0 only): transaction was already prepared.
+    TxnPending,
+    /// `MDB_CANT_ROLLBACK` (LMDB 1.0 only): environment can't rollback the
+    /// last transaction.
+    CantRollback,
+    /// `MDB_DBIS_BUSY` (LMDB 1.0 only): can't drop main DBI while other DBIs
+    /// are open.
+    DbisBusy,
+    /// `MDB_SHORT_WRITE` (LMDB 1.0 only): write was incomplete.
+    ShortWrite,
+    /// `MDB_ENV_BUSY` (LMDB 1.0 only): env is busy, can't use previous
+    /// snapshot.
+    EnvBusy,
+    /// `MDB_IS_READONLY` (LMDB 1.0 only): env or txn is read-only, can't
+    /// write.
+    IsReadonly,
+    /// `MDB_ADDR_BUSY` (LMDB 1.0 only): requested map address is
+    /// unavailable.
+    AddrBusy,
     /// Any other code, normally an `errno` value.
     Other(c_int),
 }
@@ -104,6 +133,16 @@ impl MdbError {
             MDB_BAD_VALSIZE => MdbError::BadValSize,
             MDB_BAD_DBI => MdbError::BadDbi,
             MDB_PROBLEM => MdbError::Problem,
+            MDB_BAD_CHECKSUM => MdbError::BadChecksum,
+            MDB_CRYPTO_FAIL => MdbError::CryptoFail,
+            MDB_ENV_ENCRYPTION => MdbError::EnvEncryption,
+            MDB_TXN_PENDING => MdbError::TxnPending,
+            MDB_CANT_ROLLBACK => MdbError::CantRollback,
+            MDB_DBIS_BUSY => MdbError::DbisBusy,
+            MDB_SHORT_WRITE => MdbError::ShortWrite,
+            MDB_ENV_BUSY => MdbError::EnvBusy,
+            MDB_IS_READONLY => MdbError::IsReadonly,
+            MDB_ADDR_BUSY => MdbError::AddrBusy,
             other => MdbError::Other(other),
         }
     }
@@ -132,6 +171,16 @@ impl MdbError {
             MdbError::BadValSize => MDB_BAD_VALSIZE,
             MdbError::BadDbi => MDB_BAD_DBI,
             MdbError::Problem => MDB_PROBLEM,
+            MdbError::BadChecksum => MDB_BAD_CHECKSUM,
+            MdbError::CryptoFail => MDB_CRYPTO_FAIL,
+            MdbError::EnvEncryption => MDB_ENV_ENCRYPTION,
+            MdbError::TxnPending => MDB_TXN_PENDING,
+            MdbError::CantRollback => MDB_CANT_ROLLBACK,
+            MdbError::DbisBusy => MDB_DBIS_BUSY,
+            MdbError::ShortWrite => MDB_SHORT_WRITE,
+            MdbError::EnvBusy => MDB_ENV_BUSY,
+            MdbError::IsReadonly => MDB_IS_READONLY,
+            MdbError::AddrBusy => MDB_ADDR_BUSY,
             MdbError::Other(code) => code,
         }
     }
@@ -139,8 +188,9 @@ impl MdbError {
 
 /// The text `mdb_strerror` returns for `err`.
 ///
-/// For LMDB codes this is the `mdb_errstr[]` table; for positive values it is
-/// the C library's `strerror`; other negative values give
+/// For LMDB codes this is the `mdb_errstr[]` table (the 0.9 codes, then the
+/// ones LMDB 1.0 adds, with 1.0's texts); for positive values it is the C
+/// library's `strerror`; other negative values give
 /// `"Invalid error code"`, and `0` gives `"Successful return: 0"`.
 pub fn strerror(err: c_int) -> String {
     let lmdb_text = match err {
@@ -167,6 +217,18 @@ pub fn strerror(err: c_int) -> String {
             "MDB_BAD_VALSIZE: Unsupported size of key/DB name/data, or wrong DUPFIXED size"
         }
         MDB_BAD_DBI => "MDB_BAD_DBI: The specified DBI handle was closed/changed unexpectedly",
+        // LMDB 1.0's additions (its mdb_errstr[]).
+        MDB_PROBLEM => "MDB_PROBLEM: Unexpected problem - txn should abort",
+        MDB_BAD_CHECKSUM => "MDB_BAD_CHECKSUM: Page checksum mismatch",
+        MDB_CRYPTO_FAIL => "MDB_CRYPTO_FAIL: Page encryption or decryption failed",
+        MDB_ENV_ENCRYPTION => "MDB_ENV_ENCRYPTION: Environment encryption mismatch",
+        MDB_TXN_PENDING => "MDB_TXN_PENDING: Transaction already prepared, must abort or commit",
+        MDB_CANT_ROLLBACK => "MDB_CANT_ROLLBACK: Environment can't rollback last transaction",
+        MDB_DBIS_BUSY => "MDB_DBIS_BUSY: Can't drop main DBI while other DBIs are open",
+        MDB_SHORT_WRITE => "MDB_SHORT_WRITE: Fewer bytes were written than requested",
+        MDB_ENV_BUSY => "MDB_ENV_BUSY: Environment is busy, can't use previous snapshot",
+        MDB_IS_READONLY => "MDB_IS_READONLY: Can't write in readonly txn or environment",
+        MDB_ADDR_BUSY => "MDB_ADDR_BUSY: Requested map address is unavailable",
         e if e < 0 => "Invalid error code",
         e => return crate::os::strerror(e),
     };
@@ -288,7 +350,7 @@ mod tests {
 
     #[test]
     fn codes_round_trip() {
-        for code in MDB_KEYEXIST..=MDB_PROBLEM {
+        for code in MDB_KEYEXIST..=MDB_LAST_ERRCODE_V10 {
             let e = MdbError::from_err_code(code);
             assert!(!matches!(e, MdbError::Other(_)), "code {code}");
             assert_eq!(e.to_err_code(), code);
@@ -315,6 +377,16 @@ mod tests {
             MdbError::BadDbi.to_string(),
             "MDB_BAD_DBI: The specified DBI handle was closed/changed unexpectedly"
         );
+        // LMDB 1.0's codes have 1.0's texts.
+        assert_eq!(
+            MdbError::EnvEncryption.to_string(),
+            "MDB_ENV_ENCRYPTION: Environment encryption mismatch"
+        );
+        assert_eq!(
+            strerror(MDB_ADDR_BUSY),
+            "MDB_ADDR_BUSY: Requested map address is unavailable"
+        );
+        assert_eq!(strerror(MDB_ADDR_BUSY + 1), "Invalid error code");
         assert_eq!(strerror(0), "Successful return: 0");
         assert_eq!(strerror(-1), "Invalid error code");
         assert_eq!(strerror(libc::EACCES), "Permission denied");

@@ -34,7 +34,7 @@ use crate::consts::*;
 use crate::core::cursor::C_SUB;
 use crate::core::cursor_put::{PutData, MDB_NOSPILL};
 use crate::core::dbi::{
-    check_db_name, name_id, Dbi, DbiRegistry, DbiSlot, NamedDb, TxnDb, DB_DIRTY, DB_NEW, DB_STALE,
+    db_name_key, name_id, Dbi, DbiRegistry, DbiSlot, NamedDb, TxnDb, DB_DIRTY, DB_NEW, DB_STALE,
     DB_USRVALID, DB_VALID,
 };
 use crate::core::dirty::PagePool;
@@ -85,6 +85,10 @@ pub(crate) struct WriteState {
     pub(crate) pglast: u64,
     /// `me_pgoldest`, copied from the environment for the transaction.
     pub(crate) pg_oldest: u64,
+    /// `me_pbuf->mp_pad`, copied from the environment for the transaction
+    /// (see `WriterState::pbuf_pad`) and handed back when it ends, committed
+    /// or not, as C's scratch page keeps it.
+    pub(crate) pbuf_pad: u16,
     /// The cursors of this transaction (`mt_cursors`).
     pub(crate) cursors: Arena,
     /// The main DB record of the snapshot a top-level transaction began on
@@ -240,11 +244,13 @@ impl<'env> RwTxn<'env> {
         let pages = std::mem::replace(&mut lock.state.pages, PagePool::new(env.page_size()));
         core.dirty.give_pool(pages);
         let pg_oldest = lock.state.pg_oldest;
+        let pbuf_pad = lock.state.pbuf_pad;
         Ok(RwTxn {
             core,
             w: WriteState {
                 dirty_room: env.dirty_limit(),
                 pg_oldest,
+                pbuf_pad,
                 base_main: Some(meta.dbs[MAIN_DBI as usize]),
                 ..WriteState::default()
             },
@@ -303,6 +309,7 @@ impl<'env> RwTxn<'env> {
         self.w.flags = TXN_FINISHED;
         if let Some(mut lock) = self.lock.take() {
             lock.state.pg_oldest = self.w.pg_oldest;
+            lock.state.pbuf_pad = self.w.pbuf_pad;
             let mut pages = self.core.dirty.take_pool();
             pages.trim();
             lock.state.pages.merge(pages);
@@ -460,7 +467,8 @@ impl<'env> RwTxn<'env> {
             self.update_main_flags(flags);
             return Ok(Dbi::MAIN);
         };
-        check_db_name(name)?;
+        let key = db_name_key(self.layout(), name)?;
+        let name: &[u8] = &key;
         let env = self.core.env;
         // The registry stays locked until the slot is registered. Nothing
         // below touches the registry: the main DB is never stale.

@@ -1,11 +1,12 @@
 /* Test helper for differential testing of write operations and of the
  * cursor fixups they cause.
  *
- *   writeops <env> <dbname|-> <dbflags> <ncursors> [<mapsize>] < script
+ *   writeops <env> <dbname|-> <dbflags> <ncursors> [<mapsize> [<pagesize>]] < script
  *
  * (one op per line on stdin).
  * Creates/opens the environment (MDB_NOSYNC, 64 MiB map unless <mapsize>
- * is given), begins a write txn, opens (creating) the database with
+ * is given; <pagesize>, if not 0, with mdb_env_set_pagesize, which only
+ * LMDB 1.0 has: built against 0.9 a page size is an error), begins a write txn, opens (creating) the database with
  * <dbflags> (decimal) and opens <ncursors> cursors on it. Then performs
  * each op and prints one line:
  *
@@ -85,6 +86,19 @@ static int bulk_put(MDB_txn *txn, MDB_dbi dbi, unsigned long n, uint64_t seed, s
 	return 0;
 }
 
+/* mdb_env_set_pagesize where the library has it (LMDB 1.0). */
+static int set_pagesize(MDB_env *env, int size)
+{
+	if (!size)
+		return 0;
+#if MDB_VERSION_MAJOR >= 1
+	return mdb_env_set_pagesize(env, size);
+#else
+	(void)env;
+	return EINVAL;
+#endif
+}
+
 static int open_cursors(MDB_txn *txn, MDB_dbi dbi, MDB_cursor **cur, int ncur)
 {
 	int i, rc;
@@ -110,12 +124,26 @@ static void hexout(const MDB_val *v)
 		printf("%02x", ((unsigned char *)v->mv_data)[i]);
 }
 
+static int hexval(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+/* Decodes hex digit pairs up to the first non-hex character. (Not with
+ * sscanf: glibc's scans the rest of the string on every call, which makes
+ * decoding a value of a few hundred KiB take minutes.) */
 static size_t unhex(const char *s, unsigned char *out)
 {
 	size_t n = 0;
-	unsigned int b;
-	while (s[0] && s[1] && s[0] != ':' && sscanf(s, "%2x", &b) == 1) {
-		out[n++] = (unsigned char)b;
+	int hi, lo;
+	while ((hi = hexval(s[0])) >= 0 && (lo = hexval(s[1])) >= 0) {
+		out[n++] = (unsigned char)(hi << 4 | lo);
 		s += 2;
 	}
 	return n;
@@ -142,20 +170,24 @@ int main(int argc, char **argv)
 	unsigned int dbflags;
 	const char *dbname;
 	size_t mapsize = 64 << 20;
+	int pagesize = 0;
 	int rc, ncur, dupsort, depth = 0;
 	static unsigned char kbuf[4096], dbuf[1 << 20];
 	static char arg[(1 << 21) + 64];
 
-	if (argc != 5 && argc != 6) { fprintf(stderr, "usage\n"); return 2; }
+	if (argc < 5 || argc > 7) { fprintf(stderr, "usage\n"); return 2; }
 	dbname = strcmp(argv[2], "-") ? argv[2] : NULL;
 	dbflags = (unsigned int)strtoul(argv[3], NULL, 10);
 	ncur = atoi(argv[4]);
-	if (argc == 6)
+	if (argc >= 6)
 		mapsize = (size_t)strtoull(argv[5], NULL, 10);
+	if (argc == 7)
+		pagesize = (int)strtol(argv[6], NULL, 10);
 	if (ncur < 0 || ncur > MAXC) { fprintf(stderr, "ncursors\n"); return 2; }
 	dupsort = (dbflags & MDB_DUPSORT) != 0;
 	if ((rc = mdb_env_create(&env)) || (rc = mdb_env_set_maxdbs(env, 8)) ||
-		(rc = mdb_env_set_mapsize(env, mapsize)) ||
+			(rc = mdb_env_set_mapsize(env, mapsize)) ||
+		(rc = set_pagesize(env, pagesize)) ||
 		(rc = mdb_env_open(env, argv[1], MDB_NOSYNC, 0664)) ||
 		(rc = mdb_txn_begin(env, NULL, 0, &txns[0])) ||
 		(rc = mdb_dbi_open(txns[0], dbname, dbflags | MDB_CREATE, &dbi))) {

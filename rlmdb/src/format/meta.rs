@@ -177,6 +177,48 @@ impl Meta {
     }
 }
 
+/// How many bytes at the start of a data file [`sniff_format`] looks at:
+/// enough for the magic and version of either format's first meta page.
+pub const SNIFF_LEN: usize = 32;
+
+/// `mm_version` of the prerelease 1.0 format some lmdb-js builds wrote. Its
+/// files are neither 0.9 nor 1.0 files.
+const PRERELEASE_DATA_VERSION: u32 = 2;
+
+/// Which format a data file is in, from its first [`SNIFF_LEN`] bytes
+/// (`head`, or fewer if the file is shorter), without trusting more than
+/// the magic and the version word of the first meta page:
+///
+/// * an empty file: `None`, a new environment;
+/// * `MDB_MAGIC` at 16 (right after the 0.9 page header) and version 1:
+///   [`Format::V09`];
+/// * `MDB_MAGIC` at 24 (after the 1.0 header) and version 3:
+///   [`Format::V10`];
+/// * version 2 at either place (lmdb-js prerelease files):
+///   [`MetaError::VersionMismatch`];
+/// * anything else, including a 0.9-shaped header claiming version 3 and
+///   a 1.0-shaped one claiming 1: [`MetaError::Invalid`].
+///
+/// This only picks the layout; the meta pages are validated in full when
+/// the environment is opened with it (`mdb_env_read_header`).
+pub fn sniff_format(head: &[u8]) -> Result<Option<Format>, MetaError> {
+    if head.is_empty() {
+        return Ok(None);
+    }
+    for layout in [&V09, &V10] {
+        let at = layout.meta_offset();
+        if super::get_u32(head, at + META_MAGIC) != Some(MDB_MAGIC) {
+            continue;
+        }
+        match super::get_u32(head, at + META_VERSION) {
+            Some(v) if v == layout.data_version => return Ok(Some(layout.format)),
+            Some(PRERELEASE_DATA_VERSION) => return Err(MetaError::VersionMismatch),
+            _ => {}
+        }
+    }
+    Err(MetaError::Invalid)
+}
+
 /// Picks the current snapshot among the two meta pages, like
 /// `mdb_env_pick_meta`: `metas[ metas[0].txnid < metas[1].txnid ]`.
 /// Returns the index (0 or 1).
@@ -268,6 +310,37 @@ mod tests {
             Err(MetaError::VersionMismatch)
         );
         assert_eq!(wrong.validate(), Ok(()));
+    }
+
+    #[test]
+    fn sniff() {
+        let mut v09 = vec![0u8; 8192];
+        Meta::new_env(4096, 1 << 20, 0).write_initial_pages(&mut v09, 4096);
+        let mut v10 = vec![0u8; 8192];
+        Meta::new_env_with_layout(&V10, 4096, 1 << 20, 0)
+            .write_initial_pages_with_layout(&mut v10, 4096, &V10);
+        assert_eq!(sniff_format(&v09[..SNIFF_LEN]), Ok(Some(Format::V09)));
+        assert_eq!(sniff_format(&v10[..SNIFF_LEN]), Ok(Some(Format::V10)));
+        assert_eq!(sniff_format(&[]), Ok(None));
+        // Too short to hold a magic and version, but not empty.
+        assert_eq!(sniff_format(&v09[..20]), Err(MetaError::Invalid));
+        assert_eq!(sniff_format(&[0u8; SNIFF_LEN]), Err(MetaError::Invalid));
+        // Each shape with the other format's version word.
+        let mut bad = v09[..SNIFF_LEN].to_vec();
+        bad[20..24].copy_from_slice(&3u32.to_ne_bytes());
+        assert_eq!(sniff_format(&bad), Err(MetaError::Invalid));
+        let mut bad = v10[..SNIFF_LEN].to_vec();
+        bad[28..32].copy_from_slice(&1u32.to_ne_bytes());
+        assert_eq!(sniff_format(&bad), Err(MetaError::Invalid));
+        // Version 2 (lmdb-js prerelease files) in either place.
+        for at in [20, 28] {
+            let mut v2 = if at == 20 { v09.clone() } else { v10.clone() };
+            v2[at..at + 4].copy_from_slice(&2u32.to_ne_bytes());
+            assert_eq!(
+                sniff_format(&v2[..SNIFF_LEN]),
+                Err(MetaError::VersionMismatch)
+            );
+        }
     }
 
     #[test]

@@ -440,6 +440,19 @@ impl<'env> RwTxn<'env> {
         rc
     }
 
+    /// Gives up the root page `mp` that `mdb_rebalance` removed from the
+    /// tree of `mc`: 0.9 puts it on the transaction's free list, 1.0 calls
+    /// `mdb_page_loose`, so a page this transaction dirtied is reused by
+    /// its next allocation (`Layout::loosens_rebalanced_root`).
+    fn free_rebalanced_root(&mut self, mc: CRef, mp: u64) -> Result<()> {
+        if self.layout().loosens_rebalanced_root() {
+            self.page_loose(mc, mp)
+        } else {
+            self.w.free_pgs.append(mp);
+            Ok(())
+        }
+    }
+
     /// The root branch of `mdb_rebalance`: an empty root empties the tree;
     /// a branch root with one child is replaced by the child.
     fn rebalance_root(&mut self, mc: CRef) -> Result<()> {
@@ -470,7 +483,7 @@ impl<'env> RwTxn<'env> {
             db.root = P_INVALID;
             db.depth = 0;
             db.leaf_pages = 0;
-            self.w.free_pgs.append(mp);
+            self.free_rebalanced_root(mc, mp)?;
             // Adjust cursors pointing to mp.
             {
                 let w = self.cur_mut(mc);
@@ -494,7 +507,7 @@ impl<'env> RwTxn<'env> {
             }
         } else if is_branch && nkeys == 1 {
             // Collapsing root page.
-            self.w.free_pgs.append(mp);
+            self.free_rebalanced_root(mc, mp)?;
             let root = only_child.ok_or_else(corrupted)?;
             self.core.page(root)?;
             let depth = {
@@ -1032,11 +1045,12 @@ impl<'env> RwTxn<'env> {
                     let (nflags, ov) = {
                         let p = self.top_page(mc)?;
                         let node = p.node(i).ok_or_else(corrupted)?;
-                        (node.flags(), node.overflow_pgno())
+                        (node.flags(), node.overflow_ref())
                     };
                     if nflags & crate::format::node::F_BIGDATA != 0 {
-                        let pg = ov.ok_or_else(corrupted)?;
-                        let pages = self.overflow_run_pages(pg)?;
+                        let ov = ov.ok_or_else(corrupted)?;
+                        let pg = ov.pgno;
+                        let pages = self.dropped_run_pages(ov)?;
                         self.w.free_pgs.append_range(pg, pages);
                         let db = self.db_mut(mc);
                         db.overflow_pages = db.overflow_pages.wrapping_sub(pages as u64);

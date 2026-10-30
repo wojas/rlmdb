@@ -4,25 +4,34 @@
 //!
 //! 1. Resolve file names (`mdb_fname_init`): `path/data.mdb` and
 //!    `path/lock.mdb`, or with `NO_SUB_DIR` `path` and `path-lock`.
-//! 2. Unless read-only or `NO_LOCK`, set up the lock file *first*
+//! 2. Decide the data-file format ([`sniff_format`]: the magic and version
+//!    of the first meta page; not in C, which handles one format only). An
+//!    existing file keeps its format, a new one gets the requested format
+//!    or LMDB 0.9. This happens before the lock file is touched, so opening
+//!    a file of the other format never re-initialises a peer's lock file.
+//! 3. Unless read-only or `NO_LOCK`, set up the lock file *first*
 //!    (`LockRegion::open`, `mdb_env_setup_locks`). Read-only environments
 //!    open the data file first (it must exist) and the lock file second.
-//! 3. Open the data file (`O_RDWR|O_CREAT`, or `O_RDONLY`).
-//! 4. `mdb_env_open2`: read both meta pages with `pread`
+//! 4. Open the data file (`O_RDWR|O_CREAT`, or `O_RDONLY`).
+//! 5. `mdb_env_open2`: read both meta pages with `pread`
 //!    (`mdb_env_read_header`); an empty file is a new environment whose two
 //!    meta pages are written immediately (`mdb_env_init_meta`), with the OS
-//!    page size capped at the format's `MAX_PAGESIZE` (32 KiB for LMDB 0.9).
-//!    The map size is the configured one, else the one recorded in the meta
-//!    (1 MiB for a new file), raised to cover all pages in use. Then map the
-//!    file read-only.
-//! 5. Open the `O_DSYNC` descriptor used for meta-page writes (`me_mfd`).
-//! 6. If we initialised the lock table, publish the current txnid and
+//!    page size (1.0: or the one set with `mdb_env_set_pagesize`) capped at
+//!    the format's `MAX_PAGESIZE` (32 KiB for LMDB 0.9, 64 KiB for 1.0).
+//!    An existing 1.0 file that uses encryption or page checksums is
+//!    refused. The map size is the configured one, else the one recorded
+//!    in the meta (1 MiB for a new file), raised to cover all pages in use.
+//!    Then map the file read-only.
+//! 6. Open the `O_DSYNC` descriptor used for meta-page writes (`me_mfd`).
+//! 7. If we initialised the lock table, publish the current txnid and
 //!    downgrade to a shared lock (`mdb_env_share_locks`).
 //!
 //! The data-file format of the environment ([`Format`]) decides the page
 //! layout; the environment keeps its [`Layout`] and every transaction reads
-//! pages through it. Every environment is LMDB 0.9 for now: a request for
-//! [`Format::V10`] fails at open with `ENOTSUP` (`DUAL_FORMAT.md` §7).
+//! and writes pages through it. The size-derived limits (`me_nodemax`, the
+//! maximum key size, `me_maxfree_1pg`) follow from the layout and the page
+//! size. The lock file is the version 1 one in both formats for now
+//! (`DUAL_FORMAT.md` §7, stage 3).
 //!
 //! Dropping an [`Environment`] mirrors `mdb_env_close0`: unmap the data
 //! file, close the descriptors, clear any reader slots this process still
@@ -46,8 +55,8 @@ use crate::core::txn_rw::RwTxn;
 use crate::core::{Info, Stat};
 use crate::error::{Error, MdbError, Result};
 use crate::flags::{DatabaseFlags, EnvironmentFlags};
-use crate::format::layout::{Format, Layout, META_SIZE, V09, V10};
-use crate::format::meta::{pick_newest, Meta};
+use crate::format::layout::{Format, Layout, META_SIZE, V10};
+use crate::format::meta::{self, pick_newest, Meta, SNIFF_LEN};
 use crate::idl::Idl;
 use crate::os::{self, DataMap};
 
@@ -139,6 +148,7 @@ pub struct EnvironmentBuilder {
     max_dbs: u32,
     flags: EnvironmentFlags,
     format: Option<Format>,
+    page_size: Option<usize>,
 }
 
 impl Default for EnvironmentBuilder {
@@ -149,6 +159,7 @@ impl Default for EnvironmentBuilder {
             max_dbs: 0,
             flags: EnvironmentFlags::empty(),
             format: None,
+            page_size: None,
         }
     }
 }
@@ -189,11 +200,25 @@ impl EnvironmentBuilder {
         self
     }
 
-    /// The data-file format to use. Only [`Format::V09`] is implemented so
-    /// far: opening with [`Format::V10`] fails with `ENOTSUP`. Without a
-    /// request the environment is LMDB 0.9.
+    /// The data-file format to use: [`Format::V09`] (`MDB_DATA_VERSION 1`)
+    /// or [`Format::V10`] (`MDB_DATA_VERSION 3`). An existing data file
+    /// keeps its format: opening it fails with `MDB_VERSION_MISMATCH` if
+    /// this asks for the other one ([`sniff_format`] tells which it is).
+    /// Without a request an existing file is opened in its format and a new
+    /// one is created as LMDB 0.9.
     pub fn format(&mut self, format: Format) -> &mut Self {
         self.format = Some(format);
+        self
+    }
+
+    /// `mdb_env_set_pagesize` (LMDB 1.0): the page size of a new 1.0
+    /// environment, any power of two from 256 to 65536 (the default is the
+    /// OS page size). An existing environment keeps the page size recorded
+    /// in its file, as in C. LMDB 0.9 has no such call: opening an
+    /// environment that turns out to be 0.9 with a page size set fails with
+    /// `EINVAL`, as does a size that is not a power of two in range.
+    pub fn page_size(&mut self, size: usize) -> &mut Self {
+        self.page_size = Some(size);
         self
     }
 
@@ -260,6 +285,12 @@ pub(crate) struct WriterState {
     /// `me_dpages`: spare page buffers, kept between write transactions
     /// (a write transaction's dirty list holds them while it runs).
     pub(crate) pages: PagePool,
+    /// `me_pbuf->mp_pad`: the key size field of C's scratch page for
+    /// `MDB_DUPSORT` puts, which outlives transactions. A sub-page made from
+    /// a single item of a non-`MDB_DUPFIXED` database inherits it (C never
+    /// sets it there), so the `mp_pad` it gets depends on earlier puts
+    /// (see `RwTxn::dup_prepare`).
+    pub(crate) pbuf_pad: u16,
 }
 
 impl std::fmt::Debug for Environment {
@@ -285,14 +316,6 @@ impl Environment {
         if flags & !(CHANGEABLE | CHANGELESS) != 0 || opts.max_readers < 1 {
             return Err(Error::einval());
         }
-        // The 1.0 layout is described (`layout::V10`) but the engine does
-        // not write it yet: refuse it before touching any file
-        // (DUAL_FORMAT.md §7, stage 2). Sniffing an existing file and the
-        // process default come with stage 4.
-        let layout: &'static Layout = match opts.format {
-            None | Some(Format::V09) => &V09,
-            Some(Format::V10) => return Err(Error::errno(libc::ENOTSUP)),
-        };
         let read_only = flags & MDB_RDONLY != 0;
         if read_only {
             // Silently ignore WRITEMAP when we're only getting read access.
@@ -304,6 +327,16 @@ impl Environment {
 
         // Declared first so that it is dropped last on every error path.
         let registration = Registration::new(path, no_sub_dir)?;
+
+        // Decide the format before the lock file is touched: C sets up the
+        // lock file first and would re-initialise a lock file of the other
+        // version (DUAL_FORMAT.md §4.2).
+        let layout = choose_format(sniff_data_file(&data_path)?, opts.format)?.layout();
+        let new_page_size = match opts.page_size {
+            None => None,
+            Some(ps) if layout.format == Format::V10 && valid_set_pagesize(ps, layout) => Some(ps),
+            Some(_) => return Err(Error::einval()),
+        };
 
         let mut lock = None;
         if !read_only && !no_lock {
@@ -326,19 +359,26 @@ impl Environment {
 
         // mdb_env_open2
         let max_pagesize = layout.max_pagesize;
-        let (page_size, mut meta, new_env) = match read_header(&data_file, layout)? {
-            Some(meta) => (meta.page_size() as usize, meta, false),
+        let (page_size, mut meta, new_env, meta0_flags) = match read_header(&data_file, layout)? {
+            Some((meta, meta0)) => (meta.page_size() as usize, meta, false, meta0.env_flags()),
             None => {
-                let ps = os::os_page_size().min(max_pagesize);
+                // me_os_psize, which mdb_env_set_pagesize replaces in 1.0.
+                let ps = new_page_size
+                    .unwrap_or_else(os::os_page_size)
+                    .min(max_pagesize);
                 (
                     ps,
                     Meta::new_env_with_layout(layout, ps as u32, DEFAULT_MAPSIZE as u64, flags),
                     true,
+                    0,
                 )
             }
         };
         if !page_size.is_power_of_two() || !(MIN_PAGESIZE..=max_pagesize).contains(&page_size) {
             return Err(MdbError::Invalid.into());
+        }
+        if layout.format == Format::V10 && !new_env {
+            check_v10_features(&data_file, page_size, meta0_flags)?;
         }
         let mut map_size = opts.map_size.unwrap_or(meta.map_size as usize);
         // Make sure mapsize >= committed data size, even when using
@@ -385,6 +425,7 @@ impl Environment {
             flags: AtomicU32::new(flags),
             fatal: AtomicBool::new(false),
             writer: Mutex::new(WriterState {
+                pbuf_pad: 0,
                 pg_oldest: 0,
                 pages: PagePool::new(page_size),
             }),
@@ -624,7 +665,9 @@ impl Environment {
     }
 
     /// `mdb_env_get_maxkeysize`: the largest key (and `DUP_SORT` data
-    /// item) this environment writes, 511 for LMDB 0.9.
+    /// item) this environment writes: 511 for LMDB 0.9; for 1.0 it follows
+    /// from the page size (`me_nodemax - (NODESIZE + sizeof(MDB_db))`: 1978
+    /// on 4 KiB pages, 8122 on 16 KiB, 32698 on 64 KiB).
     pub fn max_key_size(&self) -> usize {
         self.max_key
     }
@@ -729,16 +772,81 @@ impl Environment {
     }
 }
 
+/// `rlmdb_sniff_format`: the data-file format of the environment at `path`
+/// (a directory, or with [`NO_SUB_DIR`](EnvironmentFlags::NO_SUB_DIR) the
+/// data file), from the magic and version of its first meta page, without
+/// opening the environment or touching its lock file. `None` if there is
+/// no data file yet or it is empty (opening creates a new environment);
+/// `MDB_VERSION_MISMATCH` for the version 2 files of lmdb-js prerelease
+/// builds; `MDB_INVALID` for anything else that is not an LMDB data file.
+/// The file is not validated beyond that: opening it may still fail.
+pub fn sniff_format(path: impl AsRef<Path>, flags: EnvironmentFlags) -> Result<Option<Format>> {
+    let no_sub_dir = flags.bits() & MDB_NOSUBDIR != 0;
+    let (data_path, _) = file_names(path.as_ref(), no_sub_dir);
+    sniff_data_file(&data_path)
+}
+
+/// [`sniff_format`] of the data file `data_path`: a missing file is a new
+/// environment.
+fn sniff_data_file(data_path: &Path) -> Result<Option<Format>> {
+    let file = match File::open(data_path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut head = [0u8; SNIFF_LEN];
+    let n = os::read_at(&file, &mut head, 0)?;
+    Ok(meta::sniff_format(&head[..n]).map_err(MdbError::from)?)
+}
+
+/// The format to open with: the existing file's (`found`), which must be
+/// the one `requested` if any (`MDB_VERSION_MISMATCH` otherwise: there is
+/// no conversion in place), else the requested one, else LMDB 0.9.
+fn choose_format(found: Option<Format>, requested: Option<Format>) -> Result<Format> {
+    match (found, requested) {
+        (Some(f), Some(r)) if f != r => Err(MdbError::VersionMismatch.into()),
+        (Some(f), _) | (None, Some(f)) => Ok(f),
+        (None, None) => Ok(Format::V09),
+    }
+}
+
+/// The checks of 1.0's `mdb_env_set_pagesize`: a power of two from 256 to
+/// `MAX_PAGESIZE`.
+fn valid_set_pagesize(size: usize, layout: &Layout) -> bool {
+    size.is_power_of_two() && (MIN_PAGESIZE..=layout.max_pagesize).contains(&size)
+}
+
+/// Refuses an existing 1.0 environment that uses what this crate does not
+/// implement, with 1.0's error codes (`mdb_env_open2`): encryption
+/// (`MDB_ENCRYPT` in meta page 0's `mm_flags`, `MDB_ENV_ENCRYPTION`) and
+/// page checksums (C 1.0 records the checksum size in the last two bytes of
+/// page 0; `MDB_BAD_CHECKSUM` if it is not 0, where C would compare it with
+/// its own checksum size).
+fn check_v10_features(file: &File, page_size: usize, meta0_flags: u16) -> Result<()> {
+    if u32::from(meta0_flags) & MDB_ENCRYPT != 0 {
+        return Err(MdbError::EnvEncryption.into());
+    }
+    let mut sumsize = [0u8; 2];
+    if os::read_at(file, &mut sumsize, page_size as u64 - 2)? != sumsize.len() {
+        return Err(MdbError::Invalid.into());
+    }
+    if u16::from_ne_bytes(sumsize) != 0 {
+        return Err(MdbError::BadChecksum.into());
+    }
+    Ok(())
+}
+
 /// `mdb_env_read_header`: read both meta pages of the format `layout`
-/// describes with `pread` and return the newer valid one, or `None` for an
-/// empty file (a new environment).
-fn read_header(file: &File, layout: &Layout) -> Result<Option<Meta>> {
+/// describes with `pread` and return the newer valid one and the one of page
+/// 0, or `None` for an empty file (a new environment).
+fn read_header(file: &File, layout: &Layout) -> Result<Option<(Meta, Meta)>> {
     // sizeof(MDB_metabuf): the page header and the meta. The buffer is
     // sized for the largest header (1.0's).
     let size = layout.meta_offset() + META_SIZE;
     let mut storage = [0u8; V10.page_hdr + META_SIZE];
     let buf = storage.get_mut(..size).ok_or(MdbError::Invalid)?;
     let mut best: Option<Meta> = None;
+    let mut first: Option<Meta> = None;
     let mut off = 0u64;
     for _ in 0..NUM_METAS {
         let n = os::read_at(file, buf, off)?;
@@ -749,6 +857,7 @@ fn read_header(file: &File, layout: &Layout) -> Result<Option<Meta>> {
             return Err(MdbError::Invalid.into());
         }
         let meta = Meta::read_page_with_layout(buf, layout).map_err(MdbError::from)?;
+        first.get_or_insert(meta);
         match best {
             Some(b) if meta.txnid <= b.txnid => {}
             _ => best = Some(meta),
@@ -756,5 +865,5 @@ fn read_header(file: &File, layout: &Layout) -> Result<Option<Meta>> {
         // As C: the second meta page is at the first one's page size.
         off += u64::from(best.map_or(0, |b| b.page_size()));
     }
-    Ok(best)
+    Ok(best.zip(first))
 }

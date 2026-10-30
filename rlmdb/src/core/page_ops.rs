@@ -154,19 +154,23 @@ pub(crate) fn node_data_range(l: &Layout, p: &[u8], i: usize) -> Option<std::ops
     (end <= p.len()).then_some(start..end)
 }
 
-/// Sets the overflow page number in the overflow reference stored as the
-/// data of `F_BIGDATA` leaf node `i`, keeping the rest of the reference
-/// (the node's data size is that of the value, not of the reference, so
-/// [`node_data_range`] does not apply).
-pub(crate) fn set_node_overflow_pgno(l: &Layout, p: &mut [u8], i: usize, pgno: u64) -> Option<()> {
+/// Replaces the overflow reference stored as the data of `F_BIGDATA` leaf
+/// node `i` with `r` (0.9 stores only `r.pgno`). The node's data size is
+/// that of the value, not of the reference, so [`node_data_range`] does
+/// not apply.
+pub(crate) fn set_node_overflow_ref(
+    l: &Layout,
+    p: &mut [u8],
+    i: usize,
+    r: OverflowRef,
+) -> Option<()> {
     if i >= num_keys(l, p) {
         return None;
     }
     let off = ptr(l, p, i)?;
     let (ksize, _, _) = node_hdr(p, off)?;
     let data = p.get_mut(off.checked_add(l.node_data_offset(ksize))?..)?;
-    let r = l.read_overflow_ref(data)?;
-    l.write_overflow_ref(data, OverflowRef { pgno, ..r })
+    l.write_overflow_ref(data, r)
 }
 
 /// `SETDSZ`: sets the data size of leaf node `i`.
@@ -679,11 +683,16 @@ mod tests {
             NodeBody::Overflow { r, size: 6000 },
         )
         .unwrap();
-        set_node_overflow_pgno(l, &mut a, 0, 11).unwrap();
+        let moved = OverflowRef {
+            pgno: 11,
+            txnid: 1,
+            ..r
+        };
+        set_node_overflow_ref(l, &mut a, 0, moved).unwrap();
         let n = PageRef::with_layout(&a, l).unwrap().node(0).unwrap();
         assert!(n.is_bigdata());
         assert_eq!(n.data_size(), 6000);
-        assert_eq!(n.overflow_ref(), Some(OverflowRef { pgno: 11, ..r }));
+        assert_eq!(n.overflow_ref(), Some(moved));
         delete_node(l, &mut a, 0, 0).unwrap();
         assert_eq!(upper(l, &a), PS);
 

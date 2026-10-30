@@ -166,6 +166,7 @@ impl<'env> RwTxn<'env> {
             pghead: self.w.pghead.clone(),
             pglast: self.w.pglast,
             pg_oldest: self.w.pg_oldest,
+            pbuf_pad: self.w.pbuf_pad,
             cursors,
             base_main: None,
             dropped: Vec::new(),
@@ -327,6 +328,7 @@ impl<'env> RwTxn<'env> {
         // me_pgoldest lives in the environment in C; the child's view of the
         // oldest reader stays.
         p.w.pg_oldest = self.w.pg_oldest;
+        p.w.pbuf_pad = self.w.pbuf_pad;
         p.w.flags &= !TXN_HAS_CHILD;
         cursors.set_depth(depth - 1);
         p.w.cursors = cursors;
