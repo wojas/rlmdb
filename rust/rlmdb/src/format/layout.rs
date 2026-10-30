@@ -13,10 +13,11 @@
 //! | `F_BIGDATA` data | 8-byte `pgno` | 24-byte `MDB_ovpage {pgno, txnid, pages}` |
 //! | `P_SUBP` flags byte | `P_LEAF\|P_DIRTY\|P_SUBP` | `P_LEAF\|P_SUBP` |
 //! | `MAX_PAGESIZE` | 32 KiB | 64 KiB |
+//! | named DB key | the name | the name and its NUL |
 //!
 //! The engine reads all of these from a [`Layout`], one `static` per
 //! [`Format`], that the environment picks at open and hands to every page
-//! and node view. Only [`V09`] is used at run time so far.
+//! and node view.
 //!
 //! The `const`s below are the offsets of the 0.9 layout. The node header,
 //! `MDB_db` and `MDB_meta` offsets hold for both formats; the page header
@@ -197,6 +198,11 @@ pub struct Layout {
     pub subpage_flags: u16,
     /// `MAX_PAGESIZE`: the largest page size of the format.
     pub max_pagesize: usize,
+    /// Whether the key of a named database in the main DB includes the
+    /// name's terminating NUL (1.0's `mdb_dbi_open` stores `strlen(name) +
+    /// 1` bytes, 0.9's `strlen(name)`), so 0.9 and 1.0 see different keys
+    /// for the same name.
+    pub db_name_nul: bool,
 }
 
 /// The LMDB 0.9 layout (`MDB_DATA_VERSION 1`, mdb.c of this tree).
@@ -210,10 +216,10 @@ pub static V09: Layout = Layout {
     // P_LEAF | P_DIRTY | P_SUBP (mdb.c line 6920).
     subpage_flags: 0x52,
     max_pagesize: 0x8000,
+    db_name_nul: false,
 };
 
-/// The LMDB 1.0 layout (`MDB_DATA_VERSION 3`, `mdb.RE/1.0`). Described for
-/// the format work that follows; nothing opens an environment with it yet.
+/// The LMDB 1.0 layout (`MDB_DATA_VERSION 3`, `mdb.RE/1.0`).
 pub static V10: Layout = Layout {
     format: Format::V10,
     data_version: 3,
@@ -224,6 +230,7 @@ pub static V10: Layout = Layout {
     // P_LEAF | P_SUBP (mdb.c 1.0, line 8806): no P_DIRTY in 1.0.
     subpage_flags: 0x42,
     max_pagesize: 0x10000,
+    db_name_nul: true,
 };
 
 /// `EVEN(n)`: round up to an even number.
@@ -312,11 +319,32 @@ impl Layout {
     /// A buffer shorter than the header is left alone.
     #[inline(always)]
     pub fn stamp_clean_page(&self, page: &mut [u8], txnid: u64) {
+        self.set_txnid(page, txnid);
+    }
+
+    /// Sets `mp_txnid` of the page (or sub-page) header in `page` in formats
+    /// that have it (1.0); does nothing for 0.9 or a buffer shorter than the
+    /// header. Besides [`Layout::stamp_clean_page`], C 1.0 writes the
+    /// current txnid into the header of every sub-page it builds
+    /// (`_mdb_cursor_put`, mdb.c 1.0 line 8781), and that header is part of
+    /// the node data on disk.
+    #[inline(always)]
+    pub fn set_txnid(&self, page: &mut [u8], txnid: u64) {
         if let Some(off) = self.txnid_offset() {
             if let Some(dst) = page.get_mut(off..off + 8) {
                 dst.copy_from_slice(&txnid.to_ne_bytes());
             }
         }
+    }
+
+    /// Whether `mdb_rebalance` hands an emptied or collapsed root page to
+    /// `mdb_page_loose`, so the same transaction can reuse it if it was
+    /// dirty (1.0, mdb.c 1.0 lines 10385, 10413), instead of putting it on
+    /// the transaction's free list (0.9). Which pages later allocations get
+    /// depends on it.
+    #[inline(always)]
+    pub const fn loosens_rebalanced_root(&self) -> bool {
+        matches!(self.format, Format::V10)
     }
 
     // --- nodes -------------------------------------------------------------
@@ -482,6 +510,8 @@ mod tests {
         assert_eq!(l.subpage_flags, 0x52);
         assert_eq!(l.subpage_flags, P_LEAF | P_DIRTY | P_SUBP);
         assert_eq!(l.max_pagesize, 0x8000);
+        assert!(!l.db_name_nul);
+        assert!(!l.loosens_rebalanced_root());
         assert_eq!(Format::V09.layout(), l);
         // The 0.9 constants agree with the descriptor.
         assert_eq!(l.page_hdr, PAGE_HDR_SIZE);
@@ -510,6 +540,8 @@ mod tests {
         assert_eq!(l.subpage_flags, 0x42);
         assert_eq!(l.subpage_flags, P_LEAF | P_SUBP);
         assert_eq!(l.max_pagesize, 0x10000);
+        assert!(l.db_name_nul);
+        assert!(l.loosens_rebalanced_root());
         assert_eq!(Format::V10.layout(), l);
         // MDB_page_header: pgno, txnid, pad, flags, lower/upper.
         assert_eq!(l.txnid_offset(), Some(8));

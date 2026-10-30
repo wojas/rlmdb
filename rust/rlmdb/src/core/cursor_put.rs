@@ -27,13 +27,15 @@ use std::cmp::Ordering;
 
 use crate::cmp::Comparator;
 use crate::consts::*;
-use crate::core::cursor::{corrupted, cursor_last, cursor_set, CursorOp, C_DEL, C_INITIALIZED};
+use crate::core::cursor::{
+    corrupted, cursor_last_for_append, cursor_set, CursorOp, C_DEL, C_INITIALIZED,
+};
 use crate::core::dbi::DB_DIRTY;
 use crate::core::page_ops::{self, even, KeyUpdate, NodeBody};
 use crate::core::txn_rw::{FailOnPanic, RwTxn, TXN_ERROR};
 use crate::core::wcursor::{CRef, SUBPAGE};
 use crate::error::{Error, MdbError, Result};
-use crate::format::layout::{Layout, OverflowRef, NODE_SIZE};
+use crate::format::layout::{Format, Layout, OverflowRef, NODE_SIZE};
 use crate::format::node::{F_BIGDATA, F_DUPDATA, F_SUBDATA};
 use crate::format::page::{P_BRANCH, P_DIRTY, P_LEAF, P_LEAF2, P_OVERFLOW, P_SUBP};
 use crate::format::{Db, PageRef};
@@ -352,7 +354,12 @@ impl<'env> RwTxn<'env> {
         let rc = if flags & MDB_APPEND != 0 {
             let cmp = self.cmp_of(mc);
             let ord = self.read_op(mc, |txn, c, mx| {
-                cursor_last(txn, c, mx).map(|kv| cmp.compare(key, kv.key))
+                Ok(match cursor_last_for_append(txn, c, mx)? {
+                    Some(kv) => cmp.compare(key, kv.key),
+                    // An empty tree (see `cursor_last_for_append`): the
+                    // cursor is before its first slot, append there.
+                    None => Ordering::Greater,
+                })
             })?;
             if ord == Ordering::Greater {
                 let w = self.cur_mut(mc);
@@ -624,10 +631,10 @@ impl<'env> RwTxn<'env> {
         let ps = self.psize();
         let l = self.layout();
         let ki = self.cur(mc).ki_top();
-        let (nflags, ksize, olddata_size, ovpgno) = {
+        let (nflags, ksize, olddata_size, ovref) = {
             let page = self.top_page(mc)?;
             let n = page.node(ki).ok_or_else(corrupted)?;
-            (n.flags(), n.key_size(), n.data_size(), n.overflow_pgno())
+            (n.flags(), n.key_size(), n.data_size(), n.overflow_ref())
         };
         // LMDB passes F_SUBDATA in 'flags' to write a DB record.
         if (u32::from(nflags) ^ flags) & u32::from(F_SUBDATA) != 0 {
@@ -635,11 +642,18 @@ impl<'env> RwTxn<'env> {
         }
         if nflags & F_BIGDATA != 0 {
             // Overflow page overwrites need special handling.
-            let pg = ovpgno.ok_or_else(corrupted)?;
+            let ovref = ovref.ok_or_else(corrupted)?;
+            let pg = ovref.pgno;
             let dpages = l.overflow_pages_for(item.size, ps);
             let (ovpages, mut dirty) = {
                 let omp = self.core.page(pg)?;
-                (omp.overflow_pages() as usize, omp.flags() & P_DIRTY != 0)
+                // 1.0 takes the run length from the node's `op_pages`, 0.9
+                // from the page (the same number in a sound file).
+                let pages = match l.format {
+                    Format::V09 => omp.overflow_pages() as usize,
+                    Format::V10 => usize::try_from(ovref.pages).unwrap_or(usize::MAX),
+                };
+                (pages, omp.flags() & P_DIRTY != 0)
             };
             let mut level = self.core.page_level(pg);
             // Is the ov page large enough?
@@ -744,10 +758,13 @@ impl<'env> RwTxn<'env> {
             // Set up an empty "old sub-page" for prep_subDB to expand to a
             // full page.
             // (P_DIRTY: the sub-DB root built from it is a dirty page.)
+            // C writes the size into its scratch page (`me_pbuf`), where
+            // it stays for later sub-pages (`WriterState::pbuf_pad`).
+            self.w.pbuf_pad = item.size as u16;
             let mut h = self.take_scratch();
             h.resize(l.page_hdr, 0);
             page_ops::set_flags(l, &mut h, P_LEAF | P_DIRTY);
-            page_ops::set_pad(l, &mut h, item.size as u16);
+            page_ops::set_pad(l, &mut h, self.w.pbuf_pad);
             page_ops::set_lower(l, &mut h, l.page_hdr);
             page_ops::set_upper(l, &mut h, l.page_hdr);
             fp = h;
@@ -779,10 +796,9 @@ impl<'env> RwTxn<'env> {
                 // Make sub-page header for the dup items, with dummy body.
                 let mut size = l.page_hdr + olddata.len() + item.size;
                 let mut pflags = l.subpage_flags;
-                let mut pad = 0;
                 if dupfixed {
                     pflags |= P_LEAF2;
-                    pad = item.size;
+                    self.w.pbuf_pad = item.size as u16;
                     size += 2 * item.size; // leave space for 2 more
                 } else {
                     size += 2 * (2 + NODE_SIZE) + (olddata.len() & 1) + (item.size & 1);
@@ -790,7 +806,11 @@ impl<'env> RwTxn<'env> {
                 let mut h = self.take_scratch();
                 h.resize(size, 0);
                 page_ops::set_pgno(&mut h, leaf_pgno);
-                page_ops::set_pad(l, &mut h, pad as u16);
+                // 1.0 also stamps the sub-page with the current txnid.
+                l.set_txnid(&mut h, self.core.txnid);
+                // Without MDB_DUPFIXED C leaves mp_pad as its scratch page
+                // has it: whatever an earlier put left there.
+                page_ops::set_pad(l, &mut h, self.w.pbuf_pad);
                 page_ops::set_flags(l, &mut h, pflags);
                 page_ops::set_lower(l, &mut h, l.page_hdr);
                 page_ops::set_upper(l, &mut h, size);
@@ -894,9 +914,12 @@ impl<'env> RwTxn<'env> {
             (fp, None)
         } else {
             // Grow the sub-page into a new buffer.
+            // (C builds it in its scratch page, which keeps the pad.)
+            self.w.pbuf_pad = fp_pad;
             let mut mp = self.take_scratch();
             mp.resize(xsize, 0);
             page_ops::set_pgno(&mut mp, leaf_pgno);
+            l.set_txnid(&mut mp, self.core.txnid);
             let sub = SubpageSrc {
                 fp: &fp,
                 olddata_size,

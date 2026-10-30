@@ -158,15 +158,7 @@ fn not_an_lmdb_file() {
 #[test]
 fn data_file_format() {
     let dir = tmp();
-    // The 1.0 layout is not written yet: refused before any file exists.
-    let err = Environment::builder()
-        .format(Format::V10)
-        .open(dir.path())
-        .unwrap_err();
-    assert_eq!(err.to_err_code(), libc::ENOTSUP);
-    assert!(!dir.path().join("data.mdb").exists());
-    assert!(!dir.path().join("lock.mdb").exists());
-    // Without a request, and on request, an environment is LMDB 0.9.
+    // Without a request, and on request, a new environment is LMDB 0.9.
     let env = Environment::builder().open(dir.path()).unwrap();
     assert_eq!(env.format(), Format::V09);
     drop(env);
@@ -176,6 +168,31 @@ fn data_file_format() {
         .unwrap();
     assert_eq!(env.format(), Format::V09);
     assert_eq!(env.max_key_size(), MDB_MAXKEYSIZE);
+    drop(env);
+    // The file keeps its format: asking for the other one is refused before
+    // the lock file is touched, and 0.9 has no page size setting.
+    let lock_before = std::fs::read(dir.path().join("lock.mdb")).unwrap();
+    let err = Environment::builder()
+        .format(Format::V10)
+        .open(dir.path())
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Mdb(MdbError::VersionMismatch)),
+        "{err:?}"
+    );
+    let err = Environment::builder()
+        .page_size(4096)
+        .open(dir.path())
+        .unwrap_err();
+    assert_eq!(err.to_err_code(), libc::EINVAL);
+    assert_eq!(
+        std::fs::read(dir.path().join("lock.mdb")).unwrap(),
+        lock_before
+    );
+    assert_eq!(
+        rlmdb::sniff_format(dir.path(), EnvironmentFlags::empty()).unwrap(),
+        Some(Format::V09)
+    );
 }
 
 #[test]

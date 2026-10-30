@@ -23,9 +23,12 @@ use crate::consts;
 ///
 /// * `format-0.9`: the LMDB 0.9 data and lock file formats
 ///   (`MDB_DATA_VERSION 1`, `MDB_LOCK_VERSION 1`). Present.
-/// * `format-1.0`: the LMDB 1.0 formats (`MDB_DATA_VERSION 3`,
-///   `MDB_LOCK_VERSION 2`). [`VersionInfo::v10`] is reported exactly when
-///   this token is present.
+/// * `format-1.0`: the LMDB 1.0 data file format (`MDB_DATA_VERSION 3`):
+///   environments that C LMDB 1.0 reads and writes, written as it writes
+///   them. Present. Until rlmdb writes 1.0's version 2 lock file
+///   (`MDB_LOCK_VERSION 2`, `DUAL_FORMAT.md` stage 3), a C 1.0 process and
+///   rlmdb cannot have one environment open at the same time.
+///   [`VersionInfo::v10`] is reported exactly when this token is present.
 /// * `split-freelist`: the free-list work of the `freelist-split` branch.
 /// * `convert-copy`: a compacting copy that re-encodes the environment in
 ///   the other format.
@@ -36,7 +39,7 @@ use crate::consts;
 /// * `default-format-env`: the experimental `RLMDB_DEFAULT_FORMAT`
 ///   environment variable is honoured, so a program can test whether it
 ///   still is.
-const CAPABILITIES: &[&str] = &["format-0.9"];
+const CAPABILITIES: &[&str] = &["format-0.9", "format-1.0"];
 
 /// The C LMDB release whose data and lock file formats and API the 0.9
 /// format matches (`libraries/liblmdb`).
@@ -55,11 +58,10 @@ const V10_RELEASE: (i32, i32, i32) = (1, 0, 2);
 /// is also what `rlmdb_version_string()` returns:
 ///
 /// ```text
-/// rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; caps: format-0.9)
+/// rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; format 1.0 = LMDB 1.0.2; caps: format-0.9 format-1.0)
 /// ```
 ///
-/// With capability `format-1.0`, `; format 1.0 = LMDB 1.0.2` follows the
-/// 0.9 part.
+/// The `format 1.0` part is there exactly with capability `format-1.0`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct VersionInfo {
@@ -206,16 +208,17 @@ mod tests {
         assert_eq!(v.lmdb, (0, 9, 85));
         assert_eq!(v.lmdb, crate::lmdb_version());
         assert_eq!(v.v09, (0, 9, 36));
-        // No 1.0 format yet: nothing may claim it.
-        assert!(!v.has("format-1.0"));
-        assert_eq!(v.v10, (0, 0, 0));
+        // The 1.0 data format is there: v10 names the C release it matches.
+        assert!(v.has("format-1.0"));
+        assert_eq!(v.v10, (1, 0, 2));
     }
 
     #[test]
     fn display_is_one_line() {
         let v = version_info();
         let expected = format!(
-            "rlmdb {} (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; caps: format-0.9)",
+            "rlmdb {} (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; \
+             format 1.0 = LMDB 1.0.2; caps: format-0.9 format-1.0)",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(v.to_string(), expected);
@@ -248,6 +251,7 @@ mod tests {
     fn has() {
         let v = version_info();
         assert!(v.has("format-0.9"));
+        assert!(v.has("format-1.0"));
         for absent in [
             "",
             "nope",

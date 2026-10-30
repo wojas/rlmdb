@@ -264,9 +264,8 @@ impl<'env> TxnCore<'env> {
     #[inline]
     pub(crate) fn page_by_slot(&self, pgno: u64, slot: PageSlot) -> Result<PageRef<'_>> {
         match self.dirty.at(slot, pgno) {
-            Some(buf) => {
-                PageRef::new(&buf[..self.page_size]).ok_or_else(|| MdbError::Corrupted.into())
-            }
+            Some(buf) => PageRef::with_layout(&buf[..self.page_size], self.layout)
+                .ok_or_else(|| MdbError::Corrupted.into()),
             None => self.page(pgno),
         }
     }
@@ -276,9 +275,8 @@ impl<'env> TxnCore<'env> {
     /// find: the same page, without searching that list again.
     pub(crate) fn page_not_dirty_here(&self, pgno: u64) -> Result<PageRef<'_>> {
         match self.locate_in(pgno, false) {
-            PageSource::Dirty(buf, _) => {
-                PageRef::new(&buf[..self.page_size]).ok_or_else(|| MdbError::Corrupted.into())
-            }
+            PageSource::Dirty(buf, _) => PageRef::with_layout(&buf[..self.page_size], self.layout)
+                .ok_or_else(|| MdbError::Corrupted.into()),
             _ => self.mapped_page(pgno),
         }
     }

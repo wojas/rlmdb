@@ -89,7 +89,7 @@ pub use crate::cmp::{CmpFn, Comparator};
 pub use crate::error::{Error, MdbError, Result};
 pub use crate::flags::{DatabaseFlags, EnvironmentFlags, WriteFlags};
 pub use dbi::Dbi;
-pub use env::{Environment, EnvironmentBuilder};
+pub use env::{sniff_format, Environment, EnvironmentBuilder};
 pub use reader::{format_reader_list, ReaderInfo};
 pub use ro_cursor::{CursorOp, Entry, RoCursor};
 pub use txn::{InactiveTxn, RoTxn, Transaction};

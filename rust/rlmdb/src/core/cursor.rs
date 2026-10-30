@@ -754,6 +754,40 @@ pub(crate) fn cursor_last<'t, const N: usize>(
     read_position(txn, mc, mx, DupPos::Last)
 }
 
+/// `mdb_cursor_last` as `mdb_cursor_put` uses it for `MDB_APPEND`, where the
+/// tree may be empty: a new key whose first duplicate does not fit a node
+/// goes straight to a new sub-DB whose root leaf has no items yet, and
+/// `MDB_APPENDDUP` then appends to that sub-DB. C sets `mc_ki` to
+/// `NUMKEYS - 1` (0xffff) there and compares the new item with a node read
+/// out of bounds (`KNOWN_C_BUGS.md` #32; only reachable with LMDB 1.0's
+/// small pages). Here an empty leaf yields `None` with the cursor before
+/// its first slot (`mc_ki` wraps to 0 when the caller moves it on), which
+/// is where C inserts whenever its garbage compares lower.
+pub(crate) fn cursor_last_for_append<'t, const N: usize>(
+    txn: &'t TxnCore<'_>,
+    mc: &mut Cursor<'t, N>,
+    mut mx: Option<&mut Cursor<'t, N>>,
+) -> Result<Option<Kv<'t>>> {
+    reset_sub(&mut mx);
+    if !mc.is_initialized() || mc.top > 0 {
+        mc.page_search(txn, None, PS_LAST)?;
+    }
+    // The rest of `cursor_last` (not called: it would search again).
+    let top = mc.top_page();
+    let nkeys = top.num_keys();
+    if nkeys == 0 {
+        if !top.is_leaf() {
+            return Err(corrupted());
+        }
+        mc.set_ki_top(usize::from(u16::MAX));
+        mc.flags |= C_INITIALIZED | C_EOF;
+        return Ok(None);
+    }
+    mc.set_ki_top(nkeys - 1);
+    mc.flags |= C_INITIALIZED | C_EOF;
+    read_position(txn, mc, mx, DupPos::Last).map(Some)
+}
+
 /// The common case of [`cursor_next`] and [`cursor_prev`] in one pass over
 /// the page: the cursor is on a leaf of a tree without duplicates (neither
 /// past its end nor after a delete), its neighbour on the same page

@@ -30,6 +30,7 @@
 //! opened by an aborted read transaction; keeping them is strictly more
 //! permissive and cannot affect other processes.)
 
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::RwLock;
 
@@ -40,7 +41,7 @@ use crate::core::txn::TxnCore;
 use crate::core::Stat;
 use crate::error::{Error, MdbError, Result};
 use crate::flags::DatabaseFlags;
-use crate::format::Db;
+use crate::format::{Db, Layout};
 
 /// A database handle (`MDB_dbi`). `Copy`, borrows nothing; validity is
 /// checked on every use.
@@ -322,6 +323,23 @@ pub(crate) fn check_db_name(name: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// The key of the named database `name` in the main DB, after
+/// [`check_db_name`]: the name's bytes in LMDB 0.9; in 1.0 the name with
+/// its terminating NUL, which 1.0's `mdb_dbi_open` keeps (`strlen(name) +
+/// 1` bytes, upstream commit e4cf950; [`Layout::db_name_nul`]). The
+/// registry and the transactions use this form throughout, so a 1.0 name
+/// is looked up, created, updated at commit and dropped with its NUL.
+pub(crate) fn db_name_key<'a>(layout: &Layout, name: &'a [u8]) -> Result<Cow<'a, [u8]>> {
+    check_db_name(name)?;
+    if !layout.db_name_nul {
+        return Ok(Cow::Borrowed(name));
+    }
+    let mut key = Vec::with_capacity(name.len() + 1);
+    key.extend_from_slice(name);
+    key.push(0);
+    Ok(Cow::Owned(key))
+}
+
 /// Outcome of looking a name up in the main DB.
 pub(crate) enum NamedDb {
     /// An `F_SUBDATA` node with this record.
@@ -450,7 +468,8 @@ impl TxnCore<'_> {
         let Some(name) = name else {
             return Ok(Dbi::MAIN);
         };
-        check_db_name(name)?;
+        let key = db_name_key(self.layout, name)?;
+        let name: &[u8] = &key;
         let registry = &self.env.dbis;
         let mut slots = registry.write();
 
