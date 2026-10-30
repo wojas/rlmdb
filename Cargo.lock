@@ -115,6 +115,7 @@ dependencies = [
  "libc",
  "rlmdb",
  "rlmdb-capi",
+ "rlmdb-tools",
  "tempfile",
 ]
 

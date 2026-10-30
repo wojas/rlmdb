@@ -201,6 +201,28 @@ fn diff10_dupfixed() {
     );
 }
 
+/// `MDB_DUPFIXED` items over a quarter page, which only 1.0's small pages
+/// allow (in 0.9 items are at most 511 bytes and pages at least 4 KiB): a
+/// key's second item turns its single item into a sub-DB at once, because
+/// the fake sub-page (two items and room for two more) is larger than a
+/// page. C's unsigned offset arithmetic wraps there and still gives the
+/// root its `mp_upper`; rlmdb must write the same page (it panicked on the
+/// subtraction before).
+#[test]
+fn diff10_dupfixed_items_over_a_quarter_page() {
+    for (ps, size) in [(512, 150), (512, 186), (1024, 300), (1024, 442)] {
+        eprintln!("page size {ps}, items of {size} bytes");
+        let p = for_page_size(
+            Profile {
+                dupfixed_size: Some(size),
+                ..Profile::new(MDB_DUPSORT | MDB_DUPFIXED, 20)
+            },
+            ps,
+        );
+        differential::run_profile(&C10::new(ps), p, 0x1da + size as u64, 4, 300);
+    }
+}
+
 #[test]
 fn diff10_intdup() {
     run_profiles(

@@ -66,17 +66,9 @@ fn path_str(p: &Path) -> &str {
 
 /// The C 1.0 page audit of `env`.
 fn audit10(env: &Path) {
-    let out = Command::new(bins::cpeer10())
-        .args(["check-freelist", path_str(env)])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "cpeer10 check-freelist {}:\n{}\n{}",
-        env.display(),
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    if let Err(e) = interop::tools::audit10(env) {
+        panic!("cpeer10 check-freelist {}: {e}", env.display());
+    }
 }
 
 fn hex(b: &[u8]) -> String {
