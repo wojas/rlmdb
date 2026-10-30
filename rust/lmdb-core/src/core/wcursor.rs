@@ -42,7 +42,7 @@
 
 use crate::cmp::Comparator;
 use crate::consts::*;
-use crate::core::cursor::{corrupted, empty_page, Cursor, C_INITIALIZED, C_SUB};
+use crate::core::cursor::{corrupted, empty_page, Cursor, C_DEL, C_INITIALIZED, C_SUB};
 use crate::core::dbi::{DB_DIRTY, DB_DUPDATA, DB_USRVALID, DB_VALID};
 use crate::core::page_ops;
 use crate::core::txn::TxnCore;
@@ -388,6 +388,16 @@ fn subpage_of<'t>(
     }
 }
 
+/// The bytes of clean (mapped) page `pgno` of `map`.
+fn clean_page(map: &crate::os::DataMap, ps: usize, pgno: u64) -> Result<&[u8]> {
+    let off = usize::try_from(pgno)
+        .ok()
+        .and_then(|p| p.checked_mul(ps))
+        .ok_or(MdbError::PageNotFound)?;
+    map.slice(off, ps)
+        .ok_or_else(|| MdbError::PageNotFound.into())
+}
+
 /// Rebuilds the read cursor for `c`.
 fn build_read<'t>(
     core: &'t TxnCore<'_>,
@@ -396,6 +406,19 @@ fn build_read<'t>(
     db: Db,
     cmp: Comparator,
 ) -> Result<Cursor<'t>> {
+    let mut rc = Cursor::new(db, cmp, 0);
+    load_read(core, arena, c, &mut rc)?;
+    Ok(rc)
+}
+
+/// Loads the state of cursor `c` into `out`, a fresh read cursor for its
+/// tree (see [`build_read`]).
+fn load_read<'t>(
+    core: &'t TxnCore<'_>,
+    arena: &Arena,
+    c: CRef,
+    out: &mut Cursor<'t>,
+) -> Result<()> {
     let w = arena.cur(c);
     let sub = if w.subp {
         Some(subpage_of(core, arena, c.slot)?.unwrap_or(empty_page()))
@@ -403,23 +426,10 @@ fn build_read<'t>(
         None
     };
     let snum = w.snum.min(CURSOR_STACK);
-    let mut pages = [empty_page(); CURSOR_STACK];
-    for (i, p) in pages.iter_mut().enumerate().take(snum) {
-        *p = match sub {
-            Some(sp) if i == 0 => sp,
-            _ => core.page(w.pg[i])?,
-        };
-    }
-    Ok(Cursor::from_parts(
-        db,
-        cmp,
-        w.flags,
-        &pages[..snum],
-        &w.ki,
-        snum,
-        w.top,
-        sub,
-    ))
+    out.load(w.flags, &w.ki, snum, w.top, sub, |i| match sub {
+        Some(sp) if i == 0 => Ok(sp),
+        _ => core.page(w.pg[i]),
+    })
 }
 
 /// Stores a read cursor's position back into `w`.
@@ -681,10 +691,24 @@ impl<'env> RwTxn<'env> {
         c: CRef,
         f: impl for<'t> FnOnce(&'t TxnCore<'env>, &mut Cursor<'t>, Option<&mut Cursor<'t>>) -> Result<R>,
     ) -> Result<R> {
+        // `read_cursors`, with both cursors built in place on this stack
+        // frame (they are large; moving them is measurably slow).
         let core = &self.core;
-        let (mut mc, mut mx) = read_cursors(core, &self.w.cursors, c)?;
-        let res = f(core, &mut mc, mx.as_mut());
-        write_back(&mut self.w.cursors, c, &mc, mx.as_ref());
+        let arena = &self.w.cursors;
+        let (db, cmp) = db_and_cmp(core, arena, c);
+        let mut mc = Cursor::new(db, cmp, 0);
+        load_read(core, arena, c, &mut mc)?;
+        let mut x_store;
+        let mut mx = match (&arena.slots[c.slot].x, c.sub) {
+            (Some(x), false) => {
+                x_store = Cursor::new(x.db, x.cmp, 0);
+                load_read(core, arena, CRef::sub(c.slot), &mut x_store)?;
+                Some(&mut x_store)
+            }
+            _ => None,
+        };
+        let res = f(core, &mut mc, mx.as_deref_mut());
+        write_back(&mut self.w.cursors, c, &mc, mx.as_deref());
         res
     }
 
@@ -752,7 +776,11 @@ impl<'env> RwTxn<'env> {
                 }
             }
         }
-        let np = match self.page_alloc(1) {
+        // The new page starts as a copy of the clean one (`mdb_page_copy`,
+        // done by the allocation; see `page_alloc_copy`).
+        let map = std::sync::Arc::clone(&self.core.map);
+        let src = clean_page(&map, self.psize(), mp)?;
+        let np = match self.page_alloc_copy(src) {
             Ok(p) => p,
             Err(e) => {
                 self.w.flags |= TXN_ERROR;
@@ -769,7 +797,7 @@ impl<'env> RwTxn<'env> {
         } else {
             self.db_mut(mc).root = np;
         }
-        self.copy_clean_page(mp, np)?;
+        self.own_copied_page(np)?;
 
         // Adjust cursors pointing to mp.
         self.cur_mut(mc).pg[top] = np;
@@ -806,18 +834,11 @@ impl<'env> RwTxn<'env> {
         Ok(())
     }
 
-    /// `mdb_page_copy` of clean (mapped) page `src` into the new dirty page
-    /// `dst`, then `np->mp_pgno = pgno; np->mp_flags |= P_DIRTY`.
-    fn copy_clean_page(&mut self, src: u64, dst: u64) -> Result<()> {
-        let ps = self.psize();
-        let core = &mut self.core;
-        let off = usize::try_from(src)
-            .ok()
-            .and_then(|p| p.checked_mul(ps))
-            .ok_or(MdbError::PageNotFound)?;
-        let from = core.map.slice(off, ps).ok_or(MdbError::PageNotFound)?;
-        let to = core.dirty.get_mut(dst).ok_or_else(corrupted)?;
-        to[..ps].copy_from_slice(from);
+    /// The tail of `mdb_page_touch` for the new dirty page `dst`, which
+    /// holds a copy of the clean page (`page_alloc_copy`):
+    /// `np->mp_pgno = pgno; np->mp_flags |= P_DIRTY`.
+    fn own_copied_page(&mut self, dst: u64) -> Result<()> {
+        let to = self.core.dirty.get_mut(dst).ok_or_else(corrupted)?;
         page_ops::set_pgno(to, dst);
         let f = page_ops::flags(to);
         page_ops::set_flags(to, f | P_DIRTY);
@@ -1008,13 +1029,22 @@ impl<'env> RwTxn<'env> {
         let Some(sx) = self.w.cursors.slot(src).and_then(|s| s.x.clone()) else {
             return;
         };
-        let Some(x) = self.w.cursors.slot_mut(m2).and_then(|s| s.x.as_mut()) else {
+        let Some(slot) = self.w.cursors.slot_mut(m2) else {
+            return;
+        };
+        let main_flags = slot.main.flags;
+        let Some(x) = slot.x.as_mut() else {
             return;
         };
         if new_dupdata {
             x.c.snum = 1;
             x.c.top = 0;
-            x.c.flags |= C_INITIALIZED;
+            // On the key's first item now. C ORs in C_INITIALIZED, so a
+            // C_DEL or C_EOF left from an earlier delete or move makes the
+            // next MDB_NEXT return the item again (KNOWN_C_BUGS.md #29);
+            // only a main cursor that sits before the item (after a
+            // delete, C_DEL) must not skip it.
+            x.c.flags = C_SUB | C_INITIALIZED | (main_flags & C_DEL);
             x.c.ki[0] = 0;
             x.dbflag = DB_VALID | DB_USRVALID | DB_DUPDATA;
             x.cmp = sx.cmp;

@@ -29,7 +29,7 @@ use crate::consts::*;
 use crate::core::cursor::{corrupted, cursor_last, cursor_set, CursorOp, C_DEL, C_INITIALIZED};
 use crate::core::dbi::DB_DIRTY;
 use crate::core::page_ops::{self, even, KeyUpdate, NodeBody};
-use crate::core::txn_rw::{RwTxn, TXN_ERROR};
+use crate::core::txn_rw::{FailOnPanic, RwTxn, TXN_ERROR};
 use crate::core::wcursor::{CRef, SUBPAGE};
 use crate::error::{Error, MdbError, Result};
 use crate::format::layout::{NODE_SIZE, PAGE_HDR_SIZE};
@@ -189,6 +189,15 @@ impl<'env> RwTxn<'env> {
         data: PutData<'_>,
         flags: u32,
     ) -> Result<usize> {
+        let mut txn = FailOnPanic(self);
+        let rc = txn.put_at0(mc, key, data, flags);
+        if let Err(e) = &rc {
+            txn.fail_unless_clean(e);
+        }
+        rc
+    }
+
+    fn put_at0(&mut self, mc: CRef, key: &[u8], data: PutData<'_>, flags: u32) -> Result<usize> {
         let mut flags = flags;
         let mut dcount = 0;
         // Check this first so counter will always be zero on any early
@@ -251,7 +260,7 @@ impl<'env> RwTxn<'env> {
             self.cur_mut(mc).push(np)?;
             let db = self.db_mut(mc);
             db.root = np;
-            db.depth += 1;
+            db.depth = db.depth.wrapping_add(1);
             let leaf2 = u32::from(db.flags) & (MDB_DUPSORT | MDB_DUPFIXED) == MDB_DUPFIXED;
             self.set_dbflag(mc, DB_DIRTY);
             if leaf2 {
@@ -276,7 +285,8 @@ impl<'env> RwTxn<'env> {
                 return rc.map(|()| mcount);
             }
             if insert_data {
-                self.db_mut(mc).entries += 1;
+                let db = self.db_mut(mc);
+                db.entries = db.entries.wrapping_add(1);
             }
             if insert_key {
                 self.cur_mut(mc).flags |= C_INITIALIZED;
@@ -488,6 +498,10 @@ impl<'env> RwTxn<'env> {
             }
             if go_current {
                 match self.put_current(mc, key, item, *flags)? {
+                    // An item equal to the key's only one: C returns here
+                    // even for MDB_MULTIPLE, so the later items are never
+                    // written (and the count says so: KNOWN_C_BUGS.md #30).
+                    CurStep::Done if *flags & MDB_MULTIPLE != 0 => return Ok((None, false)),
                     CurStep::Done => return Ok((Some(Ok(())), insert_data)),
                     CurStep::Reinsert => {}
                 }
@@ -521,7 +535,8 @@ impl<'env> RwTxn<'env> {
             Ok(()) => Ok((None, insert_data)),
             Err(e) => {
                 if insert_data {
-                    self.db_mut(mc).entries += 1;
+                    let db = self.db_mut(mc);
+                    db.entries = db.entries.wrapping_add(1);
                 }
                 if insert_key {
                     // bad_sub: invalidate txn if we created an empty sub-DB.
@@ -804,7 +819,8 @@ impl<'env> RwTxn<'env> {
             offset = ps - olddata_size;
             *flags |= u32::from(F_DUPDATA | F_SUBDATA);
             dummy.root = mp;
-            self.db_mut(mc).leaf_pages += 1;
+            let db = self.db_mut(mc);
+            db.leaf_pages = db.leaf_pages.wrapping_add(1);
             let page = self.dirty_mut(mp)?;
             build_subpage(&mut page[..ps], &fp, olddata_size, fp_flags, fp_pad, offset)
                 .ok_or_else(corrupted)?;
@@ -881,7 +897,7 @@ impl<'env> RwTxn<'env> {
             }
             let w3 = self.cur_mut(m3);
             if w3.ki[i] >= mc_ki && insert_key {
-                w3.ki[i] += 1;
+                w3.ki[i] = w3.ki[i].wrapping_add(1);
             }
         }
         Ok(())
@@ -1030,11 +1046,11 @@ impl<'env> RwTxn<'env> {
         }
         let db = self.db_mut(mc);
         if flags & P_BRANCH != 0 {
-            db.branch_pages += 1;
+            db.branch_pages = db.branch_pages.wrapping_add(1);
         } else if flags & P_LEAF != 0 {
-            db.leaf_pages += 1;
+            db.leaf_pages = db.leaf_pages.wrapping_add(1);
         } else if flags & P_OVERFLOW != 0 {
-            db.overflow_pages += num as u64;
+            db.overflow_pages = db.overflow_pages.wrapping_add(num as u64);
         }
         Ok(np)
     }

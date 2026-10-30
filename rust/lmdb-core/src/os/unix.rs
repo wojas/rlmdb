@@ -287,10 +287,20 @@ pub fn file_size(file: &File) -> io::Result<u64> {
 /// for such pages, and their lifetime is bounded by the read transaction
 /// that pins the snapshot. The two meta pages *are* rewritten under readers;
 /// they are only ever read through [`DataMap::read_volatile`] into a private
-/// copy.
+/// copy, and `slice` refuses them ([`DataMap::with_meta_pages`]).
+///
+/// What `slice` cannot check is that a page belongs to a pinned snapshot:
+/// that is the contract of its (crate-internal) callers, `TxnCore::page`
+/// and friends, which bound every page number by the snapshot's
+/// `next_pgno`. Pages past the end of the file are refused, so a file that
+/// is shorter than its meta pages claim yields errors, not `SIGBUS`. A file
+/// that shrinks *while mapped* (truncated by another program, outside the
+/// LMDB protocol) can still raise `SIGBUS` for pages seen before, as in C.
 pub struct DataMap {
     ptr: *mut u8,
     len: usize,
+    /// End of the meta pages: `slice` refuses offsets below it.
+    meta_end: usize,
     file: File,
     /// Last known size of the data file, to avoid `SIGBUS` past the end.
     known_file_size: AtomicU64,
@@ -336,9 +346,18 @@ impl DataMap {
         Ok(DataMap {
             ptr: ptr as *mut u8,
             len,
+            meta_end: 0,
             file,
             known_file_size: AtomicU64::new(size),
         })
+    }
+
+    /// Declares the first `len` bytes of the map to be the meta pages,
+    /// which writers rewrite under readers: [`DataMap::slice`] refuses
+    /// them, only [`DataMap::read_volatile`] reads them.
+    pub fn with_meta_pages(mut self, len: usize) -> DataMap {
+        self.meta_end = len;
+        self
     }
 
     /// Length of the mapping (`me_mapsize`).
@@ -354,23 +373,23 @@ impl DataMap {
     }
 
     /// Returns `len` bytes at `offset`, or `None` if the range is outside the
-    /// map or beyond the end of the data file.
+    /// map, overlaps the meta pages or is beyond the end of the data file.
     ///
     /// Callers must only ask for pages of a snapshot they hold pinned (see
     /// the type documentation).
     #[inline]
     pub fn slice(&self, offset: usize, len: usize) -> Option<&[u8]> {
         let end = offset.checked_add(len)?;
-        if end > self.len {
+        if end > self.len || offset < self.meta_end {
             return None;
         }
         if end as u64 > self.known_file_size.load(Ordering::Relaxed) && !self.refresh_size(end) {
             return None;
         }
         // SAFETY: [offset, end) lies inside the live mapping (checked above)
-        // and inside the file (so no SIGBUS). The mapping lives as long as
-        // `self`, and the bytes are not modified while the caller's snapshot
-        // is pinned (type-level documentation).
+        // and inside the file (so no SIGBUS), past the meta pages. The
+        // mapping lives as long as `self`, and the bytes are not modified
+        // while the caller's snapshot is pinned (type-level documentation).
         Some(unsafe { std::slice::from_raw_parts(self.ptr.add(offset), len) })
     }
 
@@ -617,8 +636,13 @@ mod tests {
     fn data_map_bounds() {
         let mut f = tempfile::tempfile().unwrap();
         f.write_all(&[7u8; 8192]).unwrap();
-        let m = DataMap::map_readonly(f.try_clone().unwrap(), 1 << 20, true).unwrap();
+        let m = DataMap::map_readonly(f.try_clone().unwrap(), 1 << 20, true)
+            .unwrap()
+            .with_meta_pages(2048);
         assert_eq!(m.slice(4096, 4096).unwrap()[0], 7);
+        // The meta pages are only read with volatile copies.
+        assert!(m.slice(0, 16).is_none() && m.slice(2047, 1).is_none());
+        assert!(m.slice(2048, 1).is_some());
         // Inside the map but past the end of the file: refused, no SIGBUS.
         assert!(m.slice(8192, 4096).is_none());
         assert!(m.slice(1 << 20, 1).is_none());

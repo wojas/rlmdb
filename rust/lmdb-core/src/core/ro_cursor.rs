@@ -201,6 +201,13 @@ impl<'txn> RoCursor<'txn> {
         op: CursorOp,
     ) -> Result<Option<Entry<'txn>>> {
         let rc = self.get_inner(key, data, op);
+        self.finish(rc)
+    }
+
+    /// The tail of [`RoCursor::get`]: clear `C_DEL`, turn `MDB_NOTFOUND`
+    /// into `None`.
+    #[inline]
+    fn finish(&mut self, rc: Result<Kv<'txn>>) -> Result<Option<Entry<'txn>>> {
         if self.mc.flags & C_DEL != 0 {
             self.mc.flags ^= C_DEL;
         }
@@ -271,8 +278,18 @@ impl<'txn> RoCursor<'txn> {
                 }
                 self.require_dupfixed()?;
                 let key = self.current_key().unwrap_or(&[]);
+                // The sub-cursor stays initialised when the cursor moves
+                // from a key with duplicates onto one without (as in C,
+                // which then returns the other key's duplicates,
+                // KNOWN_C_BUGS.md #27): only fetch for a key with some.
+                let dups = current_has_dups(&self.mc);
                 let mx = self.mx.as_mut().ok_or(MdbError::Incompatible)?;
-                if mx.is_initialized() && mx.flags & C_EOF == 0 {
+                // C tests C_EOF instead, which MDB_LAST & co. also set on
+                // the last item (and which stays when more duplicates are
+                // added after it): it fetches nothing there
+                // (KNOWN_C_BUGS.md #28).
+                let on_item = mx.depth() > 0 && mx.ki_top() < mx.top_page().num_keys();
+                if dups && mx.is_initialized() && on_item {
                     Ok(Kv {
                         key,
                         data: mx.fetch_multiple()?,
@@ -301,8 +318,9 @@ impl<'txn> RoCursor<'txn> {
                     cursor_last(txn, &mut self.mc, self.mx.as_mut())?;
                 }
                 let key = self.current_key()?;
+                let dups = current_has_dups(&self.mc);
                 match self.mx.as_mut() {
-                    Some(mx) if mx.is_initialized() => {
+                    Some(mx) if dups && mx.is_initialized() => {
                         mx.sibling(txn, false)?;
                         Ok(Kv {
                             key,
@@ -409,12 +427,17 @@ impl<'txn> RoCursor<'txn> {
     /// each step can fail.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Entry<'txn>>> {
-        self.get(None, None, CursorOp::Next)
+        // `self.get(None, None, CursorOp::Next)` without the dispatch on
+        // the operation: scans call this once per item.
+        let rc = cursor_next(self.txn, &mut self.mc, self.mx.as_mut(), CursorOp::Next);
+        self.finish(rc)
     }
 
     /// `MDB_PREV` (the last item if the cursor is not positioned).
     pub fn prev(&mut self) -> Result<Option<Entry<'txn>>> {
-        self.get(None, None, CursorOp::Prev)
+        // As `next`: `self.get(None, None, CursorOp::Prev)`.
+        let rc = cursor_prev(self.txn, &mut self.mc, self.mx.as_mut(), CursorOp::Prev);
+        self.finish(rc)
     }
 
     /// `MDB_NEXT_DUP`.

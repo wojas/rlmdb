@@ -97,6 +97,34 @@ pub(crate) struct WriteState {
     pub(crate) dropped: Vec<(usize, DbiSlot, u32)>,
 }
 
+/// Wraps a write transaction for a mutating operation: if the operation
+/// panics (a user comparator, `set_compare`/`set_dupsort`), dropping the
+/// guard while unwinding marks the transaction failed (`MDB_TXN_ERROR`),
+/// because the tree may be half changed; a caller that catches the panic
+/// can then only abort, commit fails with `MdbError::BadTxn`.
+pub(crate) struct FailOnPanic<'a, 'env>(pub(crate) &'a mut RwTxn<'env>);
+
+impl Drop for FailOnPanic<'_, '_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.w.flags |= TXN_ERROR;
+        }
+    }
+}
+
+impl<'env> std::ops::Deref for FailOnPanic<'_, 'env> {
+    type Target = RwTxn<'env>;
+    fn deref(&self) -> &RwTxn<'env> {
+        self.0
+    }
+}
+
+impl std::ops::DerefMut for FailOnPanic<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+    }
+}
+
 /// The writer locks a write transaction holds: the in-process writer state
 /// and, unless `MDB_NOLOCK`, the shared writer mutex. Dropping it unlocks.
 struct WriterLock<'env> {
@@ -323,6 +351,29 @@ impl<'env> RwTxn<'env> {
             return Err(MdbError::BadTxn.into());
         }
         Ok(())
+    }
+
+    /// After a put or delete failed with `e`: unless `e` is one of the
+    /// errors returned before anything changed (or with the change
+    /// complete), the tree may be half changed, so the transaction may
+    /// only be aborted now (`MDB_TXN_ERROR`). C sets it on these paths too,
+    /// or (on a corrupt page) asserts or crashes; some Rust paths that
+    /// detect a corrupt page part-way through did not set it.
+    pub(crate) fn fail_unless_clean(&mut self, e: &Error) {
+        let clean = matches!(
+            e,
+            Error::Mdb(
+                MdbError::KeyExist
+                    | MdbError::NotFound
+                    | MdbError::BadValSize
+                    | MdbError::Incompatible
+                    | MdbError::BadTxn
+                    | MdbError::BadDbi
+            )
+        ) || e.to_err_code() == libc::EINVAL;
+        if !clean {
+            self.w.flags |= TXN_ERROR;
+        }
     }
 
     /// `TXN_DBI_EXIST(txn, dbi, DB_USRVALID)` for a write operation, then
