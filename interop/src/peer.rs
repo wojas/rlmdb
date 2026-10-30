@@ -18,10 +18,10 @@ use crate::{bins, Error, Result, TestEnv};
 pub enum Peer {
     /// `cpeer`: C, linked against `liblmdb` built from `libraries/liblmdb`.
     C,
-    /// `rpeer`: Rust, built on the `lmdb-core` crate (`src/bin/rpeer`).
+    /// `rpeer`: Rust, built on the `rlmdb` crate (`src/bin/rpeer`).
     Rust,
     /// `cpeer_capi`: the same C program as [`Peer::C`], linked against the
-    /// Rust `liblmdb.a` of `lmdb-capi` instead of the C library (see
+    /// Rust `liblmdb.a` of `rlmdb-capi` instead of the C library (see
     /// [`bins::cpeer_capi`]).
     COnRust,
 }
@@ -45,7 +45,7 @@ pub fn skipped(msg: impl fmt::Display) {
 
 /// A peer that completes a command with parts left out says so on stderr
 /// with a `NOT-IMPLEMENTED` line (e.g. rpeer's `nested-test` while
-/// `lmdb-core` had no `mdb_drop`); pass those on as SKIPPED notes. (A
+/// `rlmdb` had no `mdb_drop`); pass those on as SKIPPED notes. (A
 /// command that fails as not implemented is reported where it fails.)
 fn report_partial(out: &Output) {
     if !out.success() {
@@ -92,18 +92,18 @@ fn rpeer_path() -> Result<PathBuf> {
     }
     candidates.into_iter().find(|p| p.is_file()).ok_or_else(|| {
         Error::new(
-            "the Rust peer `rpeer` is not built: run `cargo build -p interop --bin rpeer` \
+            "the Rust peer `rpeer` is not built: run `cargo build -p rlmdb-interop --bin rpeer` \
              or set INTEROP_RPEER to its path",
         )
     })
 }
 
 /// Exit status of a peer that does not implement a command (yet): `rpeer`
-/// for a command that needs a part of `lmdb-core` that does not exist yet.
+/// for a command that needs a part of `rlmdb` that does not exist yet.
 pub const EXIT_NOT_IMPLEMENTED: i32 = 4;
 
 /// `strerror(ENOSYS)` on macOS and glibc: what `cpeer` prints when a call
-/// into a not yet implemented part of the Rust C API (`lmdb-capi`) fails.
+/// into a not yet implemented part of the Rust C API (`rlmdb-capi`) fails.
 const ENOSYS_TEXT: &str = "Function not implemented";
 
 /// The answer of `<peer> commands`: `(command, implemented)` pairs.
@@ -168,7 +168,7 @@ impl Peer {
     }
 
     /// Is this peer built on the Rust library (`rpeer`, or `cpeer` on
-    /// `lmdb-capi`)?
+    /// `rlmdb-capi`)?
     pub fn is_rust(&self) -> bool {
         *self != Peer::C
     }
@@ -310,7 +310,7 @@ impl Output {
             )))
         } else if self.code() == Some(3) && self.stderr.contains(ENOSYS_TEXT) {
             Err(Error::not_implemented(format!(
-                "NOT-IMPLEMENTED an LMDB call returned ENOSYS (not implemented in lmdb-capi \
+                "NOT-IMPLEMENTED an LMDB call returned ENOSYS (not implemented in rlmdb-capi \
                  yet): {self}"
             )))
         } else {

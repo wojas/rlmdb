@@ -8,15 +8,15 @@ environment and checking what each sees.
 * `cpeer` (C, `c/cpeer*.c`) speaks the protocol below, linked against
   `liblmdb` built from `../../libraries/liblmdb` (LMDB 0.9.36+) by `build.rs`
   with the upstream Makefile's flags and the platform's default lock mode.
-* `rpeer` (Rust, `src/bin/rpeer/`, on the `lmdb-core` crate) speaks the same
+* `rpeer` (Rust, `src/bin/rpeer/`, on the `rlmdb` crate) speaks the same
   protocol, with the same LMDB calls in the same order and the same output
   (see "Peer status" below).
-* `cpeer_capi` is the C peer compiled against `../lmdb-capi/include/lmdb.h`
-  and linked against the Rust `liblmdb.a` of `lmdb-capi` instead of the C
+* `cpeer_capi` is the C peer compiled against `../rlmdb-capi/include/lmdb.h`
+  and linked against the Rust `liblmdb.a` of `rlmdb-capi` instead of the C
   library: the same C program on the Rust implementation (`Peer::COnRust`).
   `build.rs` compiles its objects; `interop::bins::cpeer_capi()` links them
   at test time (once per test process), because cargo builds `liblmdb.a`
-  (`lmdb-capi` is a dev-dependency of this crate) only after build scripts
+  (`rlmdb-capi` is a dev-dependency of this crate) only after build scripts
   run.
 * `layout_dump` (`c/layout_dump.c`) `#include`s `mdb.c` and prints
   `sizeof`/`offsetof`/`alignof` of every on-disk and lock-file struct.
@@ -35,13 +35,13 @@ audits too.
 ## Running
 
 ```sh
-cargo test -p interop                       # everything: 9 pairs, three peers, layout, rpeer (~1.5 min)
-cargo test -p interop --test c_vs_c         # every scenario with C on both sides
-cargo test -p interop --test rust_writes_c_reads   # every scenario, Rust writes, C reads
-cargo test -p interop --test rpeer          # rpeer vs cpeer outputs, checkers, exit codes
-cargo test -p interop --test c_vs_c -- --nocapture mvcc   # one scenario, with its log
-INTEROP_LOOP_SECS=20 cargo test -p interop --no-fail-fast  # stress: 20 s loops (~6 min)
-rust/scripts/linux-test.sh test -p interop  # the same on Linux (Docker)
+cargo test -p rlmdb-interop                       # everything: 9 pairs, three peers, layout, rpeer (~1.5 min)
+cargo test -p rlmdb-interop --test c_vs_c         # every scenario with C on both sides
+cargo test -p rlmdb-interop --test rust_writes_c_reads   # every scenario, Rust writes, C reads
+cargo test -p rlmdb-interop --test rpeer          # rpeer vs cpeer outputs, checkers, exit codes
+cargo test -p rlmdb-interop --test c_vs_c -- --nocapture mvcc   # one scenario, with its log
+INTEROP_LOOP_SECS=20 cargo test -p rlmdb-interop --no-fail-fast  # stress: 20 s loops (~6 min)
+rust/scripts/linux-test.sh test -p rlmdb-interop  # the same on Linux (Docker)
 ```
 
 | test file | what |
@@ -65,7 +65,7 @@ prints
 silent pass): either C runs that step instead (`capable()`), or the whole
 scenario is skipped (its test passes). Three things count as lacking: the
 peer's `commands` list says `implemented=0` (exit status 4 if run anyway);
-an LMDB call fails with `ENOSYS` (`COnRust` while `lmdb-capi` has
+an LMDB call fails with `ENOSYS` (`COnRust` while `rlmdb-capi` has
 placeholders); or a peer completes a command but prints a
 `NOT-IMPLEMENTED` line on stderr for a part it left out (reported as
 `SKIPPED partly`).
@@ -114,10 +114,10 @@ The tests print the page size of each environment they create (`--nocapture`):
 `rpeer` mirrors the C peer file by file (`args.rs` = `cpeer.c`, `dataset.rs`
 = `dataset.c`, `data.rs` = `cpeer_data.c`, `loops.rs` = `cpeer_loops.c`,
 `misc.rs` = `cpeer_misc.c`, `pagewalk.rs` = `cpeer_pagewalk.c`) and uses only
-the public API of the `lmdb-core` crate (no `unsafe`): `lmdb_core::core`
+the public API of the `rlmdb` crate (no `unsafe`): `rlmdb::core`
 for everything except `check-freelist`, which decodes the data file with
-`lmdb_core::format` alone. `cpeer_capi` is `cpeer` itself; what it can do
-depends on what `lmdb-capi` implements.
+`rlmdb::format` alone. `cpeer_capi` is `cpeer` itself; what it can do
+depends on what `rlmdb-capi` implements.
 
 | command | C | Rust (`rpeer`) | COnRust (`cpeer_capi`) |
 |---|---|---|---|

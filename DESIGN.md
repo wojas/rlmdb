@@ -18,15 +18,15 @@ not a binding. The goals, in priority order:
    transaction, mutation needs `&mut`, read transactions are not tied to a
    thread, handles cannot outlive the environment, there is no `void*` and no
    "undefined behaviour if you call this twice".
-4. **A C API compatible with C LMDB** (`lmdb-capi`): the same `mdb_*` symbols,
+4. **A C API compatible with C LMDB** (`rlmdb-capi`): the same `mdb_*` symbols,
    same `lmdb.h`, same error codes and flag values, so existing C programs link
    and run unchanged against the Rust build (`liblmdb.a` / `liblmdb.so`).
 5. **Performance comparable to C.** No allocations in the hot read path, binary
    search on pages, cursor stacks in fixed arrays, zero-copy values.
-6. **Minimal `unsafe`.** `unsafe` is confined to `lmdb-core/src/os/` (mmap,
+6. **Minimal `unsafe`.** `unsafe` is confined to `rlmdb/src/os/` (mmap,
    file locks, fsync, shared mutexes/semaphores, pread/pwrite) and to
-   `lmdb-capi` (inherently FFI). Everything else, including all page parsing
-   and B-tree logic, is safe Rust over byte slices. `lmdb-core/src/lib.rs`
+   `rlmdb-capi` (inherently FFI). Everything else, including all page parsing
+   and B-tree logic, is safe Rust over byte slices. `rlmdb/src/lib.rs`
    carries `#![deny(unsafe_code)]` and `#[forbid(unsafe_code)]` on every
    module except `os`, which opts back in with `#![allow(unsafe_code)]`
    (a crate-level `forbid` could not be relaxed for one module).
@@ -53,9 +53,9 @@ Out of scope for now (leave the door open, do not design it away):
 * `../libraries/liblmdb/midl.c` / `midl.h`: the ID lists (`MDB_IDL`,
   `MDB_ID2L`) used for free lists and dirty lists.
 * `../libraries/liblmdb/mtest*.c`: small C test programs; they must run
-  unchanged against `lmdb-capi`.
+  unchanged against `rlmdb-capi`.
 * `../libraries/liblmdb/mdb_stat.c`, `mdb_dump.c`, `mdb_load.c`,
-  `mdb_copy.c`: the tools, reimplemented in `lmdb-tools` (`mdb_drop` does not
+  `mdb_copy.c`: the tools, reimplemented in `rlmdb-tools` (`mdb_drop` does not
   exist in 0.9.36; the Rust one is an extra modelled on 1.0's).
 
 ## On-disk format (what "compatible" means)
@@ -194,13 +194,13 @@ rust/
   COMPATIBILITY.md    the compatibility contract and what verifies it
   KNOWN_C_BUGS.md     C 0.9.36 bugs not ported (or ported on purpose)
   scripts/            linux-test.sh (cargo in Docker), check-all.sh
-  lmdb-core/          the library (package `lmdb-core`, lib `lmdb_core`)
-  lmdb-capi/          cdylib+staticlib `lmdb` exporting the C ABI, ships include/lmdb.h
-  lmdb-tools/         mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop in Rust
+  rlmdb/          the library (package `rlmdb`, lib `rlmdb`)
+  rlmdb-capi/          cdylib+staticlib `lmdb` exporting the C ABI, ships include/lmdb.h
+  rlmdb-tools/         mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop in Rust
   interop/            cross-process compatibility tests (builds the C library)
 ```
 
-### `lmdb-core` module map
+### `rlmdb` module map
 
 As implemented (the heed-layer files at the end are planned only):
 
@@ -268,7 +268,7 @@ copy names, signatures, generics, lifetimes and doc comments.
 
 The crate has two layers:
 
-* **`lmdb_core::core`** (byte-level, documented, public): `Environment`,
+* **`rlmdb::core`** (byte-level, documented, public): `Environment`,
   `EnvironmentBuilder`, `RoTxn`, `RwTxn`, `Dbi` (a `Copy` handle),
   `RoCursor`, `RwCursor`, `CursorOp`, `Stat`, `Info`, `ReaderInfo`. This is
   what the C API crate, the tools, the interop peer and the heed layer are
@@ -313,11 +313,11 @@ Deliberate differences from heed:
   C too (`mdb_set_compare`); a C peer must install the same comparator. The
   core layer accepts `fn(&[u8], &[u8]) -> Ordering` comparators.
 
-### Core layer (`lmdb_core::core`)
+### Core layer (`rlmdb::core`)
 
 This is the C API in Rust clothing, byte slices in and out, with lifetimes
 doing the work that the C docs' "do not do X" paragraphs do. The sketch
-below was the stage-1 plan; the rustdoc of `lmdb_core::core` is the
+below was the stage-1 plan; the rustdoc of `rlmdb::core` is the
 reference. Additions since: `Transaction::open_db_bytes`, `set_compare`,
 `set_dupsort`, `comparators`; `RwTxn::create_db_bytes`; handle-based
 cursors (`RwTxn::open_cursor` -> `CursorId`, `cursor_get`/`cursor_put`/
@@ -461,7 +461,7 @@ strings match `mdb_strerror`.
 * Name things after the concept, not the C field: `lower`, `upper`, `num_keys`,
   `child_pgno`. Mention the C name in the doc comment once.
 * Tests: unit tests next to the code for format parsing (hand-built pages),
-  integration tests in `lmdb-core/tests/` for API behaviour, and `interop/`
+  integration tests in `rlmdb/tests/` for API behaviour, and `interop/`
   for cross-process checks against the C build.
 * Linux is tested in Docker: `rust/scripts/linux-test.sh [cargo args]` runs
   cargo inside `rust:1-bookworm` (Debian, glibc, aarch64, 4 KiB pages) with
@@ -511,7 +511,7 @@ Facts about C 0.9.36 behaviour that implementers must honour; the harness in
 * `mdb_load` in 0.9.36 drops the flags of the first DB in its input (the
   `flags = 0;` from ITS#8662); the Rust tool must not copy that bug.
 * `mtest6` calls `mdb_dkey`, which exists only with `MDB_DEBUG`;
-  `lmdb-core/tests` and `lmdb-capi/tests` build it against a small shim,
+  `rlmdb/tests` and `rlmdb-capi/tests` build it against a small shim,
   the interop harness skips it.
 
 ## Status
@@ -521,7 +521,7 @@ coordinator. What landed (commits on this branch):
 
 **Stage 1** (in parallel):
 
-* A. `lmdb-core` foundation and the complete read path (`39256da`):
+* A. `rlmdb` foundation and the complete read path (`39256da`):
   consts, flags, errors, `format`, `idl`, `cmp`, `os` (maps, locks, shared
   mutex/semaphores, reader table), environment open including creating a
   new environment (`mdb_env_init_meta`), read transactions, `open_db`,
@@ -539,7 +539,7 @@ coordinator. What landed (commits on this branch):
   reuse, dirty pages, `mdb_page_touch`, node add, splits, put with every
   flag, commit (flush, sync, meta write), `set_map_size`. Deletes,
   rebalancing and merges landed here too (planned for stage 3).
-* D1. `lmdb-capi` read side (`6678f83`).
+* D1. `rlmdb-capi` read side (`6678f83`).
 * B2. The Rust peer's read side; every scenario as "C writes, Rust reads";
   the layout test against the C dump (`d85dd7c`).
 * The core API gaps the C API and interop agents reported (`f2db7cd`) all
@@ -548,7 +548,7 @@ coordinator. What landed (commits on this branch):
   bytes), `Info::map_address`, `Environment::has_lock_file`,
   `Transaction::comparators`, `RoCursor::is_initialized`/
   `current_has_dups`, `Environment::copy_to_path`/`copy_to_fd`, and the
-  rename of the library to package `lmdb-core`, lib `lmdb_core`
+  rename of the library to package `rlmdb`, lib `rlmdb`
   (`028c63f`).
 
 **Stage 3:**
@@ -561,21 +561,21 @@ coordinator. What landed (commits on this branch):
 * B3. The Rust peer's write side, a third peer (the C peer linked against
   the Rust `liblmdb.a`), all nine writer/reader pairs, concurrent and
   alternating writers, stale readers (`25ae621`).
-* T. `lmdb-tools`: `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`,
+* T. `rlmdb-tools`: `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`,
   `mdb_drop`, byte-identical to the C tools (`4b5c420`).
 
 **Stage 4** (review, follow-ups, docs):
 
-* `lmdb-capi`: cursors of a parent transaction work inside a nested
+* `rlmdb-capi`: cursors of a parent transaction work inside a nested
   transaction, as in C (the last known gap of the C API; the core
   supported it since stage 3). `mdb_cursor_txn` on such a cursor returns
   the active child.
-* `lmdb-tools`: the database-name errors (empty: `MDB_BAD_VALSIZE`; over
+* `rlmdb-tools`: the database-name errors (empty: `MDB_BAD_VALSIZE`; over
   511 bytes: `MDB_NOTFOUND` when opening, `MDB_BAD_VALSIZE` when creating)
   are checked against the C tools.
 * `scripts/check-all.sh`; `README.md`, `COMPATIBILITY.md`, the crate
-  documentation of `lmdb_core`, and this section.
-* Other stage-4 work (the review of `lmdb-core` and of the C API's
+  documentation of `rlmdb`, and this section.
+* Other stage-4 work (the review of `rlmdb` and of the C API's
   handle code, benchmarks against C) runs separately; the coordinator
   records it here when it lands.
 

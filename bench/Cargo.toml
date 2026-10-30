@@ -1,5 +1,5 @@
 [package]
-name = "lmdb-bench"
+name = "rlmdb-bench"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,11 +11,11 @@ description = "Benchmarks of the Rust LMDB rewrite against the C library (identi
 # The driver and the Rust side of every workload. The C side is the
 # `cbench` program built by build.rs from c/cbench.c and the C library.
 [[bin]]
-name = "lmdb-bench"
+name = "rlmdb-bench"
 path = "src/main.rs"
 
 [dependencies]
-lmdb-core = { path = "../lmdb-core" }
+rlmdb = { path = "../rlmdb" }
 
 [build-dependencies]
 cc = "1"

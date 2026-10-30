@@ -17,8 +17,8 @@
 //! Durations: loops run for [`loop_secs`] (`$INTEROP_LOOP_SECS`, default
 //! 1.5 s); every scenario should finish in well under 10 s.
 //!
-//! Peers that do not implement a command yet (`rpeer` while `lmdb-core`
-//! lacks a feature, `COnRust` while `lmdb-capi` returns `ENOSYS`) are
+//! Peers that do not implement a command yet (`rpeer` while `rlmdb`
+//! lacks a feature, `COnRust` while `rlmdb-capi` returns `ENOSYS`) are
 //! handled in two ways, both reported with a `[interop] SKIPPED` line on
 //! the real stderr (visible without `--nocapture`): a step that some other
 //! peer could do just as well runs on C instead ([`capable`]); otherwise

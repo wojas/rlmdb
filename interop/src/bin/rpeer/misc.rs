@@ -3,7 +3,7 @@
 
 use std::io::{self, BufWriter, Write};
 
-use lmdb_core::{DatabaseFlags, Dbi, Environment, MdbError, RoTxn, RwTxn, Transaction, WriteFlags};
+use rlmdb::{DatabaseFlags, Dbi, Environment, MdbError, RoTxn, RwTxn, Transaction, WriteFlags};
 
 use crate::args::{
     parse_u32, parse_u32_opt, parse_u64, show, Check, CmdResult, Fail, Opts, EXIT_LMDB,

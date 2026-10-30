@@ -17,11 +17,11 @@
 //! | `misc` | `cpeer_misc.c` | `create`, `stat`, `readers`, `reader-check`, `copy`, `nested-test`, `gen` |
 //! | `pagewalk` | `cpeer_pagewalk.c` | `check-freelist` |
 //!
-//! It uses only the public API of the `lmdb` crate: `lmdb_core::core` for
+//! It uses only the public API of the `lmdb` crate: `rlmdb::core` for
 //! everything except `check-freelist`, which decodes the data file itself
-//! with `lmdb_core::format`.
+//! with `rlmdb::format`.
 //!
-//! Commands that need a part of `lmdb_core` that does not exist yet parse
+//! Commands that need a part of `rlmdb` that does not exist yet parse
 //! their arguments and then exit with status 4 ("not implemented in rpeer
 //! yet"); `rpeer commands` lists what is implemented, which is how the
 //! harness decides to skip or substitute (`interop::Peer::supports`).
@@ -48,7 +48,7 @@ struct Command {
     min_pos: usize,
     max_pos: usize,
     usage: &'static str,
-    /// `false` for commands that need a part of `lmdb_core` that does not
+    /// `false` for commands that need a part of `rlmdb` that does not
     /// exist yet (exit status 4).
     implemented: bool,
 }

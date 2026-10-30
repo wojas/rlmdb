@@ -10,9 +10,9 @@
 //!   `README.md` (`fill`, `verify`, `writer-loop`, `check-freelist`, …).
 //!   [`Peer::C`] is `cpeer`, written in C against `liblmdb` (built from
 //!   `../../libraries/liblmdb` by `build.rs`); [`Peer::Rust`] is `rpeer`
-//!   (`src/bin/rpeer`), built on the `lmdb-core` crate; [`Peer::COnRust`]
+//!   (`src/bin/rpeer`), built on the `rlmdb` crate; [`Peer::COnRust`]
 //!   is the same C program linked against the Rust `liblmdb.a` of
-//!   `lmdb-capi`. Commands a peer does not implement yet exit with status
+//!   `rlmdb-capi`. Commands a peer does not implement yet exit with status
 //!   4; [`Peer::supports`] tells, and scenarios skip or substitute the C
 //!   peer for them.
 //! * [`TestEnv`] is an environment in a temporary directory.

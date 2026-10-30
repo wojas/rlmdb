@@ -21,7 +21,7 @@
 //! * both meta pages: the `MDB_meta` fields.
 //!
 //! Offsets are those of `DESIGN.md` ("On-disk format"); the parsing is
-//! independent of `lmdb-core` on purpose.
+//! independent of `rlmdb` on purpose.
 
 use std::collections::BTreeMap;
 use std::path::Path;

@@ -6,7 +6,7 @@
 //!   the data and lock files are the ones a normal `make` build produces.
 //! * `cpeer`: the C implementation of the peer command protocol (`c/cpeer*.c`).
 //! * The cpeer objects once more, compiled against the Rust library's
-//!   `lmdb.h` (`../lmdb-capi/include`): at test time they are linked with
+//!   `lmdb.h` (`../rlmdb-capi/include`): at test time they are linked with
 //!   the Rust `liblmdb.a` into `cpeer_capi`, the third peer
 //!   (`Peer::COnRust`, see `src/bins.rs`). That link cannot happen here:
 //!   the build script runs before cargo builds `liblmdb.a`.
@@ -88,7 +88,7 @@ fn main() {
     exported.push(("cpeer", link(&bin_dir, "cpeer", &objs, &lib_objs)));
 
     // cpeer against the Rust library's header, linked at test time.
-    let capi_include = manifest_dir.join("../lmdb-capi/include");
+    let capi_include = manifest_dir.join("../rlmdb-capi/include");
     let capi_include = capi_include.canonicalize().unwrap_or(capi_include);
     println!(
         "cargo:rerun-if-changed={}",
