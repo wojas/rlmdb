@@ -41,7 +41,10 @@ fn rlmdb_h_version_functions() {
 
 #[test]
 fn rlmdb_h_from_cxx() {
-    let exe = builder().cxx_test_program("capi_version");
+    // Skipped (with a note) where there is no C++ compiler.
+    let Some(exe) = builder().cxx_test_program("capi_version") else {
+        return;
+    };
     let out = run_capi_version(&exe);
     assert!(out.starts_with("capi_version (C++): "), "{out}");
     assert!(out.trim_end().ends_with(" 0 failures"), "{out}");
