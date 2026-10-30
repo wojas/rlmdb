@@ -250,8 +250,10 @@ impl<'env> RwTxn<'env> {
     /// the free list grow by billions of entries (C fails with `ENOMEM` at
     /// best).
     pub(crate) fn overflow_run_pages(&self, pgno: u64) -> Result<usize> {
-        let n = self.core.page(pgno)?.overflow_pages();
-        if n == 0
+        let page = self.core.page(pgno)?;
+        let n = page.overflow_pages();
+        if !page.is_overflow()
+            || n == 0
             || pgno
                 .checked_add(u64::from(n))
                 .is_none_or(|end| end > self.core.next_pgno)

@@ -787,7 +787,13 @@ impl<'env> RwTxn<'env> {
                 return Err(e);
             }
         };
-        debug_assert_ne!(np, mp);
+        // A corrupt file can hand us the page we are copying: a free-DB
+        // record naming a live page, or a root on the free list. C goes on
+        // and later reuses the live page; refuse instead.
+        if np == mp {
+            self.w.flags |= TXN_ERROR;
+            return Err(corrupted());
+        }
         self.w.free_pgs.append(mp);
         // Update the parent page, if any, to point to the new page.
         if top > 0 {
