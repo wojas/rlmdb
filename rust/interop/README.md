@@ -181,7 +181,17 @@ robust process-shared mutexes, `sizeof(pthread_mutex_t)` 48).
 `10 + LOG2_MOD(alignof(pthread_mutex_t), 5) + sizeof(pthread_mutex_t) / 4 %
 22 * 5` for POSIX mutexes, so the value depends on the mutex size: on
 x86-64 glibc (40-byte mutex, `MDB_txbody` 64 bytes) the formula gives
-`0x2c2f6002`, not measured here.
+`0x2c2f6002`. That was measured once by compiling `layout_dump10` in an
+emulated x86-64 `rust:1-bookworm` container (`docker run --platform
+linux/amd64`), together with the rest of the x86-64 version 2 layout:
+`mtb_rmutex` at 24 (40 bytes), `sizeof(MDB_txbody)` 64, `mt2_wmutex` at 64,
+readers at 128. The test runs do not cover x86-64.
+
+`tests/lockfile10.rs` compares rlmdb's lock-file descriptors with every
+lock-file line of both `layout_dump`s, and shares a version 2 lock file
+between rlmdb and C 1.0 processes in both directions (rlmdb attaches to
+C's table, C attaches to rlmdb's), through `rlmdb::core::reader::LockFile`
+because an rlmdb `Environment` cannot open a 1.0 data file yet.
 
 ### 0.9 and 1.0 refuse each other
 
