@@ -1,4 +1,4 @@
-/* See mtest_shim.h. Compiled with the same -Dtime=mtest_time. */
+/* See mtest_shim.h. */
 #include <stdio.h>
 #include <stdlib.h>
 #include "mtest_shim.h"

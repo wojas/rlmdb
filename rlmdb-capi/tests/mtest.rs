@@ -167,6 +167,27 @@ fn mtest6() {
     acceptance("mtest6");
 }
 
+/// The seed reaches `srand()` (`tests/c/mtest_shim.h`), which the
+/// comparisons above rely on: the same seed gives the same run more than a
+/// second later, which a `time(NULL)` seed would not, and another seed
+/// another run (other values, other keys).
+#[test]
+fn mtest_seed_takes_effect() {
+    let b = builder();
+    let run = |name: &str, seed: u32| {
+        let out = run_mtest_seeded("mtest", Lib::C, &b.scratch(name), seed);
+        without_pointers(&String::from_utf8_lossy(&out.stdout))
+    };
+    let first = run("seed-a", MTEST_SEED);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert_eq!(
+        run("seed-a-again", MTEST_SEED),
+        first,
+        "the same seed later"
+    );
+    assert_ne!(run("seed-b", 7), first, "another seed");
+}
+
 // ---------------------------------------------------------------------------
 // mdb_load / mdb_dump / mdb_copy
 // ---------------------------------------------------------------------------

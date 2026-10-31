@@ -654,8 +654,9 @@ impl Builder {
     }
 
     /// One of the upstream `mtest*.c` programs, unmodified, built with
-    /// `tests/c/mtest_shim.{h,c}`: a fixed `rand()` seed (`$MTEST_SEED`)
-    /// and the `mdb_dkey()` that `mtest6.c` needs.
+    /// `tests/c/mtest_shim.{h,c}` (the header included first): a fixed
+    /// `rand()` seed (`$MTEST_SEED`) and the `mdb_dkey()` that `mtest6.c`
+    /// needs.
     pub fn mtest(&self, name: &str, lib: Lib) -> PathBuf {
         let shim_h = test_c_dir().join("mtest_shim.h");
         let include = if Compiler::new(&self.dir, false).is_ok_and(|c| c.is_msvc()) {
@@ -663,8 +664,7 @@ impl Builder {
         } else {
             vec!["-include".to_owned(), shim_h.display().to_string()]
         };
-        let mut extra = vec!["-Dtime=mtest_time"];
-        extra.extend(include.iter().map(String::as_str));
+        let extra: Vec<&str> = include.iter().map(String::as_str).collect();
         self.program_with(
             name,
             &[

@@ -409,9 +409,13 @@ nested one, was closed in stage 4.)
 C library and against the Rust `liblmdb.a`:
 
 * `mtest.c` .. `mtest6.c` seed `rand()` with `time(NULL)`; the tests build
-  them with `-Dtime=mtest_time -include tests/c/mtest_shim.h`, which makes
-  the seed `$MTEST_SEED` (and supplies `mdb_dkey()`, which `mtest6.c` needs
-  and `liblmdb` only has with `MDB_DEBUG`). With seeds 20261030 and 7 each
+  them with `tests/c/mtest_shim.h` included first (`-include`, `cl /FI`),
+  which includes `<time.h>` and then makes `time` the shim's
+  `mtest_time()`, so the seed is `$MTEST_SEED` (and supplies `mdb_dkey()`,
+  which `mtest6.c` needs and `liblmdb` only has with `MDB_DEBUG`). (Not a
+  `-Dtime=mtest_time` on the command line: MSVC's `<time.h>` defines
+  `time()` inline and MinGW-w64's gives it an assembler name, and the
+  macro would rename those.) `mtest_seed_takes_effect` checks the seed. With seeds 20261030 and 7 each
   program, against either library, exits 0 with nothing on stderr and the
   **same stdout** (pointer values aside), and the environments they leave
   are **identical as far as the C tools can tell**: C `mdb_stat -e -f -ff
