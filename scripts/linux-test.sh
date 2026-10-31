@@ -27,12 +27,23 @@
 # the Docker host has none (a rootless daemon on Linux 6.7 or later has a
 # binfmt_misc instance per user namespace, so a handler registered by
 # another container is not seen); in CI docker/setup-qemu-action registers
-# it on the host. QEMU_LD_PREFIX points the emulator at the cross compiler's
-# target libraries. QEMU user mode has no robust futexes (a mutex whose
-# owner died is never marked EOWNERDEAD, in C too), which
+# it on the host. Such an instance, once any privileged container (this one,
+# tonistiigi/binfmt) has mounted it, stays until the daemon's user namespace
+# ends, and every container of that daemon then sees only its handlers, not
+# the VM's; its entries last while some container has it mounted. So the
+# script also registers the VM's amd64 handler there (Lima's Rosetta at
+# /mnt/lima-rosetta, if the VM has it), and linux/amd64 containers of the
+# daemon work while a cross run does (between runs the instance is empty
+# again; only a daemon restart brings back the VM's handlers). It never
+# changes or removes an entry. QEMU_LD_PREFIX points the emulator at the
+# cross compiler's target libraries. QEMU user mode has no robust futexes (a
+# mutex whose owner died is never marked EOWNERDEAD, in C too), which
 # INTEROP_NO_ROBUST_MUTEX tells the interop tests. Emulation is slow: run
 # one crate at a time; INTEROP_TIMEOUT_SECS, the interop tests' limit per
 # program, defaults to 900 s here.
+#
+# FYI: under Rosetta, the interop tests can hang on a futex with parallel
+# test threads; --test-threads=1 passes.
 #
 # /tmp, where tests and benchmarks create their environments, is a tmpfs in
 # the VM's memory: the alternatives inside the VM are its virtual disk
@@ -88,8 +99,26 @@ if [ -n "${LINUX_TEST_TARGET:-}" ]; then
     -e INTEROP_TIMEOUT_SECS=${INTEROP_TIMEOUT_SECS:-900} --privileged"
   qemu=${gnu%%-*}
   bf=/proc/sys/fs/binfmt_misc
+  # The binfmt_misc instance the container mounts may be rootless Docker's
+  # own, which hides the VM's handlers from every container of that daemon
+  # (see above). So register the VM's amd64 handler (Lima's Rosetta, if the
+  # VM has it) there too, with the line of the VM's own registration;
+  # existing entries are left alone, nothing is removed.
+  rosetta=/mnt/lima-rosetta
+  register_rosetta=
+  if docker run --rm --mount "type=bind,source=$rosetta,target=/r,readonly" \
+      "$cross_image" test -x /r/rosetta >/dev/null 2>&1; then
+    cross_env="$cross_env --mount type=bind,source=$rosetta,target=$rosetta,readonly"
+    rosetta_line=':rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:'$rosetta/rosetta:OCF
+    register_rosetta="{ [ -e $bf/rosetta ] || printf '%s' '$rosetta_line' > $bf/register ||
+      [ -e $bf/rosetta ] || echo 'linux-test.sh: could not register Rosetta' >&2; }"
+  fi
+  # A handler that appears between the test and the write (another
+  # container registering it) is fine: EEXIST, then the test holds.
   set -- sh -c "{ [ -e $bf/register ] || mount -t binfmt_misc binfmt_misc $bf; } &&
-    { [ -e $bf/qemu-$qemu ] || cat /usr/lib/binfmt.d/qemu-$qemu.conf > $bf/register; } &&
+    { [ -e $bf/qemu-$qemu ] || cat /usr/lib/binfmt.d/qemu-$qemu.conf > $bf/register ||
+      [ -e $bf/qemu-$qemu ]; } &&
+    ${register_rosetta:-:} &&
     exec cargo \"\$@\"" sh "$@"
   cmd=
 fi
