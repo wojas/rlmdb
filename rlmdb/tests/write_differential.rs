@@ -88,6 +88,7 @@ impl C09 {
 /// reference's page number, a sub-page in this form), the packed keys of
 /// a `P_LEAF2` page, and every byte of other pages (meta, overflow, free).
 fn canonical09(page: &[u8], sub: bool) -> Vec<u8> {
+    use rlmdb::format::layout::{NODE_HI, NODE_LO};
     use rlmdb::format::node::{F_BIGDATA, F_DUPDATA, F_SUBDATA};
     use rlmdb::format::page::{P_BRANCH, P_LEAF, P_LEAF2};
     let u16_at = |o: usize| page.get(o..o + 2).map(|b| u16::from_ne_bytes([b[0], b[1]]));
@@ -112,9 +113,10 @@ fn canonical09(page: &[u8], sub: bool) -> Vec<u8> {
         let Some(off) = u16_at(16 + 2 * i).map(usize::from) else {
             return page.to_vec();
         };
+        // mn_lo and mn_hi swap places on big-endian hosts.
         let (Some(lo), Some(hi), Some(nflags), Some(ksize)) = (
-            u16_at(off),
-            u16_at(off + 2),
+            u16_at(off + NODE_LO),
+            u16_at(off + NODE_HI),
             u16_at(off + 4),
             u16_at(off + 6),
         ) else {
