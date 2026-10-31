@@ -122,6 +122,35 @@ pub fn shared_lib_name(name: &str) -> String {
     }
 }
 
+/// The functions `lmdb.h` declares (`mdb_*`, one declaration per line,
+/// starting in the first column).
+pub fn lmdb_h_functions() -> Vec<String> {
+    let header = fs::read_to_string(c_src().join("lmdb.h")).unwrap();
+    let names: Vec<String> = header
+        .lines()
+        .filter(|l| l.starts_with(|c: char| c.is_ascii_alphabetic()) && !l.starts_with("typedef"))
+        .filter_map(|l| {
+            let name = &l[l.find("mdb_")?..];
+            let name = &name[..name.find('(')?];
+            name.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                .then(|| name.to_owned())
+        })
+        .collect();
+    // 0.9.36 declares 56; a change of style would show here.
+    assert!(names.len() > 50, "lmdb.h declares only {names:?}");
+    names
+}
+
+/// A module-definition file (`.def`) for DLL `name` exporting `functions`.
+pub fn module_definition(name: &str, functions: &[String]) -> String {
+    let mut def = format!("LIBRARY {name}\nEXPORTS\n");
+    for f in functions {
+        def.push_str(&format!("\t{f}\n"));
+    }
+    def
+}
+
 /// The import library of the Rust DLL (Windows): `liblmdb.dll.a` (MinGW)
 /// or `lmdb.dll.lib` (MSVC), next to `lmdb.dll`.
 pub fn rust_import_lib() -> PathBuf {
@@ -537,8 +566,8 @@ impl Builder {
         self.program(name, &[test_c_dir().join(format!("{name}.c"))], lib)
     }
 
-    /// The C library as a shared library (`liblmdbc.so` / `.dylib`), for
-    /// programs that load LMDB with `dlopen`.
+    /// The C library as a shared library (`liblmdbc.so` / `.dylib`,
+    /// `lmdbc.dll`), for programs that load LMDB with `dlopen`.
     pub fn c_shared_lib(&self) -> PathBuf {
         let mut built = self.built.lock().unwrap_or_else(|e| e.into_inner());
         let key = ("liblmdbc-shared".to_owned(), Lib::C);
@@ -549,17 +578,29 @@ impl Builder {
         fs::create_dir_all(&out_dir).unwrap();
         let lib = out_dir.join(shared_lib_name("lmdbc"));
         let mut c = Compiler::new(&out_dir, false).unwrap();
-        // MinGW exports every function of a DLL without __declspec
-        // (lmdb.h has none); `cl` would need a module-definition file.
-        assert!(
-            !c.is_msvc(),
-            "the C library as a DLL is not built with MSVC (no exports in lmdb.h)"
-        );
-        c.args(["-shared", "-fPIC"])
-            .output(&lib)
-            .args([c_src().join("mdb.c"), c_src().join("midl.c")])
-            .include(&c_src())
-            .pthread();
+        let sources = [c_src().join("mdb.c"), c_src().join("midl.c")];
+        if c.is_msvc() {
+            // MinGW's linker exports every function of a DLL; `cl` only
+            // what a module-definition file names (lmdb.h has no
+            // __declspec(dllexport)): the functions lmdb.h declares, as
+            // rlmdb-capi exports them.
+            let def = out_dir.join("lmdbc.def");
+            fs::write(&def, module_definition("lmdbc", &lmdb_h_functions())).unwrap();
+            let def_arg = format!("-DEF:{}", def.display());
+            // (The linker's options come last, after -link.)
+            c.args(["-LD"])
+                .output(&lib)
+                .include(&c_src())
+                .args(sources)
+                .lmdb_system_libs()
+                .args(["-link", def_arg.as_str()]);
+        } else {
+            c.args(["-shared", "-fPIC"])
+                .output(&lib)
+                .args(sources)
+                .include(&c_src())
+                .pthread();
+        }
         let cmd = c.command();
         let out = cmd.output().unwrap();
         assert!(

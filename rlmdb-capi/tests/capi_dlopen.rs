@@ -7,6 +7,12 @@
 //!
 //! It also reports whether `dlclose` unloaded the library (`U` lines): the
 //! C library is unloaded, the Rust one stays loaded (see `build.rs`).
+//!
+//! This is the pattern of dnsdist, which loads several copies of LMDB with
+//! `dlopen`, each reading one environment `MDB_RDONLY | MDB_NOLOCK`; it
+//! runs on every platform, with MSVC too, where the C library's DLL exports
+//! what `lmdb.h` declares through a module-definition file
+//! (`Builder::c_shared_lib`).
 
 mod common;
 
