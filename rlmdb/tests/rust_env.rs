@@ -309,7 +309,9 @@ fn no_lock_snapshot_matches_its_id(format: Format, two_handles: bool) {
     let open = || {
         Environment::builder()
             .format(format)
-            .map_size(64 << 20)
+            // 1 GiB is reserved, not written: a reader descheduled under load while a
+            // fast release-mode writer runs 4000 commits must not fill the map.
+            .map_size(1 << 30)
             .flags(EnvironmentFlags::NO_LOCK | EnvironmentFlags::NO_SYNC)
             .open(dir.path())
             .unwrap()
