@@ -65,6 +65,13 @@ Out of scope for now (leave the door open, do not design it away):
 
 All integers are host-endian (LMDB does not byte-swap). We implement the
 64-bit layout: `pgno_t`, `txnid_t`, `size_t`, `MDB_ID` are all 8 bytes.
+Big-endian hosts are supported the same way C supports them: the code
+uses `from_ne_bytes`/`to_ne_bytes` throughout, and the few places where
+C's layout or behaviour itself depends on the byte order carry
+`target_endian` cfgs (`MDB_node`'s `mn_lo`/`mn_hi` order in
+`format::layout`, the 16-bit word order of `mdb_cmp_cint` in `cmp`).
+Big-endian Linux (s390x) runs under QEMU user emulation
+(`LINUX_TEST_TARGET` of `scripts/linux-test.sh`, the nightly CI job).
 
 ### Data file
 

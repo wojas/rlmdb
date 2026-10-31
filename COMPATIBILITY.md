@@ -15,6 +15,7 @@ table below), 64-bit.
 | macOS (arm64) | POSIX named semaphores `/MDBr…`, `/MDBw…`; reader slots at offset 128 | tested |
 | Linux, glibc, aarch64 | process-shared robust `pthread_mutex_t` (48 bytes) in the lock file; slots at 192 | tested (Docker, `scripts/linux-test.sh`) |
 | Linux, glibc, x86-64 | as above, 40-byte mutex; slots at 128 | layout follows `size_of::<pthread_mutex_t>()`; not run in CI here |
+| Linux, glibc, s390x (big-endian) | as above, 40-byte mutex; slots at 128 | tested under QEMU user emulation (`LINUX_TEST_TARGET=s390x-unknown-linux-gnu scripts/linux-test.sh`, nightly CI); see *Byte order* |
 | Android | robust pthread mutex layout | compiles in principle; untested |
 | FreeBSD 13+ (64-bit) | as Linux: process-shared robust `pthread_mutex_t` in the lock file, 8 bytes there (a pointer to a kernel object keyed by its address); slots at 128 in both lock-file versions; `fdatasync`; meta fd `O_DSYNC` | untested; compiles and lints in CI (`Check BSD targets`); tests in a FreeBSD VM, experimental (`bsd.yml`) |
 | OpenBSD (64-bit) | LMDB 0.9 lock file: POSIX named semaphores as on macOS (names in the lock file; slots at 128). LMDB 1.0 lock file: a SysV semaphore set, `semget(ftok(lockfile, 'M'))`, its id `mtb_semid` at 20, `mtb_rlocked` at 24, `mt2_wlocked` at 64, slots at 128. `fsync` for `MDB_FDATASYNC`; meta fd `O_DSYNC`; after every write to the data file `msync(MS_INVALIDATE)` of the map (no unified buffer cache); no `O_DIRECT` for copies | untested; compiles and lints with nightly `-Zbuild-std` (tier 3), not in CI |
@@ -39,6 +40,25 @@ exists (FreeBSD, DragonFly); rlmdb's map is read-only, so no page is ever
 dirtied through it and the flag would change nothing. The layouts and
 `MDB_LOCK_FORMAT` values of the BSDs are computed from the C declarations,
 not yet measured with `layout_dump` on a BSD.
+
+**Byte order.** LMDB files are host-endian: C never byte-swaps, so a C
+build on a big-endian machine writes big-endian data and lock files, and
+every process that opens an environment must run on a host of the same
+byte order (to move data across, `mdb_dump` on one and `mdb_load` on the
+other). rlmdb follows the same rule: integers are read and written in host
+order, `MDB_node`'s `mn_lo`/`mn_hi` swap places as they do in C, and the
+integer comparators (`mdb_cmp_int`, `mdb_cmp_long`, `mdb_cmp_cint`)
+compare as C's do on that host, so an `MDB_INTEGERKEY` or `MDB_INTEGERDUP`
+database holds native integers and sorts by their value on either byte
+order. A file of the other byte order is refused as C refuses it
+(`MDB_INVALID`: the magic does not match; `rlmdb::format::meta` unit test
+`sniff`). Big-endian Linux is tested on s390x under QEMU user emulation:
+the `rlmdb`, `rlmdb-capi` and `rlmdb-interop` suites, with the C 0.9 and
+1.0 oracles and peers built for s390x and run in the same emulated
+container. One thing cannot be tested there: QEMU user mode has no robust
+futexes, so a writer mutex whose owner was killed is never marked
+`EOWNERDEAD` (for C as for Rust), and the interop scenario `killed_writer`
+checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
 
 ## The files
 

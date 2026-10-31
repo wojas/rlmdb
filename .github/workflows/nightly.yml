@@ -25,3 +25,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: test --ignored
         run: cargo test -p rlmdb --release -- --ignored
+
+  big-endian:
+    # LMDB files are host-endian; this runs the suites on a big-endian
+    # host. The tests and the C oracle are cross-compiled for s390x in a
+    # container and run under QEMU user emulation (scripts/linux-test.sh,
+    # LINUX_TEST_TARGET), one crate at a time.
+    name: Big-endian (Linux s390x, QEMU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: s390x
+      - name: test -p rlmdb
+        run: LINUX_TEST_TARGET=s390x-unknown-linux-gnu scripts/linux-test.sh test -p rlmdb
+      - name: test -p rlmdb-capi
+        run: LINUX_TEST_TARGET=s390x-unknown-linux-gnu scripts/linux-test.sh test -p rlmdb-capi
+      - name: test -p rlmdb-interop
+        run: LINUX_TEST_TARGET=s390x-unknown-linux-gnu scripts/linux-test.sh test -p rlmdb-interop
