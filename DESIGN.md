@@ -259,6 +259,49 @@ Version 2 (LMDB 1.0, `mdb.RE/1.0` at 4865523, "mdb10.c", lines 865-1017):
 | writer lock | 64 | none | 128 | 128 | 64 | 64 |
 | `mti_readers` | 128 | 64 | 192 | 192 | 128 | 128 |
 
+The BSDs (supported, untested; `COMPATIBILITY.md`), following the C
+sources' selection (mdb.c lines 86-170, mdb10.c lines 123-240):
+
+* **FreeBSD** (11+: `MDB_USE_POSIX_MUTEX` + `MDB_USE_ROBUST`): Linux's
+  layout with an 8-byte `pthread_mutex_t` (a pointer; with
+  `PTHREAD_PROCESS_SHARED` the mutex lives in a kernel object keyed by the
+  address in the shared file); `pthread_mutexattr_setrobust`,
+  `EOWNERDEAD` and `pthread_mutex_consistent` exist there, so the recovery
+  is Linux's.
+* **OpenBSD, NetBSD, DragonFly** (`defined(BSD)`): version 1 is macOS's
+  (`MDB_USE_POSIX_SEM`, names in the file, readers at 128). NetBSD names
+  are one character shorter, `"/MDBr"` plus nine (`MDB_SHORT_SEMNAMES`,
+  line 4999), and its `dev_t` is 8 bytes, so the hashed struct has no
+  padding there. Version 2 uses a SysV semaphore set (`MDB_USE_SYSV_SEM`,
+  `MDB_LOCK_TYPE` 8): `semid:i32` at 20 and `rlocked:i32` at 24
+  (`sizeof(MDB_txbody)` 32, padded to 64), `wlocked:i32` at 64 (padded to
+  64), readers at 128. The exclusive opener runs `semget(ftok(lockfile,
+  'M'), 2, mode | IPC_CREAT)` and `SETALL` {1, 1}, and stores the id; the
+  others take it from the file and check it with `IPC_STAT` and `IPC_SET`
+  (the latter only passes for the set's owner, creator or root, as in C).
+  Lock and unlock are `semop` of -1 / +1 with `SEM_UNDO`; a lock that
+  finds its flag still set reports `MDB_OWNERDEAD`, and the last user
+  removes the set (`IPC_RMID`). rlmdb computes the `ftok` key from the
+  lock file's `fstat` with the formula of the BSD libcs (a unit test
+  compares it with `ftok`), because the path is not passed down to `os`.
+* `MDB_FDATASYNC` is `fsync` on OpenBSD, NetBSD and DragonFly, `fdatasync`
+  on FreeBSD 11.1+. OpenBSD has no unified buffer cache: after each write
+  of pages and of the meta page, C invalidates the map's copy
+  (`MDB_Invalidate`, `msync(MS_INVALIDATE)`), and so does rlmdb
+  (`Env::invalidate_map`, a no-op elsewhere), widened to whole OS pages
+  (`KNOWN_C_BUGS.md`).
+
+| | FreeBSD v1 | FreeBSD v2 | Open/Net/DragonFly v1 | v2 (SysV) |
+|---|---|---|---|---|
+| `mti_format` | `0x10001` | `0x2986c002` | `0x10001` | `0x2889a002` |
+| `mti_txnid`, `mti_numreaders` | 16, 24 | 8, 16 | 40, 48 | 8, 16 |
+| reader lock: offset, size | 8, 8 | 24, 8 | 8, 32 | 20, 8 |
+| writer lock | 64 | 64 | 64 | 64 |
+| `mti_readers` | 128 | 128 | 128 | 128 |
+
+These values are computed from the C declarations; nobody has run
+`layout_dump` on a BSD yet.
+
 Both versions:
 
 * A table of the other version (or of the same version built for another

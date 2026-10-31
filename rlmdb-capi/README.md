@@ -44,6 +44,13 @@ tests/lmdb-c/0.9/mdb_stat.c target/release/liblmdb.a -lpthread
 -lgcc_s -lutil -lrt -lm -ldl` on Linux. The shared library needs no extra
 flags (`-L target/release -llmdb`).
 
+On the BSDs (untested, see `COMPATIBILITY.md`; from `--print
+native-static-libs` of the Rust targets): FreeBSD `-lrt -lutil -lexecinfo
+-lkvm -lmemstat -lprocstat -ldevstat -lpthread -lgcc_s -lc -lm`, NetBSD
+`-lutil -lrt -lexecinfo -lpthread -lgcc_s -lc -lm`, OpenBSD `-lutil
+-lexecinfo -lpthread -lc++abi -lc -lm -lcompiler_rt`, DragonFly `-lrt
+-lutil -lexecinfo -lkvm -lpthread -lgcc_pic -lc -lm`.
+
 Note: the library target is named `lmdb` so that the artifacts are called
 `liblmdb.*`; the Rust library it is built on is the `rlmdb` package
 (lib `rlmdb`).

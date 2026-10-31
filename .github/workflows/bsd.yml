@@ -1,0 +1,39 @@
+# EXPERIMENTAL: the tests of rlmdb and rlmdb-capi in a FreeBSD virtual
+# machine, the way to run them on a BSD without a BSD machine. FreeBSD is
+# marked untested in COMPATIBILITY.md until this has passed and someone has
+# read the results; until then a failure does not fail the workflow.
+#
+# The VM gets Rust from the FreeBSD packages; the C compiler the tests use
+# to build the reference library is the base system's cc (clang). The
+# interop suite is not run here (it needs the C 1.0 build as well and has
+# not been ported to the BSDs).
+name: BSD (experimental)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  freebsd:
+    name: FreeBSD tests (experimental)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: cargo test in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          copyback: false
+          prepare: |
+            pkg install -y rust
+          run: |
+            freebsd-version
+            cc --version
+            rustc --version
+            cargo test -p rlmdb -p rlmdb-capi --no-fail-fast

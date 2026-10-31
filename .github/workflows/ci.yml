@@ -48,3 +48,30 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - name: test
         run: cargo test --workspace --no-fail-fast
+
+  bsd-check:
+    # FreeBSD and NetBSD are supported but untested (COMPATIBILITY.md):
+    # this only checks that the workspace, its tests included, compiles for
+    # them. The runner has no BSD sysroot for the C reference library, so
+    # the interop and bench build scripts skip it (RLMDB_SKIP_C_BUILD, see
+    # interop/build.rs). bsd.yml runs the tests in a FreeBSD VM.
+    name: Check BSD targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RLMDB_SKIP_C_BUILD: 1
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-freebsd,x86_64-unknown-netbsd
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: check FreeBSD
+        run: cargo check --workspace --target x86_64-unknown-freebsd
+      - name: check NetBSD
+        run: cargo check --workspace --target x86_64-unknown-netbsd
+      - name: clippy FreeBSD
+        run: cargo clippy --workspace --all-targets --target x86_64-unknown-freebsd -- -D warnings
+      - name: clippy NetBSD
+        run: cargo clippy --workspace --all-targets --target x86_64-unknown-netbsd -- -D warnings

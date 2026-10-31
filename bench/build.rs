@@ -10,6 +10,10 @@
 //! Nothing is linked into the Rust binary: the C workloads run as a separate
 //! process, like the Rust ones (the driver starts one process per workload
 //! group and implementation).
+//!
+//! `RLMDB_SKIP_C_BUILD=1` skips the C side, as in `interop/build.rs` (for
+//! `cargo check` of a target without a C toolchain); `cbench` is then
+//! missing and the C compiler's version is `unknown`.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -26,22 +30,30 @@ fn main() {
         println!("cargo:rerun-if-changed={}", lmdb_dir.join(f).display());
     }
     println!("cargo:rerun-if-changed={}", src.display());
-
-    let obj_dir = out_dir.join("obj");
-    std::fs::create_dir_all(&obj_dir).expect("create obj dir");
-    let objs = c_build(&lmdb_dir)
-        .out_dir(&obj_dir)
-        .files([lmdb_dir.join("mdb.c"), lmdb_dir.join("midl.c"), src])
-        .compile_intermediates();
+    println!("cargo:rerun-if-env-changed=RLMDB_SKIP_C_BUILD");
+    let skip_c = env::var_os("RLMDB_SKIP_C_BUILD").is_some_and(|v| !v.is_empty() && v != "0");
 
     let bin_dir = out_dir.join("bin");
     std::fs::create_dir_all(&bin_dir).expect("create bin dir");
-    let exe = link(&bin_dir.join("cbench"), &objs);
+    let exe = bin_dir.join("cbench");
+    if !skip_c {
+        let obj_dir = out_dir.join("obj");
+        std::fs::create_dir_all(&obj_dir).expect("create obj dir");
+        let objs = c_build(&lmdb_dir)
+            .out_dir(&obj_dir)
+            .files([lmdb_dir.join("mdb.c"), lmdb_dir.join("midl.c"), src])
+            .compile_intermediates();
+        link(&exe, &objs);
+    }
     println!("cargo:rustc-env=LMDB_BENCH_CBENCH={}", exe.display());
 
     // Compiler versions, for the report.
-    let compiler = cc::Build::new().cargo_metadata(false).get_compiler();
-    let cc_version = first_line(Command::new(compiler.path()).arg("--version"));
+    let cc_version = if skip_c {
+        "unknown".to_string()
+    } else {
+        let compiler = cc::Build::new().cargo_metadata(false).get_compiler();
+        first_line(Command::new(compiler.path()).arg("--version"))
+    };
     let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let rustc_version = first_line(Command::new(rustc).arg("-V"));
     println!("cargo:rustc-env=LMDB_BENCH_CC_VERSION={cc_version}");

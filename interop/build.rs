@@ -30,6 +30,11 @@
 //! `$OUT_DIR/cpeer_capi.link`, exported as `INTEROP_CPEER_CAPI_LINK`.
 //! Nothing is linked into the Rust crate itself: the C programs run as
 //! separate processes, which is the point of the exercise.
+//!
+//! With `RLMDB_SKIP_C_BUILD=1` ([`SKIP_C_VAR`]) nothing is compiled or
+//! linked and the exported paths name programs that do not exist: for
+//! `cargo check` of a target without a C toolchain (CI checks the BSD
+//! targets this way). The tests of such a build cannot run.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -107,6 +112,15 @@ const UPSTREAM10_PROGRAMS: &[&str] = &[
 /// it for `mtest_enc`; `mtest_enc3` calls it too).
 const CHACHA8_PROGRAMS: &[&str] = &["mtest_enc", "mtest_enc3"];
 
+/// Environment variable that skips the C build (see the crate docs): set
+/// and neither empty nor `0`.
+const SKIP_C_VAR: &str = "RLMDB_SKIP_C_BUILD";
+
+/// `true` if [`SKIP_C_VAR`] asks to skip the C build.
+fn skip_c() -> bool {
+    env::var_os(SKIP_C_VAR).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 fn main() {
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
@@ -116,6 +130,7 @@ fn main() {
     let peer_dir = manifest_dir.join("c");
     let bin_dir = out_dir.join("bin");
     std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    println!("cargo:rerun-if-env-changed={SKIP_C_VAR}");
 
     for f in ["mdb.c", "midl.c", "lmdb.h", "midl.h"] {
         println!("cargo:rerun-if-changed={}", lmdb_dir.join(f).display());
@@ -387,6 +402,9 @@ fn compile_with(
     srcs: &[PathBuf],
     defines: &[&str],
 ) -> Vec<PathBuf> {
+    if skip_c() {
+        return Vec::new();
+    }
     let obj_dir = out_dir.join("obj").join(tag);
     std::fs::create_dir_all(&obj_dir).expect("create obj dir");
     let mut b = c_build(lmdb_dir);
@@ -401,6 +419,10 @@ fn compile_with(
 /// line: `out <executable>`, `cc <compiler>`, `arg <compiler argument>`
 /// (the flags `cc` would use, e.g. `-arch`), `obj <object file>`.
 fn write_link_recipe(recipe: &Path, exe: &Path, objs: &[PathBuf]) {
+    if skip_c() {
+        std::fs::write(recipe, format!("out {}\n", exe.display())).expect("write link recipe");
+        return;
+    }
     let compiler = cc::Build::new().cargo_metadata(false).get_compiler();
     let mut text = format!("out {}\ncc {}\n", exe.display(), compiler.path().display());
     for a in compiler.args() {
@@ -426,6 +448,9 @@ fn link_with(
     extra: &[&str],
 ) -> PathBuf {
     let exe = bin_dir.join(name);
+    if skip_c() {
+        return exe;
+    }
     let compiler = cc::Build::new().cargo_metadata(false).get_compiler();
     let mut cmd: Command = compiler.to_command();
     cmd.args(objs)

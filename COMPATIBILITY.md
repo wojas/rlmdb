@@ -5,7 +5,8 @@ it) promises with respect to C LMDB 0.9.36 (`tests/lmdb-c/0.9`), and
 which tests check each promise. The last section covers the LMDB 1.0 data
 file, the second format `rlmdb` handles. "C" below means the C library built with
 its platform defaults (the upstream `Makefile`: `MDB_USE_POSIX_MUTEX` with
-robust mutexes on Linux, `MDB_USE_POSIX_SEM` on macOS), 64-bit.
+robust mutexes on Linux, `MDB_USE_POSIX_SEM` on macOS; the BSDs as in the
+table below), 64-bit.
 
 ## Platforms
 
@@ -14,15 +15,30 @@ robust mutexes on Linux, `MDB_USE_POSIX_SEM` on macOS), 64-bit.
 | macOS (arm64) | POSIX named semaphores `/MDBr…`, `/MDBw…`; reader slots at offset 128 | tested |
 | Linux, glibc, aarch64 | process-shared robust `pthread_mutex_t` (48 bytes) in the lock file; slots at 192 | tested (Docker, `scripts/linux-test.sh`) |
 | Linux, glibc, x86-64 | as above, 40-byte mutex; slots at 128 | layout follows `size_of::<pthread_mutex_t>()`; not run in CI here |
-| FreeBSD, Android | robust pthread mutex layout | compiles in principle; untested |
+| Android | robust pthread mutex layout | compiles in principle; untested |
+| FreeBSD 13+ (64-bit) | as Linux: process-shared robust `pthread_mutex_t` in the lock file, 8 bytes there (a pointer to a kernel object keyed by its address); slots at 128 in both lock-file versions; `fdatasync`; meta fd `O_DSYNC` | untested; compiles and lints in CI (`Check BSD targets`); tests in a FreeBSD VM, experimental (`bsd.yml`) |
+| OpenBSD (64-bit) | LMDB 0.9 lock file: POSIX named semaphores as on macOS (names in the lock file; slots at 128). LMDB 1.0 lock file: a SysV semaphore set, `semget(ftok(lockfile, 'M'))`, its id `mtb_semid` at 20, `mtb_rlocked` at 24, `mt2_wlocked` at 64, slots at 128. `fsync` for `MDB_FDATASYNC`; meta fd `O_DSYNC`; after every write to the data file `msync(MS_INVALIDATE)` of the map (no unified buffer cache); no `O_DIRECT` for copies | untested; compiles and lints with nightly `-Zbuild-std` (tier 3), not in CI |
+| NetBSD (64-bit) | as OpenBSD, but semaphore names of 14 characters (C's `MDB_SHORT_SEMNAMES`) and no invalidation | untested; compiles and lints in CI (`Check BSD targets`) |
+| DragonFly (64-bit) | as OpenBSD, but no invalidation and meta fd `O_SYNC` (there is no `O_DSYNC`) | untested; compiles and lints with nightly `-Zbuild-std` (tier 3), not in CI |
 | Windows, 32-bit targets | | not supported (`compile_error!`) |
 
 C and Rust processes must share the platform ABI: a lock file is only
 meaningful between processes that agree on `pthread_mutex_t` (Linux) or
 the semaphore naming (macOS). This is the same restriction C has between
 two C builds; it does not hold across a musl and a glibc build, or a C
-build with non-default lock options (`MDB_USE_SYSV_SEM`, a Linux build
-with `MDB_USE_POSIX_SEM`).
+build with non-default lock options (`MDB_USE_SYSV_SEM` where it is not
+C 1.0's default, a Linux build with `MDB_USE_POSIX_SEM`).
+
+On the BSDs every choice follows the C sources' own selection (mdb.c lines
+86-170 of 0.9, lines 123-240 of 1.0): FreeBSD 11+ takes the
+`MDB_USE_POSIX_MUTEX` + `MDB_USE_ROBUST` branch, every other `BSD` takes
+`MDB_USE_POSIX_SEM` in 0.9 and `MDB_USE_SYSV_SEM` in 1.0, `MDB_FDATASYNC`
+is `fsync` there (FreeBSD 11.1+ keeps `fdatasync`), and OpenBSD alone
+defines `MDB_Invalidate`. C uses `MAP_NOSYNC` with `MDB_NOSYNC` where it
+exists (FreeBSD, DragonFly); rlmdb's map is read-only, so no page is ever
+dirtied through it and the flag would change nothing. The layouts and
+`MDB_LOCK_FORMAT` values of the BSDs are computed from the C declarations,
+not yet measured with `layout_dump` on a BSD.
 
 ## The files
 
@@ -49,7 +65,10 @@ with `MDB_USE_POSIX_SEM`).
   the semaphore names are derived from it, as 1.0 does; there is no writer
   lock cache line, so the reader slots start at 64. On Linux the mutexes
   are at 24 and 128 (64 on x86-64), the slots at 192 (128). rlmdb creates
-  and attaches to it as C 1.0 does.
+  and attaches to it as C 1.0 does. On the BSDs (computed, not measured):
+  FreeBSD `0x2986c002`, mutexes at 24 and 64, slots at 128; OpenBSD,
+  NetBSD and DragonFly `0x2889a002` (`MDB_LOCK_TYPE` 8, SysV semaphores),
+  layout in the platform table.
 * **Lock files of the other version** are refused with
   `MDB_VERSION_MISMATCH` while another process holds them, and
   re-initialised in the opener's version by an exclusive opener, by C and
@@ -88,7 +107,13 @@ with `MDB_USE_POSIX_SEM`).
   never go back.
 * A process that dies holding the writer lock: on Linux the robust mutex
   lets the next writer (C or Rust) recover, as between C processes. On
-  macOS semaphores are not robust; C has the same limitation.
+  macOS semaphores are not robust; C has the same limitation. FreeBSD
+  recovers like Linux. On OpenBSD, NetBSD and DragonFly the named
+  semaphores of a 0.9 lock file are not robust either (a crashed writer
+  leaves the lock taken until an exclusive opener re-creates the
+  semaphores, as in C); the SysV semaphores of a 1.0 lock file are
+  (`SEM_UNDO` frees the semaphore, the flag the dead holder left set makes
+  the next holder recover, as C 1.0's `mdb_sem_wait`).
 * Reader slots of dead processes stay until `mdb_reader_check` (C or Rust,
   `mdb_stat -rr` of either) or an exclusive re-open clears them, as in C.
 * When a writer of either side grows the data file beyond another
@@ -211,6 +236,7 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 | Concurrent C and Rust processes on one environment | `interop` (three peers per format: C, Rust, C-on-Rust; all nine writer/reader pairs; concurrent writer loops of both with reader loops of all three; `three_peers`; the same for LMDB 1.0 below), `rlmdb/tests/c_concurrency.rs`, `rlmdb-capi/tests/concurrency.rs` and `cross_process.rs` |
 | Lock file created by either side | `interop` `reader_creates_lock_file`, `rlmdb/tests/c_concurrency.rs` (`rust_creates_environment_c_uses_it`, `c_creates_environment_rust_attaches`, `exclusive_opener_resizes_small_lock_file`) |
 | Lock file format 2 (LMDB 1.0): every offset, size and `MDB_LOCK_FORMAT` equals C 1.0's; `mti_format` per platform; macOS semaphore names | `interop/tests/lockfile10.rs` `lock_file_lines_match_c` (`layout_dump` and `layout_dump10` vs `LOCK_V09`/`LOCK_V10`), `rlmdb` unit tests in `format/lockfile.rs` (the measured values, the `MDB_lock_desc` formula for all three platforms) and `os/shared_lock.rs` (`mdb_pack85` names) |
+| BSD lock primitives: the SysV semaphore set of 1.0 lock files (created, attached through the stored id with `IPC_STAT`/`IPC_SET`, taken and released, a holder that dies reported to the next as `OwnerDied`, removed by the last user), `ftok` as libc computes it; NetBSD's short names; the per-BSD layouts | `rlmdb` unit tests in `os/shared_lock.rs` (`sysv::tests`, built on macOS too, which has the same SysV interface; `imp::tests::v09_name_length`) and `format/lockfile.rs` (`lock_format_v2_per_platform`; `freebsd_layout` and `bsd_semaphore_layout` run only on those systems) |
 | Lock file format 2 shared with C 1.0 processes: an rlmdb `Environment` attaches to C 1.0's table (header, `mtb_mutexid` equal to C's hash, C's table size, C's reader in `reader_list` as in `mdb_stat10 -r`, writer lock exclusive both ways, a killed C reader cleared by `reader_check`) and C 1.0 attaches to rlmdb's (lists the Rust reader, `mdb_stat10 -e` sees rlmdb's table size, a C commit moves `mti_txnid`) | `interop/tests/lockfile10.rs` `rust_attaches_to_c10_lock_file`, `c10_attaches_to_rust_lock_file` |
 | Lock files of the two versions refuse each other while held (`MDB_VERSION_MISMATCH` from rlmdb, C 0.9 and C 1.0; rlmdb meets one when a data file of the other format replaced the one a live process uses, and leaves the table alone), and an exclusive opener of either implementation re-initialises a stale table of the other version | `interop/tests/lockfile10.rs` `lock_versions_refuse_each_other`, `stale_lock_files_of_the_other_version_are_reinitialised` and the two tests above; `rlmdb` `core::reader` unit test `exclusive_opener_reinitialises_other_version` |
 | Reader table, stale readers, `mdb_reader_check` | `interop` `readers_list`, `stale_reader_cleared_by_reader`, `stale_reader_cleared_by_mdb_stat`; `rlmdb-tools/tests/readers.rs` |
