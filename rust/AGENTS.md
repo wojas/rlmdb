@@ -84,7 +84,12 @@ panic, hang or out-of-bounds read.
 * Integers from disk are read with `from_ne_bytes` over sub-slices; every
   offset into a page or the map is bounds-checked. Crafted files must not
   cause UB, panics (including overflow in debug builds) or endless loops;
-  `rlmdb/tests/robust_*.rs` and the mutation tests check this.
+  `rlmdb/tests/robust_*.rs` and the mutation tests check this. The one
+  documented exception is damage that breaks MVCC itself (a free list
+  naming a live page, a lock file with a forged `mti_txnid` or a cleared
+  live reader slot): a writer may then rewrite a page under a live
+  reader's slice, as in C; see `os::DataMap` and the residual-risk list
+  in `rlmdb-capi/README.md`.
 * Meta pages are written concurrently by other processes: read them with
   volatile reads into an owned value, validate, and re-check `mti_txnid`.
 * `RwTxn` is `!Send` (the Linux writer mutex is thread-owned). Read
