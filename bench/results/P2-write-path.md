@@ -5,8 +5,8 @@ the B-tree work itself: positioning for `mdb_put`/`mdb_del` on the write
 cursor's own stack, fewer page lookups and allocations per put and per
 commit, overflow runs built with their data in place and recycled, and
 cheaper pointer moves in page edits. All library changes are in
-`rust/rlmdb` (`src/core/`, `src/idl.rs`), written on `ef9fea2` and
-rebased onto `6d56545` (LMDB 1.0 data and lock file and the process
+`rlmdb` (`src/core/`, `src/idl.rs`), written on `c9dc6d7` and
+rebased onto `c679eb2` (LMDB 1.0 data and lock file and the process
 default format, dual-format stages 2 to 4; see "After the rebase" at the
 end). Same
 results, same file bytes, same free list, same spill decisions: the
@@ -272,7 +272,7 @@ the build before it; about 2 % run-to-run noise):
 
 ## A/B: new against base (macOS)
 
-`rlmdb-bench --baseline <bench of ef9fea2> --rounds 3 --reps 3 --only
+`rlmdb-bench --baseline <bench of c9dc6d7> --rounds 3 --reps 3 --only
 seq_put,rand_put,overwrite,overflow,delete,small_txn,mixed,ls`
 (n = 1 000 000; both sides alternate per group, 9 samples per side;
 ns/op as median (min)).
@@ -519,7 +519,7 @@ pages; inlined code summed per function) against C's were more useful:
 
 ## Tests
 
-All from `rust/`, on the final tree:
+All from the repository root, on the final tree:
 
 | platform | command | outcome |
 |---|---|---|
@@ -663,8 +663,8 @@ Linux, scripts/linux-test.sh test -p rlmdb -p rlmdb-interop:
 
 ## After the rebase
 
-Rebased from `ef9fea2` onto `2d8a6a1` (the LMDB 1.0 data file and lock
-file, dual-format stages 2 and 3), then onto `6d56545` (stage 4: the
+Rebased from `c9dc6d7` onto `25a3892` (the LMDB 1.0 data file and lock
+file, dual-format stages 2 and 3), then onto `c679eb2` (stage 4: the
 process default format, 1.0's `mdb_drop` of the main DB,
 `mdb_cursor_is_db`, a `DUPFIXED` sub-DB offset fix; none of it touches the
 paths changed here). What the rebase changed in this work:
@@ -704,13 +704,13 @@ paths changed here). What the rebase changed in this work:
 All runs below with `RLMDB_DEFAULT_FORMAT` unset (so the bench's
 environments are LMDB 0.9, as before).
 
-Instructions per operation (macOS harness) against `6d56545`, the same as
-against `ef9fea2` before: appends 2,555 -> 2,121 (0.83), overwrites
+Instructions per operation (macOS harness) against `c679eb2`, the same as
+against `c9dc6d7` before: appends 2,555 -> 2,121 (0.83), overwrites
 6,619 -> 6,065 (0.92), deletes 10,309 -> 9,572 (0.93), one-put
 transaction begin 4,942 -> 3,756, put 15,489 -> 12,118, commit 62,379 ->
 53,601, `put_64k` put 40,286 -> 23,499 and its commit 98,341 -> 26,021.
 
-A/B against the bench of `6d56545` (`--rounds 3 --reps 3 --only
+A/B against the bench of `c679eb2` (`--rounds 3 --reps 3 --only
 seq_put,overwrite,overflow,small_txn,ls`; the machine was very busy when
 it started, load average 21, and 3.3 at the end):
 
@@ -738,13 +738,13 @@ overflow`, load 3.4):
 | put_64k | 23191 (22095) | 13450 (13112) | **0.58** | 0.59 |
 | get_64k | 210 (208) | 208 (205) | 0.99 | 0.99 |
 
-The gains survive the rebase. (Against `2d8a6a1`, at load 21-25 then 6-7,
+The gains survive the rebase. (Against `25a3892`, at load 21-25 then 6-7,
 the same A/B gave appends 0.76, `put_64k` 0.57-0.58, `txn_nosync` 0.91,
 `put_4k` 0.91-1.04, `rand_overwrite` 1.04-1.21 by the median and
 0.98-1.02 by the minimum, `ls_update` 1.00: on the M1 the overwrites and
 `ls_update` wait on memory and move within the noise.)
 
-Tests after the rebase onto `6d56545`, from `rust/`, with
+Tests after the rebase onto `c679eb2`, from the repository root, with
 `RLMDB_DEFAULT_FORMAT` unset:
 
 | platform | command | outcome |
@@ -754,7 +754,7 @@ Tests after the rebase onto `6d56545`, from `rust/`, with
 | macOS | `cargo test -p rlmdb --release -- --ignored` | passed: `diff_spill_full_size`, `replay`, `core::spill::tests::soak`, `write_soak` |
 | Linux | `scripts/linux-test.sh test --workspace --no-fail-fast` | 70: 785 passed, 0 failed, 8 ignored |
 
-On `2d8a6a1`, two Linux workspace runs failed `c_databases::mtest3_dupsort`
+On `25a3892`, two Linux workspace runs failed `c_databases::mtest3_dupsort`
 once: C's own `cursorops` aborted (`mdb.c:5796: Assertion 'root > 1'`) on
 the database that C's `mtest3`, seeded with the time, had written, and a
 later round then differed after C's failed `count`. That test writes

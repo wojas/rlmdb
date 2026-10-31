@@ -3,8 +3,8 @@
 Cuts what a cursor step costs per record when it stays on its leaf page:
 one format dispatch, one read of `NUMKEYS`, one node lookup and one
 bounds check for key and data together, with the item returned straight
-to the caller. All library changes are in `rust/rlmdb` (`src/core/`,
-`src/format/node.rs`), based on `ccc9893`, behaviour-preserving (same
+to the caller. All library changes are in `rlmdb` (`src/core/`,
+`src/format/node.rs`), based on `90cc145`, behaviour-preserving (same
 results, same errors on corrupt input, nothing on the write path or on
 disk changes), without new `unsafe`; the public API is unchanged. The
 bench's Lightning Stream scan loop is compiled out of line, as C's is
@@ -99,7 +99,7 @@ page takes; "mean" includes the page changes (about one in 65 records).
 
 | build | `ls_scan`, in page | mean | page change |
 |---|---:|---:|---:|
-| base (`ccc9893`, loop inlined into `run`) | 147 (`cursor_next` 51, `read_position` 68, loop 28) | 148.9 | 304 |
+| base (`90cc145`, loop inlined into `run`) | 147 (`cursor_next` 51, `read_position` 68, loop 28) | 148.9 | 304 |
 | base library, bench loop out of line | 141 (51, 68, loop 22) | 142.7 | 298 |
 | fast step in `RoCursor::next`, general path in the same function | 92 (`next` 70, loop 22) | 94.9 | 362 |
 | general path and `finish` moved out of line (no stack frame) | 84 (`next` 62, loop 22) | 86.7 | 368 |
@@ -121,8 +121,8 @@ first, then the general path dispatches again. At one page change in
 * macOS 15, Apple M1 Pro (10 cores), 32 GiB RAM, APFS on the internal
   SSD, environments in the temp directory; 16 KiB pages. rustc 1.93.1,
   the workspace's release profile.
-* The base is the Rust side of `rlmdb-bench` built at `ccc9893`.
-  Command (from `rust/`): `cargo run --release -p rlmdb-bench --
+* The base is the Rust side of `rlmdb-bench` built at `90cc145`.
+  Command (from the repository root): `cargo run --release -p rlmdb-bench --
   --baseline <base build> --rounds 3 --reps 3 --only ls,read,dupsort`
   (n = 1 000 000; 3 rounds alternating which side goes first, 3 timed
   reps after a warm-up each, so 9 samples per side; ns/op median (min);
@@ -155,9 +155,9 @@ with the bench code held equal where possible:
 
 | new side | base side | ls_scan median (min) | ls_update median (min) |
 |---|---|---:|---:|
-| final | base (`ccc9893`) | 0.78 (0.80) | 1.08 (1.03) |
+| final | base (`90cc145`) | 0.78 (0.80) | 1.08 (1.03) |
 | final | base library + the bench change of item 5 | 0.80 (0.80) | **0.84** (0.88) |
-| base library + the bench change | base (`ccc9893`) | 1.00 (1.01) | 1.09 (1.08) |
+| base library + the bench change | base (`90cc145`) | 1.00 (1.01) | 1.09 (1.08) |
 
 With the same bench code on both sides, the new library is faster at
 `ls_update` (14 of its 15 samples below the fastest base sample). The
@@ -172,7 +172,7 @@ work per put.
 
 ## Rust and C (`ls` group)
 
-Command (from `rust/`): `target/release/rlmdb-bench --only ls --rounds
+Command (from the repository root): `target/release/rlmdb-bench --only ls --rounds
 3 --reps 3` (n = 1 000 000, 5 million records), and on Linux
 `scripts/linux-test.sh run --release -p rlmdb-bench -- --dir
 /tmp/lmdb-bench --only ls,read --rounds 3 --reps 3`. Before: the
@@ -261,7 +261,7 @@ library's puts are not slower than the base's.
 
 ## Tests
 
-All from `rust/`, on the final tree:
+All from the repository root, on the final tree:
 
 | platform | command | outcome |
 |---|---|---|

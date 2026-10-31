@@ -1,7 +1,7 @@
 # rlmdb-bench
 
 Benchmarks of the Rust rewrite (`rlmdb`) against the C library
-(`libraries/liblmdb`, 0.9.36), with identical workloads and data on both
+(`../tests/lmdb-c/0.9`, 0.9.36), with identical workloads and data on both
 sides. Results and analysis: [`RESULTS.md`](RESULTS.md).
 
 * **C side**: `c/cbench.c`, linked with `mdb.c`/`midl.c` compiled by
@@ -29,7 +29,6 @@ sides. Results and analysis: [`RESULTS.md`](RESULTS.md).
 ## Running
 
 ```sh
-cd rust
 cargo run --release -p rlmdb-bench               # everything, both sides (about 10 min on an M1 Pro)
 cargo run --release -p rlmdb-bench -- --check-data   # C and Rust generate the same data?
 cargo run --release -p rlmdb-bench -- --only read,dupsort --reps 9

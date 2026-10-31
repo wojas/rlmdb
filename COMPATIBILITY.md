@@ -1,7 +1,7 @@
 # Compatibility contract
 
 What the Rust rewrite (`rlmdb`, and `rlmdb-capi`/`rlmdb-tools` built on
-it) promises with respect to C LMDB 0.9.36 (`../libraries/liblmdb`), and
+it) promises with respect to C LMDB 0.9.36 (`tests/lmdb-c/0.9`), and
 which tests check each promise. The last section covers the LMDB 1.0 data
 file, the second format `rlmdb` handles. "C" below means the C library built with
 its platform defaults (the upstream `Makefile`: `MDB_USE_POSIX_MUTEX` with
@@ -179,7 +179,7 @@ of it changes the files or what another process concludes about them.
 
 All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 `scripts/check-all.sh` runs both. In each, a C library or tool built from
-`../libraries/liblmdb` at test time is the oracle.
+`tests/lmdb-c/0.9` at test time is the oracle.
 
 | Promise | Verified by |
 |---|---|
@@ -206,8 +206,9 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 
 ## The LMDB 1.0 data file
 
-rlmdb also reads and writes the data file of C LMDB 1.0 (`mdb.RE/1.0` at
-4865523: LMDB 1.0.2 plus ITS#10642/10643; `MDB_DATA_VERSION 3`), with the
+rlmdb also reads and writes the data file of C LMDB 1.0 (upstream
+`mdb.RE/1.0` at 4865523, vendored in `tests/lmdb-c/1.0`: LMDB 1.0.2 plus
+ITS#10642/10643; `MDB_DATA_VERSION 3`), with the
 differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
 
 * **Format selection.** An existing data file is opened in its format

@@ -1,7 +1,8 @@
 # rlmdb: LMDB in Rust
 
 A rewrite of [LMDB](http://www.lmdb.tech/) 0.9 in Rust that is binary
-compatible with the C implementation in `../libraries/liblmdb` (0.9.36): the
+compatible with the C implementation (LMDB 0.9.36, whose sources the tests
+build as their oracle from `tests/lmdb-c/0.9`): the
 data file and the lock file are byte for byte what C writes and expects,
 so C and Rust processes can open one environment **at the same time**,
 share its reader table and writer lock, and read and write it in turns.
@@ -96,7 +97,7 @@ library and C test programs with the `cc` crate).
 
 ```toml
 [dependencies]
-rlmdb = { path = "rust/rlmdb" }
+rlmdb = { git = "https://github.com/wojas/rlmdb" }
 ```
 
 ```rust
@@ -132,7 +133,6 @@ and the `unsafe` policy: all `unsafe` code is in the private `os` module.
 ### `rlmdb-capi`: `liblmdb` for C programs
 
 ```sh
-cd rust
 cargo build -p rlmdb-capi --release
 # target/release/liblmdb.a and target/release/liblmdb.{so,dylib}
 ```
@@ -142,14 +142,14 @@ link either library instead of the C one:
 
 ```sh
 # from the repository root; macOS
-cc -I rust/rlmdb-capi/include -o mtest libraries/liblmdb/mtest.c \
-   rust/target/release/liblmdb.a
+cc -I rlmdb-capi/include -o mtest tests/lmdb-c/0.9/mtest.c \
+   target/release/liblmdb.a
 # Linux (glibc): the static library needs the Rust runtime's system libs
-cc -I rust/rlmdb-capi/include -o mtest libraries/liblmdb/mtest.c \
-   rust/target/release/liblmdb.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
+cc -I rlmdb-capi/include -o mtest tests/lmdb-c/0.9/mtest.c \
+   target/release/liblmdb.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
 # shared library, either platform
-cc -I rust/rlmdb-capi/include -o mtest libraries/liblmdb/mtest.c \
-   -L rust/target/release -llmdb
+cc -I rlmdb-capi/include -o mtest tests/lmdb-c/0.9/mtest.c \
+   -L target/release -llmdb
 ```
 
 With the shared library, the loader must find it at run time
@@ -163,20 +163,20 @@ in
 ### `rlmdb-tools`
 
 ```sh
-cd rust
 cargo build -p rlmdb-tools --release
 target/release/mdb_stat -efa /path/to/env
 target/release/mdb_dump -a /path/to/env | target/release/mdb_load -a /path/to/copy
 ```
 
-The C man pages (`libraries/liblmdb/*.1`) apply; see
-[`rlmdb-tools/README.md`](rlmdb-tools/README.md) for `mdb_drop` and the few
-documented differences.
+The documentation of the C tools applies (upstream LMDB's man pages,
+`mdb_stat.1` … in `libraries/liblmdb` of
+[github.com/LMDB/lmdb](https://github.com/LMDB/lmdb); they are not copied
+here); see [`rlmdb-tools/README.md`](rlmdb-tools/README.md) for `mdb_drop`
+and the few documented differences.
 
 ## Testing
 
 ```sh
-cd rust
 cargo test --workspace                    # host (macOS or Linux)
 scripts/linux-test.sh test --workspace    # Linux (Debian glibc) in Docker
 scripts/check-all.sh                      # everything below, with a summary
@@ -195,7 +195,7 @@ instead of named semaphores, a different header size) and its pages are
 4 KiB instead of macOS's 16 KiB.
 
 Most tests run C and Rust side by side: the C library and tools are built
-from `../libraries/liblmdb` at test time and serve as the oracle. Useful
+from `tests/lmdb-c/0.9` at test time and serve as the oracle. Useful
 subsets:
 
 ```sh
@@ -228,14 +228,17 @@ full-size spill comparison with C, soak tests); run them with
   [`rlmdb-capi/README.md`](rlmdb-capi/README.md#differences-from-c-lmdb-0936)
   and [`KNOWN_C_BUGS.md`](KNOWN_C_BUGS.md).
 
-## Layout
+## Repository layout
+
+The workspace is the repository root; every command above runs there.
 
 ```
-rust/
+./
   Cargo.toml          workspace (edition 2021, MSRV 1.85)
   README.md           this file
   COMPATIBILITY.md    the compatibility contract
   DESIGN.md           design brief, format spec, findings, status
+  DUAL_FORMAT.md      the LMDB 1.0 data file next to 0.9's
   KNOWN_C_BUGS.md     C 0.9.36 bugs and what the Rust code does instead
   rlmdb/          the library (package rlmdb, lib rlmdb)
     src/core/         environments, transactions, cursors, write path
@@ -246,10 +249,19 @@ rust/
     tests/c/          C test programs run against both libraries
   rlmdb-tools/         mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop
   interop/            cross-process test bed: C and Rust peers, scenarios
+  bench/              benchmarks against C (rlmdb-bench), results
+  tests/lmdb-c/       the C reference sources: LMDB 0.9.36 (0.9/) and 1.0
+                      (1.0/) from pinned upstream commits, the test oracle
   scripts/
     linux-test.sh     cargo in a Linux (Debian glibc) container
     check-all.sh      fmt, clippy, doc, tests on host and Linux
+    update-c-sources.sh  re-creates tests/lmdb-c from upstream
 ```
+
+The history before this layout lived under `rust/` of a clone of the
+upstream LMDB repository; commit ids in the documentation are those of
+this repository, except where a commit is called upstream (an LMDB commit,
+see [`tests/lmdb-c/README.md`](tests/lmdb-c/README.md)).
 
 ## License
 

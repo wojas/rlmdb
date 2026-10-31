@@ -1,11 +1,12 @@
 # Working on rlmdb
 
-`rust/` holds `rlmdb`, a rewrite of LMDB 0.9 in Rust that is binary
-compatible with the C library in `../libraries/liblmdb` (the reference is
-whatever that tree holds; 0.9.36 at the time of writing), and that also
+This repository holds `rlmdb`, a rewrite of LMDB 0.9 in Rust that is
+binary compatible with the C library in `tests/lmdb-c/0.9` (the reference
+is whatever that tree holds; 0.9.36 at the time of writing), and that also
 reads and writes the data file of LMDB 1.0 (the reference is the pinned
-`mdb.RE/1.0` commit of `interop/build.rs`). This file lists the rules that
-every change must respect. The details live in:
+upstream `mdb.RE/1.0` commit vendored in `tests/lmdb-c/1.0`; see
+`tests/lmdb-c/README.md`). This file lists the rules that every change
+must respect. The details live in:
 
 * `DESIGN.md`: goals, the on-disk and lock-file format, architecture.
 * `COMPATIBILITY.md`: the compatibility contract and which test checks it.
@@ -156,11 +157,13 @@ deferred until the core has been validated through the C API.
 
 ## 8. Testing: C is the oracle
 
-* The C library and tools are built from `../libraries/liblmdb` at test
+* The C library and tools are built from `tests/lmdb-c/0.9` at test
   time; most tests run C and Rust side by side or in lock step.
 * The LMDB 1.0 oracle (`mdb_stat10`, `cpeer10`, … in `interop`) is built
-  from sources that `interop/build.rs` extracts with `git show` at a pinned
-  `mdb.RE/1.0` commit, which must be fetched (`interop/README.md`).
+  from `tests/lmdb-c/1.0`, a pinned upstream `mdb.RE/1.0` commit
+  (`interop/README.md`). The C sources are vendored and only change through
+  `scripts/update-c-sources.sh` (upstream plus the patches in
+  `tests/lmdb-c/patches/`); no build step needs git or the network.
 * The interop matrix has four peers: `cpeer` (C 0.9), `cpeer10` (C 1.0),
   `rpeer` (Rust) and `cpeer_capi` (C on the Rust library); the last two
   open both formats (`--format 1.0`). Every scenario runs for every

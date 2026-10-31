@@ -1,10 +1,10 @@
 # LMDB in Rust: design brief
 
-This directory holds a clean-room-style *rewrite* of LMDB 0.9 in Rust. It is
+This repository holds a clean-room-style *rewrite* of LMDB 0.9 in Rust. It is
 not a binding. The goals, in priority order:
 
 1. **Binary compatibility with C LMDB 0.9** (the source in
-   `../libraries/liblmdb`, version 0.9.36 / `mdb.RE/0.9`). A C LMDB process and
+   `tests/lmdb-c/0.9`, version 0.9.36 / `mdb.RE/0.9`). A C LMDB process and
    a Rust LMDB process must be able to open the same environment *at the same
    time*, share the lock file, and read and write the same data file. The data
    file format (`MDB_DATA_VERSION 1`) and lock file format (`MDB_LOCK_VERSION 1`)
@@ -48,15 +48,16 @@ Out of scope for now (leave the door open, do not design it away):
 
 ## Reference material
 
-* `../libraries/liblmdb/mdb.c` (10.5k lines) is the spec. Read it. Line
-  references in this document refer to that file at commit `a69ce88`.
-* `../libraries/liblmdb/lmdb.h` is the public C API and documents the
+* `tests/lmdb-c/0.9/mdb.c` (10.5k lines) is the spec. Read it. Line
+  references in this document refer to that file at upstream commit
+  `a69ce88` (the vendored version, `tests/lmdb-c/README.md`).
+* `tests/lmdb-c/0.9/lmdb.h` is the public C API and documents the
   semantics of every flag and function. The C API crate ships a copy of it.
-* `../libraries/liblmdb/midl.c` / `midl.h`: the ID lists (`MDB_IDL`,
+* `tests/lmdb-c/0.9/midl.c` / `midl.h`: the ID lists (`MDB_IDL`,
   `MDB_ID2L`) used for free lists and dirty lists.
-* `../libraries/liblmdb/mtest*.c`: small C test programs; they must run
+* `tests/lmdb-c/0.9/mtest*.c`: small C test programs; they must run
   unchanged against `rlmdb-capi`.
-* `../libraries/liblmdb/mdb_stat.c`, `mdb_dump.c`, `mdb_load.c`,
+* `tests/lmdb-c/0.9/mdb_stat.c`, `mdb_dump.c`, `mdb_load.c`,
   `mdb_copy.c`: the tools, reimplemented in `rlmdb-tools` (`mdb_drop` does not
   exist in 0.9.36; the Rust one is an extra modelled on 1.0's).
 
@@ -137,8 +138,9 @@ All integers are host-endian (LMDB does not byte-swap). We implement the
 
 ### The LMDB 1.0 data file (`MDB_DATA_VERSION 3`)
 
-rlmdb also reads and writes the data file of LMDB 1.0 (`mdb.RE/1.0`, pinned
-to 4865523 in `interop/build.rs`; `DUAL_FORMAT.md` is the design). The format
+rlmdb also reads and writes the data file of LMDB 1.0 (`mdb.RE/1.0` at
+upstream commit 4865523, vendored in `tests/lmdb-c/1.0`; `DUAL_FORMAT.md`
+is the design). The format
 of an environment is decided at open, before the lock file is touched: an
 existing file keeps its format (`rlmdb::sniff_format` looks at the magic and
 version of the first meta page; a request for the other one is
@@ -284,13 +286,15 @@ side either way.
 ## Crate layout
 
 ```
-rust/
+./                    the repository root
   Cargo.toml          workspace
   DESIGN.md           this file
   README.md           overview, build and test instructions
   COMPATIBILITY.md    the compatibility contract and what verifies it
   KNOWN_C_BUGS.md     C 0.9.36 bugs not ported (or ported on purpose)
-  scripts/            linux-test.sh (cargo in Docker), check-all.sh
+  scripts/            linux-test.sh (cargo in Docker), check-all.sh,
+                      update-c-sources.sh (re-creates tests/lmdb-c)
+  tests/lmdb-c/       the C reference sources (LMDB 0.9 and 1.0), vendored
   rlmdb/          the library (package `rlmdb`, lib `rlmdb`)
   rlmdb-capi/          cdylib+staticlib `lmdb` exporting the C ABI, ships include/lmdb.h
   rlmdb-tools/         mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop in Rust
@@ -575,7 +579,7 @@ strings match `mdb_strerror`.
   for cross-process checks against the C builds: the peer matrix of each
   format (C 0.9 or C 1.0, Rust, C on Rust; every writer/reader pair),
   differential tests against C 1.0, the C 1.0 tools.
-* Linux is tested in Docker: `rust/scripts/linux-test.sh [cargo args]` runs
+* Linux is tested in Docker: `scripts/linux-test.sh [cargo args]` runs
   cargo inside `rust:1-bookworm` (Debian, glibc, aarch64, 4 KiB pages) with
   the workspace bind-mounted. Run it before declaring a stage done; the lock
   file differs there: `lock_mode=posix_mutex`, `sizeof(pthread_mutex_t)=48`,
@@ -585,7 +589,7 @@ strings match `mdb_strerror`.
 ## Bugs in C 0.9.36: do not port them, track them
 
 Where a C 0.9.36 behaviour is a plain and clear bug, do not reimplement it.
-Record it in `rust/KNOWN_C_BUGS.md` (what, where in the C source, what we
+Record it in `KNOWN_C_BUGS.md` (what, where in the C source, what we
 do instead) and keep the Rust behaviour the obviously correct one. The one
 hard constraint: the deviation must not cause interoperability issues. A
 file written by Rust must still be read and written correctly by C, and the
@@ -629,52 +633,52 @@ Facts about C 0.9.36 behaviour that implementers must honour; the harness in
 ## Status
 
 The work was planned in stages, each ending with a commit by the
-coordinator. What landed (commits on this branch):
+coordinator. What landed (commits of this repository):
 
 **Stage 1** (in parallel):
 
-* A. `rlmdb` foundation and the complete read path (`39256da`):
+* A. `rlmdb` foundation and the complete read path (`9f2c605`):
   consts, flags, errors, `format`, `idl`, `cmp`, `os` (maps, locks, shared
   mutex/semaphores, reader table), environment open including creating a
   new environment (`mdb_env_init_meta`), read transactions, `open_db`,
   read cursors with every `CursorOp` (DUPSORT, DUPFIXED/LEAF2, overflow
   pages), stat/info, `reader_list`/`reader_check`. Verified against files
   written by the C tools and `mtest*`. Findings folded in above
-  (`b70ea62`).
-* B. `interop` (`c13c67d`): the C library built with `cc`, the C peer and
+  (`823a9ec`).
+* B. `interop` (`5e9a560`): the C library built with `cc`, the C peer and
   its command protocol, `layout_dump`, C-vs-C scenarios validating the
-  harness. Linux testing in Docker: `scripts/linux-test.sh` (`d189fd1`).
+  harness. Linux testing in Docker: `scripts/linux-test.sh` (`3cbd19c`).
 
 **Stage 2:**
 
-* C1. The write path, part 1 (`6046d62`): page allocation and free-list
+* C1. The write path, part 1 (`65e5c71`): page allocation and free-list
   reuse, dirty pages, `mdb_page_touch`, node add, splits, put with every
   flag, commit (flush, sync, meta write), `set_map_size`. Deletes,
   rebalancing and merges landed here too (planned for stage 3).
-* D1. `rlmdb-capi` read side (`6678f83`).
+* D1. `rlmdb-capi` read side (`438a5bd`).
 * B2. The Rust peer's read side; every scenario as "C writes, Rust reads";
-  the layout test against the C dump (`d85dd7c`).
-* The core API gaps the C API and interop agents reported (`f2db7cd`) all
+  the layout test against the C dump (`e5b0599`).
+* The core API gaps the C API and interop agents reported (`5a6356a`) all
   landed in stage 3: `Transaction::set_compare`/`set_dupsort` updating the
   calling transaction, `Transaction::open_db_bytes` (database names are
   bytes), `Info::map_address`, `Environment::has_lock_file`,
   `Transaction::comparators`, `RoCursor::is_initialized`/
   `current_has_dups`, `Environment::copy_to_path`/`copy_to_fd`, and the
   rename of the library to package `rlmdb`, lib `rlmdb`
-  (`028c63f`).
+  (`df4d77f`).
 
 **Stage 3:**
 
 * C2. Nested transactions, spilling, `drop_db`/`clear_db`, plain and
-  compacting copy, the API gaps above (`b275112`; findings below).
+  compacting copy, the API gaps above (`365d392`; findings below).
 * D2. The rest of the C API: all 56 functions of `lmdb.h`; the unmodified
   `mtest.c` .. `mtest6.c` and C tools run against it with C's results
-  (`36285e9`).
+  (`2c3a95f`).
 * B3. The Rust peer's write side, a third peer (the C peer linked against
   the Rust `liblmdb.a`), all nine writer/reader pairs, concurrent and
-  alternating writers, stale readers (`25ae621`).
+  alternating writers, stale readers (`04feda8`).
 * T. `rlmdb-tools`: `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`,
-  `mdb_drop`, byte-identical to the C tools (`4b5c420`).
+  `mdb_drop`, byte-identical to the C tools (`2a69af3`).
 
 **Stage 4** (review, follow-ups, docs):
 

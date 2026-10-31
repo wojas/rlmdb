@@ -22,10 +22,12 @@ smaller job than it sounds: the two formats share every structure except the
 page header, the node data offset, the overflow reference and the lock-file
 header. The engine (B-tree, cursors, free list, spill, copy) is the same.
 
-Sources compared: `libraries/liblmdb/mdb.c` on this branch (0.9.36 plus
-ITS#10615/10642/10643, line numbers below are from that file) and
-`origin/mdb.RE/1.0` at 4865523 (1.0.2 plus the same ITS#10642/10643 fixes,
-"mdb10.c" below).
+Sources compared: `mdb.c` of upstream `mdb.RE/0.9` at a69ce88 (0.9.36 plus
+ITS#10615/10642/10643, vendored in `tests/lmdb-c/0.9`; line numbers below
+are from that file) and of upstream `mdb.RE/1.0` at 4865523 (1.0.2 plus the
+same ITS#10642/10643 fixes, vendored in `tests/lmdb-c/1.0`; "mdb10.c"
+below). Both commits are in the upstream LMDB repository
+(`tests/lmdb-c/README.md`).
 
 ## 1. What differs on disk
 
@@ -366,24 +368,19 @@ so no renaming trick is needed: `interop/build.rs` builds a second
 `mtest*`, and every differential and interop test is parameterised by
 format. Needed:
 
-* The 1.0 C sources are **not copied into the tree**. `interop/build.rs`
-  extracts them from git at build time with
-  `git show <ref>:libraries/liblmdb/<file>` into `$OUT_DIR/lmdb10/` for
-  `mdb.c`, `midl.c`, `midl.h`, `lmdb.h`, the tools and `mtest*`. The ref is
-  a pinned commit hash in a `const LMDB10_REF` next to a comment naming the
-  tag it follows, overridable with `RLMDB_LMDB10_REF` for experiments, and
-  `cargo:rerun-if-env-changed`. Pin at least 4865523 (`mdb.RE/1.0` after
-  ITS#10642/10643): the `LMDB_1.0.2` tag still has the DUPSORT page-count
-  bug, which would otherwise be baked into the oracle. The pinned commit
-  must be fetched (`git fetch origin mdb.RE/1.0`); the build script fails
-  with that instruction when `git show` cannot find it.
-* Container builds: `linux-test.sh` bind-mounts only the checkout at
-  `/work`. In a linked worktree `.git` is a file pointing at the main
-  repository's `.git/worktrees/<name>`, which is outside the mount, so `git
-  show` fails there. The script also mounts `git rev-parse --git-common-dir`
-  read-only at its own absolute path (the `.git` file holds that absolute
-  path, and the worktree's `commondir` and `gitdir` entries resolve through
-  it). Nothing is written to it, so read-only is enough.
+* The 1.0 C sources (`mdb.c`, `midl.c`, `midl.h`, `lmdb.h`, the tools and
+  `mtest*`) come from a pinned upstream commit. At first `interop/build.rs`
+  extracted them with `git show` from the upstream history this repository
+  then contained (overridable with `RLMDB_LMDB10_REF`, which needed the
+  common git directory of linked worktrees mounted into the Linux
+  container). Since rlmdb has its own repository they are vendored in
+  `tests/lmdb-c/1.0`, re-created by `scripts/update-c-sources.sh` from the
+  pinned commit, and built where they are; `LMDB10_DIR` points the build
+  at another source directory for experiments. Pin at least 4865523
+  (`mdb.RE/1.0` after ITS#10642/10643): the `LMDB_1.0.2` tag still has the
+  DUPSORT page-count bug, which would otherwise be baked into the oracle.
+* Container builds: `linux-test.sh` bind-mounts the checkout at `/work`;
+  with the sources in the checkout the container needs nothing else.
 * `layout_dump` extended to print 1.0's `PAGEHDRSZ`, `sizeof(MDB_ovpage)`,
   `MDB_LOCK_FORMAT`, `offsetof` of the lock-file fields and
   `mdb_env_get_maxkeysize` for the host page sizes; the Rust `LockLayout`
@@ -484,8 +481,8 @@ the Rust and C peers open without it.
   with C 1.0 in every pair.
 * **#47, 0.9.36 regressions.** (a) `MDB_USE_PWRITEV` build break, Linux
   only, irrelevant to rlmdb except when building the oracle with that
-  option. (b) ITS#9388 page counts for DUPSORT: this branch's
-  `libraries/liblmdb` already carries the follow-up fixes (ITS#10642,
+  option. (b) ITS#9388 page counts for DUPSORT: the vendored
+  `tests/lmdb-c/0.9` already carries the follow-up fixes (ITS#10642,
   ITS#10643, same on both release branches), so the oracle is right; the
   open point in #47 remains: files written by 0.9.35 count sub-tree pages
   differently and nothing marks which convention a file uses, so after an
@@ -506,6 +503,9 @@ the Rust and C peers open without it.
    §4.4)
 4. No copy of the 1.0 sources in the tree: the build extracts them from a
    pinned commit of the existing `mdb.RE/1.0` branch with `git show`. (§4.5)
+   Superseded when rlmdb moved to a repository of its own, without the
+   upstream history: the 0.9 and 1.0 sources are vendored in `tests/lmdb-c`
+   from pinned upstream commits.
 5. The format-converting copy is out of the first cut, wanted soon after;
    it may replace or reimplement `github.com/wojas/lmdbconvert`. (§4.3)
 
@@ -538,7 +538,8 @@ the Rust and C peers open without it.
    rlmdb's subtraction panicked in debug builds), and one C 1.0 behaviour
    not ported (`mdb_env_info`'s process map address; `KNOWN_C_BUGS.md`).
 5. Interop matrix with both C versions (1.0 sources via `git show` of the
-   pinned commit, container mount for the common git dir); 1.0 fixtures for
+   pinned commit, container mount for the common git dir; both replaced
+   since by the vendored `tests/lmdb-c/1.0`); 1.0 fixtures for
    the robustness tests; docs (`AGENTS.md` §1 and §9, `COMPATIBILITY.md`,
    `DESIGN.md`). Done (§4.5): the fourth peer `cpeer10`, the format and
    page size of test environments, the nine 1.0 pair files, `pagesize10.rs`,

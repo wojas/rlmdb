@@ -2,10 +2,10 @@
 
 Cheaper cursor stacks and page lookups on the read path of `rlmdb`, plus
 the local wins the profiles of the read workloads showed. All changes are
-in `rust/rlmdb` (`src/core/`, `src/format/`, `src/cmp.rs`), read paths
+in `rlmdb` (`src/core/`, `src/format/`, `src/cmp.rs`), read paths
 only, behaviour-preserving (same results, same errors on corrupt input,
 nothing on disk changes), no new `unsafe`. Measured on macOS against the
-unchanged library (`71e228d`), interleaved.
+unchanged library (`9f17f7e`), interleaved.
 
 **Summary** (interleaved A/B, new/base of the medians): random gets
 0.91, gets of 4 KiB / 64 KiB values 0.92 / 0.78,
@@ -111,7 +111,7 @@ cursor and `Cursor::new` still builds one:
 ## A/B
 
 Rust after against Rust before, interleaved: `cargo run --release -p
-rlmdb-bench -- --baseline <build of 71e228d> --rounds 3 --reps 3 --only
+rlmdb-bench -- --baseline <build of 9f17f7e> --rounds 3 --reps 3 --only
 read,dupsort,overflow,mixed` (n = 1 000 000, 3 rounds of 3 timed reps
 after a warm-up, the side going first alternating; ns/op median (min);
 the median ratio is the bench's, the min ratio from the rounded mins):
@@ -242,7 +242,7 @@ The per-level page lookup of a read transaction is now a few compares and
 
 ## Tests
 
-All from `rust/`, on the final tree:
+All from the repository root, on the final tree:
 
 | platform | command | outcome |
 |---|---|---|

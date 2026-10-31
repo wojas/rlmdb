@@ -1,10 +1,10 @@
 # lmdb-bench results
 
 Rust rewrite (`rlmdb`) against the C library (0.9.36) after the second
-optimisation round (tasks W, R, S and L, measured at `e84876f`), with
+optimisation round (tasks W, R, S and L, measured at `9b18deb`), with
 the Lightning Stream workloads (`ls` group) and the write-path change P2
-(`c35adef`; the server's run 3 below is at that commit). The
-dual-format commits between `e84876f` and `eb77845` (LMDB 1.0 support
+(`9aceeb0`; the server's run 3 below is at that commit). The
+dual-format commits between `9b18deb` and `17c1c52` (LMDB 1.0 support
 behind a per-environment layout) are in the measured tree, and their own
 A/B measured them within noise on 0.9 files
 ([`results/dual-format-stage2.md`](results/dual-format-stage2.md)).
@@ -37,14 +37,14 @@ except `txn_sync`.
   pages) these are at 0.95-1.01x, overwrites 0.80x and 64 KiB puts
   0.59x. Lightning Stream updates are at 1.09x on the server, 0.83x on
   macOS.
-* This round, against the tree before it (`71e228d`), interleaved on
+* This round, against the tree before it (`9f17f7e`), interleaved on
   the server: sequential appends -33 %, 4 KiB puts -47 %, gets of 4 KiB
   and 64 KiB values -28 to -30 %, scans -10 % and random gets -5 %
   (all before L). macOS, per task: random overwrites -30 %, random puts
   -22 % (W) and -5 % (S), deletes -24 % and -5 %, sequential appends
   -7 % and -19 %; `ls_scan` -19 to -22 % and plain scans -12 to -20 %
   (L).
-* P2, against `6d56545`, interleaved: on the server sequential appends
+* P2, against `c679eb2`, interleaved: on the server sequential appends
   -28 %, 64 KiB puts -40 %, 4 KiB puts -7 %, random puts and one-put
   transactions -3 to -4 %; on macOS appends -28 %, 64 KiB puts -42 %,
   overwrites -17 %, 4 KiB puts, one-put transactions and `ls_update`
@@ -65,11 +65,11 @@ slower).
   side and group) has most medians within 1-3 % of the minimums; runs 2
   and 3 (3 rounds of 3 reps) spread more between rounds, on both sides
   (`mixed_writer` the most in run 3).
-* Source: the rows of run 3 are at `c35adef`, with P2 (`--only
+* Source: the rows of run 3 are at `9aceeb0`, with P2 (`--only
   seq_put,rand_put,overwrite,overflow,delete,small_txn,mixed,ls --rounds
-  3 --reps 3`); those of run 2 at `e84876f` (`--only ls,read,dupsort
+  3 --reps 3`); those of run 2 at `9b18deb` (`--only ls,read,dupsort
   --rounds 3 --reps 3`). The others are run 1, the full suite at
-  `ccc9893` (`--reps 5`), before task L and P2; neither changed the code
+  `90cc145` (`--reps 5`), before task L and P2; neither changed the code
   they measure (`get_4k` and `get_64k` were within noise in P2's A/B
   below). The numbers of the runs that later runs replaced are in the
   notes below the table. Run 3's `mixed_readers` count per rep was not
@@ -130,7 +130,7 @@ ext4 run also had `txn_nosync` at 1.31.
 * macOS 15, Apple M1 Pro (10 cores), 32 GiB RAM, APFS on the internal
   SSD, 16 KiB pages; environments in `$TMPDIR`. rustc 1.93.1
   (Homebrew), Apple clang 17.0.0 (clang-1700.4.4.1).
-* At `e84876f`: `target/release/rlmdb-bench --rounds 2 --reps 3` (all
+* At `9b18deb`: `target/release/rlmdb-bench --rounds 2 --reps 3` (all
   groups, 6 samples per side), started once the 1-minute load average
   had dropped to 5.5 from other jobs on the machine; during the
   10-minute run it stayed between 3.5 and 8.7 (10 cores). The `txn_*`
@@ -139,9 +139,9 @@ ext4 run also had `txn_nosync` at 1.31.
 * The rows marked P2 are from the P2 report's Rust-against-C run
   (`--rounds 3 --reps 3`, the write groups plus `mixed` and `ls`, load
   average 4.5-7), with P2's final build before its rebase onto the
-  dual-format commits; the A/B after the rebase, against `6d56545`, gave
+  dual-format commits; the A/B after the rebase, against `c679eb2`, gave
   the same gains ([`results/P2-write-path.md`](results/P2-write-path.md)).
-  The read rows are from the `e84876f` run; P2 does not change them.
+  The read rows are from the `9b18deb` run; P2 does not change them.
 
 | workload | ops/rep | C ns/op | Rust ns/op | Rust/C |
 |---|---:|---:|---:|---:|
@@ -173,7 +173,7 @@ random writes are at parity with C here, unlike on 4 KiB pages
 (`rand_overwrite` is 0.92 by the minimums; C's median sits well above
 its minimum). `txn_sync` is `F_FULLFSYNC` (about 10 ms per commit, both
 sides). `mixed_writer` swings with the load; by the minimums it is 0.94.
-Before P2 (the `e84876f` run): `seq_put_append` 2.16, `rand_put` 0.99,
+Before P2 (the `9b18deb` run): `seq_put_append` 2.16, `rand_put` 0.99,
 `rand_overwrite` 0.96, `put_4k` 1.10, `put_64k` 1.02, `del_rand` 0.94,
 `txn_nosync` 1.43, `txn_sync` 0.98, `mixed_writer` 0.85 (1.16 by the
 minimums), `ls_update` 1.00.
@@ -183,8 +183,8 @@ minimums), `ls_update` 1.00.
 * The Lima VM behind `scripts/linux-test.sh`: `Linux 6.8.0-146-generic
   ... aarch64`, Debian 12 `rust:1-bookworm` container, 8 vCPUs, 12 GB,
   on the same M1 Pro host; rustc 1.99.1, gcc 12.2.0.
-* Full suite at `87b1a9b` (W, R and S; before the LS workloads and L),
-  1 round of 3 reps. This run predates `bb96986`, which put the
+* Full suite at `8d8f612` (W, R and S; before the LS workloads and L),
+  1 round of 3 reps. This run predates `0498cf1`, which put the
   container's `/tmp` on a tmpfs in the VM's memory, so its environments
   were on the VM's virtual disk; and the host was shared. Read it as
   indicative; the server above is the reference for 4 KiB pages.
@@ -225,15 +225,15 @@ unchanged. In commit order:
 
 | change | commit | what | what it bought (interleaved A/B, new/base of the medians) |
 |---|---|---|---|
-| hardening | `9eda847` | errors instead of panics or reuse of live pages for the corruptions py-lmdb patches against (checks in `page_touch` and the overflow-run length on delete) | correctness only; nothing measurable |
-| W: write-path allocations | `f8fb670` | a pool of page buffers (C's `me_dpages`), scratch buffers for `DUPSORT` puts and splits, the DBI resolved once per put/del | macOS: `rand_overwrite` 0.70, `rand_put` 0.78, `del_rand` and `put_4k` 0.76, `seq_put_append` 0.93, `put_64k` and `txn_nosync` 0.96. [`results/W-write-alloc.md`](results/W-write-alloc.md) |
-| R: read path | `30d5566` | 8-slot cursor stacks for `mdb_get`, a page lookup for read transactions that goes straight to the map, memcmp order compared inline for keys up to 32 bytes, smaller per-item and per-call costs | macOS: `get_64k` 0.78, `readers8_get` 0.86, `scan_bwd` 0.88, `rand_get` 0.91, `get_4k` 0.92, `mixed_readers` 0.87. [`results/R-read-path.md`](results/R-read-path.md) |
-| page layout descriptor | `0e26884` | every format-dependent offset from a per-environment layout (dual-format stage 1, `DUAL_FORMAT.md`) | first cut cost 8-16 % on scans and cached reads; after the fixes in the same commit writes, point reads and scans are within noise (a few percent may remain on `DUPSORT` lookups). Details: `git show 0e26884:rust/bench/RESULTS.md` |
-| S: stable dirty-page handles | `87b1a9b` | dirty pages in a slab with checked slot handles that write cursors remember, so the write path stops searching the dirty list; the arena slot of `mdb_put` reset in place, fewer record copies | macOS: `seq_put_append` 0.81, `rand_put` and `del_rand` 0.95; one-put transactions and overwrites unchanged. [`results/S-dirty-handles.md`](results/S-dirty-handles.md) |
-| LS workloads | `ccc9893` | the `ls` group: Lightning Stream sync scan and update (bench only) | [`results/LS-workloads.md`](results/LS-workloads.md) |
-| L: scan step | `e84876f` | a cursor step within a leaf with one format dispatch, one `NUMKEYS` read and one bounds check for key and data, returned straight to the caller; the general path out of line | macOS: `ls_scan` 0.78-0.81 (147 to 78 instructions per record; C 113), `scan_fwd` 0.80, `scan_bwd` 0.88. [`results/L-ls-scan.md`](results/L-ls-scan.md) |
-| LMDB 1.0 data file | `636b15d` | the 1.0 data file next to 0.9's (dual-format stage 2, `DUAL_FORMAT.md`): a format sniff at open, layout-aware dirty-slot lookups, format branches in rarely taken write paths, the `me_pbuf` pad of `DUPSORT` sub-pages | 0.9 workloads on macOS within noise (`seq_put_append` 0.97, `rand_put` 1.00, scans 1.03-1.05, `dup_get_both` 1.00, `mixed_writer` 1.01; read rows move both ways between runs): [`results/dual-format-stage2.md`](results/dual-format-stage2.md) |
-| P2: write-path constant costs | `c35adef` | `mdb_put`/`mdb_del` positioned on the write cursor's own stack, fewer page lookups per put, overflow runs built with their data and recycled, spare per-transaction containers, cheaper commits and pointer moves (below) | macOS, against `6d56545`: `put_64k` 0.58, `seq_put_append` 0.72, `rand_overwrite` 0.83, `put_4k`, `txn_nosync` and `ls_update` 0.93; `rand_put`, `del_rand` and `mixed_writer` 0.97 (before the rebase); server: the table below. [`results/P2-write-path.md`](results/P2-write-path.md) |
+| hardening | `e33add5` | errors instead of panics or reuse of live pages for the corruptions py-lmdb patches against (checks in `page_touch` and the overflow-run length on delete) | correctness only; nothing measurable |
+| W: write-path allocations | `68ae72b` | a pool of page buffers (C's `me_dpages`), scratch buffers for `DUPSORT` puts and splits, the DBI resolved once per put/del | macOS: `rand_overwrite` 0.70, `rand_put` 0.78, `del_rand` and `put_4k` 0.76, `seq_put_append` 0.93, `put_64k` and `txn_nosync` 0.96. [`results/W-write-alloc.md`](results/W-write-alloc.md) |
+| R: read path | `fe3ac83` | 8-slot cursor stacks for `mdb_get`, a page lookup for read transactions that goes straight to the map, memcmp order compared inline for keys up to 32 bytes, smaller per-item and per-call costs | macOS: `get_64k` 0.78, `readers8_get` 0.86, `scan_bwd` 0.88, `rand_get` 0.91, `get_4k` 0.92, `mixed_readers` 0.87. [`results/R-read-path.md`](results/R-read-path.md) |
+| page layout descriptor | `eb4fa08` | every format-dependent offset from a per-environment layout (dual-format stage 1, `DUAL_FORMAT.md`) | first cut cost 8-16 % on scans and cached reads; after the fixes in the same commit writes, point reads and scans are within noise (a few percent may remain on `DUPSORT` lookups). Details: `git show eb4fa08:bench/RESULTS.md` |
+| S: stable dirty-page handles | `8d8f612` | dirty pages in a slab with checked slot handles that write cursors remember, so the write path stops searching the dirty list; the arena slot of `mdb_put` reset in place, fewer record copies | macOS: `seq_put_append` 0.81, `rand_put` and `del_rand` 0.95; one-put transactions and overwrites unchanged. [`results/S-dirty-handles.md`](results/S-dirty-handles.md) |
+| LS workloads | `90cc145` | the `ls` group: Lightning Stream sync scan and update (bench only) | [`results/LS-workloads.md`](results/LS-workloads.md) |
+| L: scan step | `9b18deb` | a cursor step within a leaf with one format dispatch, one `NUMKEYS` read and one bounds check for key and data, returned straight to the caller; the general path out of line | macOS: `ls_scan` 0.78-0.81 (147 to 78 instructions per record; C 113), `scan_fwd` 0.80, `scan_bwd` 0.88. [`results/L-ls-scan.md`](results/L-ls-scan.md) |
+| LMDB 1.0 data file | `c11a5ca` | the 1.0 data file next to 0.9's (dual-format stage 2, `DUAL_FORMAT.md`): a format sniff at open, layout-aware dirty-slot lookups, format branches in rarely taken write paths, the `me_pbuf` pad of `DUPSORT` sub-pages | 0.9 workloads on macOS within noise (`seq_put_append` 0.97, `rand_put` 1.00, scans 1.03-1.05, `dup_get_both` 1.00, `mixed_writer` 1.01; read rows move both ways between runs): [`results/dual-format-stage2.md`](results/dual-format-stage2.md) |
+| P2: write-path constant costs | `9aceeb0` | `mdb_put`/`mdb_del` positioned on the write cursor's own stack, fewer page lookups per put, overflow runs built with their data and recycled, spare per-transaction containers, cheaper commits and pointer moves (below) | macOS, against `c679eb2`: `put_64k` 0.58, `seq_put_append` 0.72, `rand_overwrite` 0.83, `put_4k`, `txn_nosync` and `ls_update` 0.93; `rand_put`, `del_rand` and `mixed_writer` 0.97 (before the rebase); server: the table below. [`results/P2-write-path.md`](results/P2-write-path.md) |
 
 P2 removes the read-cursor rebuild of every put and delete (17.6 % of a
 sequential put after S) and most of the overflow-run cost. Positioning for `mdb_put` and
@@ -261,7 +261,7 @@ emptied containers of that transaction). `DUPSORT` paths are unchanged.
 
 On the server (the x86-64 Hyper-V guest above, 4 vCPUs AMD EPYC Milan,
 Rocky Linux 9 kernel 5.14, environments on a tmpfs in RAM, 4 KiB pages;
-idle), interleaved A/B of `c35adef` (new) against `6d56545` (base),
+idle), interleaved A/B of `9aceeb0` (new) against `c679eb2` (base),
 3 rounds of 3 reps, ns/op median (min):
 
 | workload | base ns/op | new ns/op | new/base |
@@ -278,7 +278,7 @@ idle), interleaved A/B of `c35adef` (new) against `6d56545` (base),
 | ls_update | 4952 (4904) | 5107 (4930) | 1.03 |
 | get_4k / get_64k / ls_scan / mixed_readers | | | 1.04 / 1.05 / 1.02 / 0.97 (no changed code; noise) |
 
-On the server, the whole round before L (`ccc9893` against `71e228d`,
+On the server, the whole round before L (`90cc145` against `9f17f7e`,
 `--baseline`, 3 rounds of 3 reps, groups `read`, `dupsort`, `overflow`,
 `seq_put`): `put_4k` 0.53, `seq_put_append` 0.67, `get_64k` 0.70,
 `dup_put` 0.71, `get_4k` 0.72, `scan_fwd` and `scan_bwd` 0.90,
@@ -291,7 +291,7 @@ direct `next`/`prev`) took appends from 4.4-5x C to 2.5-3x, `DUPSORT`
 puts from 2.6x to 1.6-1.8x and reads to 0.7-1.25x C. Its before/after
 and per-change tables, profiles and test runs, and the descriptor's
 measurements, are in the previous version of this file (`git show
-0e26884:rust/bench/RESULTS.md`).
+eb4fa08:bench/RESULTS.md`).
 
 ## Remaining gaps and why
 
@@ -396,9 +396,9 @@ the per-task reports):
   10-40 %.
 * Environments are on local storage only: the internal SSD on macOS
   (`$TMPDIR`), a tmpfs on the server (`/dev/shm`) and in the VM since
-  `bb96986` (except where stated), so the numbers measure the libraries,
+  `0498cf1` (except where stated), so the numbers measure the libraries,
   not the disks.
-* Commands, from `rust/`: `cargo build --release -p rlmdb-bench &&
+* Commands, from the repository root: `cargo build --release -p rlmdb-bench &&
   target/release/rlmdb-bench --rounds 2 --reps 3` (macOS);
   `rlmdb-bench --dir /dev/shm/rlmdb-bench --reps 5` and `--only
   ls,read,dupsort --rounds 3 --reps 3` (server; the ext4 row with

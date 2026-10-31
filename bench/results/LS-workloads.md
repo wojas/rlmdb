@@ -83,7 +83,7 @@ with `MDB_NOSYNC` like every other workload except `txn_sync`.
 * macOS 15, Apple M1 Pro (10 cores), 32 GiB RAM, APFS on the internal
   SSD; environments in `$TMPDIR`.
 * rustc 1.93.1 (Homebrew), Apple clang 17.0.0 (clang-1700.4.4.1).
-* Command (from `rust/`): `cargo build --release -p rlmdb-bench &&
+* Command (from the repository root): `cargo build --release -p rlmdb-bench &&
   target/release/rlmdb-bench --dir "$TMPDIR/lmdb-bench-ls" --only ls
   --rounds 3 --reps 3` (n = 1 000 000, 3 rounds alternating which side
   goes first, 3 timed reps after 1 warm-up each, so 9 samples per side).
@@ -107,7 +107,7 @@ gave `ls_scan` 19.4 (16.3) ns for C and 17.4 (16.8) ns for Rust, and
   mounts a 4 GiB tmpfs at the container's `/tmp`. The database used at
   most 1.07 GiB of it.
 * rustc 1.99.1, gcc 12.2.0 (Debian 12.2.0-14+deb12u1).
-* Command (from `rust/`): `scripts/linux-test.sh run --release -p
+* Command (from the repository root): `scripts/linux-test.sh run --release -p
   rlmdb-bench -- --dir /tmp/lmdb-bench --only ls --rounds 3 --reps 3`.
 * Another benchmark was running in a container of the same VM at the
   same time, so these numbers are noisier than the macOS ones: the

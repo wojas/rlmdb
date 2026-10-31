@@ -2,16 +2,18 @@ Copyright 2026 Konrad Wojas.
 All rights reserved.
 
 This Rust implementation of LMDB is a derivative work of the LMDB C
-library (libraries/liblmdb in this repository), which is
+library (https://github.com/LMDB/lmdb), which is
 
     Copyright 2011-2021 Howard Chu, Symas Corp.
     All rights reserved.
 
 Its B-tree, free-list, transaction and copy logic was ported from mdb.c,
 and the data file, lock file and tool output formats are those of LMDB
-0.9.36. The file rust/lmdb-capi/include/lmdb.h is an unmodified copy of
-the LMDB 0.9.36 header; rust/lmdb-tools/tests/c/mdb_drop.c is a copy of
-LMDB's mdb_drop.c. Both keep their original notices.
+0.9.36. The file rlmdb-capi/include/lmdb.h is an unmodified copy of
+the LMDB 0.9.36 header; rlmdb-tools/tests/c/mdb_drop.c is a copy of
+LMDB's mdb_drop.c. Both keep their original notices. The directory
+tests/lmdb-c holds copies of C LMDB 0.9 and 1.0 sources, the test oracle,
+with upstream's LICENSE and COPYRIGHT files.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted only as authorized by the OpenLDAP Public

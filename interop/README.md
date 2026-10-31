@@ -6,7 +6,7 @@ proves it by running **peer programs** as separate processes against one
 environment and checking what each sees.
 
 * `cpeer` (C, `c/cpeer*.c`) speaks the protocol below, linked against
-  `liblmdb` built from `../../libraries/liblmdb` (LMDB 0.9.36+) by `build.rs`
+  `liblmdb` built from `../tests/lmdb-c/0.9` (LMDB 0.9.36+) by `build.rs`
   with the upstream Makefile's flags and the platform's default lock mode.
 * `rpeer` (Rust, `src/bin/rpeer/`, on the `rlmdb` crate) speaks the same
   protocol, with the same LMDB calls in the same order and the same output
@@ -31,8 +31,8 @@ environment and checking what each sees.
   `mdb_dump10`, `mdb_load10`, `mdb_copy10`, `mdb_drop10`, `mtest10`,
   `mtest2_10`…, `layout_dump10`, `cpeer10` (the fourth peer, `Peer::C10`)
   and `writeops10` (its optional sixth argument sets the page size), built
-  from 1.0 sources that `build.rs` takes from git (see "The LMDB 1.0
-  oracle" below).
+  from the vendored 1.0 sources in `../tests/lmdb-c/1.0` (see "The LMDB
+  1.0 oracle" below).
 
 * `rtools` (`src/bin/rtools.rs`) is the Rust tools of `../rlmdb-tools` in
   one executable (`rtools mdb_stat -a env` runs `mdb_stat` with `argv[0]`
@@ -65,7 +65,7 @@ cargo test -p rlmdb-interop --test rpeer          # rpeer vs cpeer outputs, chec
 cargo test -p rlmdb-interop --test oracle10       # the LMDB 1.0 oracle: version, layout, refusals
 cargo test -p rlmdb-interop --test c_vs_c -- --nocapture mvcc   # one scenario, with its log
 INTEROP_LOOP_SECS=20 cargo test -p rlmdb-interop --no-fail-fast  # stress: 20 s loops (~20 min)
-rust/scripts/linux-test.sh test -p rlmdb-interop  # the same on Linux (Docker)
+scripts/linux-test.sh test -p rlmdb-interop       # the same on Linux (Docker)
 ```
 
 | test file | what |
@@ -121,33 +121,34 @@ The tests print the page size of each environment they create (`--nocapture`):
 ## The LMDB 1.0 oracle
 
 The 1.0 format (`MDB_DATA_VERSION 3`, `MDB_LOCK_VERSION 2`) gets its own C
-oracle, next to the 0.9 one; `../DUAL_FORMAT.md` is the design. The 1.0
-sources are not copied into the tree: `build.rs` extracts them from git.
+oracle, next to the 0.9 one; `../DUAL_FORMAT.md` is the design. Its
+sources are vendored in `../tests/lmdb-c/1.0` (`../tests/lmdb-c/README.md`).
 
-* **Pinned commit.** `LMDB10_REF` in `build.rs` is commit `4865523ff0e1` of
-  the `mdb.RE/1.0` branch: the `LMDB_1.0.2` release plus the DUPSORT
-  page-count fixes of ITS#10642 and ITS#10643. Do not pin the `LMDB_1.0.2`
-  tag: it still has that bug, which would be baked into the oracle.
-* **Extraction.** `build.rs` finds the repository with `git rev-parse
-  --show-toplevel` (a linked worktree works: its objects are the main
-  repository's), resolves the ref, and writes `git show
-  <commit>:libraries/liblmdb/<file>` for the library (`mdb.c`, `midl.[ch]`,
-  `lmdb.h`, `module.c`, `chacha8.[ch]`), the tools and the `mtest*`
-  programs into `$OUT_DIR/lmdb10/`. `lmdb10/.commit` records the commit;
-  while it is unchanged nothing is extracted again
-  (`interop::bins::lmdb10_src()` has the directory).
-* **The commit must be present.** If it is not, the build fails and says to
-  run `git fetch origin mdb.RE/1.0`. Git is needed at build time.
-* **Override.** `RLMDB_LMDB10_REF=<commit-ish>` builds against another
-  commit, tag or branch (`cargo:rerun-if-env-changed`, so changing it
-  rebuilds). A branch name is resolved when the build script runs; cargo
-  does not notice the branch moving, so prefer a hash.
-* **Bumping the pin.** `git fetch origin mdb.RE/1.0`, read the new commits
-  (`git log <old>..origin/mdb.RE/1.0 -- libraries/liblmdb`), put the new
-  hash and what it contains into `LMDB10_REF` and its comment, and adjust
-  `UPSTREAM10_PROGRAMS` if programs were added or removed. Then run this
-  crate's tests on macOS and Linux: `tests/oracle10.rs` pins the layout
-  numbers below and fails if the new commit changes them.
+* **Pinned commit.** The 1.0 sources are upstream commit `4865523ff0e1` of
+  the `mdb.RE/1.0` branch (in the upstream LMDB repository,
+  <https://github.com/LMDB/lmdb>): the `LMDB_1.0.2` release plus the
+  DUPSORT page-count fixes of ITS#10642 and ITS#10643. Do not pin the
+  `LMDB_1.0.2` tag: it still has that bug, which would be baked into the
+  oracle. The pin is `LMDB10_COMMIT` in `../scripts/update-c-sources.sh`.
+* **Sources.** `build.rs` compiles the files of `LMDB10_LIB_FILES` (the
+  library: `mdb.c`, `midl.[ch]`, `lmdb.h`, `module.c`, `chacha8.[ch]`) and
+  of `UPSTREAM10_PROGRAMS` (the tools and the `mtest*` programs) where
+  they are, with `cargo:rerun-if-changed` on each
+  (`interop::bins::lmdb10_src()` has the directory). Neither git nor the
+  network is needed at build time.
+* **Override.** `LMDB10_DIR=<absolute path>` builds against the 1.0
+  sources in another directory, for example `libraries/liblmdb` of an
+  upstream checkout at another commit (`cargo:rerun-if-env-changed`, so
+  changing it rebuilds). The directory must hold every file of the two
+  lists.
+* **Bumping the pin.** Read the new upstream commits (`git log
+  <old>..origin/mdb.RE/1.0 -- libraries/liblmdb` in an upstream clone),
+  change `LMDB10_COMMIT` in `../scripts/update-c-sources.sh` (and its file
+  list, with `LMDB10_LIB_FILES` and `UPSTREAM10_PROGRAMS`, if programs were
+  added or removed), run the script, and update the commit cited here and
+  in `../tests/lmdb-c/README.md`. Then run this crate's tests on macOS and
+  Linux: `tests/oracle10.rs` pins the layout numbers below and fails if
+  the new commit changes them.
 * **Build.** The same flags as for 0.9 (the 1.0 `Makefile` has the same
   `CFLAGS`). Like 1.0's `liblmdb.a`, the library is `mdb.o midl.o
   module.o`, and programs link `-ldl` (`module.c` loads crypto modules
@@ -189,12 +190,8 @@ sources are not copied into the tree: `build.rs` extracts them from git.
   `me_nodemax` and `mdb_env_get_maxkeysize` of new environments with the
   OS page size, 4096 and 16384). The 0.9 output is unchanged.
 * **Containers.** `scripts/linux-test.sh` bind-mounts the checkout at
-  `/work`. In a linked worktree `.git` is a file that names the main
-  repository's `.git/worktrees/<name>` by absolute path, outside that
-  mount, so the script also mounts the common git directory (`git rev-parse
-  --git-common-dir`) read-only at the same path, and disables git's
-  ownership check inside the container (`safe.directory`). The
-  `rust:1-bookworm` image has git.
+  `/work`; the vendored sources are part of it, so nothing else is
+  needed.
 
 ### Layout numbers
 

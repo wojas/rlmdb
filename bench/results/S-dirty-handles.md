@@ -5,7 +5,7 @@ lets write cursors remember them, so the write path stops searching the
 dirty list for pages it already knows. It also takes the cheap wins that
 came with this: the arena slot of every `mdb_put` and the copies of the
 database record. All changes are in `rlmdb` (`src/core/`, plus one doc
-comment in `src/idl.rs`), based on `30d5566`.
+comment in `src/idl.rs`), based on `fe3ac83`.
 
 The changes preserve the layout: same results, same file bytes, same free
 list, same spill decisions. The write differential against C, the interop
@@ -197,8 +197,8 @@ through `TxnCore::page` checks the transaction's spill set, then its list
 
 ## A/B: new against base
 
-The command, from `rust/`, was `cargo run --release -p rlmdb-bench --
---baseline <bench of 30d5566> --rounds 3 --reps 3`. Both sides alternate
+The command, from the repository root, was `cargo run --release -p rlmdb-bench --
+--baseline <bench of fe3ac83> --rounds 3 --reps 3`. Both sides alternate
 per group, n = 1 000 000, and each cell is ns/op as median (min) over 9
 samples per side.
 
@@ -280,7 +280,7 @@ newly touched page.
 
 ## Rust against C, after
 
-From `rust/`: `cargo run --release -p rlmdb-bench -- --only
+From the repository root: `cargo run --release -p rlmdb-bench -- --only
 seq_put,rand_put,dupsort,delete,small_txn --reps 5`. This is one run per
 side, ns/op as median (min):
 
@@ -413,7 +413,7 @@ puts. For the other workloads only the shares compare.
 
 ## Tests
 
-From `rust/`, on the final tree:
+From the repository root, on the final tree:
 
 * `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace

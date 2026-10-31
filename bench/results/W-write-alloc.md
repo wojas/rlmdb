@@ -3,7 +3,7 @@
 Removes the allocation overhead of the write path listed in
 [`RESULTS.md`](../RESULTS.md) ("No page-buffer recycling", "`DUPSORT` puts
 allocate", "`RwTxn::put` re-validates the DBI"). All changes are in
-`rlmdb` (`src/core/`), based on `71e228d`, behaviour-preserving (same
+`rlmdb` (`src/core/`), based on `9f17f7e`, behaviour-preserving (same
 results, same file bytes; the write differential and interop tests compare
 against C) and without new `unsafe`. The public API is unchanged.
 
@@ -76,7 +76,7 @@ and the mixed reader/writer workload unchanged within noise.
 
 `rlmdb-bench --baseline <base build> --rounds 3 --reps 3 --sync-commits
 200 --only seq_put,rand_put,overwrite,dupsort,overflow,small_txn,mixed,delete`
-(the base build is the bench at `71e228d`; both sides alternate per group;
+(the base build is the bench at `9f17f7e`; both sides alternate per group;
 n = 1 000 000). ns/op: median (min) over 9 samples per side.
 
 * macOS 15, Apple M1 Pro (10 cores), 32 GiB RAM, 16 KiB pages, APFS on
@@ -215,7 +215,7 @@ the put/commit samples), all due to write cursors holding page numbers:
 
 ## Tests
 
-From `rust/`, on the final tree:
+From the repository root, on the final tree:
 
 * `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace

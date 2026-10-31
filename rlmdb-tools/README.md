@@ -4,7 +4,8 @@ Rust versions of the LMDB 0.9 command line tools, built on `rlmdb`:
 `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`, plus `mdb_drop` (which
 0.9.36 does not ship; see below).
 
-They are drop-in replacements for the C tools in `libraries/liblmdb`: same
+They are drop-in replacements for the C tools of LMDB 0.9.36 (whose
+sources the tests build from `../tests/lmdb-c/0.9`): same
 options, same output byte for byte, same messages on standard error, same
 exit codes, on the same platform. They work on environments that C
 processes use at the same time, since `rlmdb` shares the C data and
@@ -21,7 +22,10 @@ cargo build --release -p rlmdb-tools     # target/release/mdb_{stat,dump,load,co
 
 ## Usage
 
-The C man pages (`libraries/liblmdb/*.1`) apply. In short:
+The documentation of the C tools applies: upstream LMDB's man pages
+(`mdb_stat.1`, `mdb_dump.1`, `mdb_load.1`, `mdb_copy.1` in
+`libraries/liblmdb` of <https://github.com/LMDB/lmdb>; not copied into this
+repository). In short:
 
 ```text
 mdb_stat [-V] [-n] [-e] [-r[r]] [-f[f[f]]] [-a|-s subdb] dbpath
@@ -152,9 +156,9 @@ Other differences:
 
 ## Tests
 
-`cargo test -p rlmdb-tools` (and `rust/scripts/linux-test.sh test -p
+`cargo test -p rlmdb-tools` (and `scripts/linux-test.sh test -p
 rlmdb-tools` for Linux) builds the C library and tools from
-`libraries/liblmdb` with the `cc` crate, plus `tests/c/mdb_drop.c` (the C
+`../tests/lmdb-c/0.9` with the `cc` crate, plus `tests/c/mdb_drop.c` (the C
 oracle for `mdb_drop`) and `tests/c/holder.c` (keeps a reader open). Test
 environments come from `mtest`..`mtest5` and from crafted dump files
 loaded with the C `mdb_load`: every database flag combination, overflow

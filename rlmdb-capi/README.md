@@ -25,12 +25,11 @@ gaps").
 ## Building and linking
 
 ```sh
-cd rust
 cargo build -p rlmdb-capi --release
 # target/release/liblmdb.a, target/release/liblmdb.{so,dylib}
 ```
 
-Compile C programs with `-I rust/rlmdb-capi/include`. Link the static
+Compile C programs with `-I rlmdb-capi/include`. Link the static
 library together with the system libraries the Rust standard library needs
 (from `cargo rustc -p rlmdb-capi --lib --crate-type staticlib -- --print
 native-static-libs`):
@@ -40,10 +39,10 @@ native-static-libs`):
 | Linux (glibc) | `liblmdb.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc` |
 | macOS | `liblmdb.a` (needs `-lSystem -lc -lm`, which the compiler driver adds) |
 
-For example `cc -I rust/rlmdb-capi/include -o mdb_stat
-libraries/liblmdb/mdb_stat.c rust/target/release/liblmdb.a -lpthread
+For example `cc -I rlmdb-capi/include -o mdb_stat
+tests/lmdb-c/0.9/mdb_stat.c target/release/liblmdb.a -lpthread
 -lgcc_s -lutil -lrt -lm -ldl` on Linux. The shared library needs no extra
-flags (`-L rust/target/release -llmdb`).
+flags (`-L target/release -llmdb`).
 
 Note: the library target is named `lmdb` so that the artifacts are called
 `liblmdb.*`; the Rust library it is built on is the `rlmdb` package
@@ -373,13 +372,12 @@ C library and against the Rust `liblmdb.a`:
 ## Tests
 
 ```sh
-cd rust
 cargo test -p rlmdb-capi                         # macOS / host
 scripts/linux-test.sh test -p rlmdb-capi         # Linux in Docker
 ```
 
 The tests compile C programs at test time with the `cc` crate (no build
-script) against the C library (built from `../libraries/liblmdb`, the
+script) against the C library (built from `../tests/lmdb-c/0.9`, the
 oracle) and against the Rust `liblmdb.a` that cargo builds for the tests.
 Each test process works in its own directory under `target/tmp/capi/`
 (see `tests/common/mod.rs`): several test runs may share a target directory
