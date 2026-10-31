@@ -1200,7 +1200,7 @@ static void test_drop(void)
 
 static void test_nested(void)
 {
-	MDB_env *env = new_env("nested", 1UL << 24, 8, 0), *small;
+	MDB_env *env = new_env("nested", 1UL << 24, 8, 0), *small_env;
 	MDB_txn *parent, *child, *grand, *t, *r;
 	MDB_dbi db, created;
 	MDB_cursor *pc, *cc;
@@ -1362,10 +1362,10 @@ static void test_nested(void)
 	mdb_env_close(env);
 
 	/* a child that fails makes its parent fail */
-	small = new_env("nested-full", 1UL << 18, 4, 0);
-	OK(mdb_txn_begin(small, NULL, 0, &parent));
+	small_env = new_env("nested-full", 1UL << 18, 4, 0);
+	OK(mdb_txn_begin(small_env, NULL, 0, &parent));
 	OK(mdb_dbi_open(parent, NULL, 0, &db));
-	OK(mdb_txn_begin(small, parent, 0, &child));
+	OK(mdb_txn_begin(small_env, parent, 0, &child));
 	{
 		char big[3000];
 		memset(big, 'x', sizeof(big));
@@ -1381,7 +1381,7 @@ static void test_nested(void)
 	RC(mdb_txn_commit(child), MDB_BAD_TXN);
 	RC(mdb_put(parent, db, &k, &d, 0), MDB_BAD_TXN);
 	RC(mdb_txn_commit(parent), MDB_BAD_TXN);
-	mdb_env_close(small);
+	mdb_env_close(small_env);
 }
 
 /* ---------------------------------------------------------------------- */

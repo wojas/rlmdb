@@ -325,7 +325,7 @@ expect_no_db(MDB_env *env, const char *name)
 static void
 nested_check(MDB_env *env)
 {
-	static const char *const small[][2] = {
+	static const char *const small_kv[][2] = {
 		{ "k1", "v1" }, { "k2", "v2" }, { "k3", "v3" }
 	};
 	MDB_txn *txn;
@@ -341,7 +341,7 @@ nested_check(MDB_env *env)
 		die(EXIT_MISMATCH, "nested-test: DB nested not found");
 	check_rc(rc, "mdb_dbi_open(nested)");
 	for (k = 0; k < 3; k++)
-		expect_str("check", txn, dbi, small[k][0], small[k][1]);
+		expect_str("check", txn, dbi, small_kv[k][0], small_kv[k][1]);
 	expect("check", txn, dbi, "k5", big, BIG_LEN);
 	expect_entries("check", txn, dbi, 4 + NESTED_N / 2);
 
@@ -350,7 +350,7 @@ nested_check(MDB_env *env)
 	while ((rc = mdb_cursor_get(cur, &key, &data, MDB_NEXT)) == 0) {
 		const char *want;
 		if (n < 4) {
-			want = n < 3 ? small[n][0] : "k5";
+			want = n < 3 ? small_kv[n][0] : "k5";
 		} else {
 			snprintf(kbuf, sizeof(kbuf), "n%05d", u);
 			snprintf(vbuf, sizeof(vbuf), "val%05d", u);
