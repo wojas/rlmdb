@@ -16,7 +16,10 @@
 //! meta page our txn `N` uses. C accepts that (very unlikely) torn read.
 //! We additionally re-check `mti_txnid` after copying the meta: if it is
 //! still `N`, no writer can have started rewriting that page, so the copy is
-//! consistent; otherwise we retry with the newer snapshot.
+//! consistent; otherwise we retry with the newer snapshot. The same holds
+//! for a copy that fails validation: only if `mti_txnid` moved can a commit
+//! have torn it, and then we retry too (a bounded number of times); if it
+//! did not move, the page is bad and begin fails.
 //!
 //! If the snapshot's pages extend past our map (another process grew the
 //! database beyond our `map_size`), begin fails with `MDB_MAP_RESIZED`.
@@ -502,6 +505,42 @@ fn newer_commit_on_file(env: &Environment, txnid: u64, meta: &Meta) -> bool {
     meta.txnid != txnid || env.meta_ids(other).is_some_and(|(_, t)| t > txnid)
 }
 
+/// How many copies of a meta page that fail validation one
+/// [`RoTxn::take_snapshot`] makes before it gives up (see [`TornCopies`]).
+const MAX_TORN_COPIES: u32 = 16;
+
+/// The copies of a meta page that failed validation during one
+/// [`RoTxn::take_snapshot`].
+///
+/// A reader copies the meta page of the txnid it published (`mti_txnid`,
+/// or without a lock file the committed txnid the file's handles share).
+/// A commit rewrites that page only once the published txnid has moved
+/// past it, so a copy can be torn only if the txnid moved by the time the
+/// copy is done. A copy that fails validation is therefore retried if the
+/// txnid moved, as a consistent copy is, and reported if it did not: then
+/// the page really is bad. (Today validation checks magic and version,
+/// which no writer, ours or C's, rewrites, so a torn copy still passes it;
+/// the rule keeps a check of rewritten fields from failing on a race.)
+#[derive(Debug, Default)]
+struct TornCopies(u32);
+
+impl TornCopies {
+    /// The meta page `copy` if it validated; `None` (retry) if it did not
+    /// and the published txnid `moved` since it was published; the
+    /// validation error if it did not move, or after [`MAX_TORN_COPIES`]
+    /// failed copies.
+    fn check(&mut self, copy: Result<Meta>, moved: impl FnOnce() -> bool) -> Result<Option<Meta>> {
+        match copy {
+            Ok(meta) => Ok(Some(meta)),
+            Err(_) if self.0 + 1 < MAX_TORN_COPIES && moved() => {
+                self.0 += 1;
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
 /// A read-only transaction (`MDB_txn` with `MDB_RDONLY`).
 ///
 /// Pins one snapshot until it is dropped, [`aborted`](RoTxn::abort),
@@ -526,6 +565,15 @@ impl std::fmt::Debug for RoTxn<'_> {
 impl<'env> RoTxn<'env> {
     /// `mdb_txn_begin(env, NULL, MDB_RDONLY)`.
     pub(crate) fn begin(env: &'env Environment) -> Result<RoTxn<'env>> {
+        RoTxn::begin_with(env, Environment::read_meta)
+    }
+
+    /// [`RoTxn::begin`] with `copy_meta` copying and validating the meta
+    /// page (see [`RoTxn::take_snapshot`]).
+    fn begin_with(
+        env: &'env Environment,
+        copy_meta: impl FnMut(&Environment, usize) -> Result<Meta>,
+    ) -> Result<RoTxn<'env>> {
         let slot = match env.readers() {
             ReaderTable::Shared(lock) => ReaderSlot::Shared {
                 lock,
@@ -542,13 +590,19 @@ impl<'env> RoTxn<'env> {
             core: TxnCore::new_read_only(env, Vec::new()),
             slot,
         };
-        txn.take_snapshot()?;
+        txn.take_snapshot(copy_meta)?;
         Ok(txn)
     }
 
-    /// The read-only branch of `mdb_txn_renew0`.
-    fn take_snapshot(&mut self) -> Result<()> {
+    /// The read-only branch of `mdb_txn_renew0`. `copy_meta` copies and
+    /// validates a meta page (`Environment::read_meta`; tests pass one that
+    /// fails as a torn copy would).
+    fn take_snapshot(
+        &mut self,
+        mut copy_meta: impl FnMut(&Environment, usize) -> Result<Meta>,
+    ) -> Result<()> {
         let env = self.core.env;
+        let mut torn = TornCopies::default();
         let (txnid, meta) = match &self.slot {
             ReaderSlot::Shared { lock, index } => loop {
                 let txnid = lock.publish_current_txnid(*index);
@@ -557,7 +611,10 @@ impl<'env> RoTxn<'env> {
                     lock.set_slot_txnid(*index, meta.txnid);
                     break (meta.txnid, meta);
                 }
-                let meta = env.read_meta((txnid & 1) as usize)?;
+                let copy = copy_meta(env, (txnid & 1) as usize);
+                let Some(meta) = torn.check(copy, || lock.txnid() != txnid)? else {
+                    continue;
+                };
                 // If no commit happened while we copied the meta page, no
                 // writer can have been rewriting it (see module docs).
                 if lock.txnid() == txnid {
@@ -576,7 +633,10 @@ impl<'env> RoTxn<'env> {
                 // txnid + 3 on, see `find_oldest`) begins after the
                 // re-check and sees our publication.
                 let txnid = shared.publish_current_txnid(slot);
-                let meta = env.read_meta((txnid & 1) as usize)?;
+                let copy = copy_meta(env, (txnid & 1) as usize);
+                let Some(meta) = torn.check(copy, || shared.txnid() != txnid)? else {
+                    continue;
+                };
                 if shared.txnid() != txnid {
                     continue;
                 }
@@ -728,7 +788,7 @@ impl<'env> InactiveTxn<'env> {
                 return Err(MdbError::BadRslot.into());
             }
         }
-        txn.take_snapshot()?;
+        txn.take_snapshot(Environment::read_meta)?;
         Ok(txn)
     }
 
@@ -739,5 +799,126 @@ impl<'env> InactiveTxn<'env> {
 impl Drop for InactiveTxn<'_> {
     fn drop(&mut self) {
         self.slot.release();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::os::unix::fs::FileExt;
+    use std::path::Path;
+
+    use super::*;
+    use crate::flags::{EnvironmentFlags, WriteFlags};
+    use crate::format::layout::META_MAGIC;
+
+    /// An environment with a lock file or without one (`no_lock`), after
+    /// one commit (txnid 1).
+    fn open(dir: &Path, no_lock: bool) -> Environment {
+        let mut flags = EnvironmentFlags::NO_SYNC;
+        if no_lock {
+            flags |= EnvironmentFlags::NO_LOCK;
+        }
+        let env = Environment::builder().flags(flags).open(dir).unwrap();
+        commit(&env, 1);
+        env
+    }
+
+    /// Commits the value `[n]` under the key `n`.
+    fn commit(env: &Environment, n: u8) {
+        let mut txn = env.begin_rw_txn().unwrap();
+        txn.put(Dbi::MAIN, b"n", &[n], WriteFlags::empty()).unwrap();
+        txn.commit().unwrap();
+    }
+
+    /// What `Environment::read_meta` returns for a page that fails
+    /// validation.
+    fn invalid_meta() -> Error {
+        MdbError::Corrupted.into()
+    }
+
+    fn is_corrupted(e: &Error) -> bool {
+        e.to_err_code() == MdbError::Corrupted.to_err_code()
+    }
+
+    /// A copy that fails validation while a commit lands (the published
+    /// txnid moves) is torn, not bad: begin copies again and reads the
+    /// new snapshot.
+    #[test]
+    fn a_torn_copy_is_retried_when_the_txnid_moved() {
+        for no_lock in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let env = open(dir.path(), no_lock);
+            let copies = Cell::new(0);
+            let txn = RoTxn::begin_with(&env, |env: &Environment, i: usize| {
+                copies.set(copies.get() + 1);
+                if copies.get() == 1 {
+                    // A commit lands during the copy, which comes out torn.
+                    commit(env, 2);
+                    return Err(invalid_meta());
+                }
+                env.read_meta(i)
+            })
+            .unwrap();
+            assert_eq!(copies.get(), 2, "no_lock {no_lock}");
+            assert_eq!(txn.id(), 2, "no_lock {no_lock}");
+            assert_eq!(txn.get(Dbi::MAIN, b"n").unwrap(), Some(&[2][..]));
+        }
+    }
+
+    /// A copy that fails validation while the published txnid stays is of
+    /// a bad page: begin fails after that one copy, with the validation
+    /// error, as it did before torn copies were retried, and gives its
+    /// reader slot back.
+    #[test]
+    fn a_bad_copy_fails_when_the_txnid_did_not_move() {
+        for no_lock in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let env = open(dir.path(), no_lock);
+            let copies = Cell::new(0);
+            let e = RoTxn::begin_with(&env, |_: &Environment, _: usize| {
+                copies.set(copies.get() + 1);
+                Err(invalid_meta())
+            })
+            .unwrap_err();
+            assert!(is_corrupted(&e), "no_lock {no_lock}: {e}");
+            assert_eq!(copies.get(), 1, "no_lock {no_lock}");
+
+            // The same with a real bad page: the magic of meta page 1, the
+            // page of txnid 1, overwritten.
+            let off = env.page_size() + env.layout().meta_offset() + META_MAGIC;
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.path().join("data.mdb"))
+                .unwrap();
+            file.write_all_at(&[0; 4], off as u64).unwrap();
+            let e = env.begin_ro_txn().unwrap_err();
+            assert!(is_corrupted(&e), "no_lock {no_lock}: {e}");
+            assert_eq!(env.in_memory_readers().unwrap_or(0), 0);
+            assert!(env.reader_list().unwrap().is_empty());
+        }
+    }
+
+    /// Torn copies are retried a bounded number of times: if every copy
+    /// fails while a commit lands, begin gives up after
+    /// [`MAX_TORN_COPIES`] copies with the validation error.
+    #[test]
+    fn torn_copies_are_retried_a_bounded_number_of_times() {
+        for no_lock in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let env = open(dir.path(), no_lock);
+            let copies = Cell::new(0u32);
+            let e = RoTxn::begin_with(&env, |env: &Environment, _: usize| {
+                copies.set(copies.get() + 1);
+                commit(env, copies.get() as u8 + 1);
+                Err(invalid_meta())
+            })
+            .unwrap_err();
+            assert!(is_corrupted(&e), "no_lock {no_lock}: {e}");
+            assert_eq!(copies.get(), MAX_TORN_COPIES, "no_lock {no_lock}");
+            // The environment is fine: the next begin reads the last commit.
+            let txn = env.begin_ro_txn().unwrap();
+            assert_eq!(txn.id(), u64::from(MAX_TORN_COPIES) + 1);
+        }
     }
 }
