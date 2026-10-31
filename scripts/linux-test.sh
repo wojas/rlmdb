@@ -46,4 +46,4 @@ exec docker run --rm -i \
   -v lmdb-rs-cargo-registry:/usr/local/cargo/registry \
   -w /work \
   -e CARGO_TERM_COLOR=never \
-  "$image" cargo "$@"
+  "$image" sh -c 'case $1 in clippy) rustup component add clippy >/dev/null 2>&1 ;; esac; exec cargo "$@"' sh "$@"

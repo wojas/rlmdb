@@ -51,8 +51,11 @@ step "clippy -D warnings" cargo clippy --workspace --all-targets -- -D warnings
 step "doc -D warnings" env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 step "test (host: $(uname -s))" cargo test --workspace --no-fail-fast
 if [ "$linux" = 1 ]; then
+  step "clippy (Linux container)" "$here/scripts/linux-test.sh" clippy --workspace --all-targets -- -D warnings
   step "test (Linux container)" "$here/scripts/linux-test.sh" test --workspace --no-fail-fast
 else
+  summary="$summary$(printf '%-6s %-40s' SKIP 'clippy (Linux container)')
+"
   summary="$summary$(printf '%-6s %-40s' SKIP 'test (Linux container)')
 "
 fi
