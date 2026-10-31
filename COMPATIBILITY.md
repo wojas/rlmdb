@@ -98,7 +98,7 @@ not yet measured with `layout_dump` on a BSD.
   bytes differ from `mdb_copy`'s only for files that no C writer leaves
   without such a failure (or an unserialised writer) in between. Where C
   0.9.36 would leave a corrupt tree or leak pages (`KNOWN_C_BUGS.md` #11,
-  #14, #15, #19), Rust writes the correct result instead, which C reads
+  #14, #15, #19, #38), Rust writes the correct result instead, which C reads
   normally. Where a C bug decides shared state (sort order of misused
   integer keys #7, pages leaked by `mdb_drop` on the main DB #21, a
   child's dirty room #22), the bug is ported, so both sides agree.

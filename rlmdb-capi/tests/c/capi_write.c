@@ -651,6 +651,28 @@ static void test_cursors(void)
 	CHECK(veq(k, "sentinel") && veq(d, "c1"));	/* key untouched (C) */
 	trace_all("dups after MDB_CURRENT", txn, dups);
 	trace_stat("dups on a sub-page", txn, dups);
+	/* MDB_CURRENT replacing a key's only item by one of the maximum size
+	 * under a key of the maximum size: at 0.9's page sizes (the OS page
+	 * size) it fits a node, so C and Rust replace it in place. (Where it
+	 * does not, with pages of 2 KiB, C stores it on overflow pages and
+	 * rlmdb deletes and inserts: KNOWN_C_BUGS.md #38.) */
+	{
+		char kmax[511], dmax[511];
+		memset(kmax, 'K', sizeof(kmax));
+		memset(dmax, 'D', sizeof(dmax));
+		k = bv(kmax, sizeof(kmax));
+		d = sv("one");
+		OK(mdb_cursor_put(c2, &k, &d, 0));
+		d = bv(dmax, sizeof(dmax));
+		OK(mdb_cursor_put(c2, &k, &d, MDB_CURRENT));
+		trace_stat("dups after MDB_CURRENT of 511 bytes", txn, dups);
+		d = sv("two");
+		OK(mdb_cursor_put(c2, &k, &d, 0));
+		OK(mdb_cursor_count(c2, &cnt));
+		CHECK(cnt == 2);
+		trace_stat("dups with a second duplicate of it", txn, dups);
+		OK(mdb_del(txn, dups, &k, NULL));
+	}
 	k = sv("m");
 	for (i = 0; i < 600; i++) {
 		snprintf(buf, sizeof(buf), "dup-value-%05d-padding-padding", i);

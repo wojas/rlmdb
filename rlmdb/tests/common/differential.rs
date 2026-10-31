@@ -22,8 +22,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use rlmdb::consts::*;
 use rlmdb::{
-    CursorId, CursorOp, DatabaseFlags, Environment, EnvironmentFlags, Error, Format, RwTxn,
-    Transaction, WriteFlags,
+    CursorId, CursorOp, DatabaseFlags, Environment, EnvironmentFlags, Error, Format, MdbError,
+    RwTxn, Transaction, WriteFlags,
 };
 
 /// The C side of a differential round: which `writeops` to run, the format
@@ -59,6 +59,12 @@ pub trait Oracle {
     /// More checks of a round that agreed in full: `c_env` written by C,
     /// `rust_env` by Rust.
     fn after_round(&self, _c_env: &Path, _rust_env: &Path, _tag: &str) {}
+    /// A data file both sides start from instead of a new environment (for
+    /// example a 0.9 file with a page size C 0.9 cannot create but opens);
+    /// both open it as it is, without a page size request.
+    fn data_file(&self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// Lower-case hex of `b` (the script's encoding of keys and data).
@@ -131,6 +137,14 @@ fn rust_step(
         "cd" => code(&txn.cursor_del(
             cur[f[1].parse::<usize>().unwrap()],
             WriteFlags::from_bits_retain(f[2].parse().unwrap()),
+        )),
+        // C deletes and puts (writeops.c), which is what rlmdb's MDB_CURRENT
+        // does where C's in-place replacement goes wrong.
+        "cr" => code(&txn.cursor_put(
+            cur[f[1].parse::<usize>().unwrap()],
+            &unhex(f[2]),
+            &unhex(f[3]),
+            WriteFlags::CURRENT,
         )),
         "g" => {
             let key = f.get(3).map(|k| unhex(k));
@@ -588,6 +602,392 @@ pub fn dupfixed_1byte_puts(key: &[u8], n: u8) -> Vec<String> {
     (0..n).map(|v| format!("p:{k}:{}:0", hex(&[v]))).collect()
 }
 
+/// A script (for [`Ops::List`], two cursors, an `MDB_DUPSORT` DB) of
+/// `MDB_CURRENT` puts that replace a key's only item with items around the
+/// largest that fits a node with the key, for an oracle with `me_nodemax`
+/// `nodemax` and maximum key (and item) size `maxkey`, keys of `klen`
+/// bytes, padded to an even length in nodes if `even_keys` (1.0).
+///
+/// Where the new item does not fit a node, the op is `cr`: C deletes the
+/// item and puts the new one, which is what rlmdb's `MDB_CURRENT` must
+/// write there (C's would store the item on overflow pages,
+/// `KNOWN_C_BUGS.md` #38). Elsewhere both sides put with `MDB_CURRENT`:
+/// items that fit, and one byte over `maxkey` (`MDB_BAD_VALSIZE`, nothing
+/// changed). The other cursor sits on the same item (where the next key
+/// has a single item too) or on the key before it. The replaced keys then
+/// get a second duplicate, a refused `MDB_NODUPDATA` put of the item, a
+/// lookup and some deletes; two replacements run in nested transactions,
+/// one committed, one aborted.
+pub fn current_single_item_script(
+    nodemax: usize,
+    maxkey: usize,
+    even_keys: bool,
+    klen: usize,
+) -> Vec<String> {
+    const N: usize = 40;
+    let kpad = if even_keys { (klen + 1) & !1 } else { klen };
+    let key = |i: usize| {
+        let mut k = format!("k{i:03}").into_bytes();
+        k.resize(klen, b'q');
+        hex(&k)
+    };
+    let item = |len: usize, seed: usize| {
+        hex(&(0..len)
+            .map(|b| (b * 7 + seed * 13 + 1) as u8)
+            .collect::<Vec<u8>>())
+    };
+    let mut ops = Vec::new();
+    // Every fifth key has duplicates on a sub-page, the others one item.
+    let mut dups: std::collections::BTreeSet<usize> = (0..N).step_by(5).collect();
+    for i in 0..N {
+        ops.push(format!("p:{}:{}:0", key(i), item(3 + i % 7, i)));
+        if dups.contains(&i) {
+            for j in 1..4 {
+                ops.push(format!("p:{}:{}:0", key(i), item(3 + j, 100 + i + j)));
+            }
+        }
+    }
+    // Largest item that fits a node with the key, and around it.
+    let fit = (nodemax - 8).saturating_sub(kpad);
+    let mut lens: Vec<usize> = [1, fit, fit + 1, fit + 2, maxkey - 1, maxkey, maxkey + 1]
+        .into_iter()
+        .filter(|&n| (1..=maxkey + 1).contains(&n))
+        .collect();
+    lens.sort_unstable();
+    lens.dedup();
+    let mut single = (0..N).filter(|i| i % 5 != 0);
+    // Replaces key i's item by one of `len` bytes, the other cursor on the
+    // same item or the key before; true if C must delete and put.
+    let replace = |ops: &mut Vec<String>, i: usize, len: usize, same: bool| {
+        let d = item(len, i);
+        ops.push(format!("g:0:{MDB_SET}:{}", key(i)));
+        let other = if same { i } else { i - 1 };
+        ops.push(format!("g:1:{MDB_SET}:{}", key(other)));
+        let routed = len <= maxkey && 8 + kpad + len > nodemax;
+        if routed {
+            ops.push(format!("cr:0:{}:{d}", key(i)));
+        } else {
+            ops.push(format!("cp:0:{}:{d}:{MDB_CURRENT}", key(i)));
+        }
+        ops.push(format!("g:0:{MDB_GET_CURRENT}"));
+        routed
+    };
+    let mut routed_keys = Vec::new();
+    for (n, &len) in lens.iter().enumerate() {
+        for same in [false, true] {
+            let i = single.next().expect("enough keys");
+            // After the delete, the other cursor is on the next key: keep
+            // it off duplicates there (C's sub-cursor fixups after a
+            // delete are another matter, KNOWN_C_BUGS.md #18).
+            let same = same && i + 1 < N && !dups.contains(&(i + 1));
+            if replace(&mut ops, i, len, same) {
+                routed_keys.push((i, len));
+                dups.insert(i);
+            }
+            if n % 2 == 1 {
+                ops.push(format!("g:1:{MDB_NEXT}"));
+            }
+        }
+    }
+    for &(i, len) in &routed_keys {
+        let d = item(len, i);
+        ops.push(format!("p:{}:{}:0", key(i), item(5, 900 + i)));
+        ops.push(format!("p:{}:{d}:{MDB_NODUPDATA}", key(i)));
+        ops.push(format!("g:1:{MDB_GET_BOTH}:{}:{d}", key(i)));
+        ops.push(format!("g:1:{MDB_NEXT_DUP}"));
+    }
+    if let Some(&(i, len)) = routed_keys.first() {
+        ops.push(format!("d:{}:{}", key(i), item(len, i)));
+    }
+    if let Some(&(i, _)) = routed_keys.get(1) {
+        ops.push(format!("d:{}", key(i)));
+    }
+    let big = *lens.iter().rfind(|&&n| n <= maxkey).expect("an item");
+    for (end, keep) in [("nc", true), ("na", false)] {
+        let i = single.next().expect("enough keys");
+        ops.push("nb".into());
+        replace(&mut ops, i, big, false);
+        if keep {
+            ops.push(format!("p:{}:{}:0", key(i), item(4, 700 + i)));
+        }
+        ops.push(end.into());
+        ops.push(format!("g:0:{MDB_GET_CURRENT}"));
+    }
+    ops.push(format!("g:0:{MDB_FIRST}"));
+    ops.extend(std::iter::repeat_n(format!("g:0:{MDB_NEXT}"), 2 * N));
+    ops
+}
+
+/// What one case of [`single_item_on_overflow_pages`] does to the key
+/// `k` in a write transaction: an op on `db` (cursor `c` is on `k`'s item)
+/// and its result.
+type RepairOp = fn(&mut RwTxn<'_>, rlmdb::Dbi, CursorId, &Items) -> Result<(), Error>;
+
+/// A case of [`single_item_on_overflow_pages`]: its name, the op, the
+/// op's result, `k`'s items afterwards and the overflow pages left.
+type RepairCase = (
+    &'static str,
+    RepairOp,
+    Result<(), MdbError>,
+    Vec<Vec<u8>>,
+    usize,
+);
+
+/// The items of [`single_item_on_overflow_pages`]: `big` is the one C
+/// stored on overflow pages, the others are of its size.
+pub struct Items {
+    pub key: Vec<u8>,
+    pub big: Vec<u8>,
+    /// Sorts after `big`.
+    pub after: Vec<u8>,
+    /// Sorts before `big`.
+    pub before: Vec<u8>,
+}
+
+/// `KNOWN_C_BUGS.md` #38: C's `MDB_CURRENT` replacing a key's only item in
+/// an `MDB_DUPSORT` DB (`dbflags`) by one of `len` bytes that does not fit
+/// a node with the key (of `klen` bytes) stores it on overflow pages. The
+/// oracle's `writeops` builds that state, between two other keys; rlmdb
+/// reads it, then changes it in each way that converts, replaces or
+/// deletes the item, starting from a copy of the C-built file each time:
+/// a duplicate put converts the item to duplicates (read through its
+/// overflow pages, which are freed), an equal one or `MDB_CURRENT`
+/// replaces it with a sub-DB (or an inline item if it fits), deletes and
+/// `mdb_drop` free the pages, and an `MDB_NODUPDATA` put of the item
+/// changes nothing. After each, `md_overflow_pages` is what the pages say,
+/// the oracle's page audit passes, and its dump is that of the expected
+/// contents written by rlmdb from scratch. A compacting copy of the C-built
+/// file passes the audit and dumps the same.
+pub fn single_item_on_overflow_pages(o: &dyn Oracle, dbflags: u32, klen: usize, len: usize) {
+    let dupfixed = dbflags & MDB_DUPFIXED != 0;
+    let fill = |seed: u8| -> Vec<u8> {
+        (0..len)
+            .map(|b| (b as u8).wrapping_mul(7).wrapping_add(seed))
+            .collect()
+    };
+    let items = Items {
+        key: vec![b'k'; klen],
+        big: fill(0x41),
+        after: fill(0x42),
+        before: if dupfixed { vec![0; len] } else { vec![0] },
+    };
+    let (ka, kz) = (vec![b'a'; klen], vec![b'z'; klen]);
+    let dbs = DatabaseFlags::from_bits_retain(dbflags);
+    let new_dir = || {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(file) = o.data_file() {
+            std::fs::write(dir.path().join("data.mdb"), file).unwrap();
+        }
+        dir
+    };
+    let open = |dir: &Path| {
+        let mut b = Environment::builder();
+        b.format(o.format()).max_dbs(8).map_size(64 << 20);
+        if let (None, Some(ps)) = (o.data_file(), o.page_size()) {
+            b.page_size(ps);
+        }
+        b.open(dir).unwrap()
+    };
+    let overflow_pages = |dir: &Path| {
+        let env = open(dir);
+        let txn = env.begin_ro_txn().unwrap();
+        let db = txn.open_db(Some("t")).unwrap();
+        txn.stat(db).unwrap().overflow_pages
+    };
+    let audit = |dir: &Path, what: &str| {
+        let (code, stdout, stderr) = o.check_freelist(dir);
+        assert_eq!(code, 0, "{what}: page audit:\n{stdout}\n{stderr}");
+    };
+    // The expected contents, written by rlmdb from scratch.
+    let expected_dump = |k_items: &[Vec<u8>]| {
+        let dir = new_dir();
+        let env = open(dir.path());
+        let mut txn = env.begin_rw_txn().unwrap();
+        let db = txn
+            .create_db(Some("t"), dbs | DatabaseFlags::CREATE)
+            .unwrap();
+        txn.put(db, &ka, b"aa", WriteFlags::empty()).unwrap();
+        for d in k_items {
+            txn.put(db, &items.key, d, WriteFlags::empty()).unwrap();
+        }
+        txn.put(db, &kz, b"zz", WriteFlags::empty()).unwrap();
+        txn.commit().unwrap();
+        drop(env);
+        o.dump(dir.path(), "t")
+    };
+
+    // The state, as C leaves it.
+    let state = new_dir();
+    let mut crun = CRun::start(o, state.path(), "t", dbflags, 1, 64 << 20);
+    for op in [
+        format!("p:{}:{}:0", hex(&ka), hex(b"aa")),
+        format!("p:{}:{}:0", hex(&items.key), hex(b"first")),
+        format!("p:{}:{}:0", hex(&kz), hex(b"zz")),
+        format!("g:0:{MDB_SET}:{}", hex(&items.key)),
+        format!("cp:0:{}:{}:{MDB_CURRENT}", hex(&items.key), hex(&items.big)),
+    ] {
+        let line = crun.step(&op).expect("C writeops");
+        assert!(line.split(' ').nth(1) == Some("rc=0"), "{op}: {line}");
+    }
+    let (commit, err) = crun.finish();
+    assert_eq!(commit.as_deref(), Some("commit rc=0"), "{err}");
+    audit(state.path(), "C's state");
+    let ovpages = overflow_pages(state.path());
+    assert!(ovpages > 0, "C stored the item on overflow pages");
+    {
+        let env = open(state.path());
+        let txn = env.begin_ro_txn().unwrap();
+        let db = txn.open_db(Some("t")).unwrap();
+        assert_eq!(txn.get(db, &items.key).unwrap(), Some(&items.big[..]));
+        let mut c = txn.cursor(db).unwrap();
+        c.get(Some(&items.key), Some(&items.big), CursorOp::GetBoth)
+            .unwrap()
+            .expect("MDB_GET_BOTH finds the item");
+        assert_eq!(c.count().unwrap(), 1);
+    }
+    let c_dump = o.dump(state.path(), "t");
+    assert_eq!(c_dump, expected_dump(std::slice::from_ref(&items.big)));
+
+    let mut cases: Vec<RepairCase> = vec![
+        (
+            "a second duplicate",
+            |t, db, _, it| t.put(db, &it.key, &it.after, WriteFlags::empty()),
+            Ok(()),
+            vec![items.big.clone(), items.after.clone()],
+            0,
+        ),
+        (
+            "a duplicate that sorts first",
+            |t, db, _, it| t.put(db, &it.key, &it.before, WriteFlags::empty()),
+            Ok(()),
+            vec![items.before.clone(), items.big.clone()],
+            0,
+        ),
+        (
+            "MDB_NODUPDATA of the item",
+            |t, db, _, it| t.put(db, &it.key, &it.big, WriteFlags::NO_DUP_DATA),
+            Err(MdbError::KeyExist),
+            vec![items.big.clone()],
+            ovpages,
+        ),
+        (
+            "the item again",
+            |t, db, _, it| t.put(db, &it.key, &it.big, WriteFlags::empty()),
+            Ok(()),
+            vec![items.big.clone()],
+            0,
+        ),
+        (
+            "MDB_APPENDDUP of a smaller item",
+            |t, db, _, it| t.put(db, &it.key, &it.before, WriteFlags::APPEND_DUP),
+            Err(MdbError::KeyExist),
+            vec![items.big.clone()],
+            0,
+        ),
+        (
+            "MDB_CURRENT of another item of the size",
+            |t, _, c, it| t.cursor_put(c, &it.key, &it.after, WriteFlags::CURRENT),
+            Ok(()),
+            vec![items.after.clone()],
+            0,
+        ),
+        (
+            "mdb_del of the key",
+            |t, db, _, it| t.del(db, &it.key, None).map(|_| ()),
+            Ok(()),
+            vec![],
+            0,
+        ),
+        (
+            "mdb_del of the item",
+            |t, db, _, it| t.del(db, &it.key, Some(&it.big)).map(|_| ()),
+            Ok(()),
+            vec![],
+            0,
+        ),
+        (
+            "mdb_cursor_del",
+            |t, _, c, _| t.cursor_del(c, WriteFlags::empty()),
+            Ok(()),
+            vec![],
+            0,
+        ),
+    ];
+    if dupfixed {
+        cases.push((
+            "MDB_MULTIPLE starting with the item",
+            |t, _, c, it| {
+                let both = [it.big.clone(), it.after.clone()].concat();
+                let n =
+                    t.cursor_put_multiple(c, &it.key, &both, it.big.len(), WriteFlags::empty())?;
+                assert_eq!(n, 2, "MDB_MULTIPLE stored both");
+                Ok(())
+            },
+            Ok(()),
+            vec![items.big.clone(), items.after.clone()],
+            0,
+        ));
+        cases.push((
+            "MDB_CURRENT of another size",
+            |t, _, c, it| t.cursor_put(c, &it.key, b"tiny", WriteFlags::CURRENT),
+            Err(MdbError::BadValSize),
+            vec![items.big.clone()],
+            ovpages,
+        ));
+    } else {
+        cases.push((
+            "MDB_CURRENT of a small item",
+            |t, _, c, it| t.cursor_put(c, &it.key, b"tiny", WriteFlags::CURRENT),
+            Ok(()),
+            vec![b"tiny".to_vec()],
+            0,
+        ));
+    }
+    for (name, op, rc, k_items, left) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(state.path().join("data.mdb"), dir.path().join("data.mdb")).unwrap();
+        {
+            let env = open(dir.path());
+            let mut txn = env.begin_rw_txn().unwrap();
+            let db = txn.create_db(Some("t"), dbs).unwrap();
+            let c = txn.open_cursor(db).unwrap();
+            txn.cursor_get(c, Some(&items.key), None, CursorOp::Set)
+                .unwrap()
+                .unwrap();
+            let got = op(&mut txn, db, c, &items).map_err(|e| match e {
+                Error::Mdb(e) => e,
+                e => panic!("{name}: {e:?}"),
+            });
+            assert_eq!(got, rc, "{name}");
+            txn.close_cursor(c);
+            txn.commit().unwrap();
+        }
+        assert_eq!(
+            overflow_pages(dir.path()),
+            left,
+            "{name}: md_overflow_pages"
+        );
+        audit(dir.path(), name);
+        assert_eq!(o.dump(dir.path(), "t"), expected_dump(&k_items), "{name}");
+    }
+    {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(state.path().join("data.mdb"), dir.path().join("data.mdb")).unwrap();
+        let env = open(dir.path());
+        let mut txn = env.begin_rw_txn().unwrap();
+        let db = txn.create_db(Some("t"), dbs).unwrap();
+        txn.clear_db(db).unwrap();
+        txn.commit().unwrap();
+        drop(env);
+        assert_eq!(overflow_pages(dir.path()), 0, "mdb_drop: md_overflow_pages");
+        audit(dir.path(), "mdb_drop");
+    }
+    let copy = tempfile::tempdir().unwrap();
+    open(state.path()).copy_to_path(copy.path(), true).unwrap();
+    audit(copy.path(), "compacting copy");
+    assert_eq!(o.dump(copy.path(), "t"), c_dump, "compacting copy");
+}
+
 /// Where the ops of a round come from.
 pub enum Ops<'a> {
     Gen(Gen<'a>, usize),
@@ -965,6 +1365,10 @@ pub fn run_round_sized(
 ) -> Round {
     let cdir = tempfile::tempdir().unwrap();
     let rdir = tempfile::tempdir().unwrap();
+    if let Some(file) = o.data_file() {
+        std::fs::write(cdir.path().join("data.mdb"), &file).unwrap();
+        std::fs::write(rdir.path().join("data.mdb"), &file).unwrap();
+    }
     let mut builder = Environment::builder();
     builder
         .format(o.format())
@@ -1139,7 +1543,7 @@ pub fn run_profile(o: &dyn Oracle, p: Profile, seed: u64, rounds: usize, n: usiz
 fn cursor_of(op: &str) -> Option<usize> {
     let f: Vec<&str> = op.split(':').collect();
     match f[0] {
-        "g" | "cp" | "cd" => f[1].parse().ok(),
+        "g" | "cp" | "cd" | "cr" => f[1].parse().ok(),
         _ => None,
     }
 }

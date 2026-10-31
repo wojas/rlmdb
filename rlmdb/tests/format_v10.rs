@@ -615,3 +615,104 @@ fn appenddup_into_a_new_sub_db() {
     }
     assert_eq!(got, items);
 }
+
+/// The items of `db` in `env`, in order.
+fn all_items(env: &Environment, db: rlmdb::Dbi) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let txn = env.begin_ro_txn().unwrap();
+    let mut c = txn.cursor(db).unwrap();
+    let mut out = Vec::new();
+    while let Some((k, v)) = c.next().unwrap() {
+        out.push((k.to_vec(), v.to_vec()));
+    }
+    out
+}
+
+/// The Go port's reproducer of `KNOWN_C_BUGS.md` #38, with 4 KiB pages:
+/// `MDB_CURRENT` replaces the only item of a 103-byte key in a `DUP_SORT`
+/// DB with one of 1978 bytes (the maximum), which does not fit a node with
+/// the key. C stores it on overflow pages, and its next duplicate put then
+/// takes the overflow reference and the bytes after it for the item. rlmdb
+/// deletes the item and inserts the new one, into a sub-DB, so the second
+/// duplicate goes next to it; one byte more is refused before anything
+/// changes.
+#[test]
+fn current_with_an_item_too_big_for_a_node() {
+    let dir = tmp();
+    let env = v10(4096).open(dir.path()).unwrap();
+    assert_eq!(env.max_key_size(), 1978);
+    let (ka, key, kz) = (vec![b'a'; 103], vec![b'k'; 103], vec![b'z'; 103]);
+    let big: Vec<u8> = (0..1978u32).map(|i| (i * 7 + 1) as u8).collect();
+    let mut txn = env.begin_rw_txn().unwrap();
+    let db = txn
+        .create_db(Some("d"), DatabaseFlags::DUP_SORT | DatabaseFlags::CREATE)
+        .unwrap();
+    for (k, v) in [(&ka, &b"before"[..]), (&key, b"first"), (&kz, b"after")] {
+        txn.put(db, k, v, WriteFlags::empty()).unwrap();
+    }
+    let c = txn.open_cursor(db).unwrap();
+    txn.cursor_get(c, Some(&key), None, rlmdb::CursorOp::Set)
+        .unwrap()
+        .unwrap();
+    let mut too_big = big.clone();
+    too_big.push(0);
+    let err = txn
+        .cursor_put(c, &key, &too_big, WriteFlags::CURRENT)
+        .unwrap_err();
+    assert!(matches!(err, Error::Mdb(MdbError::BadValSize)), "{err:?}");
+    assert_eq!(txn.get(db, &key).unwrap(), Some(&b"first"[..]));
+    txn.cursor_put(c, &key, &big, WriteFlags::CURRENT).unwrap();
+    // The cursor is on the new item, which is in a sub-DB.
+    let cur = txn
+        .cursor_get(c, None, None, rlmdb::CursorOp::GetCurrent)
+        .unwrap()
+        .map(|(k, v)| (k.to_vec(), v.to_vec()));
+    assert_eq!(cur, Some((key.clone(), big.clone())));
+    let stat = txn.stat(db).unwrap();
+    assert_eq!((stat.overflow_pages, stat.entries), (0, 3));
+    txn.put(db, &key, b"second", WriteFlags::empty()).unwrap();
+    txn.close_cursor(c);
+    txn.commit().unwrap();
+    let want = vec![
+        (ka, b"before".to_vec()),
+        (key.clone(), big),
+        (key, b"second".to_vec()),
+        (kz, b"after".to_vec()),
+    ];
+    assert_eq!(all_items(&env, db), want);
+    let txn = env.begin_ro_txn().unwrap();
+    let stat = txn.stat(db).unwrap();
+    assert_eq!((stat.overflow_pages, stat.entries), (0, 4));
+    // The page counts include the sub-DB's leaf.
+    assert_eq!(stat.leaf_pages, 2);
+}
+
+/// The other way into the state of `KNOWN_C_BUGS.md` #38: a duplicate
+/// comparator that calls items of different sizes equal (this one looks at
+/// the first byte only) makes a put of a longer item an overwrite of the
+/// key's only item ("does data match?" in `mdb_cursor_put`), and C would
+/// store one that does not fit a node on overflow pages. rlmdb deletes and
+/// inserts it, into a sub-DB.
+#[test]
+fn equal_item_too_big_for_a_node() {
+    fn first_byte(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+        a.first().cmp(&b.first())
+    }
+    let dir = tmp();
+    let env = v10(4096).open(dir.path()).unwrap();
+    let key = vec![b'k'; 103];
+    let big = vec![b'x'; 1978];
+    let mut txn = env.begin_rw_txn().unwrap();
+    let db = txn
+        .create_db(Some("d"), DatabaseFlags::DUP_SORT | DatabaseFlags::CREATE)
+        .unwrap();
+    txn.set_dupsort(db, Some(first_byte)).unwrap();
+    txn.put(db, &key, b"x1", WriteFlags::empty()).unwrap();
+    txn.put(db, &key, &big, WriteFlags::empty()).unwrap();
+    let stat = txn.stat(db).unwrap();
+    assert_eq!((stat.overflow_pages, stat.entries), (0, 1));
+    assert_eq!(txn.get(db, &key).unwrap(), Some(&big[..]));
+    txn.put(db, &key, b"y", WriteFlags::empty()).unwrap();
+    txn.commit().unwrap();
+    let want = vec![(key.clone(), big), (key, b"y".to_vec())];
+    assert_eq!(all_items(&env, db), want);
+}

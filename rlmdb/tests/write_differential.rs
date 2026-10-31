@@ -18,12 +18,17 @@ use std::path::{Path, PathBuf};
 use common::{hex, CTools};
 use differential::{splitmix64, Ops, Oracle, Profile, Round};
 use rlmdb::consts::*;
+use rlmdb::format::Meta;
 use rlmdb::Format;
 
 /// C LMDB 0.9 (`tests/lmdb-c/0.9`), built by [`common::c_tools`].
 struct C09 {
     tools: &'static CTools,
     writeops: PathBuf,
+    /// With `Some(ps)`: both sides start from an empty data file of
+    /// `ps`-byte pages ([`empty_data_file`]), and after a round the files
+    /// must also agree page for page ([`C09::same_pages`]).
+    file_page_size: Option<usize>,
 }
 
 impl C09 {
@@ -31,8 +36,116 @@ impl C09 {
         C09 {
             tools,
             writeops: tools.bin("writeops"),
+            file_page_size: None,
         }
     }
+
+    /// C 0.9 on environments of `ps`-byte pages. 0.9 creates environments
+    /// with the OS page size only, but opens a file of any page size
+    /// (`mdb_env_open2` takes `mm_psize`), and so does rlmdb.
+    fn with_page_size(tools: &'static CTools, ps: usize) -> C09 {
+        C09 {
+            file_page_size: Some(ps),
+            ..C09::new(tools)
+        }
+    }
+
+    /// The files C and Rust committed hold the same pages:
+    /// `mdb_stat -e -f -ff -a` (last page, page counts, the free pages by
+    /// number) prints the same but for the reader count, and every page is
+    /// the same in its [`canonical09`] form, which leaves out only the bytes
+    /// C 0.9 does not initialise.
+    fn same_pages(&self, c_env: &Path, rust_env: &Path, tag: &str) {
+        let stat = |env: &Path| {
+            self.tools
+                .stat_text(env, &["-e", "-f", "-ff", "-a"])
+                .lines()
+                .filter(|l| !l.contains("readers used"))
+                .map(|l| format!("{l}\n"))
+                .collect::<String>()
+        };
+        assert_eq!(stat(c_env), stat(rust_env), "{tag}: mdb_stat -e -f -ff -a");
+        let (c, r) = (
+            std::fs::read(c_env.join("data.mdb")).unwrap(),
+            std::fs::read(rust_env.join("data.mdb")).unwrap(),
+        );
+        let ps = self.file_page_size.unwrap_or_else(common::os_page_size);
+        let page = |f: &[u8], p: usize| f.get(p * ps..(p + 1) * ps).map(|b| canonical09(b, false));
+        let differ: Vec<usize> = (0..c.len().max(r.len()).div_ceil(ps))
+            .filter(|&p| page(&c, p) != page(&r, p))
+            .collect();
+        assert!(differ.is_empty(), "{tag}: pages {differ:?} differ");
+    }
+}
+
+/// A 0.9 page (or a sub-page, `sub`) without the bytes C does not
+/// initialise: C 0.9 hands out a page buffer it freed earlier in the
+/// transaction as it is (`mdb_page_malloc`, `me_dpages`; 1.0 clears it),
+/// and leaves stale bytes where nodes were deleted or moved and in the
+/// padding of odd-sized nodes. So the form is the header (without
+/// `mp_pad` of an ordinary branch or leaf page, which nothing reads there),
+/// the node pointers, every node's header, key and data (an overflow
+/// reference's page number, a sub-page in this form), the packed keys of
+/// a `P_LEAF2` page, and every byte of other pages (meta, overflow, free).
+fn canonical09(page: &[u8], sub: bool) -> Vec<u8> {
+    use rlmdb::format::node::{F_BIGDATA, F_DUPDATA, F_SUBDATA};
+    use rlmdb::format::page::{P_BRANCH, P_LEAF, P_LEAF2};
+    let u16_at = |o: usize| page.get(o..o + 2).map(|b| u16::from_ne_bytes([b[0], b[1]]));
+    let (Some(flags), Some(lower)) = (u16_at(10), u16_at(12)) else {
+        return page.to_vec();
+    };
+    if flags & (P_BRANCH | P_LEAF) == 0 || usize::from(lower) < 16 {
+        return page.to_vec();
+    }
+    let nkeys = (usize::from(lower) - 16) / 2;
+    let mut out = page[..16].to_vec();
+    if flags & P_LEAF2 != 0 {
+        let ksize = usize::from(u16_at(8).unwrap_or(0));
+        out.extend_from_slice(page.get(16..16 + nkeys * ksize).unwrap_or(page));
+        return out;
+    }
+    if !sub {
+        out[8..10].fill(0);
+    }
+    out.extend_from_slice(&page[16..usize::from(lower)]);
+    for i in 0..nkeys {
+        let Some(off) = u16_at(16 + 2 * i).map(usize::from) else {
+            return page.to_vec();
+        };
+        let (Some(lo), Some(hi), Some(nflags), Some(ksize)) = (
+            u16_at(off),
+            u16_at(off + 2),
+            u16_at(off + 4),
+            u16_at(off + 6),
+        ) else {
+            return page.to_vec();
+        };
+        let dsize = usize::from(lo) | usize::from(hi) << 16;
+        let key_end = off + 8 + usize::from(ksize);
+        let data_len = match () {
+            _ if flags & P_BRANCH != 0 => 0,
+            _ if nflags & F_BIGDATA != 0 => 8,
+            _ => dsize,
+        };
+        let Some(node) = page.get(off..key_end + data_len) else {
+            return page.to_vec();
+        };
+        if nflags & (F_DUPDATA | F_SUBDATA) == F_DUPDATA {
+            out.extend_from_slice(&node[..8 + usize::from(ksize)]);
+            out.extend_from_slice(&canonical09(&node[8 + usize::from(ksize)..], true));
+        } else {
+            out.extend_from_slice(node);
+        }
+    }
+    out
+}
+
+/// A new 0.9 environment's data file with `ps`-byte pages: the two meta
+/// pages `mdb_env_init_meta` writes.
+fn empty_data_file(ps: usize) -> Vec<u8> {
+    let mut file = vec![0u8; 2 * ps];
+    Meta::new_env(ps as u32, 64 << 20, 0).write_initial_pages(&mut file, ps);
+    file
 }
 
 impl Oracle for C09 {
@@ -60,6 +173,16 @@ impl Oracle for C09 {
     fn page_usage(&self, env: &Path) -> String {
         let s = common::parse_stat(&self.tools.stat_text(env, &["-a", "-f"]));
         format!("{:?} free {:?}", s.dbs, s.free_pages)
+    }
+
+    fn data_file(&self) -> Option<Vec<u8>> {
+        self.file_page_size.map(empty_data_file)
+    }
+
+    fn after_round(&self, c_env: &Path, rust_env: &Path, tag: &str) {
+        if self.file_page_size.is_some() {
+            self.same_pages(c_env, rust_env, tag);
+        }
     }
 }
 
@@ -206,6 +329,50 @@ fn diff_nested_dupfixed_1byte() {
         ..Profile::new(MDB_DUPSORT | MDB_DUPFIXED, 4)
     };
     run_profile(p, 0xf4, 6, 1200);
+}
+
+/// 0.9's `me_nodemax` for pages of `ps` bytes.
+fn nodemax09(ps: usize) -> usize {
+    (((ps - 16) / 2) & !1) - 2
+}
+
+/// `MDB_CURRENT` replacing a key's only item in an `MDB_DUPSORT` DB
+/// ([`differential::current_single_item_script`], keys of 500 bytes). At
+/// the OS page size every 0.9 item fits a node with any key (both are at
+/// most 511 bytes, `me_nodemax` is at least 2038): both sides replace in
+/// place. With 2 KiB pages, a file C 0.9 does not create but opens, the
+/// larger items do not fit: C's `MDB_CURRENT` would store them on overflow
+/// pages, rlmdb's deletes and inserts (`KNOWN_C_BUGS.md` #38) and must
+/// leave the file C's `mdb_cursor_del` + `mdb_cursor_put` leave, page for
+/// page but for the bytes C 0.9 leaves uninitialised
+/// ([`C09::same_pages`]).
+#[test]
+fn diff_current_single_item() {
+    let c = require_c!();
+    let p = Profile::new(MDB_DUPSORT, 0);
+    let ps = common::os_page_size();
+    let ops = differential::current_single_item_script(nodemax09(ps), MDB_MAXKEYSIZE, false, 500);
+    assert!(!ops.iter().any(|op| op.starts_with("cr:")));
+    assert_eq!(run_round(c, &p, 2, Ops::List(ops), "current"), Round::Same);
+    let o = C09::with_page_size(c, 2048);
+    let ops = differential::current_single_item_script(nodemax09(2048), MDB_MAXKEYSIZE, false, 500);
+    assert!(ops.iter().any(|op| op.starts_with("cr:")));
+    let r = differential::run_round(&o, &p, 2, Ops::List(ops), "current-2k");
+    assert_eq!(r, Round::Same);
+}
+
+/// The 0.9 side of `KNOWN_C_BUGS.md` #38
+/// ([`differential::single_item_on_overflow_pages`]): with 2 KiB pages C
+/// 0.9's `MDB_CURRENT` leaves a key's only item (511 bytes, the key 500)
+/// on overflow pages; rlmdb converts, replaces and deletes it correctly,
+/// in a `MDB_DUPSORT` and a `MDB_DUPFIXED` DB.
+#[test]
+fn c_single_item_on_overflow_pages() {
+    let c = require_c!();
+    let o = C09::with_page_size(c, 2048);
+    for flags in [MDB_DUPSORT, MDB_DUPSORT | MDB_DUPFIXED] {
+        differential::single_item_on_overflow_pages(&o, flags, 500, MDB_MAXKEYSIZE);
+    }
 }
 
 #[test]

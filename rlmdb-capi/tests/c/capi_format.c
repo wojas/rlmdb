@@ -653,6 +653,70 @@ static void test_large_items(unsigned psize)
 	free(items);
 }
 
+/* MDB_CURRENT replacing a key's only item in a DUPSORT DB by one that does
+ * not fit a node with the key (keys of 103 bytes, items of the maximum key
+ * size; with 4 KiB pages the Go port's reproducer: 1978 bytes). C stores
+ * it on overflow pages and misreads it at the next duplicate put
+ * (KNOWN_C_BUGS.md #38); rlmdb deletes and inserts it, into a sub-DB, so
+ * nothing is on overflow pages and the second duplicate goes next to it.
+ * One byte more than the maximum fails before anything changes. */
+static void test_current_too_big(unsigned psize)
+{
+	MDB_env *env;
+	MDB_txn *txn;
+	MDB_cursor *cur;
+	MDB_dbi dups;
+	MDB_val k, d, kk, dd;
+	MDB_stat st;
+	unsigned char key[103], *big;
+	size_t maxkey, n = 0;
+
+	OK(open_env(new_dir(), RLMDB_FORMAT_10, psize, 0, &env));
+	if (!env)
+		return;
+	maxkey = (size_t)mdb_env_get_maxkeysize(env);
+	big = malloc(maxkey + 1);
+	memset(key, 'k', sizeof(key));
+	fill(big, maxkey + 1, 7);
+	big[0] = 1; /* sorts before "second" */
+	OK(mdb_txn_begin(env, NULL, 0, &txn));
+	OK(mdb_dbi_open(txn, "dups", MDB_CREATE | MDB_DUPSORT, &dups));
+	k = val(key, sizeof(key) < maxkey ? sizeof(key) : maxkey);
+	d = val("first", 5);
+	OK(mdb_put(txn, dups, &k, &d, 0));
+	OK(mdb_cursor_open(txn, dups, &cur));
+	OK(mdb_cursor_get(cur, &k, &d, MDB_SET));
+	d = val(big, maxkey + 1);
+	RC(mdb_cursor_put(cur, &k, &d, MDB_CURRENT), MDB_BAD_VALSIZE);
+	OK(mdb_cursor_get(cur, &kk, &dd, MDB_GET_CURRENT));
+	CHECK(eq(dd, (const unsigned char *)"first", 5));
+	d = val(big, maxkey);
+	OK(mdb_cursor_put(cur, &k, &d, MDB_CURRENT));
+	OK(mdb_cursor_get(cur, &kk, &dd, MDB_GET_CURRENT));
+	CHECK(eq(kk, k.mv_data, k.mv_size) && eq(dd, big, maxkey));
+	OK(mdb_stat(txn, dups, &st));
+	CHECK(st.ms_overflow_pages == 0 && st.ms_entries == 1);
+	d = val("second", 6);
+	OK(mdb_put(txn, dups, &k, &d, 0));
+	mdb_cursor_close(cur);
+	OK(mdb_txn_commit(txn));
+
+	OK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
+	OK(mdb_cursor_open(txn, dups, &cur));
+	OK(mdb_cursor_get(cur, &k, &dd, MDB_SET));
+	OK(mdb_cursor_count(cur, &n));
+	CHECK(n == 2);
+	CHECK(eq(dd, big, maxkey));
+	OK(mdb_cursor_get(cur, &kk, &dd, MDB_NEXT_DUP));
+	CHECK(eq(dd, (const unsigned char *)"second", 6));
+	OK(mdb_stat(txn, dups, &st));
+	CHECK(st.ms_overflow_pages == 0 && st.ms_entries == 2);
+	mdb_cursor_close(cur);
+	mdb_txn_abort(txn);
+	mdb_env_close(env);
+	free(big);
+}
+
 int main(int argc, char **argv)
 {
 	unsigned sizes[] = { 1024, 4096, 65536 };
@@ -669,8 +733,10 @@ int main(int argc, char **argv)
 	test_sniff();
 	test_defaults();
 	test_refused_flags();
-	for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
+	for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
 		test_large_items(sizes[i]);
+		test_current_too_big(sizes[i]);
+	}
 	printf("capi_format: %d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

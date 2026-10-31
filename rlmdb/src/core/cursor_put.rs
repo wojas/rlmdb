@@ -13,6 +13,8 @@
 //!    ([`RwTxn::put_current`]), or for `MDB_DUPSORT` prepare the node that
 //!    will hold the duplicates ([`RwTxn::dup_prepare`]): convert a single
 //!    item into a sub-page, grow a sub-page, or promote it to a sub-DB;
+//!    where C's in-place replacement goes wrong, delete the item and
+//!    insert the new one instead ([`RwTxn::replace_current`]);
 //! 4. insert the node, splitting the leaf if it is full
 //!    ([`RwTxn::insert_leaf_node`]), and fix up the other cursors;
 //! 5. for duplicates, store the data item(s) through the sub-cursor
@@ -126,7 +128,7 @@ enum DupStep {
     /// `goto put_sub`: the node already holds room for the new item.
     PutSub,
     /// `MDB_CURRENT` with an item that does not fit the sub-page: delete the
-    /// current item, then insert the new one.
+    /// current item, then insert the new one ([`RwTxn::replace_current`]).
     Replace,
     /// `goto new_sub`: (re)insert the node with this data; then store the
     /// old single item `dkey` (if converting) and the new item in the
@@ -161,6 +163,48 @@ impl<'env> RwTxn<'env> {
             || page_ops::size_left(l, fp) + even(l.leaf_size(oldk, 0)) + 2
                 >= even(l.leaf_size(size, 0) + 2)
     }
+
+    /// For `MDB_CURRENT` on a `MDB_DUPSORT` key: is the cursor on the
+    /// key's only item (a node without duplicates), and would an item of
+    /// `dsize` bytes under a key of `ksize` bytes go to overflow pages if
+    /// it replaced it there ([`overflows_node`])?
+    fn current_single_overflows(&self, mc: CRef, ksize: usize, dsize: usize) -> Result<bool> {
+        if !overflows_node(self.layout(), self.core.env.node_max(), ksize, dsize) {
+            return Ok(false);
+        }
+        let page = self.top_page(mc)?;
+        if page.is_leaf2() {
+            return Ok(false);
+        }
+        let node = page.node(self.cur(mc).ki_top()).ok_or_else(corrupted)?;
+        Ok(!node.is_dupdata())
+    }
+
+    /// `MDB_CURRENT` as `lmdb.h` describes it for an item of another size:
+    /// delete the item under `mc`, then put `data` under `key` through
+    /// `mc` (which ends on it), as `mdb_cursor_del` + `mdb_cursor_put`
+    /// would. For the replacements C gets wrong in place
+    /// (`KNOWN_C_BUGS.md` #15, #38). Once the delete is done a failed
+    /// insert leaves the transaction half changed, so it fails.
+    fn replace_current(&mut self, mc: CRef, key: &[u8], data: PutData<'_>) -> Result<()> {
+        self.del_at(mc, 0)?;
+        let rc = self.put_at(mc, key, data, 0);
+        if rc.is_err() {
+            self.w.flags |= TXN_ERROR;
+        }
+        rc.map(|_| ())
+    }
+}
+
+/// Whether `mdb_node_add` puts `dsize` bytes of leaf data under a key of
+/// `ksize` bytes on overflow pages (`F_BIGDATA`): header, key (1.0: padded
+/// to an even length) and data, the data not padded, larger than
+/// `nodemax`. (`LEAFSIZE`, which decides whether a new `MDB_DUPSORT` key's
+/// first item goes straight to a sub-DB, also pads the data in 1.0, so an
+/// item that overflows a node always goes there.)
+#[inline(always)]
+fn overflows_node(l: &Layout, nodemax: usize, ksize: usize, dsize: usize) -> bool {
+    NODE_SIZE + l.node_key_len(ksize) + dsize > nodemax
 }
 
 /// What the overwrite stage decided.
@@ -259,6 +303,20 @@ impl<'env> RwTxn<'env> {
         }
         if dupsort && u32::from(db.flags) & MDB_DUPFIXED != 0 && pos == Pos::Found {
             self.check_dupfixed_size(mc, data.size)?;
+        }
+        if dupsort
+            && flags == MDB_CURRENT
+            && self.current_single_overflows(mc, key.len(), data.size)?
+        {
+            // C overwrites the key's only item in place (`goto current`)
+            // and stores the new one on overflow pages: an F_BIGDATA node
+            // in a DUPSORT DB, which no other put makes and which C's next
+            // duplicate put reads as inline data. Delete and insert
+            // instead, before anything else, as mdb_cursor_del and
+            // mdb_cursor_put would: the item goes to a sub-DB, as a new
+            // key's first item of that size does (KNOWN_C_BUGS.md #38).
+            self.replace_current(mc, key, data)?;
+            return Ok(0);
         }
 
         // Cursor is positioned, check for room in the dirty list.
@@ -521,15 +579,32 @@ impl<'env> RwTxn<'env> {
             let mut go_current = !dupsort;
             if dupsort {
                 match self.dup_prepare(mc, item, flags, false, false)? {
+                    DupStep::Current
+                        if overflows_node(
+                            self.layout(),
+                            self.core.env.node_max(),
+                            key.len(),
+                            item.size,
+                        ) =>
+                    {
+                        // Overwriting the key's only item with one the
+                        // comparator calls equal (a C-made F_BIGDATA item,
+                        // or one of another size) that does not fit a node:
+                        // C would leave it on overflow pages
+                        // (KNOWN_C_BUGS.md #38). Delete and insert; an
+                        // MDB_MULTIPLE batch goes on with its next item.
+                        self.replace_current(mc, key, PutData::bytes(item.bytes))?;
+                        let rc = (*flags & MDB_MULTIPLE == 0).then_some(Ok(()));
+                        return Ok((rc, false));
+                    }
                     DupStep::Current => go_current = true,
                     DupStep::PutSub => {
                         let (rc, ins) = self.put_sub(mc, item, *flags, None, None, false);
                         return self.after_sub(mc, rc, ins, false);
                     }
                     DupStep::Replace => {
-                        self.del_at(mc, 0)?;
-                        let rc = self.put_at(mc, key, PutData::bytes(item.bytes), 0);
-                        return Ok((Some(rc.map(|_| ())), false));
+                        self.replace_current(mc, key, PutData::bytes(item.bytes))?;
+                        return Ok((Some(Ok(())), false));
                     }
                     DupStep::NewSub {
                         xdata,
@@ -805,11 +880,22 @@ impl<'env> RwTxn<'env> {
             fp = h;
             xsize = 0;
         } else {
-            let (nflags, ksize) = {
+            let (nflags, ksize, overflow) = {
                 let page = self.top_page(mc)?;
                 let n = page.node(ki).ok_or_else(corrupted)?;
-                olddata.extend_from_slice(n.inline_data().ok_or_else(corrupted)?);
-                (n.flags(), n.key_size())
+                let overflow = if n.flags() & (F_DUPDATA | F_BIGDATA) == F_BIGDATA {
+                    // A single item on overflow pages, which only C's
+                    // MDB_CURRENT stores in a DUPSORT DB (KNOWN_C_BUGS.md
+                    // #38). C reads the overflow reference and what follows
+                    // it in the page as the item; read the item.
+                    let pgno = n.overflow_pgno().ok_or_else(corrupted)?;
+                    olddata.extend_from_slice(self.core.overflow_data(pgno, n.data_size())?);
+                    Some(pgno)
+                } else {
+                    olddata.extend_from_slice(n.inline_data().ok_or_else(corrupted)?);
+                    None
+                };
+                (n.flags(), n.key_size(), overflow)
             };
             if nflags & F_DUPDATA == 0 {
                 // Was a single item before, must convert now.
@@ -827,6 +913,15 @@ impl<'env> RwTxn<'env> {
                     }
                     // Overwrite it.
                     return Ok(DupStep::Current);
+                }
+                if let Some(pgno) = overflow {
+                    // The item becomes the first duplicate (a key of the
+                    // sub-tree, so at most the maximum key size, as C's
+                    // MDB_CURRENT checked): its overflow pages are free.
+                    if olddata.len().wrapping_sub(1) >= self.core.env.max_key_size() {
+                        return Err(corrupted());
+                    }
+                    self.ovpage_free(mc, pgno)?;
                 }
                 // Make sub-page header for the dup items, with dummy body.
                 let mut size = l.page_hdr + olddata.len() + item.size;
@@ -930,9 +1025,10 @@ impl<'env> RwTxn<'env> {
             // `me_psize - olddata.mv_size`). Negative when a single
             // MDB_DUPFIXED item becomes a sub-DB whose fake sub-page (two
             // items and room for two more) is larger than a page: items
-            // over a quarter page, reachable with 1.0's small pages only.
-            // C's unsigned arithmetic wraps back to the page's
-            // `mp_upper` there; `build_subpage` adds it signed.
+            // over a quarter page, reachable in 1.0 only (0.9 items are at
+            // most 511 bytes). C's unsigned arithmetic wraps back to the
+            // page's `mp_upper` there; `build_subpage` adds it signed (and
+            // in 16 bits, for a fake sub-page over 64 KiB).
             let sub_offset = ps as isize - olddata_size as isize;
             *flags |= u32::from(F_DUPDATA | F_SUBDATA);
             dummy.root = mp;
@@ -1280,7 +1376,7 @@ impl<'env> RwTxn<'env> {
                 node_size += l.ovpage_size;
                 let r = l.read_overflow_ref(d.bytes).ok_or_else(corrupted)?;
                 body = NodeBody::Overflow { r, size: d.size };
-            } else if node_size + d.size > nodemax {
+            } else if overflows_node(l, nodemax, key.len(), d.size) {
                 // Put data on overflow page.
                 let ovpages = l.overflow_pages_for(d.size, ps);
                 node_size = even(node_size + l.ovpage_size);
@@ -1376,7 +1472,8 @@ struct SubpageSrc<'a> {
 /// `mp_upper += offset`, the nodes moved to the end and their pointers
 /// shifted, or the `P_LEAF2` keys copied. `offset` is negative when a
 /// `P_LEAF2` fake sub-page larger than a page becomes a sub-DB root (see
-/// the caller); `None` if a result is out of range (corrupt input).
+/// the caller), whose `mp_upper` is then computed in 16 bits, as C does;
+/// `None` if a result is out of range (corrupt input).
 /// `dirty` is the `P_DIRTY` bit the new page gets: always for a sub-DB root
 /// (an ordinary dirty page), [`Layout::subpage_dirty`] for a sub-page.
 fn build_subpage(
@@ -1397,7 +1494,16 @@ fn build_subpage(
     page_ops::set_flags(l, mp, fp_flags | dirty);
     page_ops::set_pad(l, mp, fp_pad);
     page_ops::set_lower(l, mp, page_ops::lower(l, fp));
-    let mp_upper = fp_upper.checked_add_signed(offset)?;
+    let mp_upper = if fp_flags & P_LEAF2 != 0 {
+        // `MP_UPPER(mp) = MP_UPPER(fp) + offset` in C's 16 bits: the fake
+        // sub-page of a single item of more than 16 KiB (64 KiB pages)
+        // is larger than 64 KiB, so its `mp_upper` wrapped, and the sum
+        // wraps back to the new page's.
+        let stored = (fp_upper - l.ptr_base) as isize + offset;
+        l.ptr_base + stored.rem_euclid(1 << 16) as usize
+    } else {
+        fp_upper.checked_add_signed(offset)?
+    };
     page_ops::set_upper(l, mp, mp_upper);
     if fp_flags & P_LEAF2 != 0 {
         let len = nkeys * usize::from(fp_pad);

@@ -23,6 +23,11 @@
  *   cp:<n>:<k>:<d>:<flags>   mdb_cursor_put on cursor n
  *   d:<k>[:<d>]              mdb_del
  *   cd:<n>:<flags>           mdb_cursor_del on cursor n
+ *   cr:<n>:<k>:<d>           mdb_cursor_del on cursor n, then (if that
+ *                            succeeded) mdb_cursor_put of k/d with flags 0
+ *                            on it: what rlmdb's MDB_CURRENT does where C's
+ *                            in-place replacement goes wrong (the Rust side
+ *                            of the harness runs it as one MDB_CURRENT put)
  *   g:<n>:<opnum>[:<k>[:<d>]] mdb_cursor_get on cursor n (MDB_cursor_op number)
  *   nb                       begin a nested txn of the current one and open
  *                            <ncursors> cursors in it (they become current)
@@ -226,6 +231,12 @@ int main(int argc, char **argv)
 			rc = mdb_del(txn, dbi, &key, nf == 3 ? &data : NULL);
 		} else if (!strcmp(f[0], "cd") && nf == 3) {
 			rc = mdb_cursor_del(CUR(atoi(f[1])), (unsigned)atoi(f[2]));
+		} else if (!strcmp(f[0], "cr") && nf == 4) {
+			key.mv_data = kbuf; key.mv_size = unhex(f[2], kbuf);
+			data.mv_data = dbuf; data.mv_size = unhex(f[3], dbuf);
+			rc = mdb_cursor_del(CUR(atoi(f[1])), 0);
+			if (!rc)
+				rc = mdb_cursor_put(CUR(atoi(f[1])), &key, &data, 0);
 		} else if (!strcmp(f[0], "g") && nf >= 3) {
 			if (nf >= 4) { key.mv_data = kbuf; key.mv_size = unhex(f[3], kbuf); }
 			if (nf >= 5) { data.mv_data = dbuf; data.mv_size = unhex(f[4], dbuf); }

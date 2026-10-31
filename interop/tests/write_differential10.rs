@@ -214,16 +214,25 @@ fn diff10_dupfixed() {
     );
 }
 
-/// `MDB_DUPFIXED` items over a quarter page, which only 1.0's small pages
-/// allow (in 0.9 items are at most 511 bytes and pages at least 4 KiB): a
-/// key's second item turns its single item into a sub-DB at once, because
-/// the fake sub-page (two items and room for two more) is larger than a
-/// page. C's unsigned offset arithmetic wraps there and still gives the
-/// root its `mp_upper`; rlmdb must write the same page (it panicked on the
-/// subtraction before).
+/// `MDB_DUPFIXED` items over a quarter page, which only 1.0 allows (in 0.9
+/// items are at most 511 bytes and pages at least 4 KiB): a key's second
+/// item turns its single item into a sub-DB at once, because the fake
+/// sub-page (two items and room for two more) is larger than a page. C's
+/// unsigned offset arithmetic wraps there and still gives the root its
+/// `mp_upper`; rlmdb must write the same page (it panicked on the
+/// subtraction before). With 64 KiB pages and items over 16 KiB the fake
+/// sub-page is larger than 64 KiB, so its 16-bit `mp_upper` wraps too, and
+/// C's sum wraps back (a debug build of rlmdb panicked there).
 #[test]
 fn diff10_dupfixed_items_over_a_quarter_page() {
-    for (ps, size) in [(512, 150), (512, 186), (1024, 300), (1024, 442)] {
+    for (ps, size) in [
+        (512, 150),
+        (512, 186),
+        (1024, 300),
+        (1024, 442),
+        (65536, 20000),
+        (65536, 32698),
+    ] {
         eprintln!("page size {ps}, items of {size} bytes");
         let p = for_page_size(
             Profile {
@@ -232,7 +241,9 @@ fn diff10_dupfixed_items_over_a_quarter_page() {
             },
             ps,
         );
-        differential::run_profile(&C10::new(ps), p, 0x1da + size as u64, 4, 300);
+        // Items of 20 and 32 KiB: fewer and shorter rounds.
+        let (rounds, n) = if ps == 65536 { (2, 60) } else { (4, 300) };
+        differential::run_profile(&C10::new(ps), p, 0x1da + size as u64, rounds, n);
     }
 }
 
@@ -321,6 +332,54 @@ fn diff10_dupfixed_1byte_upper_wraps() {
     let ops = differential::dupfixed_1byte_script_for(&key);
     let r = differential::run_round(&c, &p, 2, Ops::List(ops), "wrap-script");
     assert_eq!(r, Round::Same);
+}
+
+/// `MDB_CURRENT` replacing a key's only item in an `MDB_DUPSORT` DB
+/// ([`differential::current_single_item_script`]) at every page size 1.0
+/// allows, with keys of 103 bytes (fewer where keys are limited to less).
+/// Items that do not fit a node with the key are deleted and inserted, as
+/// C's `mdb_cursor_del` + `mdb_cursor_put` do (C's `MDB_CURRENT` would put
+/// them on overflow pages, `KNOWN_C_BUGS.md` #38); with 4 KiB pages that
+/// includes the Go port's reproducer, an item of 1978 bytes (the maximum)
+/// replacing one under a 103-byte key, then a second duplicate. The files
+/// must agree page for page.
+#[test]
+fn diff10_current_single_item() {
+    let p = Profile::new(MDB_DUPSORT, 0);
+    for ps in [256, 512].into_iter().chain(PAGE_SIZES) {
+        let maxkey = nodemax(ps) - 56;
+        let ops =
+            differential::current_single_item_script(nodemax(ps), maxkey, true, maxkey.min(103));
+        assert!(ops.iter().any(|op| op.starts_with("cr:")), "page size {ps}");
+        assert_eq!(
+            differential::run_round(&C10::new(ps), &p, 2, Ops::List(ops), "current"),
+            Round::Same,
+            "page size {ps}"
+        );
+    }
+}
+
+/// `KNOWN_C_BUGS.md` #38 ([`differential::single_item_on_overflow_pages`]):
+/// C 1.0's `MDB_CURRENT` leaves a key's only item on overflow pages (items
+/// of the maximum key size, keys of 103 bytes or the maximum, the Go port's
+/// shape with 4 KiB pages); rlmdb's next duplicate put reads the item
+/// through its overflow pages and frees them, and its other changes of the
+/// item are right too, in a `MDB_DUPSORT` and a `MDB_DUPFIXED` DB. C 1.0
+/// audits and reads every result.
+#[test]
+fn c10_single_item_on_overflow_pages() {
+    for ps in [256, 1024, 4096, 65536] {
+        let maxkey = nodemax(ps) - 56;
+        for flags in [MDB_DUPSORT, MDB_DUPSORT | MDB_DUPFIXED] {
+            eprintln!("page size {ps}, flags {flags:#x}");
+            differential::single_item_on_overflow_pages(
+                &C10::new(ps),
+                flags,
+                maxkey.min(103),
+                maxkey,
+            );
+        }
+    }
 }
 
 #[test]
