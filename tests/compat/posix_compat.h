@@ -9,7 +9,9 @@
  *   threads    pthread_create/join/self, mutexes and condition variables
  *              (SRW locks and CONDITION_VARIABLEs; static initialisers)
  *   files      mkdir(path, mode) (mode ignored), pread (ReadFile with an
- *              offset), O_BINARY for open() where C needs it
+ *              offset), O_BINARY for open() where C needs it, and
+ *              COMPAT_CREATE_MODE, the permissions open() takes when it
+ *              creates a file
  *   processes  getpid, sleep, usleep
  *   system     sysconf(_SC_PAGESIZE), setenv/unsetenv (on the process
  *              environment, which the Rust library reads)
@@ -20,6 +22,12 @@
  *              on POSIX: their output is parsed by the tests. (The
  *              upstream LMDB tools do not include this; they keep the C
  *              runtime's text mode, as on any Windows system.)
+ *              setvbuf(f, NULL, _IOLBF, 0) gets the default size.
+ *
+ * MSVC's C runtime (the UCRT) ends a program that passes a parameter it
+ * considers invalid (its invalid-parameter handler), where POSIX and
+ * MinGW's msvcrt accept it: a buffer of 0 bytes for setvbuf, permissions
+ * other than _S_IREAD and _S_IWRITE for open(). Hence the last two.
  *
  * The test programs print size_t with %zu: their builds define
  * __USE_MINGW_ANSI_STDIO=1 with MinGW (MSVC's C runtime has it anyway).
@@ -41,6 +49,9 @@
 #ifndef O_BINARY
 #define O_BINARY	0
 #endif
+
+/* The permissions of a file a test program creates with open(). */
+#define COMPAT_CREATE_MODE	0664
 
 /* What C LMDB returns where a path's directory does not exist, and where a
  * file it creates exists already: errno values on POSIX, the system's
@@ -80,7 +91,11 @@ compat_filehandle_size(int fd)
 #define COMPAT_FN	static __inline
 
 #ifdef _MSC_VER
+/* (Also declared by tests/compat/msvc/unistd.h, under the same guard.) */
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
 typedef intptr_t ssize_t;
+#endif
 /* GCC attributes in the test programs' prototypes (format, noreturn). */
 #define __attribute__(x)
 #endif
@@ -94,6 +109,19 @@ compat_binary_stdio(void)
 	_setmode(1, _O_BINARY);
 	_setmode(2, _O_BINARY);
 }
+
+/* setvbuf(stream, NULL, _IOLBF, 0), the programs' line buffering of the
+ * default size: the Windows C runtime has no line buffering (_IOLBF
+ * buffers fully; the lines a reader waits for are flushed), and the UCRT
+ * refuses a buffer size below 2. The default size, BUFSIZ, then. */
+COMPAT_FN int
+compat_setvbuf(FILE *stream, char *buf, int mode, size_t size)
+{
+	if (mode != _IONBF && size < 2)
+		size = BUFSIZ;
+	return setvbuf(stream, buf, mode, size);
+}
+#define setvbuf(stream, buf, mode, size)	compat_setvbuf(stream, buf, mode, size)
 
 #ifdef _MSC_VER
 /* A C runtime initialiser: one per program (selectany; several translation
@@ -222,6 +250,10 @@ pread(int fd, void *buf, size_t len, long long off)
 	}
 	return (ssize_t)got;
 }
+
+/* open() of the Windows C runtime takes only these permissions (the UCRT
+ * ends a program that passes others, such as 0664). */
+#define COMPAT_CREATE_MODE	(_S_IREAD | _S_IWRITE)
 
 /* ERROR_PATH_NOT_FOUND and ERROR_FILE_EXISTS (see the POSIX branch). */
 #define COMPAT_ENOENT_DIR	3

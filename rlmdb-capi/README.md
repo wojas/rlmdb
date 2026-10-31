@@ -89,8 +89,8 @@ codes whose `mdb_strerror` text is the system's message (the C runtime's
 `strerror` for the `errno` values LMDB uses itself); each such text is kept
 for the life of the process, where C returns a buffer on its stack. The
 upstream `mtest*.c` and tools build unchanged with MinGW's `gcc`; MSVC has
-no `getopt`, which the tools need, so the tests give `cl` the
-`tests/compat/msvc/unistd.h` of this repository.
+no `<unistd.h>` (`getopt`, and `ssize_t`, which `mdb_stat.c` uses), so the
+tests give `cl` the `tests/compat/msvc/unistd.h` of this repository.
 
 ## Functions
 

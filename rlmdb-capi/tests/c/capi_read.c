@@ -802,7 +802,7 @@ static void test_writable_env(const char *path, const char *scratch)
 	rc = mdb_env_copy2(env, dir, MDB_CP_COMPACT);
 	RC(rc, 0);
 	snprintf(dir, sizeof(dir), "%s/copy.mdb", scratch);
-	fd = open(dir, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0664);
+	fd = open(dir, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, COMPAT_CREATE_MODE);
 	CHECK(fd >= 0);
 	rc = mdb_env_copyfd(env, COMPAT_FILEHANDLE(fd));
 	RC(rc, 0);

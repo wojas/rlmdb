@@ -1,6 +1,8 @@
 /* unistd.h for MSVC, which has none: what the unmodified upstream LMDB
- * tools (mdb_stat.c, mdb_dump.c, mdb_load.c include <unistd.h> for
- * getopt) and rlmdb's C test programs need from it.
+ * tools (mdb_stat.c, mdb_dump.c, mdb_load.c, 1.0's mdb_drop.c include
+ * <unistd.h> for getopt; mdb_stat.c also uses ssize_t, which POSIX
+ * declares in <sys/types.h> and MSVC nowhere) and rlmdb's C test programs
+ * need from it.
  *
  * Only on the include path of MSVC builds (rlmdb/tests/common,
  * rlmdb-capi/tests/common, rlmdb-tools/tests/common, interop/build.rs);
@@ -25,6 +27,14 @@
 
 #ifndef getpid
 #define getpid()	_getpid()
+#endif
+
+/* ssize_t, as MinGW-w64 declares it (and under its guard, which
+ * tests/compat/posix_compat.h uses too). */
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
+#include <stdint.h>
+typedef intptr_t ssize_t;
 #endif
 
 static char *optarg;

@@ -1445,14 +1445,14 @@ static void test_copy(const char *name)
 	snprintf(dst, sizeof(dst), "%s/%s-fd", scratch, name);
 	mkdir(dst, 0775);
 	snprintf(dst, sizeof(dst), "%s/%s-fd/data.mdb", scratch, name);
-	fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0664);
+	fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, COMPAT_CREATE_MODE);
 	CHECK(fd >= 0);
 	OK(mdb_env_copyfd(env, COMPAT_FILEHANDLE(fd)));
 	close(fd);
 	snprintf(dst, sizeof(dst), "%s/%s-fd-compact", scratch, name);
 	mkdir(dst, 0775);
 	snprintf(dst, sizeof(dst), "%s/%s-fd-compact/data.mdb", scratch, name);
-	fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0664);
+	fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, COMPAT_CREATE_MODE);
 	CHECK(fd >= 0);
 	OK(mdb_env_copyfd2(env, COMPAT_FILEHANDLE(fd), MDB_CP_COMPACT));
 	close(fd);

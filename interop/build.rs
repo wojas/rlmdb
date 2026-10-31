@@ -30,7 +30,8 @@
 //! On Windows the same programs are built with MinGW's `gcc` (the GNU
 //! toolchain; `-D__USE_MINGW_ANSI_STDIO=1` for C99 `printf`, no `-pthread`,
 //! which C LMDB does not use there) or with MSVC's `cl` (`/W3`, the
-//! `unistd.h` shim of `tests/compat/msvc` for the tools' `getopt`, and
+//! headers MSVC lacks from `tests/compat/msvc`: `unistd.h` for the tools'
+//! `getopt` and `ssize_t`, `sys/param.h` for `chacha8.c`'s byte order; and
 //! `advapi32.lib`, which C LMDB needs for its mutexes); executables get
 //! `.exe`.
 //! The recipe for linking `cpeer_capi` (compiler, flags, objects) goes to
