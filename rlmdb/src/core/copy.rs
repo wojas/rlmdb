@@ -180,7 +180,7 @@ impl Environment {
         let l = self.layout();
         let txn = self.begin_ro_txn()?;
         let core = txn.core();
-        let mut w = CopyWriter::new(out, ps, l);
+        let mut w = CopyWriter::new(out, ps, l, core.next_pgno);
 
         // Meta page 0: a new environment (mdb_env_init_meta0), with the
         // source's recorded map address.
@@ -322,6 +322,13 @@ struct CopyWriter<'o, W: Write> {
     /// duplicates' sub-DBs). C recurses without a limit, so a corrupt
     /// sub-DB record pointing back up the tree overflows its stack.
     nesting: usize,
+    /// The source snapshot's `mt_next_pgno`: a copy that writes each
+    /// reachable page once stays below it. Pages that a corrupt tree
+    /// shares or reaches again (a child pointing back up) would be written
+    /// again and again, C's `mdb_env_cwalk` writes them all (exponentially
+    /// many with sharing at every level), so passing this ends the copy
+    /// with `MDB_CORRUPTED` (`KNOWN_C_BUGS.md` #44).
+    limit: u64,
 }
 
 /// The deepest valid `cwalk` nesting: main DB, named DB, sub-DB of
@@ -329,7 +336,7 @@ struct CopyWriter<'o, W: Write> {
 const MAX_CWALK_NESTING: usize = 3;
 
 impl<'o, W: Write> CopyWriter<'o, W> {
-    fn new(out: &'o mut W, ps: usize, layout: &'static Layout) -> Self {
+    fn new(out: &'o mut W, ps: usize, layout: &'static Layout, limit: u64) -> Self {
         CopyWriter {
             out,
             bufs: AlignedBuf::new(2 * WBUF),
@@ -339,6 +346,16 @@ impl<'o, W: Write> CopyWriter<'o, W> {
             ps,
             layout,
             nesting: 0,
+            limit,
+        }
+    }
+
+    /// Fails with `MDB_CORRUPTED` if `pages` more pages would take the copy
+    /// past the source's page count ([`CopyWriter::limit`]).
+    fn check_room(&self, pages: usize) -> Result<()> {
+        match self.next_pgno.checked_add(pages as u64) {
+            Some(end) if end <= self.limit => Ok(()),
+            _ => Err(MdbError::Corrupted.into()),
         }
     }
 
@@ -382,6 +399,7 @@ impl<'o, W: Write> CopyWriter<'o, W> {
     /// Appends a copy of page `src` (`mdb_page_copy`) numbered
     /// `mc_next_pgno` and returns that number.
     fn put_page(&mut self, src: &[u8]) -> Result<u64> {
+        self.check_room(1)?;
         self.make_room()?;
         let ps = self.ps;
         let l = self.layout;
@@ -400,6 +418,7 @@ impl<'o, W: Write> CopyWriter<'o, W> {
 
     /// Appends the overflow run `run` (`pages` pages), renumbered.
     fn put_overflow(&mut self, run: &[u8], pages: usize) -> Result<u64> {
+        self.check_room(pages)?;
         self.make_room()?;
         let ps = self.ps;
         let l = self.layout;

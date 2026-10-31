@@ -547,3 +547,72 @@ fn root_split_beyond_the_cursor_stack_fails_the_txn() {
         assert!(after == file, "{what}: file changed");
     }
 }
+
+/// Trees whose branch pages share their children or point back up: a
+/// compacting copy writes a page once per path to it, which C's
+/// `mdb_env_cwalk` does without bound (4^12 pages for a file of 15 here).
+/// The copy stops with `MDB_CORRUPTED` as soon as it would hold more pages
+/// than the file (`KNOWN_C_BUGS.md` #44); a plain copy is unaffected.
+#[test]
+fn compacting_copy_of_shared_pages_stops_at_the_source_size() {
+    const LEVELS: u64 = 12;
+    let leaf: &[(&[u8], &[u8])] = &[(b"a", b"1"), (b"m", b"2"), (b"z", b"3")];
+    // Branch `pgno` with four children, all `child` (`back`: the last one
+    // is the branch itself).
+    let branch = |pgno: u64, child: u64, back: bool| {
+        let mut buf = vec![0u8; PS];
+        let mut p = PageMut::new(&mut buf);
+        p.init(pgno, P_BRANCH);
+        for (i, k) in [&b""[..], b"g", b"n", b"t"].into_iter().enumerate() {
+            let to = if back && i == 3 { pgno } else { child };
+            p.add_node(i, k, NodeData::Child(to), 0).unwrap();
+        }
+        buf
+    };
+    let leaf_page = |pgno: u64| {
+        let mut buf = vec![0u8; PS];
+        let mut p = PageMut::new(&mut buf);
+        p.init(pgno, P_LEAF);
+        for (i, (k, v)) in leaf.iter().enumerate() {
+            p.add_node(i, k, NodeData::Inline(v), 0).unwrap();
+        }
+        buf
+    };
+    let shared: Vec<Vec<u8>> = (0..LEVELS)
+        .map(|l| branch(2 + l, 3 + l, false))
+        .chain([leaf_page(2 + LEVELS)])
+        .collect();
+    let cycle = vec![branch(2, 3, true), leaf_page(3)];
+    for (what, pages) in [("shared", shared), ("cycle", cycle)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("env");
+        std::fs::create_dir(&path).unwrap();
+        let main = Db {
+            depth: pages.len() as u16,
+            branch_pages: pages.len() as u64 - 1,
+            leaf_pages: 1,
+            entries: leaf.len() as u64,
+            root: 2,
+            ..Db::default()
+        };
+        let file = file_of(&pages, main);
+        std::fs::write(path.join("data.mdb"), &file).unwrap();
+        let env = open_ro(&path, 2);
+        let compact = dir.path().join("compact");
+        std::fs::create_dir(&compact).unwrap();
+        match env.copy_to_path(&compact, true) {
+            Err(Error::Mdb(MdbError::Corrupted)) => {}
+            r => panic!("{what}: expected MDB_CORRUPTED, got {r:?}"),
+        }
+        let written = std::fs::metadata(compact.join("data.mdb")).unwrap().len();
+        assert!(written <= file.len() as u64, "{what}: {written} bytes");
+        let plain = dir.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        env.copy_to_path(&plain, false).unwrap();
+        assert_eq!(
+            std::fs::read(plain.join("data.mdb")).unwrap(),
+            file,
+            "{what}"
+        );
+    }
+}
