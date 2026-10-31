@@ -210,9 +210,21 @@ impl<'a> PageRef<'a> {
     }
 
     /// `SIZELEFT`: free bytes between pointers and nodes.
+    ///
+    /// C computes `(indx_t)(mp_upper - mp_lower)`, modulo 2^16. That
+    /// matters for `P_LEAF2` pages, which only count with the two fields
+    /// (`mp_upper` grows past the page end and wraps on 64 KiB pages of
+    /// 1-byte items, while the difference stays exact; see
+    /// `core::page_ops::leaf2_count`): their free space is the wrapping
+    /// difference, as in C. On other pages `mp_upper` is an offset, and a
+    /// corrupt one below `mp_lower` yields 0.
     #[inline(always)]
     pub fn size_left(&self) -> usize {
-        usize::from(self.upper().saturating_sub(self.lower()))
+        if self.is_leaf2() {
+            usize::from(self.upper().wrapping_sub(self.lower()))
+        } else {
+            usize::from(self.upper().saturating_sub(self.lower()))
+        }
     }
 
     /// `IS_BRANCH`.

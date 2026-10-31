@@ -91,7 +91,7 @@ scripts/linux-test.sh test -p rlmdb-interop       # the same on Linux (Docker)
 | `tests/layout.rs` | the C struct layout against DESIGN.md, and every `layout_dump` value against `lmdb::consts`/`lmdb::format::layout` |
 | `tests/oracle10.rs` | the LMDB 1.0 build: tool versions, the `layout_dump10` numbers (page header, `MDB_ovpage`, lock-file header, the `MDB_LOCK_FORMAT` formula, maximum key size), the two dumps lining up, 0.9 and 1.0 refusing each other's environments, `cpeer10`, every 1.0 `mtest*` |
 | `tests/audit10.rs` | `cpeer10 check-freelist` and `pagecmp` on 1.0 files written by the C 1.0 programs (page sizes 256 to 65536, copies, `mtest*`): good files pass, broken copies (leaked page, page used twice, bad `mp_txnid`, `MDB_ovpage`, sub-page flags) fail; `pagecmp` refuses 0.9 against 1.0 |
-| `tests/write_differential10.rs` | the write path of the 1.0 format against C 1.0: the lock-step harness of `rlmdb/tests/common/differential.rs` with `writeops10` at 1, 4, 16 and 64 KiB pages (plain, integer, reverse, DUPSORT, DUPFIXED (items of 1 to 3 bytes also at 256 and 512 B pages), deep trees, overwrites, nested transactions, drops, Rust-side spills; `diff10_spill_full_size` `#[ignore]`d), every step compared, then `mdb_dump10`, `cpeer10 check-freelist` and `pagecmp` (page by page, `mp_txnid` included) |
+| `tests/write_differential10.rs` | the write path of the 1.0 format against C 1.0: the lock-step harness of `rlmdb/tests/common/differential.rs` with `writeops10` at 1, 4, 16 and 64 KiB pages (plain, integer, reverse, DUPSORT, DUPFIXED (items of 1 to 3 bytes also at 256 and 512 B pages; with `writeops10_ndebug`, 1-byte items whose `P_LEAF2` page's `mp_upper` wraps at 64 KiB), deep trees, overwrites, nested transactions, drops, Rust-side spills; `diff10_spill_full_size` `#[ignore]`d), every step compared, then `mdb_dump10`, `cpeer10 check-freelist` and `pagecmp` (page by page, `mp_txnid` included) |
 | `tests/capi10.rs` | the C API with 1.0 environments against C 1.0: `cpeer_capi` creates one with `RLMDB_DEFAULT_FORMAT=1.0` (and a 0.9 one without), fills 1.0 files of 1 KiB and 64 KiB pages that `mdb_load10` created (opened without a format request; inline values of 20000 bytes on 64 KiB pages), and `cpeer10 verify`, the C 1.0 page audit, `mdb_dump10` and `mdb_stat10` agree; the reverse with `cpeer10` writing and `cpeer_capi verify`/`dump` reading, keys over 511 bytes from `mdb_load10` included |
 | `tests/tools10.rs` | the Rust tools (`rtools`) on 1.0 files against `mdb_load10` (`-F 1.0` and `RLMDB_DEFAULT_FORMAT=1.0`: same messages, same pages; empty keys), `mdb_stat10` and `mdb_dump10` (every option both have, on `mdb_load10` files at 1, 4, 64 KiB pages and on `mtest*10` environments), `mdb_drop10` (same files, also emptying the main DB), `mdb_copy10` (byte-identical copies); C 1.0's process map address is normalised (`KNOWN_C_BUGS.md`, "LMDB 1.0") |
 | `tests/format10.rs` | rlmdb reading C 1.0's files (`mdb_load10` at 512 B to 64 KiB pages, `mtest*10`) against `mdb_dump10`/`mdb_stat10`; rlmdb loading what `mdb_load10` loads (same pages); copies byte-identical to `mdb_copy10 [-c]`; C 1.0 and rlmdb writing one environment in turns; a C 1.0 reader pinning pages against an rlmdb writer and the reverse, both writing an environment both keep open |
@@ -157,7 +157,11 @@ sources are vendored in `../tests/lmdb-c/1.0` (`../tests/lmdb-c/README.md`).
   underscore when the name ends in a digit: `mdb_stat10`, `mdb_drop10`
   (1.0 only), `mtest10`, `mtest2_10`…`mtest5_10`, `mtest_remap10`,
   `mtest_enc10`, `mtest_enc3_10` (chacha8, built from `chacha8.c`),
-  `layout_dump10`, `cpeer10`, `writeops10`. Not built: `mtest6` (needs `MDB_DEBUG`),
+  `layout_dump10`, `cpeer10`, `writeops10`, and `writeops10_ndebug`:
+  `writeops` against a 1.0 library built with `-DNDEBUG`, for the one
+  differential test on which C's assertions abort although its arithmetic
+  is right (`diff10_dupfixed_1byte_upper_wraps`: `mp_upper` of a
+  `P_LEAF2` page wraps on 64 KiB pages). Not built: `mtest6` (needs `MDB_DEBUG`),
   `mtest_enc2` and `mtest_enc4` (they load the libsodium module
   `crypto.lm`), `mplay` (a log replayer, not a test).
 * **`cpeer10`** is `c/cpeer*.c` compiled against the 1.0 `lmdb.h` and

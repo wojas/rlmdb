@@ -21,7 +21,8 @@
 //!   `../tests/lmdb-c/1.0` (or `$LMDB10_DIR`, see [`lmdb10_dir`]), the
 //!   library, the tools, the `mtest*` programs, `layout_dump`, `cpeer` and
 //!   `writeops` are built once more, with the same flags, under names ending
-//!   in `10` (`mdb_stat10`, `mtest2_10`, see [`name10`]).
+//!   in `10` (`mdb_stat10`, `mtest2_10`, see [`name10`]), and `writeops`
+//!   also against a 1.0 library built with `-DNDEBUG` (`writeops10_ndebug`).
 //!
 //! Executables go to `$OUT_DIR/bin/` and their paths are exported to the crate
 //! as `INTEROP_<NAME>` compile-time environment variables (see `src/bins.rs`).
@@ -288,6 +289,28 @@ fn build_lmdb10(
     );
     let name = name10("writeops");
     let exe = link_with(bin_dir, &name, &objs, &lib_objs, &["-ldl"]);
+    exported.push((name, exe));
+
+    // The same against a 1.0 library built with -DNDEBUG, for scripts that
+    // reach an assertion C's arithmetic does not need: `mdb_node_add`
+    // asserts `MP_UPPER(mp) >= MP_LOWER(mp)`, which a `P_LEAF2` page of
+    // 1-byte items breaks on 64 KiB pages, where `mp_upper` wraps (the
+    // page is fine; release builds of C go on, see
+    // `interop/tests/write_differential10.rs`).
+    let ndebug_mdb_obj = compile_with(
+        out_dir,
+        "lmdb10_mdb_ndebug",
+        lmdb10_dir,
+        &[src("mdb.c")],
+        &["NDEBUG"],
+    );
+    let ndebug_lib_objs: Vec<PathBuf> = [&ndebug_mdb_obj, &midl_obj, &module_obj]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    let name = "writeops10_ndebug".to_string();
+    let exe = link_with(bin_dir, &name, &objs, &ndebug_lib_objs, &["-ldl"]);
     exported.push((name, exe));
 
     // layout_dump includes 1.0's mdb.c, so it only needs midl.o.

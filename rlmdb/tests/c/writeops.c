@@ -172,7 +172,8 @@ int main(int argc, char **argv)
 	size_t mapsize = 64 << 20;
 	int pagesize = 0;
 	int rc, ncur, dupsort, depth = 0;
-	static unsigned char kbuf[4096], dbuf[1 << 20];
+	/* Keys up to LMDB 1.0's largest (32,698 bytes with 64 KiB pages). */
+	static unsigned char kbuf[1 << 16], dbuf[1 << 20];
 	static char arg[(1 << 21) + 64];
 
 	if (argc < 5 || argc > 7) { fprintf(stderr, "usage\n"); return 2; }

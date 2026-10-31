@@ -80,6 +80,14 @@ pub fn writeops10() -> &'static Path {
     Path::new(env!("INTEROP_WRITEOPS10"))
 }
 
+/// [`writeops10`] against a 1.0 library built with `-DNDEBUG`, as C
+/// release builds are: no `mdb_assert`s. For scripts that trip an assertion
+/// on a state C's arithmetic handles (see `interop/build.rs`); every other
+/// test takes the upstream flags of [`writeops10`].
+pub fn writeops10_ndebug() -> &'static Path {
+    Path::new(env!("INTEROP_WRITEOPS10_NDEBUG"))
+}
+
 /// The C peer built against the LMDB 1.0 header and library. Its
 /// `check-freelist` decodes the 1.0 layout (`c/cpeer_pagewalk.c` picks the
 /// layout from `MDB_VERSION_MAJOR`).

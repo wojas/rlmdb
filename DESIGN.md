@@ -101,7 +101,9 @@ All integers are host-endian (LMDB does not byte-swap). We implement the
   `mp_lower`/`mp_upper` only count: each item adds 2 to `mp_lower` and
   subtracts `ksize - 2` from `mp_upper`, unsigned and modulo 2^16, so with
   1-byte items `mp_upper` lies past the end of the page (`mdb_node_add`;
-  `SIZELEFT` is still the free space after the items).
+  `SIZELEFT`, `(indx_t)(mp_upper - mp_lower)`, is still the free space
+  after the items, also on 1.0's 64 KiB pages, where the stored
+  `mp_upper` wraps past 2^16 at the 24th item).
 * `MDB_db` (line 1058, 48 bytes): `md_pad:u32, md_flags:u16, md_depth:u16,
   md_branch_pages:u64, md_leaf_pages:u64, md_overflow_pages:u64,
   md_entries:u64, md_root:u64` (`P_INVALID = !0` means empty tree).

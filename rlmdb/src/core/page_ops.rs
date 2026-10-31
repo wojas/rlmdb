@@ -105,10 +105,17 @@ pub(crate) fn num_keys(l: &Layout, p: &[u8]) -> usize {
     l.num_keys(hdr(p, l.lower_offset()))
 }
 
-/// `SIZELEFT`.
+/// `SIZELEFT`: modulo 2^16 for a `P_LEAF2` page, as C computes it (see
+/// [`leaf2_count`] and `PageRef::size_left`); 0 if a corrupt `mp_upper`
+/// lies below `mp_lower` on any other page.
 #[inline]
 pub(crate) fn size_left(l: &Layout, p: &[u8]) -> usize {
-    upper(l, p).saturating_sub(lower(l, p))
+    if flags(l, p) & P_LEAF2 != 0 {
+        let lower = hdr(p, l.lower_offset());
+        usize::from(hdr(p, l.upper_offset()).wrapping_sub(lower))
+    } else {
+        upper(l, p).saturating_sub(lower(l, p))
+    }
 }
 
 /// `mp_ptrs[i] + PAGEBASE`: the offset of node `i` from the page start.
@@ -301,7 +308,10 @@ pub(crate) fn insert_leaf2(
 /// and `mp_upper` grows by one per item, past the end of the page. That is
 /// what C writes and what C readers expect (they never use `mp_upper` of a
 /// `P_LEAF2` page as an offset), so the stored fields are updated here
-/// with the same wrapping 16-bit arithmetic, for every `ksize`.
+/// with the same wrapping 16-bit arithmetic, for every `ksize`. On 1.0's
+/// 64 KiB pages the stored `mp_upper` starts at 65,512 and wraps to 0 at
+/// the 24th 1-byte item; [`size_left`] subtracts modulo 2^16 as `SIZELEFT`
+/// does, so the free space stays exact.
 pub(crate) fn leaf2_count(l: &Layout, p: &mut [u8], n: isize, ksize: usize) {
     let n = n as i64;
     let lower = i64::from(hdr(p, l.lower_offset())) + 2 * n;
@@ -702,6 +712,34 @@ mod tests {
             insert_leaf2(l, &mut buf, 0, b"zz", 2).unwrap();
             assert_eq!((num_keys(l, &buf), upper(l, &buf)), (1, PS));
         }
+    }
+
+    /// On 1.0's 64 KiB pages the stored `mp_upper` of a `P_LEAF2` page of
+    /// 1-byte items starts at 65,512 and wraps to 0 at the 24th item;
+    /// `SIZELEFT` is the 16-bit difference, as C's, and stays exact. On
+    /// other pages an `mp_upper` below `mp_lower` is damage: no room.
+    #[test]
+    fn leaf2_upper_wraps_on_64k_pages() {
+        let l = V10L;
+        let ps = 0x10000;
+        let mut buf = vec![0u8; ps];
+        PageMut::with_layout(&mut buf, l).init(3, P_LEAF | P_LEAF2);
+        for n in 1..=100usize {
+            insert_leaf2(l, &mut buf, n - 1, &[n as u8], 1).unwrap();
+            let free = ps - l.page_hdr - n;
+            assert_eq!(size_left(l, &buf), free, "{n} items");
+            let page = PageRef::with_layout(&buf, l).unwrap();
+            assert_eq!(page.size_left(), free, "{n} items");
+        }
+        assert_eq!(hdr(&buf, l.upper_offset()), 100 - 24, "wrapped");
+        assert_eq!(num_keys(l, &buf), 100);
+
+        let mut buf = vec![0u8; ps];
+        PageMut::with_layout(&mut buf, l).init(4, P_BRANCH);
+        put_u16(&mut buf, l.lower_offset(), 48);
+        put_u16(&mut buf, l.upper_offset(), 0);
+        assert_eq!(size_left(l, &buf), 0);
+        assert_eq!(PageRef::with_layout(&buf, l).unwrap().size_left(), 0);
     }
 
     #[test]

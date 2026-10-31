@@ -31,6 +31,8 @@ struct C10 {
     page_size: usize,
     /// Rust side's dirty-page limit ([`Oracle::dirty_limit`]).
     dirty_limit: Option<usize>,
+    /// The C side: [`bins::writeops10`], or [`bins::writeops10_ndebug`].
+    writeops: &'static Path,
 }
 
 impl C10 {
@@ -38,6 +40,17 @@ impl C10 {
         C10 {
             page_size,
             dirty_limit: None,
+            writeops: bins::writeops10(),
+        }
+    }
+
+    /// The same with C 1.0 built with `-DNDEBUG`, for a script on which the
+    /// upstream build asserts although C's arithmetic is right (see
+    /// `diff10_dupfixed_1byte_upper_wraps`).
+    fn ndebug(self) -> C10 {
+        C10 {
+            writeops: bins::writeops10_ndebug(),
+            ..self
         }
     }
 }
@@ -56,7 +69,7 @@ fn run(prog: &Path, args: &[&str]) -> String {
 
 impl Oracle for C10 {
     fn writeops(&self) -> &Path {
-        bins::writeops10()
+        self.writeops
     }
 
     fn format(&self) -> Format {
@@ -273,6 +286,43 @@ fn diff10_dupfixed_1byte_script() {
     }
 }
 
+/// A `P_LEAF2` page whose stored `mp_upper` wraps. With 64 KiB pages a
+/// key of 1.0's largest size (32,698 bytes) leaves almost no room for a
+/// sub-page, so its 1-byte items soon go to a sub-DB, all of them on its
+/// leaf, which starts with `mp_upper` 65,512; each item raises it by one
+/// (see `diff10_dupfixed_small_items`) and the 24th wraps it to 0,
+/// `mp_lower` being 48. C's `SIZELEFT` is 16-bit, so its free space stays
+/// exact (65,488 bytes) and C keeps the 100 items of this script (1-byte
+/// values 0..99 in order) on that one page; rlmdb took the free space for
+/// 0 once `mp_upper` was below `mp_lower`, split on every later put and
+/// ran out of an 8-page map (`MDB_MAP_FULL` at the 37th put; with more
+/// room it wrote other pages than C). The longer
+/// [`differential::dupfixed_1byte_script_for`] with the same key then
+/// takes the page to all 256 values and deletes them again (merges,
+/// `PAGEFILL` of the wrapped page).
+///
+/// C with its default (upstream) flags asserts `MP_UPPER(mp) >=
+/// MP_LOWER(mp)` at the top of `mdb_node_add` once `mp_upper` wrapped, so
+/// the C side here is `writeops10_ndebug`: C 1.0 built with `-DNDEBUG`, as
+/// release builds are (`interop/build.rs`). No 0.9 page wraps
+/// (`rlmdb/tests/write_differential.rs`, `diff_dupfixed_1byte_max_key`).
+#[test]
+fn diff10_dupfixed_1byte_upper_wraps() {
+    const PS: usize = 65536;
+    let key = vec![b'K'; nodemax(PS) - 8 - 48];
+    assert_eq!(key.len(), 32698, "mdb_env_get_maxkeysize");
+    let p = Profile::new(MDB_DUPSORT | MDB_DUPFIXED, 0);
+    let c = C10::new(PS).ndebug();
+    for pages in [8, 1024] {
+        let ops = differential::dupfixed_1byte_puts(&key, 100);
+        let r = differential::run_round_sized(&c, &p, 2, Ops::List(ops), "wrap", pages * PS);
+        assert_eq!(r, Round::Same, "map of {pages} pages");
+    }
+    let ops = differential::dupfixed_1byte_script_for(&key);
+    let r = differential::run_round(&c, &p, 2, Ops::List(ops), "wrap-script");
+    assert_eq!(r, Round::Same);
+}
+
 #[test]
 fn diff10_intdup() {
     run_profiles(
@@ -380,8 +430,8 @@ fn diff10_spilling_rust_side() {
             ),
         ] {
             let o = C10 {
-                page_size: ps,
                 dirty_limit: Some(256),
+                ..C10::new(ps)
             };
             differential::run_profile(&o, for_page_size(p, ps), seed + ps as u64, 3, 1200);
         }

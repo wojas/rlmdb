@@ -168,6 +168,33 @@ fn diff_dupfixed_1byte_script() {
     assert_eq!(run_round(c, &p, 2, Ops::List(ops), "1byte"), Round::Same);
 }
 
+/// The 0.9 side of `diff10_dupfixed_1byte_upper_wraps`
+/// (`interop/tests/write_differential10.rs`, where a `P_LEAF2` page's
+/// stored `mp_upper` wraps past 2^16 and C's 16-bit `SIZELEFT` stays
+/// exact): its script, 1-byte items 0..99 and then
+/// [`differential::dupfixed_1byte_script_for`], with a key of 0.9's
+/// largest size (511 bytes). No 0.9 page can wrap: `mp_upper` of a
+/// `P_LEAF2` page starts at the page size, at most 32 KiB, and grows by
+/// one per 1-byte item, of which a page holds at most `page size - 16`,
+/// so it stays at most 65,520; and at the OS page sizes this oracle uses
+/// (4 and 16 KiB) the 256 possible values even stay on a sub-page.
+#[test]
+fn diff_dupfixed_1byte_max_key() {
+    let c = require_c!();
+    let key = vec![b'K'; 511];
+    let p = Profile::new(MDB_DUPSORT | MDB_DUPFIXED, 0);
+    let ops = differential::dupfixed_1byte_puts(&key, 100);
+    assert_eq!(
+        run_round(c, &p, 2, Ops::List(ops), "1byte-puts"),
+        Round::Same
+    );
+    let ops = differential::dupfixed_1byte_script_for(&key);
+    assert_eq!(
+        run_round(c, &p, 2, Ops::List(ops), "1byte-max-key"),
+        Round::Same
+    );
+}
+
 /// [`diff_dupfixed_small_items`] with 1-byte items in nested transactions
 /// and with drops.
 #[test]

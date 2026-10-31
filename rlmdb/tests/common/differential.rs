@@ -551,7 +551,12 @@ fn gen_op(rng: &mut Rng, p: &Profile, ncur: usize) -> String {
 /// shrinks them; with 1.0's 256-byte pages the key's sub-DB splits its
 /// `P_LEAF2` page and then merges and rebalances `P_LEAF2` pages.
 pub fn dupfixed_1byte_script() -> Vec<String> {
-    let k = hex(b"k");
+    dupfixed_1byte_script_for(b"k")
+}
+
+/// [`dupfixed_1byte_script`] with the key `key`.
+pub fn dupfixed_1byte_script_for(key: &[u8]) -> Vec<String> {
+    let k = hex(key);
     let v = |i: usize| hex(&[(i * 167 % 256) as u8]);
     let mut ops: Vec<String> = (0..256).map(|i| format!("p:{k}:{}:0", v(i))).collect();
     ops.push(format!("g:0:{MDB_FIRST}"));
@@ -573,6 +578,14 @@ pub fn dupfixed_1byte_script() -> Vec<String> {
     ops.extend(std::iter::repeat_n("cd:0:0".to_string(), 3));
     ops.push(format!("g:0:{MDB_GET_MULTIPLE}"));
     ops
+}
+
+/// A script (for [`Ops::List`]) of puts of the 1-byte items `0..n`, in
+/// that order, as duplicates of `key` (an `MDB_DUPSORT | MDB_DUPFIXED`
+/// DB).
+pub fn dupfixed_1byte_puts(key: &[u8], n: u8) -> Vec<String> {
+    let k = hex(key);
+    (0..n).map(|v| format!("p:{k}:{}:0", hex(&[v]))).collect()
 }
 
 /// Where the ops of a round come from.
