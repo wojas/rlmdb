@@ -293,8 +293,15 @@ read_node(const unsigned char *page, size_t page_len, unsigned int i, struct nod
 
 	if (off < PAGEHDRSZ || off + NODESIZE > page_len)
 		return 0;
+	/* MDB_node declares mn_lo, mn_hi on little-endian hosts and mn_hi,
+	 * mn_lo on big-endian ones (mdb.c). */
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+	hi = rd16(p);
+	lo = rd16(p + 2);
+#else
 	lo = rd16(p);
 	hi = rd16(p + 2);
+#endif
 	n->flags = rd16(p + 4);
 	n->ksize = rd16(p + 6);
 	n->dsize = lo | ((uint32_t)hi << 16);

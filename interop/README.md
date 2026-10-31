@@ -645,6 +645,11 @@ DB's comparators: keys by `memcmp`-then-length, reversed bytes for
 
 ### Test vectors (`gen`, pinned in `scenarios::GEN_VECTORS`)
 
+As printed on a little-endian host. The keys of `--intkey` and the values
+of `--intdup` are native integers, so a big-endian host prints their bytes
+reversed (`gen 1 3 --intkey` prints `key=ed81ded300000003` there;
+`scenarios::host_order`).
+
 ```
 gen 1 0                     key=39326361326630652e30  ("92ca2f0e.0")
                             value0=514e28b7f465b9a16a9e786e4f450980185dc406ec814c72a8b88bf89b74a851

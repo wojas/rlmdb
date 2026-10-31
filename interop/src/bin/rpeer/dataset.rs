@@ -356,7 +356,8 @@ mod tests {
         let d = ds(1, 0);
         assert_eq!(d.key(0), b"92ca2f0e.0");
         let d = ds(1, MDB_INTEGERKEY);
-        assert_eq!(d.key(3), [0x03, 0, 0, 0, 0xd3, 0xde, 0x81, 0xed]);
+        // A native integer: these are the bytes on little-endian hosts.
+        assert_eq!(d.key(3), 0xed81_ded3_0000_0003u64.to_ne_bytes());
     }
 
     #[test]

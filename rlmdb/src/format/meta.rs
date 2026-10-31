@@ -274,13 +274,13 @@ mod tests {
         let mut buf = vec![0u8; 8192];
         meta.write_initial_pages(&mut buf, 4096);
         let mut bad = buf[..4096].to_vec();
-        bad[10] = 0x02; // P_LEAF instead of P_META
+        super::super::put_u16(&mut bad, 10, 0x02); // P_LEAF instead of P_META
         assert_eq!(Meta::read_page(&bad), Err(MetaError::Invalid));
         let mut bad = buf[..4096].to_vec();
         bad[16] ^= 1;
         assert_eq!(Meta::read_page(&bad), Err(MetaError::Invalid));
         let mut bad = buf[..4096].to_vec();
-        bad[20] = 2;
+        super::super::put_u32(&mut bad, 20, 2);
         assert_eq!(Meta::read_page(&bad), Err(MetaError::VersionMismatch));
     }
 
@@ -325,6 +325,14 @@ mod tests {
         // Too short to hold a magic and version, but not empty.
         assert_eq!(sniff_format(&v09[..20]), Err(MetaError::Invalid));
         assert_eq!(sniff_format(&[0u8; SNIFF_LEN]), Err(MetaError::Invalid));
+        // A file written on a host of the other byte order: its magic
+        // reads byte-swapped (MDB_INVALID, as in C).
+        for (buf, layout) in [(&v09, &V09), (&v10, &V10)] {
+            let mut swapped = buf[..SNIFF_LEN].to_vec();
+            let at = layout.meta_offset() + META_MAGIC;
+            swapped[at..at + 4].reverse();
+            assert_eq!(sniff_format(&swapped), Err(MetaError::Invalid));
+        }
         // Each shape with the other format's version word.
         let mut bad = v09[..SNIFF_LEN].to_vec();
         bad[20..24].copy_from_slice(&3u32.to_ne_bytes());

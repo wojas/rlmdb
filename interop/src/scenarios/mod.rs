@@ -1284,6 +1284,7 @@ pub fn mtest_databases(pair: Pair) -> Result<()> {
 /// pinned vectors of README.md.
 pub fn gen_vectors(pair: Pair) -> Result<()> {
     for (args, pinned) in GEN_VECTORS {
+        let pinned = &host_order(args, pinned);
         let mut outs: Vec<Output> = Vec::new();
         for peer in pair.peers() {
             outs.push(peer.cmd("gen").args(args.split_whitespace()).run()?);
@@ -1327,7 +1328,37 @@ pub fn gen_vectors(pair: Pair) -> Result<()> {
     Ok(())
 }
 
-/// `gen` arguments and the exact output (README.md, "Test vectors").
+/// A [`GEN_VECTORS`] output as `gen` prints it on this host: the vectors
+/// are those of a little-endian host, and the keys of `--intkey` and the
+/// values of `--intdup` are native integers, so on a big-endian host their
+/// bytes are reversed.
+pub fn host_order(args: &str, pinned: &str) -> String {
+    let native = |name: &str| {
+        (name == "key" && args.contains("--intkey"))
+            || (name.starts_with("value") && args.contains("--intdup"))
+    };
+    let mut out = String::new();
+    for line in pinned.lines() {
+        match line.split_once('=') {
+            Some((name, hex)) if cfg!(target_endian = "big") && native(name) => {
+                let reversed: String = (0..hex.len())
+                    .step_by(2)
+                    .rev()
+                    .map(|i| &hex[i..i + 2])
+                    .collect();
+                out.push_str(&format!("{name}={reversed}\n"));
+            }
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// `gen` arguments and the exact output on a little-endian host (README.md,
+/// "Test vectors"; see [`host_order`]).
 pub const GEN_VECTORS: &[(&str, &str)] = &[
     (
         "1 0",

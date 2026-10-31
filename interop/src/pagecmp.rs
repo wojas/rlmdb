@@ -39,6 +39,10 @@ use std::path::Path;
 use crate::{Error, Result};
 
 const NODE_HDR: usize = 8;
+/// Offsets of `MDB_node`'s `mn_lo` and `mn_hi`, which C declares in the
+/// other order on big-endian hosts.
+const NODE_LO: usize = if cfg!(target_endian = "little") { 0 } else { 2 };
+const NODE_HI: usize = 2 - NODE_LO;
 const META_SIZE: usize = 136;
 const P_BRANCH: u16 = 0x01;
 const P_LEAF: u16 = 0x02;
@@ -312,8 +316,8 @@ fn canonical(
     out.extend_from_slice(slice(page, hdr, lower - fmt.empty_lower())?);
     for i in 0..nkeys {
         let ptr = usize::from(u16_at(page, hdr + 2 * i)?) + fmt.base;
-        let lo = u16_at(page, ptr)?;
-        let hi = u16_at(page, ptr + 2)?;
+        let lo = u16_at(page, ptr + NODE_LO)?;
+        let hi = u16_at(page, ptr + NODE_HI)?;
         let nflags = u16_at(page, ptr + 4)?;
         let ksize = usize::from(u16_at(page, ptr + 6)?);
         out.extend_from_slice(slice(page, ptr, NODE_HDR + ksize)?);
@@ -460,8 +464,9 @@ mod tests {
         let node = 256 - 16; // 8-byte header, key "abc" + pad, 4 data bytes
         page[22..24].copy_from_slice(&((node - 24) as u16).to_ne_bytes()); // mp_upper
         page[24..26].copy_from_slice(&((node - 24) as u16).to_ne_bytes()); // mp_ptrs[0]
-        page[node..node + 2].copy_from_slice(&4u16.to_ne_bytes()); // mn_lo: dsize
-        page[node + 2..node + 4].copy_from_slice(&0u16.to_ne_bytes());
+        let (lo, hi) = (node + NODE_LO, node + NODE_HI);
+        page[lo..lo + 2].copy_from_slice(&4u16.to_ne_bytes()); // mn_lo: dsize
+        page[hi..hi + 2].copy_from_slice(&0u16.to_ne_bytes());
         page[node + 4..node + 6].copy_from_slice(&0u16.to_ne_bytes()); // mn_flags
         page[node + 6..node + 8].copy_from_slice(&3u16.to_ne_bytes()); // mn_ksize
         page[node + 8..node + 11].copy_from_slice(b"abc");

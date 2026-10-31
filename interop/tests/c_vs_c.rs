@@ -137,7 +137,8 @@ fn pagecmp_detects_differences() -> interop::Result<()> {
     let pg = leaf * psize;
     let node = pg + common::read_u16(&data, pg + 16);
     let ksize = common::read_u16(&data, node + 6);
-    let dsize = common::read_u16(&data, node);
+    // mn_lo: the low 16 bits of the data size.
+    let dsize = common::read_u16(&data, node + rlmdb::format::layout::NODE_LO);
     let end = 8 + ksize + dsize;
     assert_eq!(end % 2, 1, "the node needs a padding byte");
     common::patch(&b.data_file(), (node + end) as u64, &[0xa5])?;

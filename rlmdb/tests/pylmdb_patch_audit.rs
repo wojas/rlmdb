@@ -38,6 +38,10 @@ const F_BIGDATA: u16 = 0x01;
 const F_SUBDATA: u16 = 0x02;
 const F_DUPDATA: u16 = 0x04;
 const MDB_DUPFIXED: u16 = 0x10;
+/// Offsets of `MDB_node`'s `mn_lo` and `mn_hi`, which C declares in the
+/// other order on big-endian hosts.
+const NODE_LO: usize = if cfg!(target_endian = "little") { 0 } else { 2 };
+const NODE_HI: usize = 2 - NODE_LO;
 
 const MAIN_KEYS: usize = 300;
 const BIG_KEYS: usize = 6;
@@ -274,12 +278,13 @@ impl Img {
     }
 
     fn node_dsize(&self, n: usize) -> usize {
-        (self.get16(n).unwrap_or(0) as usize) | ((self.get16(n + 2).unwrap_or(0) as usize) << 16)
+        (self.get16(n + NODE_LO).unwrap_or(0) as usize)
+            | ((self.get16(n + NODE_HI).unwrap_or(0) as usize) << 16)
     }
 
     fn set_node_dsize(&mut self, n: usize, size: u32) {
-        self.put16(n, size as u16);
-        self.put16(n + 2, (size >> 16) as u16);
+        self.put16(n + NODE_LO, size as u16);
+        self.put16(n + NODE_HI, (size >> 16) as u16);
     }
 
     /// Named DB records: data of `F_SUBDATA` nodes without `F_DUPDATA`.
@@ -1068,8 +1073,8 @@ fn validate_md_root() {
         for &pg in &branches {
             for (i, n) in img.nodes(pg).into_iter().enumerate() {
                 let target = if i % 2 == 0 { pg } else { branches[0] } as u64;
-                img.put16(n, target as u16);
-                img.put16(n + 2, (target >> 16) as u16);
+                img.put16(n + NODE_LO, target as u16);
+                img.put16(n + NODE_HI, (target >> 16) as u16);
                 img.put16(n + 4, (target >> 32) as u16);
             }
         }
@@ -1077,8 +1082,8 @@ fn validate_md_root() {
     check("child-meta", |img| {
         for pg in img.pages_with(|f| f & P_BRANCH != 0) {
             for n in img.nodes(pg) {
-                img.put16(n, 1);
-                img.put16(n + 2, 0);
+                img.put16(n + NODE_LO, 1);
+                img.put16(n + NODE_HI, 0);
                 img.put16(n + 4, 0);
             }
         }

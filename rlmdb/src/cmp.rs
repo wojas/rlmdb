@@ -359,26 +359,38 @@ mod tests {
         assert_eq!(Comparator::Clong.compare(&l(5), &l(5)), Equal);
     }
 
-    /// Literal port of the little-endian `mdb_cmp_cint` loop over padded
-    /// buffers, to check the generic path on even sizes other than 4/8.
-    fn c_cint_le(a: &[u8], b: &[u8]) -> i32 {
+    /// Literal port of both `mdb_cmp_cint` loops over padded buffers (the
+    /// host's: from the last 16-bit word backwards on little-endian hosts,
+    /// from the first forwards on big-endian ones), to check the generic
+    /// path on even sizes other than 4/8.
+    fn c_cint(a: &[u8], b: &[u8]) -> i32 {
         let n = a.len() / 2;
         let w = |buf: &[u8], i: usize| -> i32 {
-            i32::from(u16::from_le_bytes([buf[2 * i], buf[2 * i + 1]]))
+            i32::from(u16::from_ne_bytes([buf[2 * i], buf[2 * i + 1]]))
         };
-        let mut i = n;
-        loop {
-            i -= 1;
-            let x = w(a, i) - w(b, i);
-            if x != 0 || i == 0 {
-                return x;
+        if cfg!(target_endian = "little") {
+            let mut i = n;
+            loop {
+                i -= 1;
+                let x = w(a, i) - w(b, i);
+                if x != 0 || i == 0 {
+                    return x;
+                }
+            }
+        } else {
+            let mut i = 0;
+            loop {
+                let x = w(a, i) - w(b, i);
+                i += 1;
+                if x != 0 || i == n {
+                    return x;
+                }
             }
         }
     }
 
-    #[cfg(target_endian = "little")]
     #[test]
-    fn cint_generic_matches_c_on_le() {
+    fn cint_generic_matches_c() {
         let cases: [(&[u8], &[u8]); 5] = [
             (&[1, 0, 0, 0, 0, 0], &[0, 0, 0, 0, 0, 1]),
             (&[0, 0, 0, 0, 0, 1], &[1, 0, 0, 0, 0, 0]),
@@ -387,10 +399,22 @@ mod tests {
             (&[3, 4, 5, 6, 7, 8], &[3, 4, 5, 6, 7, 8]),
         ];
         for (a, b) in cases {
-            assert_eq!(cmp_cint(a, b), c_cint_le(a, b).cmp(&0), "{a:?} vs {b:?}");
+            assert_eq!(cmp_cint(a, b), c_cint(a, b).cmp(&0), "{a:?} vs {b:?}");
         }
         // Only a.len() bytes of b take part (b longer than a).
         assert_eq!(cmp_cint(&[1, 0], &[1, 0, 9, 9]), Equal);
+        assert_eq!(
+            Comparator::Memn.compare_in_page(b"ab", b"a", b"abc"),
+            Greater
+        );
+        // Odd sizes do not panic.
+        let _ = cmp_cint(&[1, 2, 3], &[1, 2, 4]);
+        let _ = cmp_cint(&[], &[]);
+    }
+
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn cint_short_operand_on_le() {
         // b shorter than a: missing bytes count as zero...
         assert_eq!(cmp_cint(&[0, 0, 0, 0, 0, 1], &[5, 0]), Greater);
         // ...unless the bytes after the key in its page are known, which C
@@ -400,13 +424,23 @@ mod tests {
             Comparator::Cint.compare_in_page(&[0, 0, 0, 0, 0, 1], &tail[..2], &tail),
             Less
         );
+    }
+
+    #[cfg(target_endian = "big")]
+    #[test]
+    fn cint_short_operand_on_be() {
+        // b shorter than a: the first word decides on big-endian hosts...
+        assert_eq!(cmp_cint(&[0, 5, 0, 0, 0, 0], &[0, 5]), Equal);
+        assert_eq!(cmp_cint(&[0, 6, 0, 0, 0, 0], &[0, 5]), Greater);
+        // ...then the missing bytes count as zero, unless the bytes after
+        // the key in its page are known, which C would read: here the tail
+        // makes b's last word 7 > 1.
+        assert_eq!(cmp_cint(&[0, 5, 0, 0, 0, 1], &[0, 5]), Greater);
+        let tail = [0u8, 5, 0, 0, 0, 7];
         assert_eq!(
-            Comparator::Memn.compare_in_page(b"ab", b"a", b"abc"),
-            Greater
+            Comparator::Cint.compare_in_page(&[0, 5, 0, 0, 0, 1], &tail[..2], &tail),
+            Less
         );
-        // Odd sizes do not panic.
-        let _ = cmp_cint(&[1, 2, 3], &[1, 2, 4]);
-        let _ = cmp_cint(&[], &[]);
     }
 
     #[test]

@@ -161,6 +161,11 @@ const F_BIGDATA: usize = 0x01;
 const F_SUBDATA: usize = 0x02;
 const F_DUPDATA: usize = 0x04;
 
+/// Offsets of `MDB_node`'s `mn_lo` and `mn_hi`, which C declares in the
+/// other order on big-endian hosts.
+const NODE_LO: usize = if cfg!(target_endian = "little") { 0 } else { 2 };
+const NODE_HI: usize = 2 - NODE_LO;
+
 fn rd16(data: &[u8], off: usize) -> usize {
     u16::from_ne_bytes(data[off..off + 2].try_into().unwrap()).into()
 }
@@ -249,7 +254,8 @@ impl File10 {
             if self.flags(pgno) & P_BRANCH != 0 {
                 for node in self.nodes(pgno).into_iter().rev() {
                     // A branch node's child: mn_lo | mn_hi << 16 | mn_flags << 32.
-                    let (lo, hi) = (rd16(&self.data, node), rd16(&self.data, node + 2));
+                    let lo = rd16(&self.data, node + NODE_LO);
+                    let hi = rd16(&self.data, node + NODE_HI);
                     stack.push((lo | hi << 16 | self.node_flags(node) << 32) as u64);
                 }
             }

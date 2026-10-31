@@ -275,6 +275,10 @@ const P_LEAF2: u16 = 0x20;
 const F_BIGDATA: u16 = 0x01;
 const F_SUBDATA: u16 = 0x02;
 const F_DUPDATA: u16 = 0x04;
+/// Offsets of `MDB_node`'s `mn_lo` and `mn_hi`, which C declares in the
+/// other order on big-endian hosts.
+const NODE_LO: usize = if cfg!(target_endian = "little") { 0 } else { 2 };
+const NODE_HI: usize = 2 - NODE_LO;
 
 impl Img {
     /// The image of data file `buf` (of a valid base environment).
@@ -553,8 +557,8 @@ fn mutate(rng: &mut Rng, img: &mut Img) -> String {
             } else {
                 bogus_pgno(rng, img, pg)
             };
-            img.put16(n, target as u16);
-            img.put16(n + 2, (target >> 16) as u16);
+            img.put16(n + NODE_LO, target as u16);
+            img.put16(n + NODE_HI, (target >> 16) as u16);
             img.put16(n + 4, (target >> 32) as u16);
             format!("pg={pg} child at {n} -> {target}")
         }
@@ -697,14 +701,14 @@ fn mutate(rng: &mut Rng, img: &mut Img) -> String {
                 .into_iter()
                 .filter(|&n| {
                     let ks = img.get16(n + 6).unwrap_or(0) as usize;
-                    let ds = img.get16(n).unwrap_or(0) as usize;
+                    let ds = img.get16(n + NODE_LO).unwrap_or(0) as usize;
                     ks == 8 && ds >= 16 && ds % 8 == 0
                 })
                 .collect();
             let Some(n) = pick(rng, &idls) else {
                 return "idl: no node".into();
             };
-            let ds = img.get16(n).unwrap_or(0) as usize;
+            let ds = img.get16(n + NODE_LO).unwrap_or(0) as usize;
             let d = n + 16;
             if rng.below(2) == 0 {
                 let v = [0u64, 1, u64::MAX, 1 << 40, (ds / 8) as u64][rng.below(5)];
@@ -753,8 +757,8 @@ fn mutate_all(rng: &mut Rng, img: &mut Img) -> String {
                 for n in img.nodes(pg) {
                     if rng.below(4) == 0 {
                         let t = bogus_pgno(rng, img, pg);
-                        img.put16(n, t as u16);
-                        img.put16(n + 2, (t >> 16) as u16);
+                        img.put16(n + NODE_LO, t as u16);
+                        img.put16(n + NODE_HI, (t >> 16) as u16);
                         img.put16(n + 4, (t >> 32) as u16);
                     }
                 }

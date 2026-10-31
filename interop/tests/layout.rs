@@ -106,8 +106,18 @@ fn node() {
     assert_eq!(get("NODESIZE"), 8);
     assert_eq!(get("offsetof(MDB_node.mn_data)"), 8);
     assert_eq!(get("alignof(MDB_node)"), 2);
-    // Little-endian hosts: mn_lo first. (Big-endian swaps lo and hi.)
-    for (field, off) in [("mn_lo", 0), ("mn_hi", 2), ("mn_flags", 4), ("mn_ksize", 6)] {
+    // Little-endian hosts: mn_lo first; big-endian hosts swap lo and hi.
+    let (lo, hi) = if cfg!(target_endian = "little") {
+        (0, 2)
+    } else {
+        (2, 0)
+    };
+    for (field, off) in [
+        ("mn_lo", lo),
+        ("mn_hi", hi),
+        ("mn_flags", 4),
+        ("mn_ksize", 6),
+    ] {
         assert_eq!(get(&format!("offsetof(MDB_node.{field})")), off, "{field}");
         assert_eq!(get(&format!("sizeof(MDB_node.{field})")), 2, "{field}");
     }
