@@ -15,6 +15,10 @@
 //! 3. Unless read-only or `NO_LOCK`, set up the lock file *first*
 //!    (`LockRegion::open`, `mdb_env_setup_locks`). Read-only environments
 //!    open the data file first (it must exist) and the lock file second.
+//!    Without a lock file (`NO_LOCK`, or read-only on a read-only file
+//!    system) the environment tracks its read transactions in an in-memory
+//!    table instead (`reader::LocalReaders`; C tracks none), so that its
+//!    writers never reuse pages they read.
 //! 4. Open the data file (`O_RDWR|O_CREAT`, or `O_RDONLY`).
 //! 5. `mdb_env_open2`: read both meta pages with `pread`
 //!    (`mdb_env_read_header`); an empty file is a new environment whose two
@@ -52,7 +56,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use crate::cmp::CmpFn;
 use crate::consts::*;
 use crate::core::dbi::{Dbi, DbiRegistry};
-use crate::core::reader::{LockRegion, ReaderInfo};
+use crate::core::reader::{LocalReaders, LockRegion, ReaderInfo, ReaderTable};
 use crate::core::txn::{RoTxn, Transaction};
 use crate::core::txn_rw::{RwTxn, SpareTxn};
 use crate::core::{Info, Stat};
@@ -258,7 +262,9 @@ pub struct Environment {
     map: RwLock<Arc<DataMap>>,
     meta_file: Option<File>,
     data_file: File,
-    lock: Option<LockRegion>,
+    /// The lock file's reader table, or without a lock file the in-memory
+    /// table of this process's read transactions.
+    readers: ReaderTable,
     pub(crate) dbis: DbiRegistry,
     flags: AtomicU32,
     /// `MDB_FATAL_ERROR`: a meta page write failed; every new transaction
@@ -266,7 +272,9 @@ pub struct Environment {
     fatal: AtomicBool,
     /// Writer state that lives in `MDB_env` in C (`me_pgoldest`). Its mutex
     /// also serialises write transactions within this process (the shared
-    /// writer mutex does that across processes).
+    /// writer mutex does that across processes; without a lock file it is
+    /// the only writer lock, and other processes are the caller's business,
+    /// as with C's `MDB_NOLOCK`).
     writer: Mutex<WriterState>,
     page_size: usize,
     map_size: AtomicUsize,
@@ -437,11 +445,15 @@ impl Environment {
         };
 
         let max_readers = lock.as_ref().map_or(opts.max_readers, |l| l.max_readers());
+        let readers = match lock {
+            Some(lock) => ReaderTable::Shared(lock),
+            None => ReaderTable::Local(LocalReaders::default()),
+        };
         let env = Environment {
             map: RwLock::new(Arc::new(map)),
             meta_file,
             data_file,
-            lock,
+            readers,
             dbis: DbiRegistry::new(opts.max_dbs),
             flags: AtomicU32::new(flags),
             fatal: AtomicBool::new(false),
@@ -462,7 +474,7 @@ impl Environment {
             _registration: registration,
         };
 
-        if let Some(lock) = &env.lock {
+        if let Some(lock) = env.lock_region() {
             if lock.is_exclusive() {
                 lock.downgrade(env.pick_meta()?.txnid)?;
             }
@@ -517,8 +529,17 @@ impl Environment {
         Arc::clone(&self.map.read().unwrap_or_else(|e| e.into_inner()))
     }
 
+    /// The lock file's table, `None` without a lock file.
     pub(crate) fn lock_region(&self) -> Option<&LockRegion> {
-        self.lock.as_ref()
+        match &self.readers {
+            ReaderTable::Shared(lock) => Some(lock),
+            ReaderTable::Local(_) => None,
+        }
+    }
+
+    /// Where read transactions advertise their snapshots.
+    pub(crate) fn readers(&self) -> &ReaderTable {
+        &self.readers
     }
 
     pub(crate) fn is_read_only(&self) -> bool {
@@ -637,7 +658,8 @@ impl Environment {
         Ok(Stat::from_db(self.page_size, &meta.dbs[MAIN_DBI as usize]))
     }
 
-    /// `mdb_env_info`.
+    /// `mdb_env_info`. Without a lock file `num_readers` is 0, as in C
+    /// (see [`Environment::in_memory_readers`]).
     pub fn info(&self) -> Result<Info> {
         let meta = self.pick_meta()?;
         Ok(Info {
@@ -645,7 +667,7 @@ impl Environment {
             last_pgno: meta.last_pgno as usize,
             last_txnid: meta.txnid as usize,
             max_readers: self.max_readers,
-            num_readers: self.lock.as_ref().map_or(0, |l| l.raw_num_readers()),
+            num_readers: self.lock_region().map_or(0, |l| l.raw_num_readers()),
             map_address: meta.address as usize,
         })
     }
@@ -770,7 +792,27 @@ impl Environment {
     /// lock file could not be created because the file system is read-only
     /// (`EROFS`, as C allows).
     pub fn has_lock_file(&self) -> bool {
-        self.lock.is_some()
+        self.lock_region().is_some()
+    }
+
+    /// The number of read transactions of this process that pin a snapshot
+    /// in the in-memory reader table of an environment without a lock file
+    /// (see [`Environment::has_lock_file`]); `None` with a lock file, whose
+    /// table [`Environment::reader_list`] shows.
+    ///
+    /// Without a lock file the read transactions of this process are
+    /// tracked in memory, so that its write transactions never reuse pages
+    /// they read; C does not track them (`MDB_NOLOCK` leaves that to the
+    /// caller). Other processes are not covered: with `NO_LOCK`, keeping
+    /// them away while this one writes is the caller's job, as in C. The
+    /// functions that report C's lock-file table ([`Environment::info`],
+    /// [`Environment::reader_list`], [`Environment::reader_check`]) report
+    /// what C does without one.
+    pub fn in_memory_readers(&self) -> Option<usize> {
+        match &self.readers {
+            ReaderTable::Shared(_) => None,
+            ReaderTable::Local(local) => Some(local.active()),
+        }
     }
 
     /// `mdb_env_get_fd`-like access to the data file.
@@ -779,19 +821,20 @@ impl Environment {
     }
 
     /// The active reader slots (`mdb_reader_list`). Empty if the
-    /// environment has no lock file (`NO_LOCK`). Use
+    /// environment has no lock file (`NO_LOCK`; C prints `(no reader
+    /// locks)` then, see [`Environment::in_memory_readers`]). Use
     /// [`format_reader_list`](crate::core::format_reader_list) for C's text.
     pub fn reader_list(&self) -> Result<Vec<ReaderInfo>> {
         Ok(self
-            .lock
-            .as_ref()
+            .lock_region()
             .map_or_else(Vec::new, |l| l.reader_list()))
     }
 
     /// `mdb_reader_check`: clear reader slots of dead processes; returns how
-    /// many were cleared.
+    /// many were cleared. 0 without a lock file, as in C (the in-memory
+    /// table has no dead readers).
     pub fn reader_check(&self) -> Result<usize> {
-        match &self.lock {
+        match self.lock_region() {
             Some(l) => l.reader_check(),
             None => Ok(0),
         }

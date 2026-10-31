@@ -541,13 +541,11 @@ impl<'env> RwTxn<'env> {
 }
 
 /// `mdb_find_oldest`: the oldest snapshot any reader uses, or our txnid
-/// minus one if there is none older.
+/// minus one if there is none older. Without a lock file C looks at no
+/// reader at all; here the in-memory table of this process's readers
+/// stands in for the lock file's (`KNOWN_C_BUGS.md` #35).
 fn find_oldest(core: &crate::core::txn::TxnCore<'_>) -> u64 {
-    let txnid = core.txnid;
-    match core.env.lock_region() {
-        Some(lock) => lock.find_oldest(txnid),
-        None => txnid.wrapping_sub(1),
-    }
+    core.env.readers().find_oldest(core.txnid)
 }
 
 #[cfg(test)]

@@ -283,7 +283,11 @@ pub fn file_size(file: &File) -> io::Result<u64> {
 /// which the C implementation relies on just the same, is that a page
 /// reachable from a snapshot is never modified while a reader slot pins that
 /// snapshot: writers only reuse pages freed by transactions older than every
-/// active reader (`mdb_find_oldest`). Slices handed out by `slice` are only
+/// active reader (`mdb_find_oldest`). Without a lock file (`MDB_NOLOCK`) the
+/// environment's in-memory reader table stands in for the slots of this
+/// process's readers (C has none there); other processes then must not
+/// write while we read, which `MDB_NOLOCK` makes the caller's job, as in C.
+/// Slices handed out by `slice` are only
 /// for such pages, and their lifetime is bounded by the read transaction
 /// that pins the snapshot. The two meta pages *are* rewritten under readers;
 /// they are only ever read through [`DataMap::read_volatile`] into a private
@@ -305,8 +309,10 @@ pub fn file_size(file: &File) -> io::Result<u64> {
 /// pages past the snapshot are refused, see `core::freelist`), and a lock
 /// file into which another program wrote a too-high `mti_txnid` or cleared
 /// a live reader slot, both make a writer (in this process or another)
-/// rewrite a page that a read transaction may be looking at. The page
-/// then changes under a live `&[u8]`. Every access to page contents is a
+/// rewrite a page that a read transaction may be looking at. So does a
+/// process writing an `MDB_NOLOCK` environment that another process reads
+/// (the misuse `lmdb.h` warns about). The page then changes under a live
+/// `&[u8]`. Every access to page contents is a
 /// bounds check against the slice's length, which does not change, so in
 /// practice the reader sees wrong data or gets `MDB_CORRUPTED`. Formally
 /// it is undefined behaviour in Rust, which is why it is listed with the

@@ -37,7 +37,8 @@
 //! * [`reader`]: the lock file and reader table (`mdb_env_setup_locks`,
 //!   `mdb_env_excl_lock`, `mdb_env_share_locks`, `mdb_reader_pid`,
 //!   `mdb_reader_list`, `mdb_reader_check0`, `mdb_find_oldest`,
-//!   `mdb_mutex_failed`);
+//!   `mdb_mutex_failed`), and the in-memory reader table of an
+//!   environment without a lock file (no C counterpart);
 //! * [`txn`]: read transactions and the [`Transaction`] trait
 //!   (`mdb_txn_begin`, `mdb_txn_renew0`, `mdb_txn_reset`, `mdb_txn_abort`,
 //!   `mdb_get`);

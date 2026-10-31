@@ -35,7 +35,14 @@ bitflags::bitflags! {
         /// `MDB_NOTLS`. Accepted; this implementation always behaves this
         /// way (a reader slot belongs to a transaction, not a thread).
         const NO_TLS = MDB_NOTLS;
-        /// `MDB_NOLOCK`: no lock file; the caller must serialise access.
+        /// `MDB_NOLOCK`: no lock file and no cross-process locking (no
+        /// shared mutexes or semaphores, no `fcntl` locks), as in C. Other
+        /// processes are the caller's business: none may write while this
+        /// one uses the environment, nor read while this one writes.
+        /// Within the process nothing changes: write transactions are
+        /// serialised, and read transactions are tracked in memory so that
+        /// writers never reuse their pages (C tracks none; see
+        /// [`Environment::in_memory_readers`](crate::Environment::in_memory_readers)).
         const NO_LOCK = MDB_NOLOCK;
         /// `MDB_NORDAHEAD`: advise the OS that access is random.
         const NO_READ_AHEAD = MDB_NORDAHEAD;

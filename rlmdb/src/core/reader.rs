@@ -1,10 +1,22 @@
-//! The lock file and its reader table.
+//! The lock file and its reader table, and the in-memory reader table of
+//! an environment without a lock file.
 //!
 //! Readers do not lock anything while they read. They advertise the snapshot
 //! they use in a slot of the shared reader table, so that writers know which
 //! freed pages must not be reused yet (`mdb_find_oldest`). The table lives in
 //! the lock file (`lock.mdb` or `<path>-lock`), memory-mapped by every
 //! process using the environment.
+//!
+//! An environment without a lock file (`MDB_NOLOCK`, or read-only on a
+//! read-only file system) has no shared table. C then does not track
+//! readers at all: `mdb_find_oldest` returns the writer's txnid minus one,
+//! so a write transaction may reuse pages a read transaction of the same
+//! process still reads (`lmdb.h` makes that the caller's problem). Here the
+//! environment keeps a `LocalReaders` table instead, which tracks the read
+//! transactions of this process exactly as the lock file's table would; only
+//! other processes are the caller's business, as in C
+//! (`KNOWN_C_BUGS.md` #35). `ReaderTable` is the environment's choice of
+//! the two.
 //!
 //! C counterparts and behaviours kept exactly:
 //!
@@ -35,8 +47,8 @@
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::consts::MDB_MAGIC;
 use crate::error::{Error, MdbError, Result};
@@ -71,6 +83,28 @@ pub fn format_reader_list(readers: &[ReaderInfo]) -> String {
         }
     }
     s
+}
+
+/// Where the read transactions of an environment advertise their
+/// snapshots: the lock file's table, shared with other processes, or,
+/// without a lock file, an in-memory table of this process's readers.
+pub(crate) enum ReaderTable {
+    /// The lock file (`me_txns`).
+    Shared(LockRegion),
+    /// No lock file (`me_txns == NULL` in C, which tracks no readers then).
+    Local(LocalReaders),
+}
+
+impl ReaderTable {
+    /// `mdb_find_oldest`: the oldest snapshot still in use by a reader, or
+    /// `txnid - 1` if there is none older. Without a lock file, the readers
+    /// of this process.
+    pub(crate) fn find_oldest(&self, txnid: u64) -> u64 {
+        match self {
+            ReaderTable::Shared(lock) => lock.find_oldest(txnid),
+            ReaderTable::Local(local) => local.find_oldest(txnid),
+        }
+    }
 }
 
 /// The open lock file: its mapping, the shared mutexes and our bookkeeping
@@ -520,6 +554,118 @@ impl Drop for LockRegion {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The in-memory reader table
+// ---------------------------------------------------------------------------
+
+/// `mr_txnid` of an entry that pins no snapshot (`(txnid_t)-1`).
+const IDLE: u64 = !0;
+
+/// The reader table of an environment without a lock file: the in-memory
+/// counterpart of the lock file's table, for the read transactions of this
+/// process (see the module documentation).
+///
+/// Each read transaction owns an entry ([`LocalSlot`]) as long as it (or
+/// the [`InactiveTxn`](crate::core::InactiveTxn) a reset leaves) lives, and
+/// publishes its snapshot's txnid in it, as in a lock-file slot. Owning,
+/// publishing, resetting and releasing are atomic operations on the entry;
+/// the mutex only guards the list, which claiming an entry and
+/// [`LocalReaders::find_oldest`] walk. Unlike the lock file's, the table has
+/// no fixed size: C has no limit on read transactions without a lock file
+/// either (no `MDB_READERS_FULL`).
+#[derive(Debug, Default)]
+pub(crate) struct LocalReaders {
+    /// Every entry ever claimed; released ones are reused.
+    entries: Mutex<Vec<Arc<LocalEntry>>>,
+}
+
+/// One entry of [`LocalReaders`] (an `MDB_reader` without pid and thread).
+#[derive(Debug)]
+struct LocalEntry {
+    /// The snapshot its owner reads (`mr_txnid`), or [`IDLE`].
+    txnid: AtomicU64,
+    /// `true` while a transaction owns it (`mr_pid != 0`).
+    owned: AtomicBool,
+}
+
+/// A read transaction's entry in [`LocalReaders`]. Dropping it releases the
+/// entry.
+#[derive(Debug)]
+pub(crate) struct LocalSlot(Arc<LocalEntry>);
+
+impl LocalReaders {
+    /// Claims an entry for a read transaction, reusing a released one
+    /// first (the slot search of `mdb_txn_renew0`). Its txnid is [`IDLE`].
+    pub(crate) fn acquire(&self) -> LocalSlot {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        // Entries are only claimed under the mutex, so a free one stays
+        // free until we take it. The acquire load pairs with the release
+        // in `LocalSlot::drop`: the previous owner's last store (`IDLE`)
+        // comes before ours.
+        let entry = match entries.iter().find(|e| !e.owned.load(Ordering::Acquire)) {
+            Some(e) => Arc::clone(e),
+            None => {
+                let e = Arc::new(LocalEntry {
+                    txnid: AtomicU64::new(IDLE),
+                    owned: AtomicBool::new(false),
+                });
+                entries.push(Arc::clone(&e));
+                e
+            }
+        };
+        entry.owned.store(true, Ordering::Relaxed);
+        LocalSlot(entry)
+    }
+
+    /// `mdb_find_oldest` over this process's readers: the oldest snapshot
+    /// one of them pins, or `txnid - 1` if there is none older.
+    pub(crate) fn find_oldest(&self, txnid: u64) -> u64 {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        // Pairs with the fence in `LocalSlot::publish`: a reader whose
+        // publication we miss sees the meta page of every commit before
+        // this point and retries (`RoTxn::take_snapshot`).
+        fence(Ordering::SeqCst);
+        entries
+            .iter()
+            .map(|e| e.txnid.load(Ordering::SeqCst))
+            .fold(txnid.wrapping_sub(1), u64::min)
+    }
+
+    /// The number of entries that pin a snapshot.
+    pub(crate) fn active(&self) -> usize {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries
+            .iter()
+            .filter(|e| e.txnid.load(Ordering::SeqCst) != IDLE)
+            .count()
+    }
+}
+
+impl LocalSlot {
+    /// Pins snapshot `txnid` (`r->mr_txnid = txnid`). Writers that look at
+    /// the table after this see it; see `RoTxn::take_snapshot` for those
+    /// that looked before.
+    pub(crate) fn publish(&self, txnid: u64) {
+        self.0.txnid.store(txnid, Ordering::SeqCst);
+        // Order the store before the caller's re-read of the meta page.
+        fence(Ordering::SeqCst);
+    }
+
+    /// Unpins the snapshot but keeps the entry (`mdb_txn_reset`).
+    pub(crate) fn reset(&self) {
+        self.0.txnid.store(IDLE, Ordering::SeqCst);
+    }
+}
+
+impl Drop for LocalSlot {
+    /// Unpins the snapshot and releases the entry (`mdb_txn_end` with
+    /// `MDB_END_SLOT`).
+    fn drop(&mut self) {
+        self.0.txnid.store(IDLE, Ordering::SeqCst);
+        self.0.owned.store(false, Ordering::Release);
+    }
+}
+
 /// Holds the reader-table mutex; unlocks on drop (`UNLOCK_MUTEX`).
 struct ReaderTableGuard<'a> {
     mutex: &'a SharedMutex,
@@ -643,5 +789,396 @@ mod tests {
             );
             assert_eq!(region.reader_list().len(), 1);
         }
+    }
+
+    // --- readers pin their pages, with or without a lock file -------------
+
+    use std::collections::BTreeMap;
+
+    use crate::core::audit::{page_use, PageUse};
+    use crate::core::txn_rw::TXN_SPILLS;
+    use crate::core::{Dbi, Environment, RoTxn, RwTxn, Transaction};
+    use crate::flags::{EnvironmentFlags, WriteFlags};
+
+    /// Keys of the scenarios below.
+    const KEYS: u32 = 300;
+
+    fn scenario_env(dir: &Path, flags: EnvironmentFlags) -> Environment {
+        Environment::builder()
+            .map_size(256 << 20)
+            .flags(flags | EnvironmentFlags::NO_SYNC)
+            .open(dir)
+            .unwrap()
+    }
+
+    /// Value of key `i` in round `round`: every seventh an overflow run.
+    fn value(i: u32, round: u32, page_size: usize) -> Vec<u8> {
+        let len = if i % 7 == 0 { 2 * page_size } else { 100 };
+        let mut v = vec![(i ^ round) as u8; len];
+        v[..4].copy_from_slice(&round.to_le_bytes());
+        v
+    }
+
+    /// Rewrites every key in `txn`, which frees every page of the tree.
+    fn rewrite(txn: &mut RwTxn<'_>, round: u32) {
+        rewrite_keys(txn, round, 0..KEYS);
+    }
+
+    /// Rewrites the keys `keys` in `txn`.
+    fn rewrite_keys(txn: &mut RwTxn<'_>, round: u32, keys: std::ops::Range<u32>) {
+        let ps = txn.psize();
+        for i in keys {
+            txn.put(
+                Dbi::MAIN,
+                &i.to_be_bytes(),
+                &value(i, round, ps),
+                WriteFlags::empty(),
+            )
+            .unwrap();
+        }
+    }
+
+    /// One write transaction of [`rewrite`].
+    fn commit_round(env: &Environment, round: u32) {
+        let mut txn = env.begin_rw_txn().unwrap();
+        rewrite(&mut txn, round);
+        txn.commit().unwrap();
+    }
+
+    /// What a reader saw when it began: the bytes of every page of its
+    /// snapshot, its page use, and some values it holds.
+    struct Pinned<'t> {
+        pages: BTreeMap<u64, Vec<u8>>,
+        uses: PageUse,
+        held: Vec<(&'t [u8], Vec<u8>)>,
+    }
+
+    fn pin<'t>(txn: &'t RoTxn<'_>) -> Pinned<'t> {
+        let uses = page_use(txn);
+        let ps = txn.env().page_size();
+        let pages = uses
+            .tree
+            .iter()
+            .map(|&p| (p, mapped(txn, p, ps).to_vec()))
+            .collect();
+        let held = (0..KEYS)
+            .step_by(13)
+            .map(|i| {
+                let v = txn.get(Dbi::MAIN, &i.to_be_bytes()).unwrap().unwrap();
+                (v, v.to_vec())
+            })
+            .collect();
+        Pinned { pages, uses, held }
+    }
+
+    /// Page `p` as the reader's map holds it now.
+    fn mapped<'t>(txn: &'t RoTxn<'_>, p: u64, ps: usize) -> &'t [u8] {
+        txn.core().map.slice(p as usize * ps, ps).unwrap()
+    }
+
+    /// The reader's bytes did not change and none of its pages was reused.
+    /// `freed` is the page use right after the first commit since the
+    /// reader began, which freed (nearly) all of its pages; such a page must
+    /// stay in the free record that freed it for as long as the reader
+    /// lives (`now`), and any other page of the snapshot must still be in a
+    /// tree, unchanged, or in a free record newer than the snapshot.
+    fn check_pinned(txn: &RoTxn<'_>, pinned: &Pinned<'_>, freed: &PageUse, now: &PageUse) {
+        let ps = txn.env().page_size();
+        let id = txn.id();
+        for (&p, bytes) in &pinned.pages {
+            assert!(
+                mapped(txn, p, ps) == &bytes[..],
+                "page {p} of the reader's snapshot {id} changed under it"
+            );
+            match freed.free.get(&p) {
+                Some(&rec) if rec > id => assert_eq!(
+                    now.free.get(&p),
+                    Some(&rec),
+                    "page {p} of snapshot {id}, freed by txn {rec}, was reused"
+                ),
+                _ if now.tree.contains(&p) => {}
+                _ => assert!(
+                    now.free.get(&p).is_some_and(|&rec| rec > id),
+                    "page {p} of snapshot {id} was reused"
+                ),
+            }
+        }
+        for (v, copy) in &pinned.held {
+            assert_eq!(v, copy, "a value the reader holds changed");
+        }
+    }
+
+    /// The first commit after a reader began freed most of its pages (so
+    /// [`check_pinned`] tests something).
+    fn assert_freed_most(pinned: &Pinned<'_>, id: u64, freed: &PageUse) {
+        let n = pinned
+            .pages
+            .keys()
+            .filter(|p| freed.free.get(p).is_some_and(|&rec| rec > id))
+            .count();
+        assert!(n * 2 > pinned.pages.len(), "{n} of {}", pinned.pages.len());
+    }
+
+    /// The pages that were free in `before` and have been reused since:
+    /// they are in a tree in `after`, or in a newer free record (reused,
+    /// then freed again).
+    fn reused<'a>(before: &'a PageUse, after: &'a PageUse) -> impl Iterator<Item = u64> + 'a {
+        before.free.iter().filter_map(|(&p, &rec)| {
+            let again = after.tree.contains(&p) || after.free.get(&p).is_some_and(|&r| r > rec);
+            again.then_some(p)
+        })
+    }
+
+    fn newest(env: &Environment) -> PageUse {
+        page_use(&env.begin_ro_txn().unwrap())
+    }
+
+    /// A reader pins its snapshot while a dozen commits rewrite every page;
+    /// then it ends and its pages are reused. Returns the newest page use.
+    fn long_reader(flags: EnvironmentFlags) -> PageUse {
+        let dir = tempfile::tempdir().unwrap();
+        let env = scenario_env(dir.path(), flags);
+        for round in 0..3 {
+            commit_round(&env, round);
+        }
+        let reader = env.begin_ro_txn().unwrap();
+        let pinned = pin(&reader);
+        commit_round(&env, 3);
+        let freed = newest(&env);
+        assert_freed_most(&pinned, reader.id(), &freed);
+        for round in 4..15 {
+            commit_round(&env, round);
+        }
+        let now = newest(&env);
+        check_pinned(&reader, &pinned, &freed, &now);
+        // The writers did reuse pages meanwhile (the free ones of the
+        // reader's snapshot).
+        assert!(
+            reused(&pinned.uses, &now).next().is_some(),
+            "no page was reused while the reader was live"
+        );
+        let reader_pages: Vec<u64> = pinned.pages.keys().copied().collect();
+        drop(pinned);
+        drop(reader);
+        // Once it has ended, its pages are reused.
+        for round in 15..18 {
+            commit_round(&env, round);
+        }
+        let after = newest(&env);
+        assert!(
+            reused(&now, &after).any(|p| reader_pages.contains(&p)),
+            "the ended reader's pages were not reused"
+        );
+        crate::core::audit::audit(&env);
+        after
+    }
+
+    #[test]
+    fn no_lock_reader_pins_its_pages() {
+        let no_lock = long_reader(EnvironmentFlags::NO_LOCK);
+        // With a lock file the writers make the same decisions.
+        let locked = long_reader(EnvironmentFlags::empty());
+        assert_eq!(no_lock, locked);
+    }
+
+    /// One round of [`spilling_reader`]: half of the keys in a write
+    /// transaction, the other half in a nested one, both spilling. Returns
+    /// whether they spilled.
+    fn nested_round(env: &Environment, round: u32) -> bool {
+        let mut txn = env.begin_rw_txn().unwrap();
+        rewrite_keys(&mut txn, round, 0..KEYS / 2);
+        let mut spilled = txn.w.flags & TXN_SPILLS != 0;
+        let mut child = txn.begin_nested_txn().unwrap();
+        let before = child.core.spilled.len();
+        rewrite_keys(&mut child, round, KEYS / 2..KEYS);
+        spilled &= child.core.spilled.len() > before;
+        child.commit().unwrap();
+        txn.commit().unwrap();
+        spilled
+    }
+
+    /// [`long_reader`] with write transactions that spill, in nested
+    /// transactions too: spilled pages go to the file before the commit, so
+    /// they must not be pages the reader reads either (`mdb_page_spill`
+    /// writes pages `mdb_page_alloc` took, which asked `mdb_find_oldest`).
+    fn spilling_reader(flags: EnvironmentFlags) -> PageUse {
+        let dir = tempfile::tempdir().unwrap();
+        let env = scenario_env(dir.path(), flags);
+        // (An overflow run is one entry of the dirty list.)
+        env.set_dirty_limit(16);
+        for round in 0..3 {
+            assert!(nested_round(&env, round));
+        }
+        let reader = env.begin_ro_txn().unwrap();
+        let pinned = pin(&reader);
+        assert!(nested_round(&env, 3));
+        let freed = newest(&env);
+        assert_freed_most(&pinned, reader.id(), &freed);
+        for round in 4..15 {
+            assert!(nested_round(&env, round), "round {round} did not spill");
+        }
+        let now = newest(&env);
+        check_pinned(&reader, &pinned, &freed, &now);
+        assert!(reused(&pinned.uses, &now).next().is_some());
+        let reader_pages: Vec<u64> = pinned.pages.keys().copied().collect();
+        drop(pinned);
+        drop(reader);
+        for round in 15..18 {
+            nested_round(&env, round);
+        }
+        let after = newest(&env);
+        assert!(reused(&now, &after).any(|p| reader_pages.contains(&p)));
+        crate::core::audit::audit(&env);
+        after
+    }
+
+    #[test]
+    fn no_lock_reader_pins_its_pages_against_spills_and_nested_txns() {
+        let no_lock = spilling_reader(EnvironmentFlags::NO_LOCK);
+        let locked = spilling_reader(EnvironmentFlags::empty());
+        assert_eq!(no_lock, locked);
+    }
+
+    /// The oldest snapshot the writer of `env` would have to keep, as its
+    /// next write transaction (txnid `next`) sees it.
+    fn oldest(env: &Environment, next: u64) -> u64 {
+        env.readers().find_oldest(next)
+    }
+
+    /// Entries of the in-memory table (claimed or not).
+    fn local_entries(env: &Environment) -> usize {
+        match env.readers() {
+            ReaderTable::Local(local) => local.entries.lock().unwrap().len(),
+            ReaderTable::Shared(_) => panic!("environment has a lock file"),
+        }
+    }
+
+    #[test]
+    fn no_lock_begin_reset_renew_and_end_update_the_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = scenario_env(dir.path(), EnvironmentFlags::NO_LOCK);
+        for round in 0..3 {
+            commit_round(&env, round);
+        }
+        let next = 10;
+        assert_eq!(oldest(&env, next), next - 1);
+
+        let a = env.begin_ro_txn().unwrap();
+        let id = a.id();
+        assert_eq!(oldest(&env, next), id);
+        assert_eq!(a.reader_slot(), None);
+        commit_round(&env, 3);
+        let b = env.begin_ro_txn().unwrap();
+        assert_eq!(b.id(), id + 1);
+        assert_eq!(env.in_memory_readers(), Some(2));
+        assert_eq!(oldest(&env, next), id);
+
+        // A reset transaction pins nothing; renewed, it pins the newest
+        // snapshot.
+        let inactive = a.reset();
+        assert_eq!(env.in_memory_readers(), Some(1));
+        assert_eq!(oldest(&env, next), id + 1);
+        commit_round(&env, 4);
+        let a = inactive.renew().unwrap();
+        assert_eq!(a.id(), id + 2);
+        assert_eq!(oldest(&env, next), id + 1);
+
+        // Abort, commit and drop on another thread unregister.
+        b.abort();
+        assert_eq!(oldest(&env, next), id + 2);
+        std::thread::scope(|s| {
+            s.spawn(move || drop(a)).join().unwrap();
+        });
+        assert_eq!(env.in_memory_readers(), Some(0));
+        assert_eq!(oldest(&env, next), next - 1);
+        let c = env.begin_ro_txn().unwrap();
+        assert_eq!(oldest(&env, next), id + 2);
+        c.commit().unwrap();
+        // An inactive transaction that is dropped releases its entry.
+        drop(env.begin_ro_txn().unwrap().reset());
+        assert_eq!(env.in_memory_readers(), Some(0));
+        assert_eq!(oldest(&env, next), next - 1);
+        // Released entries are reused.
+        assert_eq!(local_entries(&env), 2);
+        for _ in 0..10 {
+            let t = env.begin_ro_txn().unwrap();
+            let u = env.begin_ro_txn().unwrap();
+            drop((t, u));
+        }
+        assert_eq!(local_entries(&env), 2);
+        // No limit, as in C without a lock file (no MDB_READERS_FULL).
+        let many: Vec<_> = (0..300).map(|_| env.begin_ro_txn().unwrap()).collect();
+        assert_eq!(env.in_memory_readers(), Some(300));
+        drop(many);
+        assert_eq!(env.in_memory_readers(), Some(0));
+    }
+
+    /// Readers on several threads hold values while a writer commits: no
+    /// value changes under a reader, also when a reader begins while
+    /// commits happen (the publication race of `RoTxn::take_snapshot`).
+    #[test]
+    fn no_lock_readers_on_other_threads_keep_their_snapshots() {
+        use std::sync::atomic::AtomicU64;
+
+        let dir = tempfile::tempdir().unwrap();
+        let env = scenario_env(dir.path(), EnvironmentFlags::NO_LOCK);
+        let keys = 64u32;
+        let val = |i: u32, round: u64| -> Vec<u8> {
+            let mut v = vec![i as u8; 200];
+            v[..8].copy_from_slice(&round.to_le_bytes());
+            v
+        };
+        let write = |round: u64| {
+            let mut txn = env.begin_rw_txn().unwrap();
+            for i in 0..keys {
+                txn.put(
+                    Dbi::MAIN,
+                    &i.to_be_bytes(),
+                    &val(i, round),
+                    WriteFlags::empty(),
+                )
+                .unwrap();
+            }
+            txn.commit().unwrap();
+        };
+        write(0);
+        let commits = AtomicU64::new(0);
+        let done = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    let mut snapshots = 0;
+                    while !done.load(Ordering::SeqCst) || snapshots < 3 {
+                        let txn = env.begin_ro_txn().unwrap();
+                        let held: Vec<&[u8]> = (0..keys)
+                            .map(|i| txn.get(Dbi::MAIN, &i.to_be_bytes()).unwrap().unwrap())
+                            .collect();
+                        let copies: Vec<Vec<u8>> = held.iter().map(|v| v.to_vec()).collect();
+                        let round = u64::from_le_bytes(copies[0][..8].try_into().unwrap());
+                        for (i, v) in copies.iter().enumerate() {
+                            assert_eq!(v, &val(i as u32, round), "torn snapshot");
+                        }
+                        // Hold the values across a few commits.
+                        let seen = commits.load(Ordering::SeqCst);
+                        while commits.load(Ordering::SeqCst) < seen + 3
+                            && !done.load(Ordering::SeqCst)
+                        {
+                            std::thread::yield_now();
+                        }
+                        for (v, c) in held.iter().zip(&copies) {
+                            assert_eq!(v, c, "a value changed under its reader");
+                        }
+                        snapshots += 1;
+                    }
+                });
+            }
+            for round in 1..300 {
+                write(round);
+                commits.fetch_add(1, Ordering::SeqCst);
+            }
+            done.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(env.in_memory_readers(), Some(0));
+        crate::core::audit::audit(&env);
     }
 }

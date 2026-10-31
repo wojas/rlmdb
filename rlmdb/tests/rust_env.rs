@@ -5,7 +5,9 @@
 mod common;
 
 use rlmdb::consts::MDB_MAXKEYSIZE;
-use rlmdb::{CursorOp, Dbi, Environment, EnvironmentFlags, Error, Format, MdbError, Transaction};
+use rlmdb::{
+    CursorOp, Dbi, Environment, EnvironmentFlags, Error, Format, MdbError, Transaction, WriteFlags,
+};
 
 fn tmp() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
@@ -104,6 +106,30 @@ fn already_opened_and_reopen_after_drop() {
     ));
     drop(env);
     let env = Environment::builder().open(dir.path()).unwrap();
+    drop(env);
+}
+
+/// The registry covers `NO_LOCK` environments too, whatever the other open
+/// asks for: the in-memory reader table of one `Environment` then covers
+/// every read transaction of the process on that path.
+#[test]
+fn already_opened_without_a_lock_file() {
+    let dir = tmp();
+    let open = |flags| Environment::builder().flags(flags).open(dir.path());
+    let env = open(EnvironmentFlags::NO_LOCK).unwrap();
+    for flags in [
+        EnvironmentFlags::NO_LOCK,
+        EnvironmentFlags::empty(),
+        EnvironmentFlags::NO_LOCK | EnvironmentFlags::READ_ONLY,
+    ] {
+        assert!(matches!(open(flags), Err(Error::EnvAlreadyOpened)));
+    }
+    drop(env);
+    let env = open(EnvironmentFlags::empty()).unwrap();
+    assert!(matches!(
+        open(EnvironmentFlags::NO_LOCK),
+        Err(Error::EnvAlreadyOpened)
+    ));
     drop(env);
 }
 
@@ -328,10 +354,79 @@ fn no_lock_environment() {
         .open(dir.path())
         .unwrap();
     assert!(!dir.path().join("lock.mdb").exists());
+    assert_eq!(env.in_memory_readers(), Some(0));
     let txn = env.begin_ro_txn().unwrap();
     assert_eq!(txn.reader_slot(), None);
+    // Tracked in memory; the lock-file views report what C does.
+    assert_eq!(env.in_memory_readers(), Some(1));
     assert!(env.reader_list().unwrap().is_empty());
     assert_eq!(env.info().unwrap().num_readers, 0);
+    assert_eq!(env.reader_check().unwrap(), 0);
+    let inactive = txn.reset();
+    assert_eq!(env.in_memory_readers(), Some(0));
+    let txn = inactive.renew().unwrap();
+    assert_eq!(env.in_memory_readers(), Some(1));
+    // A transaction that lives on in another thread unregisters when it
+    // is dropped there.
+    std::thread::scope(|s| {
+        s.spawn(move || drop(txn));
+    });
+    assert_eq!(env.in_memory_readers(), Some(0));
+    assert!(!dir.path().join("lock.mdb").exists());
+
+    // With a lock file the table is the lock file's.
+    drop(env);
+    let env = Environment::builder().open(dir.path()).unwrap();
+    let _txn = env.begin_ro_txn().unwrap();
+    assert_eq!(env.in_memory_readers(), None);
+    assert_eq!(env.reader_list().unwrap().len(), 1);
+}
+
+/// Without a lock file, write transactions of the process (nested ones
+/// included) are still serialised: by the in-process writer lock.
+#[test]
+fn no_lock_writers_are_serialised() {
+    let dir = tmp();
+    let env = Environment::builder()
+        .flags(EnvironmentFlags::NO_LOCK | EnvironmentFlags::NO_SYNC)
+        .open(dir.path())
+        .unwrap();
+    let count = |txn: &dyn Transaction| -> u64 {
+        txn.get(Dbi::MAIN, b"n")
+            .unwrap()
+            .map_or(0, |v| u64::from_le_bytes(v.try_into().unwrap()))
+    };
+    let (threads, rounds) = (4, 50);
+    std::thread::scope(|s| {
+        for t in 0..threads {
+            let env = &env;
+            s.spawn(move || {
+                for r in 0..rounds {
+                    let mut txn = env.begin_rw_txn().unwrap();
+                    let n = count(&txn);
+                    let mut child = txn.begin_nested_txn().unwrap();
+                    assert_eq!(count(&child), n);
+                    child
+                        .put(Dbi::MAIN, b"n", &(n + 1).to_le_bytes(), WriteFlags::empty())
+                        .unwrap();
+                    child.commit().unwrap();
+                    if (t + r) % 7 == 0 {
+                        // A nested transaction that aborts changes nothing.
+                        let mut child = txn.begin_nested_txn().unwrap();
+                        child
+                            .put(Dbi::MAIN, b"n", &0u64.to_le_bytes(), WriteFlags::empty())
+                            .unwrap();
+                        child.abort();
+                    }
+                    std::thread::yield_now();
+                    txn.commit().unwrap();
+                }
+            });
+        }
+    });
+    let txn = env.begin_ro_txn().unwrap();
+    assert_eq!(count(&txn), threads * rounds);
+    assert_eq!(txn.id(), threads * rounds);
 }
 
 fn assert_send<T: Send>() {}

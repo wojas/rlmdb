@@ -156,6 +156,9 @@ pub unsafe extern "C" fn mdb_env_info(env: *mut MDB_env, info: *mut MDB_envinfo)
                 me_last_pgno: i.last_pgno,
                 me_last_txnid: i.last_txnid,
                 me_maxreaders: i.max_readers,
+                // 0 without a lock file, as in C (the read transactions
+                // are then tracked in memory, which C does not do;
+                // KNOWN_C_BUGS.md #35).
                 me_numreaders: i.num_readers,
             };
             // SAFETY: info is non-NULL and writable (lmdb.h).
@@ -420,7 +423,8 @@ pub unsafe extern "C" fn mdb_reader_list(
             Err(err) => return err.to_err_code(),
         },
         // C: no lock table (MDB_NOLOCK, a read-only environment on a
-        // read-only file system, or not open yet).
+        // read-only file system, or not open yet). The in-memory table of
+        // such an environment is not listed: programs may compare with C.
         _ => "(no reader locks)\n".to_owned(),
     };
     let mut result = 0;

@@ -20,6 +20,14 @@
 //!
 //! If the snapshot's pages extend past our map (another process grew the
 //! database beyond our `map_size`), begin fails with `MDB_MAP_RESIZED`.
+//!
+//! Without a lock file there is no `mti_txnid` and C does not track readers
+//! (`mdb_txn_renew0` just takes the newest meta page). Here the transaction
+//! takes an entry of the environment's in-memory reader table
+//! (`reader::LocalReaders`) instead of a slot, publishes the txnid of the
+//! newest meta page in it and then re-checks that meta page; see
+//! `RoTxn::take_snapshot`. Writers of the process then keep its pages as
+//! they would for a lock-file slot.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -30,6 +38,7 @@ use crate::core::cursor::{self, Cursor, RoCursor};
 use crate::core::dbi::{init_txn_dbs, Dbi, TxnDb, DB_USRVALID, DB_VALID};
 use crate::core::dirty::{DirtyPages, Layer, PageSlot, SpillSet};
 use crate::core::env::Environment;
+use crate::core::reader::{LocalSlot, LockRegion, ReaderTable};
 use crate::core::Stat;
 use crate::error::{Error, MdbError, Result};
 use crate::flags::DatabaseFlags;
@@ -432,6 +441,52 @@ impl<'env> TxnCore<'env> {
     }
 }
 
+/// A read transaction's place in its environment's reader table
+/// (`mt_u.reader`).
+enum ReaderSlot<'env> {
+    /// Slot `index` of the lock file's table.
+    Shared {
+        lock: &'env LockRegion,
+        index: usize,
+    },
+    /// An entry of the in-memory table (no lock file); released when
+    /// dropped.
+    Local(LocalSlot),
+    /// None: given to the [`InactiveTxn`] by a reset, or taken from us
+    /// (`MDB_BAD_RSLOT`).
+    None,
+}
+
+impl std::fmt::Debug for ReaderSlot<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReaderSlot::Shared { index, .. } => f.debug_tuple("Shared").field(index).finish(),
+            ReaderSlot::Local(_) => f.write_str("Local"),
+            ReaderSlot::None => f.write_str("None"),
+        }
+    }
+}
+
+impl ReaderSlot<'_> {
+    /// Unpins the snapshot but keeps the slot (`mdb_txn_reset`).
+    fn reset(&self) {
+        match self {
+            ReaderSlot::Shared { lock, index } => lock.reset_slot(*index),
+            ReaderSlot::Local(slot) => slot.reset(),
+            ReaderSlot::None => {}
+        }
+    }
+
+    /// Gives the slot back (`mdb_txn_end` with `MDB_END_SLOT`).
+    fn release(&mut self) {
+        match std::mem::replace(self, ReaderSlot::None) {
+            ReaderSlot::Shared { lock, index } => lock.release_slot(index),
+            // Dropping the entry releases it.
+            ReaderSlot::Local(_) | ReaderSlot::None => {}
+        }
+    }
+}
+
 /// A read-only transaction (`MDB_txn` with `MDB_RDONLY`).
 ///
 /// Pins one snapshot until it is dropped, [`aborted`](RoTxn::abort),
@@ -439,8 +494,9 @@ impl<'env> TxnCore<'env> {
 /// thread: it may be sent to another thread (`Send`).
 pub struct RoTxn<'env> {
     core: TxnCore<'env>,
-    /// Our reader slot, if the environment has a lock file.
-    slot: Option<usize>,
+    /// Our reader slot: in the lock file, or in the environment's in-memory
+    /// table if it has none.
+    slot: ReaderSlot<'env>,
 }
 
 impl std::fmt::Debug for RoTxn<'_> {
@@ -455,9 +511,12 @@ impl std::fmt::Debug for RoTxn<'_> {
 impl<'env> RoTxn<'env> {
     /// `mdb_txn_begin(env, NULL, MDB_RDONLY)`.
     pub(crate) fn begin(env: &'env Environment) -> Result<RoTxn<'env>> {
-        let slot = match env.lock_region() {
-            Some(lock) => Some(lock.acquire_slot()?),
-            None => None,
+        let slot = match env.readers() {
+            ReaderTable::Shared(lock) => ReaderSlot::Shared {
+                lock,
+                index: lock.acquire_slot()?,
+            },
+            ReaderTable::Local(local) => ReaderSlot::Local(local.acquire()),
         };
         // Built before the snapshot is taken so that Drop releases the slot
         // if anything below fails.
@@ -472,12 +531,12 @@ impl<'env> RoTxn<'env> {
     /// The read-only branch of `mdb_txn_renew0`.
     fn take_snapshot(&mut self) -> Result<()> {
         let env = self.core.env;
-        let (txnid, meta) = match (env.lock_region(), self.slot) {
-            (Some(lock), Some(slot)) => loop {
-                let txnid = lock.publish_current_txnid(slot);
+        let (txnid, meta) = match &self.slot {
+            ReaderSlot::Shared { lock, index } => loop {
+                let txnid = lock.publish_current_txnid(*index);
                 if txnid == 0 && env.is_read_only() {
                     let meta = env.pick_meta()?;
-                    lock.set_slot_txnid(slot, meta.txnid);
+                    lock.set_slot_txnid(*index, meta.txnid);
                     break (meta.txnid, meta);
                 }
                 let meta = env.read_meta((txnid & 1) as usize)?;
@@ -487,10 +546,25 @@ impl<'env> RoTxn<'env> {
                     break (txnid, meta);
                 }
             },
-            _ => {
+            ReaderSlot::Local(slot) => loop {
+                // No lock file: the newest meta page, as C's
+                // `mdb_env_pick_meta`, then publish its txnid.
                 let meta = env.pick_meta()?;
-                (meta.txnid, meta)
-            }
+                slot.publish(meta.txnid);
+                // A writer that looked at the table before the publication
+                // did not see it. Pages of snapshot N are freed by commits
+                // after N, and a writer with txnid W reuses only pages
+                // freed by commits before W - 1 (`find_oldest` returns at
+                // most W - 1), so only a writer from N + 3 on can reuse
+                // them. It begins after commit N + 2, which rewrote meta
+                // page N & 1: if that page still holds N, every writer that
+                // could reuse the snapshot's pages looks at the table
+                // after the publication. Otherwise try the newer snapshot.
+                if env.meta_ids((meta.txnid & 1) as usize).map(|(_, t)| t) == Some(meta.txnid) {
+                    break (meta.txnid, meta);
+                }
+            },
+            ReaderSlot::None => return Err(MdbError::BadRslot.into()),
         };
         self.core.set_snapshot(txnid, &meta)
     }
@@ -508,10 +582,8 @@ impl<'env> RoTxn<'env> {
     /// `mdb_txn_reset`: release the snapshot but keep the reader slot, so
     /// that [`InactiveTxn::renew`] is cheap.
     pub fn reset(mut self) -> InactiveTxn<'env> {
-        let slot = self.slot.take();
-        if let (Some(lock), Some(i)) = (self.core.env.lock_region(), slot) {
-            lock.reset_slot(i);
-        }
+        let slot = std::mem::replace(&mut self.slot, ReaderSlot::None);
+        slot.reset();
         let dbs = std::mem::take(self.core.dbs.get_mut());
         InactiveTxn {
             env: self.core.env,
@@ -525,9 +597,15 @@ impl<'env> RoTxn<'env> {
         &self.core
     }
 
-    /// The reader slot index this transaction occupies, if any.
+    /// The index of the lock-file reader slot this transaction occupies,
+    /// if any (`None` without a lock file: the transaction is tracked in
+    /// the environment's in-memory table, see
+    /// [`Environment::in_memory_readers`]).
     pub fn reader_slot(&self) -> Option<usize> {
-        self.slot
+        match self.slot {
+            ReaderSlot::Shared { index, .. } => Some(index),
+            ReaderSlot::Local(_) | ReaderSlot::None => None,
+        }
     }
 }
 
@@ -535,9 +613,7 @@ impl Drop for RoTxn<'_> {
     /// `mdb_txn_end(MDB_END_ABORT|MDB_END_SLOT)`: clear the slot's txnid and
     /// give the slot back.
     fn drop(&mut self) {
-        if let (Some(lock), Some(i)) = (self.core.env.lock_region(), self.slot) {
-            lock.release_slot(i);
-        }
+        self.slot.release();
     }
 }
 
@@ -587,7 +663,7 @@ impl Transaction for RoTxn<'_> {
 /// snapshot. [`renew`](InactiveTxn::renew) it to read the latest snapshot.
 pub struct InactiveTxn<'env> {
     env: &'env Environment,
-    slot: Option<usize>,
+    slot: ReaderSlot<'env>,
     dbs: Vec<TxnDb>,
 }
 
@@ -604,16 +680,16 @@ impl<'env> InactiveTxn<'env> {
     /// reader slot. `MdbError::BadRslot` if the slot was taken from us (e.g.
     /// cleared by a reader check in another process).
     pub fn renew(mut self) -> Result<RoTxn<'env>> {
-        let slot = self.slot.take();
+        let slot = std::mem::replace(&mut self.slot, ReaderSlot::None);
         let dbs = std::mem::take(&mut self.dbs);
         let mut txn = RoTxn {
             core: TxnCore::new_read_only(self.env, dbs),
             slot,
         };
-        if let (Some(lock), Some(i)) = (self.env.lock_region(), slot) {
-            if !lock.slot_is_idle_and_ours(i) {
+        if let ReaderSlot::Shared { lock, index } = txn.slot {
+            if !lock.slot_is_idle_and_ours(index) {
                 // Not ours any more: do not release it on drop.
-                txn.slot = None;
+                txn.slot = ReaderSlot::None;
                 return Err(MdbError::BadRslot.into());
             }
         }
@@ -627,8 +703,6 @@ impl<'env> InactiveTxn<'env> {
 
 impl Drop for InactiveTxn<'_> {
     fn drop(&mut self) {
-        if let (Some(lock), Some(i)) = (self.env.lock_region(), self.slot) {
-            lock.release_slot(i);
-        }
+        self.slot.release();
     }
 }

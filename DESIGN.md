@@ -115,7 +115,9 @@ All integers are host-endian (LMDB does not byte-swap). We implement the
 * The free DB (DBI 0) maps `txnid_t` keys (8 bytes host-endian) to `MDB_IDL`
   values: `[count:u64, pgno..]` with pgnos sorted **descending**
   (`mdb_freelist_save`, line 3169; `midl.h`). Pages listed under txn T may be
-  reused once no reader is using a snapshot older than T (`mdb_find_oldest`).
+  reused once no reader is using a snapshot older than T (`mdb_find_oldest`;
+  without a lock file, no reader of this process, from an in-memory table:
+  `KNOWN_C_BUGS.md` #35).
   A Rust writer must leave the free DB in exactly the state a C writer would
   accept: every freed page recorded once, no page both free and in use, loose
   pages handled, and overflow pages counted correctly.
@@ -336,7 +338,8 @@ src/core/env.rs     Environment, EnvironmentBuilder, open sequence, meta selecti
                     map size, the per-process registry of open paths, the
                     the environment's Format/Layout (sniffed from the file,
                     requested, or V09), sniff_format
-src/core/reader.rs  lock file and reader table: slots, oldest reader, reader_check/list
+src/core/reader.rs  lock file and reader table: slots, oldest reader, reader_check/list;
+                    the in-memory reader table without a lock file (NO_LOCK)
 src/core/txn.rs     TxnCore (snapshot, DBI view, page lookup), RoTxn, InactiveTxn,
                     the Transaction trait
 src/core/dbi.rs     Dbi handles, open/close, names, stale-record refresh
@@ -533,6 +536,14 @@ strings match `mdb_strerror`.
 * LMDB's MVCC guarantees that pages reachable from a snapshot are not modified
   while a reader slot pins that snapshot. This is the same invariant the C
   code relies on; document it in `os::Mmap`.
+* Without a lock file (`MDB_NOLOCK`, or read-only on a read-only file
+  system) C tracks no readers and its writers reuse pages that read
+  transactions of the same process still read. rlmdb keeps an in-memory
+  reader table per `Environment` instead (`core::reader::LocalReaders`):
+  read transactions publish their snapshot in it and `mdb_find_oldest`
+  consults it, so the invariant holds within the process; the registry of
+  open paths makes one table cover the process. Other processes are the
+  caller's job, as `lmdb.h` says for `MDB_NOLOCK` (`KNOWN_C_BUGS.md` #35).
 * Meta pages *are* written concurrently by other processes. Read them with
   volatile reads (`ptr::read_volatile` in `os`) into an owned `Meta` value and
   validate (`magic`, `version`), re-reading as C does at txn begin

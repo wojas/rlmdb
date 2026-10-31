@@ -6,13 +6,16 @@
 //! (branch, leaf and overflow pages of the free DB, the main DB, the named
 //! DBs and their `DUP_SORT` sub-DBs) or listed in a free DB record; and
 //! each DB record's depth and page counts must match its tree.
+//!
+//! [`page_use`] reports who uses which page in any snapshot, for tests that
+//! check which pages a writer may reuse while a reader pins one.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::consts::*;
 use crate::core::dbi::Dbi;
 use crate::core::env::Environment;
-use crate::core::txn::{Transaction, TxnCore};
+use crate::core::txn::{RoTxn, Transaction, TxnCore};
 use crate::format::Db;
 use crate::idl::Idl;
 
@@ -118,9 +121,21 @@ impl Audit<'_, '_> {
     }
 }
 
-/// Audits the newest snapshot of `env` (see the module documentation).
-pub(crate) fn audit(env: &Environment) {
-    let txn = env.begin_ro_txn().unwrap();
+/// Who uses the pages of a snapshot (see [`page_use`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PageUse {
+    /// The pages of every tree: the free DB, the main DB, the named DBs and
+    /// their `DUP_SORT` sub-DBs, overflow runs.
+    pub(crate) tree: BTreeSet<u64>,
+    /// The pages listed in free DB records, with the record's txnid.
+    pub(crate) free: BTreeMap<u64, u64>,
+    /// `last_pgno` of the snapshot.
+    pub(crate) last_pgno: u64,
+}
+
+/// Who uses which page in the snapshot of `txn`. Panics, like [`audit`],
+/// on a page used twice or a DB record that does not match its tree.
+pub(crate) fn page_use(txn: &RoTxn<'_>) -> PageUse {
     let core = txn.core();
     let mut a = Audit {
         core,
@@ -140,15 +155,33 @@ pub(crate) fn audit(env: &Environment) {
             a.claim(p, Use::Free(id));
         }
     }
-    let last = core.next_pgno - 1;
+    let mut uses = PageUse {
+        tree: BTreeSet::new(),
+        free: BTreeMap::new(),
+        last_pgno: core.next_pgno - 1,
+    };
+    for (p, by) in a.used {
+        match by {
+            Use::Tree(_) => uses.tree.insert(p),
+            Use::Free(id) => uses.free.insert(p, id).is_none(),
+        };
+    }
+    uses
+}
+
+/// Audits the newest snapshot of `env` (see the module documentation).
+pub(crate) fn audit(env: &Environment) {
+    let txn = env.begin_ro_txn().unwrap();
+    let uses = page_use(&txn);
+    let last = uses.last_pgno;
     for p in NUM_METAS as u64..=last {
         assert!(
-            a.used.contains_key(&p),
+            uses.tree.contains(&p) || uses.free.contains_key(&p),
             "page {p} of {last} is unaccounted for"
         );
     }
     assert!(
-        a.used.keys().all(|&p| p <= last),
+        uses.tree.iter().chain(uses.free.keys()).all(|&p| p <= last),
         "page past last_pgno in use"
     );
 }

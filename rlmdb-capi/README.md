@@ -249,6 +249,7 @@ point into the memory map or the transaction's dirty pages (zero copy).
 | `mdb_strerror` of LMDB 1.0's codes (-30779 .. -30769) | "Invalid error code". | 1.0's messages. |
 | Threads | Without `MDB_NOTLS` a thread may hold one read transaction at a time (`MDB_BAD_RSLOT` otherwise) and a read transaction is tied to its thread. | Always behaves like `MDB_NOTLS`: any number of read transactions per thread, usable from any thread (one at a time). `MDB_NOTLS` is accepted. A superset of C. |
 | Opening one environment twice in a process | Allowed but unsafe (closing one handle drops the other's locks). | `mdb_env_open` fails with `EBUSY`. |
+| Read transactions with `MDB_NOLOCK` | Not tracked: a write transaction of the same process reuses pages a live read transaction still reads (`lmdb.h` asks the caller to prevent that). | Tracked in memory by the environment (`../KNOWN_C_BUGS.md` #35): writers of the process never reuse their pages. `mdb_env_info` (`me_numreaders` 0), `mdb_reader_list` (`(no reader locks)`) and `mdb_reader_check` (none cleared) report what C reports. Other processes remain the caller's job, as in C. |
 | `MDB_FIXEDMAP`, `MDB_WRITEMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT` | Honoured. | Accepted and ignored (`mdb_env_get_flags` reports them). A new environment records map address 0 (`KNOWN_C_BUGS.md` #9); a C-created `MDB_FIXEDMAP` environment's recorded address is reported by `mdb_env_info`. |
 | Handles of existing databases opened in a transaction | Visible to other transactions only after that transaction commits; closed if it aborts (read or write transaction). | Published at once and kept after commit or abort. Handles of databases *created* by a write transaction follow C (published at commit, closed on abort). |
 | A parent transaction while its nested child is active | Most functions return `MDB_BAD_TXN`, but some check the DBI first (`EINVAL` for a bad one) and `mdb_dbi_flags`, `mdb_cmp`, `mdb_dcmp` still work. | Every function on the parent returns `MDB_BAD_TXN` (`mdb_txn_id`, `mdb_txn_env` work). |
@@ -308,6 +309,12 @@ the safe Rust core cannot be used to break them:
   (`os::DataMap` in `rlmdb`). Free-list records that name meta pages or
   pages past the end are refused; other lock-file damage only yields
   errors (`rlmdb/tests/robust_lockfile.rs`).
+* Another process writing an `MDB_NOLOCK` environment while this one reads
+  or writes it: `MDB_NOLOCK` drops every cross-process lock, and `lmdb.h`
+  leaves keeping processes apart to the caller. This process's read
+  transactions are tracked in memory, so its own writers keep their pages,
+  but a writer in another process does not know them and may rewrite them,
+  with the consequences of the previous item.
 
 ## Known gaps
 

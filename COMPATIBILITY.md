@@ -101,8 +101,17 @@ with `MDB_USE_POSIX_SEM`).
   both the C library and the Rust library. POSIX record locks belong to the
   process, so closing either handle would drop the other's locks. (Within
   the Rust library, a second open of the same path fails with `EBUSY`.)
-* `MDB_NOLOCK` environments have no lock file in either implementation; the
-  application must serialise access, as in C.
+* `MDB_NOLOCK` environments have no lock file and no cross-process locking
+  in either implementation: keeping other processes away while one writes
+  is the application's job, as in C. Within one process rlmdb serialises
+  write transactions with its in-process writer lock and tracks read
+  transactions in an in-memory reader table, so a writer never reuses a
+  page that a live read transaction of the process reads; C tracks no
+  readers then and does reuse them (`KNOWN_C_BUGS.md` #35). Through the C
+  API `mdb_env_info`, `mdb_reader_list` and `mdb_reader_check` report what
+  C reports without a lock table (`me_numreaders` 0, `(no reader locks)`,
+  nothing cleared); `Environment::in_memory_readers` gives Rust callers the
+  in-memory count.
 
 ## Flags
 
@@ -110,7 +119,8 @@ Environment flags (`mdb_env_open`, `EnvironmentFlags`):
 
 | Flag | Rust |
 |---|---|
-| `MDB_NOSUBDIR`, `MDB_RDONLY`, `MDB_NOSYNC`, `MDB_NOMETASYNC`, `MDB_NOLOCK`, `MDB_NORDAHEAD` | honoured, as in C |
+| `MDB_NOSUBDIR`, `MDB_RDONLY`, `MDB_NOSYNC`, `MDB_NOMETASYNC`, `MDB_NORDAHEAD` | honoured, as in C |
+| `MDB_NOLOCK` | no lock file and no cross-process locking, as in C; read transactions of the process are tracked in memory (see above, `KNOWN_C_BUGS.md` #35) |
 | `MDB_NOTLS` | accepted; always in effect (see below) |
 | `MDB_WRITEMAP`, `MDB_MAPASYNC` | accepted and ignored: pages are always written with `pwrite`, which is compatible with C peers that use a writable map |
 | `MDB_FIXEDMAP` | accepted and ignored (the bit is recorded in a new file, the address is 0) |
@@ -196,6 +206,7 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 | MVCC across implementations, map growth | `interop` `mvcc_hold_reader`, `rlmdb-capi/tests/concurrency.rs` (snapshots byte-identical while the other side commits; `MDB_MAP_RESIZED`) |
 | `MDB_NOTLS` superset | `interop` `notls_readers` and every scenario (C peers in TLS mode next to Rust readers), `rlmdb/tests/rust_env.rs` (`transactions_move_between_threads`) |
 | `MDB_NOSUBDIR`, read-only, `MDB_NOLOCK` | `interop` `nosubdir`, `rlmdb/tests/core_api_c2.rs` |
+| `MDB_NOLOCK` within a process: a long-lived reader keeps its pages (page numbers and free list the same as with a lock file), also against spilling and nested write transactions and against readers on other threads; reset, renew, abort and drop (on another thread) unregister; writers stay serialised; a second open of the path is `EBUSY`; the C API shows C's page reuse with the C library and none with the Rust library, and both report the same reader information | `rlmdb` `core::reader` unit tests `no_lock_*`, `rlmdb/tests/rust_env.rs` (`no_lock_environment`, `no_lock_writers_are_serialised`, `already_opened_without_a_lock_file`), `rlmdb-capi/tests/capi_nolock.rs` |
 | Nested transactions | `rlmdb/tests/nested_txn.rs` (written by one side, checked by the other), `interop` `nested_txns`, `reader_loop_during_nested`, `rlmdb-capi/tests/c/capi_write.c` |
 | Copies byte-identical to `mdb_copy [-c]` | `rlmdb/tests/env_copy.rs`, `rlmdb-tools/tests/copy_drop.rs`, `interop` `copy_dump_equal` |
 | The C API behaves as C (return codes, outputs, traces) | `rlmdb-capi/tests/c/capi_read.c`, `capi_write.c` (run against both libraries; traces must be identical; `DIFFERS()`/`DEVIATION()` mark the documented deviations), `rlmdb-capi/tests/tools.rs` (upstream `mdb_stat.c`/`mdb_dump.c` linked against both print the same) |
