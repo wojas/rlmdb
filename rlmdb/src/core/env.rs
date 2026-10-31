@@ -599,6 +599,18 @@ impl Environment {
         self.dbis.close(db)
     }
 
+    /// The generation of handle `db` (`me_dbiseqs[db]`). It changes when
+    /// the handle is closed (by [`Environment::close_db`], by dropping its
+    /// database, or by the abort of the transaction that created it) and
+    /// when its slot is given to a database again, so a layer that keeps
+    /// state per handle can tell whether a handle value still names the
+    /// database the state was made for. Not part of the API: the C API
+    /// (`rlmdb-capi`) keeps the C functions of `mdb_set_compare` this way.
+    #[doc(hidden)]
+    pub fn handle_generation(&self, db: Dbi) -> u32 {
+        self.dbis.seq_of(db.0 as usize)
+    }
+
     /// `mdb_txn_begin(MDB_RDONLY)`: start a read transaction on the latest
     /// snapshot.
     pub fn begin_ro_txn(&self) -> Result<RoTxn<'_>> {

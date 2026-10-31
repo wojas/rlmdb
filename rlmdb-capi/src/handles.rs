@@ -71,11 +71,21 @@ pub(crate) struct EnvConfig {
 }
 
 /// The C comparison functions installed on one DBI slot, remembered for
-/// `mdb_cmp` / `mdb_dcmp`.
+/// `mdb_cmp` / `mdb_dcmp` (the core has them only as trampolines, see
+/// `crate::cmp`).
+///
+/// They belong to one generation of the slot
+/// ([`Environment::handle_generation`]): the core forgets its comparators
+/// whenever it closes a handle, also when the transaction that created the
+/// database aborts (a nested one included), and a database that gets the
+/// slot next starts with the default order, as C's `mdb_dbi_open` resets
+/// `md_cmp` (`mdb_default_cmp`). A record of an older generation is stale.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct CComparators {
     pub(crate) key: Option<MDB_cmp_func>,
     pub(crate) dup: Option<MDB_cmp_func>,
+    /// The generation of the slot the functions were installed in.
+    generation: u32,
 }
 
 /// `MDB_env`: an LMDB environment handle (opaque to C).
@@ -145,29 +155,39 @@ impl MDB_env {
         self.path.get()
     }
 
-    /// The C comparators installed on `dbi`.
+    /// The C comparators installed on `dbi` in its current generation.
     pub(crate) fn c_comparators(&self, dbi: MDB_dbi) -> CComparators {
+        let Some(env) = self.open_env() else {
+            return CComparators::default();
+        };
+        let generation = env.handle_generation(Dbi::from_raw(dbi));
         lock(&self.comparators)
             .get(dbi as usize)
             .copied()
+            .filter(|c| c.generation == generation)
             .unwrap_or_default()
     }
 
-    /// Updates the C comparators remembered for `dbi` (a valid handle).
+    /// Updates the C comparators remembered for `dbi`, a valid handle of
+    /// the open environment, after the core installed them; a record of an
+    /// older generation of the slot is dropped first.
     pub(crate) fn update_c_comparators(&self, dbi: MDB_dbi, f: impl FnOnce(&mut CComparators)) {
+        let Some(env) = self.open_env() else {
+            return;
+        };
+        let generation = env.handle_generation(Dbi::from_raw(dbi));
         let mut all = lock(&self.comparators);
         let i = dbi as usize;
         if all.len() <= i {
             all.resize(i + 1, CComparators::default());
         }
-        f(&mut all[i]);
-    }
-
-    /// Forgets the C comparators of `dbi` (`mdb_dbi_close`).
-    pub(crate) fn forget_c_comparators(&self, dbi: MDB_dbi) {
-        if let Some(c) = lock(&self.comparators).get_mut(dbi as usize) {
-            *c = CComparators::default();
+        if all[i].generation != generation {
+            all[i] = CComparators {
+                generation,
+                ..CComparators::default()
+            };
         }
+        f(&mut all[i]);
     }
 }
 

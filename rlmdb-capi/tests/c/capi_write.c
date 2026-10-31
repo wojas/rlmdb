@@ -935,6 +935,73 @@ static void test_comparators(void)
 	mdb_env_close(env);
 }
 
+/* mdb_set_compare (dup 0) or mdb_set_dupsort (dup 1) on the handle of a
+ * database whose creation is then aborted, by the creating transaction or
+ * (nested 1) by the child that created it. The database created next gets
+ * the same handle and, with default flags, the default order: in mdb_cmp
+ * or mdb_dcmp and in what it stores. */
+static void comparator_reuse(int dup, int nested)
+{
+	MDB_env *env;
+	MDB_txn *parent = NULL, *txn, *r;
+	MDB_dbi gone, dbi;
+	MDB_cursor *c;
+	MDB_val k, d, a = sv("a"), b = sv("b");
+	unsigned flags = dup ? MDB_DUPSORT : 0;
+	int (*cmp)(MDB_txn *, MDB_dbi, const MDB_val *, const MDB_val *) =
+		dup ? mdb_dcmp : mdb_cmp;
+	char name[32];
+
+	snprintf(name, sizeof(name), "cmpreuse-%d-%d", dup, nested);
+	env = new_env(name, 1UL << 22, 2, 0);
+	if (nested)
+		OK(mdb_txn_begin(env, NULL, 0, &parent));
+	OK(mdb_txn_begin(env, parent, 0, &txn));
+	OK(mdb_dbi_open(txn, "gone", MDB_CREATE | flags, &gone));
+	if (dup)
+		OK(mdb_set_dupsort(txn, gone, revcmp));
+	else
+		OK(mdb_set_compare(txn, gone, revcmp));
+	CHECK(cmp(txn, gone, &a, &b) > 0);
+	mdb_txn_abort(txn);
+
+	if (nested)
+		txn = parent;
+	else
+		OK(mdb_txn_begin(env, NULL, 0, &txn));
+	OK(mdb_dbi_open(txn, "new", MDB_CREATE | flags, &dbi));
+	CHECK(dbi == gone);
+	CHECK(cmp(txn, dbi, &a, &b) < 0);
+	k = dup ? sv("k") : b;
+	d = b;
+	OK(mdb_put(txn, dbi, &k, &d, 0));
+	k = dup ? sv("k") : a;
+	d = a;
+	OK(mdb_put(txn, dbi, &k, &d, 0));
+	OK(mdb_txn_commit(txn));
+
+	OK(mdb_txn_begin(env, NULL, MDB_RDONLY, &r));
+	CHECK(cmp(r, dbi, &a, &b) < 0);
+	OK(mdb_cursor_open(r, dbi, &c));
+	OK(mdb_cursor_get(c, &k, &d, MDB_FIRST));
+	CHECK(veq(d, "a"));
+	T("%s: first %.*s", name, (int)d.mv_size, (char *)d.mv_data);
+	OK(mdb_cursor_get(c, &k, &d, MDB_NEXT));
+	CHECK(veq(d, "b"));
+	mdb_cursor_close(c);
+	mdb_txn_abort(r);
+	mdb_env_close(env);
+}
+
+static void test_comparator_reuse(void)
+{
+	int dup, nested;
+
+	for (dup = 0; dup < 2; dup++)
+		for (nested = 0; nested < 2; nested++)
+			comparator_reuse(dup, nested);
+}
+
 /* ---------------------------------------------------------------------- */
 
 static void test_errors(void)
@@ -1396,6 +1463,7 @@ int main(int argc, char **argv)
 	test_put_get_del();
 	test_cursors();
 	test_comparators();
+	test_comparator_reuse();
 	test_errors();
 	test_threads();
 	test_drop();

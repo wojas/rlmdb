@@ -178,10 +178,8 @@ pub unsafe extern "C" fn mdb_dbi_close(env: *mut MDB_env, dbi: MDB_dbi) {
         return;
     };
     if let Some(open) = e.open_env() {
+        // (Its C comparators go with the handle's generation.)
         open.close_db(Dbi::from_raw(dbi));
-        if dbi >= rlmdb::consts::CORE_DBS {
-            e.forget_c_comparators(dbi);
-        }
     }
 }
 

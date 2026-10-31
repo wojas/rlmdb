@@ -468,7 +468,10 @@ environments.
   keys that point into the transaction's own pages, cursor puts and
   deletes while other cursors are positioned, `MDB_CURRENT`, `DUPSORT`
   sub-page to sub-DB promotion and back, custom comparators used in the
-  creating transaction, `MDB_MAP_FULL` and the `MDB_BAD_TXN` state,
+  creating transaction (and gone with the handle when its creation aborts,
+  also in a nested transaction: the database that reuses the handle has
+  the default order in `mdb_cmp`/`mdb_dcmp` and in what it stores),
+  `MDB_MAP_FULL` and the `MDB_BAD_TXN` state,
   threads waiting for the writer lock, `mdb_drop`, nested transactions
   (commit, abort, two levels, failing children, parents committed or
   aborted with an active child, parent cursors used, moved, written and

@@ -472,10 +472,8 @@ pub unsafe extern "C" fn mdb_drop(txn: *mut MDB_txn, dbi: MDB_dbi, del: c_int) -
         }
         .map_err(|e| e.to_err_code())
     });
-    if result.is_ok() && del == 1 && dbi >= rlmdb::consts::CORE_DBS {
-        // C: mdb_dbi_close(env, dbi).
-        t.env().forget_c_comparators(dbi);
-    }
+    // With del = 1 the core closes the handle (C: mdb_dbi_close), and its
+    // C comparators go with the handle's generation.
     code(result)
 }
 
