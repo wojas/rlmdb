@@ -180,6 +180,9 @@ deferred until the core has been validated through the C API.
 * Run `scripts/check-all.sh` (fmt, clippy, doc, host tests, then the same
   tests in a Linux container via `scripts/linux-test.sh`) before declaring
   work done. `--no-linux` skips the container only for quick iteration.
+  CI (`.github/workflows/`) runs the host steps on Linux x86-64, Linux
+  arm64 and macOS, and the ignored tests nightly; it is not a substitute
+  for running the checks locally.
 * Long tests are `#[ignore]`d; run `cargo test -p rlmdb --release --
   --ignored` after changes to the write path or spilling.
 * New behaviour needs a test on the appropriate level: unit tests next to

@@ -1,0 +1,50 @@
+# Formatting, lints, rustdoc and the whole test suite on every push and pull
+# request, on the three platforms rlmdb is tested on. The tests build the C
+# reference library from tests/lmdb-c with the runner's C compiler; no git
+# history or network access is needed after the checkout.
+#
+# RLMDB_DEFAULT_FORMAT is deliberately not set: the tests assume it is unset
+# (see scripts/check-all.sh).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86-64
+            os: ubuntu-latest
+          - name: Linux arm64
+            os: ubuntu-24.04-arm
+          - name: macOS arm64
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: doc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: test
+        run: cargo test --workspace --no-fail-fast

@@ -1,0 +1,27 @@
+# The long tests that are #[ignore]d in the normal runs (a randomised
+# differential run, a full-size spill comparison with C, soak tests), in
+# release mode, once a day and on demand.
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ignored:
+    name: Ignored tests (Linux x86-64, release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: test --ignored
+        run: cargo test -p rlmdb --release -- --ignored

@@ -210,6 +210,12 @@ A few long tests are `#[ignore]`d (a randomised differential run, a
 full-size spill comparison with C, soak tests); run them with
 `cargo test -p rlmdb --release -- --ignored`.
 
+CI (GitHub Actions, `.github/workflows/ci.yml`) runs the host steps of
+`scripts/check-all.sh` (fmt, clippy, doc, `cargo test --workspace`) on every
+push and pull request on Linux x86-64, Linux arm64 and macOS arm64;
+`nightly.yml` runs the ignored tests daily on Linux x86-64. Benchmarks are
+not run in CI.
+
 ## Compatibility, in short
 
 * The data file (format 1) and the lock file (format 1) are C's, on
@@ -234,6 +240,7 @@ The workspace is the repository root; every command above runs there.
 
 ```
 ./
+  .github/workflows/  CI: ci.yml (every push), nightly.yml (ignored tests)
   Cargo.toml          workspace (edition 2021, MSRV 1.85)
   README.md           this file
   COMPATIBILITY.md    the compatibility contract
