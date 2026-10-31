@@ -1,5 +1,5 @@
 //! Acceptance test: the unmodified upstream C programs of
-//! `libraries/liblmdb` run against the Rust library.
+//! `tests/lmdb-c/0.9` run against the Rust library.
 //!
 //! * `mtest.c` .. `mtest6.c`, built once against the C library and once
 //!   against the Rust `liblmdb.a` (with `tests/c/mtest_shim.h`: a fixed

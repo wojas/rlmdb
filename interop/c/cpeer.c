@@ -2,7 +2,7 @@
  *
  *   cpeer <command> <envpath> [args...] [options...]
  *
- * See rust/interop/README.md for the protocol: the commands, their
+ * See interop/README.md for the protocol: the commands, their
  * arguments, their output lines and their exit codes. Options may appear
  * anywhere after the command; everything else is positional.
  */

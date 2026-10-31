@@ -2,9 +2,12 @@
 //! tools, generating databases with them, parsing their output, and checking
 //! a Rust view of a database against an expected list of pairs.
 //!
-//! The C sources are copied from `libraries/liblmdb` into a private build
+//! The C sources are copied from `tests/lmdb-c/0.9` into a private build
 //! directory under `CARGO_TARGET_TMPDIR`, so the source tree stays clean and
 //! concurrent builds (other test binaries, the interop crate) do not clash.
+//! They are built as the upstream `Makefile` (not vendored) builds them:
+//! its `CFLAGS` (`C_FLAGS`), `liblmdb.a` from `mdb.o` and `midl.o`, and
+//! one executable per program linked against it.
 //! If the build fails, C-dependent tests print a message and return early.
 
 #![allow(dead_code)]
@@ -91,35 +94,42 @@ fn run_ok(cmd: &mut Command) -> Result<(), String> {
     Ok(())
 }
 
+/// The upstream `Makefile`'s `CFLAGS`, `$(THREADS) $(OPT) $(W)`, used for
+/// every C file built here.
+const C_FLAGS: &[&str] = &[
+    "-pthread",
+    "-O2",
+    "-g",
+    "-W",
+    "-Wall",
+    "-Wno-unused-parameter",
+    "-Wbad-function-cast",
+    "-Wuninitialized",
+];
+
+/// The upstream programs built against `liblmdb.a`: the `Makefile`'s
+/// `PROGS` (`mtest6` needs a shim and is built separately).
+const C_PROGRAMS: &[&str] = &[
+    "mdb_stat", "mdb_dump", "mdb_load", "mdb_copy", "mtest", "mtest2", "mtest3", "mtest4", "mtest5",
+];
+
 fn build_c_tools() -> Result<PathBuf, String> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let src = manifest.join("../../libraries/liblmdb");
+    let src = manifest.join("../tests/lmdb-c/0.9");
     let helpers = manifest.join("tests/c");
     let mut files: Vec<PathBuf> = Vec::new();
     for dir in [&src, &helpers] {
         for e in fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
             let p = e.map_err(|e| e.to_string())?.path();
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name == "Makefile" || name.ends_with(".c") || name.ends_with(".h") {
+            if name.ends_with(".c") || name.ends_with(".h") {
                 files.push(p);
             }
         }
     }
     files.sort();
-    let targets = [
-        "liblmdb.a",
-        "mdb_stat",
-        "mdb_dump",
-        "mdb_load",
-        "mdb_copy",
-        "mtest",
-        "mtest2",
-        "mtest3",
-        "mtest4",
-        "mtest5",
-    ];
     let mut h = 0xcbf2_9ce4_8422_2325u64;
-    for t in targets {
+    for t in C_FLAGS.iter().chain(C_PROGRAMS) {
         fnv(&mut h, t.as_bytes());
     }
     for f in &files {
@@ -153,12 +163,27 @@ fn build_c_tools() -> Result<PathBuf, String> {
     )
     .map_err(|e| e.to_string())?;
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_owned());
+    for obj in ["mdb", "midl"] {
+        run_ok(
+            Command::new(&cc)
+                .current_dir(&tmp)
+                .args(C_FLAGS)
+                .args(["-c", &format!("{obj}.c")]),
+        )?;
+    }
     run_ok(
-        Command::new("make")
+        Command::new("ar")
             .current_dir(&tmp)
-            .arg(format!("CC={cc}"))
-            .args(targets),
+            .args(["rs", "liblmdb.a", "mdb.o", "midl.o"]),
     )?;
+    for prog in C_PROGRAMS {
+        run_ok(Command::new(&cc).current_dir(&tmp).args(C_FLAGS).args([
+            "-o",
+            prog,
+            &format!("{prog}.c"),
+            "liblmdb.a",
+        ]))?;
+    }
     run_ok(Command::new(&cc).current_dir(&tmp).args([
         "-pthread",
         "-O2",
@@ -194,8 +219,8 @@ fn build_c_tools() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Builds the interop C peer (`rust/interop/c/cpeer*.c`, see
-/// `rust/interop/README.md`) against the C library of `tools`, once per
+/// Builds the interop C peer (`interop/c/cpeer*.c`, see
+/// `interop/README.md`) against the C library of `tools`, once per
 /// version of its sources. Built here rather than through the `interop`
 /// crate so that these tests do not depend on that crate building.
 fn build_cpeer(tools: &CTools) -> Result<PathBuf, String> {

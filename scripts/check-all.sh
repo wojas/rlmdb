@@ -1,11 +1,11 @@
 #!/bin/sh
-# Run every check of the Rust workspace: formatting, clippy, rustdoc and the
+# Run every check of the workspace: formatting, clippy, rustdoc and the
 # tests on the host, then the tests in the Linux container
 # (scripts/linux-test.sh). Every step runs even if an earlier one failed;
 # a PASS/FAIL summary per step is printed at the end, and the exit status
 # is 1 if any step failed.
 #
-# Usage: rust/scripts/check-all.sh [--no-linux]
+# Usage: scripts/check-all.sh [--no-linux]
 #   --no-linux  skip the Linux container step (reported as SKIP)
 # Works from any directory.
 set -u

@@ -1,5 +1,5 @@
 //! `mdb_copy`: copy an environment, optionally compacting it
-//! (`libraries/liblmdb/mdb_copy.c`).
+//! (`tests/lmdb-c/0.9/mdb_copy.c`).
 //!
 //! ```text
 //! mdb_copy [-V] [-c] [-n] srcpath [dstpath]

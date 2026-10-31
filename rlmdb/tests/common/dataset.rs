@@ -1,5 +1,5 @@
-//! The deterministic data set of the interop peers (`rust/interop/c/
-//! dataset.c`, documented in `rust/interop/README.md`), so that Rust can
+//! The deterministic data set of the interop peers (`interop/c/
+//! dataset.c`, documented in `interop/README.md`), so that Rust can
 //! write exactly what `cpeer verify` checks. Cross-checked against
 //! `cpeer gen` by the tests.
 

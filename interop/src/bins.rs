@@ -1,11 +1,11 @@
 //! Paths of the C programs that `build.rs` compiles into `$OUT_DIR/bin`.
 //!
 //! They are plain C executables linked against `liblmdb` built from
-//! `../../libraries/liblmdb` with the upstream Makefile's flags, and are run as
+//! `../tests/lmdb-c/0.9` with the upstream Makefile's flags, and are run as
 //! subprocesses.
 //!
-//! The second oracle, LMDB 1.0, is built the same way from sources that
-//! `build.rs` extracts from git (the pinned `mdb.RE/1.0` commit, see
+//! The second oracle, LMDB 1.0, is built the same way from the vendored 1.0
+//! sources in `../tests/lmdb-c/1.0` (the pinned `mdb.RE/1.0` commit, see
 //! `README.md`): the functions ending in `10` ([`mdb_stat10`], [`mtest10`],
 //! [`cpeer10`] …). Its executables are named after the 0.9 ones with `10`
 //! appended, after an underscore when the name ends in a digit
@@ -159,13 +159,13 @@ pub fn bin_dir() -> &'static Path {
     Path::new(env!("INTEROP_BIN_DIR"))
 }
 
-/// The C library sources (`libraries/liblmdb`).
+/// The C library sources (`tests/lmdb-c/0.9`).
 pub fn lmdb_src() -> &'static Path {
     Path::new(env!("INTEROP_LMDB_SRC"))
 }
 
-/// The LMDB 1.0 sources `build.rs` extracted from git (`$OUT_DIR/lmdb10`;
-/// `.commit` in it holds the commit hash).
+/// The LMDB 1.0 sources the 1.0 programs were built from
+/// (`tests/lmdb-c/1.0`, or `$LMDB10_DIR` at build time).
 pub fn lmdb10_src() -> &'static Path {
     Path::new(env!("INTEROP_LMDB10_SRC"))
 }

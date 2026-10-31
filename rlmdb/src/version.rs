@@ -7,7 +7,7 @@
 //! supports. [`version_info`] answers both. The C API exports the same data
 //! as `rlmdb_version()`, `rlmdb_version_string()` and
 //! `rlmdb_has_capability()` (`rlmdb-capi/include/rlmdb.h`); the design is in
-//! `rust/DUAL_FORMAT.md` §4.3 and §4.4.
+//! `DUAL_FORMAT.md` §4.3 and §4.4.
 
 use std::fmt;
 
@@ -19,7 +19,7 @@ use crate::consts;
 /// A token is a short lower-case name of one feature a program may want to
 /// test for ([`VersionInfo::has`], `rlmdb_has_capability`). It is added when
 /// the feature lands and never removed while the feature exists. Planned
-/// (`rust/DUAL_FORMAT.md` §4.4):
+/// (`DUAL_FORMAT.md` §4.4):
 ///
 /// * `format-0.9`: the LMDB 0.9 data and lock file formats
 ///   (`MDB_DATA_VERSION 1`, `MDB_LOCK_VERSION 1`). Present.
@@ -41,7 +41,7 @@ use crate::consts;
 const CAPABILITIES: &[&str] = &["default-format-env", "format-0.9", "format-1.0"];
 
 /// The C LMDB release whose data and lock file formats and API the 0.9
-/// format matches (`libraries/liblmdb`).
+/// format matches (`tests/lmdb-c/0.9`).
 const V09_RELEASE: (i32, i32, i32) = (0, 9, 36);
 
 /// The C LMDB release the 1.0 format matches (`mdb.RE/1.0`); reported

@@ -1,5 +1,5 @@
 //! `mdb_stat`: environment, free list, reader table and database
-//! statistics (`libraries/liblmdb/mdb_stat.c`).
+//! statistics (`tests/lmdb-c/0.9/mdb_stat.c`).
 //!
 //! ```text
 //! mdb_stat [-V] [-n] [-e] [-r[r]] [-f[f[f]]] [-a|-s subdb] dbpath

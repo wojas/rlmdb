@@ -288,7 +288,7 @@ pub const MDB_IDL_DB_MAX: usize = MDB_IDL_DB_SIZE - 1;
 pub const MDB_IDL_UM_MAX: usize = MDB_IDL_UM_SIZE - 1;
 
 // The version `mdb_version` reports. The one exception to the rule above:
-// the patch level is not lmdb.h's (`rust/DUAL_FORMAT.md` §4.4).
+// the patch level is not lmdb.h's (`DUAL_FORMAT.md` §4.4).
 
 /// `MDB_VERSION_MAJOR`, as `mdb_version` reports it: 0, as in `lmdb.h`.
 pub const MDB_VERSION_MAJOR: i32 = 0;

@@ -1,7 +1,7 @@
 //! Shared helpers for the `rlmdb-tools` tests:
 //!
 //! * building the C oracle: the C library and tools from
-//!   `libraries/liblmdb` (`mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`,
+//!   `tests/lmdb-c/0.9` (`mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`,
 //!   `mtest`..`mtest5`), plus `tests/c/mdb_drop.c` (LMDB's first
 //!   `mdb_drop`, 0.9 API only) and `tests/c/holder.c` (keeps a reader
 //!   open), with the `cc` crate at test time;
@@ -54,9 +54,9 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// `libraries/liblmdb`.
+/// `tests/lmdb-c/0.9`.
 pub fn c_src() -> PathBuf {
-    manifest_dir().join("../../libraries/liblmdb")
+    manifest_dir().join("../tests/lmdb-c/0.9")
 }
 
 fn target_triple() -> String {
@@ -89,7 +89,7 @@ fn fnv(h: &mut u64, bytes: &[u8]) {
     }
 }
 
-/// The C programs built from `libraries/liblmdb`.
+/// The C programs built from `tests/lmdb-c/0.9`.
 const C_TOOLS: &[&str] = &[
     "mdb_stat", "mdb_dump", "mdb_load", "mdb_copy", "mtest", "mtest2", "mtest3", "mtest4", "mtest5",
 ];
@@ -263,7 +263,7 @@ pub fn assert_same(tool: &str, argv: &[Vec<u8>], stdin: &[u8], cwd: &Path) -> Ru
 }
 
 /// The line `-V` prints. The one intended difference between the tools:
-/// the C tools print `MDB_VERSION_STRING` of `libraries/liblmdb/lmdb.h`
+/// the C tools print `MDB_VERSION_STRING` of `tests/lmdb-c/0.9/lmdb.h`
 /// (`LMDB 0.9.36: (<date>)`), the Rust tools the string rlmdb's
 /// `mdb_version` returns (`LMDB 0.9.85: (rlmdb <version>)`).
 pub fn version_line(imp: Impl) -> Vec<u8> {

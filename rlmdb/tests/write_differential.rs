@@ -20,7 +20,7 @@ use differential::{splitmix64, Ops, Oracle, Profile, Round};
 use rlmdb::consts::*;
 use rlmdb::Format;
 
-/// C LMDB 0.9 (`libraries/liblmdb`), built by [`common::c_tools`].
+/// C LMDB 0.9 (`tests/lmdb-c/0.9`), built by [`common::c_tools`].
 struct C09 {
     tools: &'static CTools,
     writeops: PathBuf,

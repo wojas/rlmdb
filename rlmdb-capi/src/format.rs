@@ -1,7 +1,7 @@
 //! The data-file format functions of `include/rlmdb.h`:
 //! `rlmdb_env_set_format`, `rlmdb_env_get_format`, `rlmdb_sniff_format`,
 //! `rlmdb_set_default_format` and `rlmdb_env_set_pagesize`
-//! (`rust/DUAL_FORMAT.md` §4.4). C LMDB has none of them: a C library
+//! (`DUAL_FORMAT.md` §4.4). C LMDB has none of them: a C library
 //! handles one format only.
 //!
 //! Formats are numbered as in `rlmdb.h`: [`RLMDB_FORMAT_09`] (LMDB 0.9,

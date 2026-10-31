@@ -26,7 +26,7 @@
 //! per-process choice that the lock file does not record).
 //!
 //! Where C 0.9.36 has a plain bug that does not affect the files, this
-//! module does the obviously correct thing instead; `rust/KNOWN_C_BUGS.md`
+//! module does the obviously correct thing instead; `KNOWN_C_BUGS.md`
 //! lists every such case, and the ones ported on purpose.
 //!
 //! Module map (C functions in parentheses):

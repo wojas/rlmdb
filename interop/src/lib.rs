@@ -9,7 +9,7 @@
 //! * A **peer** is a program that speaks the command protocol documented in
 //!   `README.md` (`fill`, `verify`, `writer-loop`, `check-freelist`, …).
 //!   [`Peer::C`] is `cpeer`, written in C against `liblmdb` (built from
-//!   `../../libraries/liblmdb` by `build.rs`); [`Peer::Rust`] is `rpeer`
+//!   `../tests/lmdb-c/0.9` by `build.rs`); [`Peer::Rust`] is `rpeer`
 //!   (`src/bin/rpeer`), built on the `rlmdb` crate; [`Peer::COnRust`]
 //!   is the same C program linked against the Rust `liblmdb.a` of
 //!   `rlmdb-capi`; [`Peer::C10`] is the same C program on LMDB 1.0, the

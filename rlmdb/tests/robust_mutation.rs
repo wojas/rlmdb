@@ -1,7 +1,7 @@
 //! Corrupt-input robustness: mutation testing of the core against damaged
 //! data files.
 //!
-//! Valid environments written by the C peer (`rust/interop/c/cpeer`, or by
+//! Valid environments written by the C peer (`interop/c/cpeer`, or by
 //! the Rust writer when the C tools cannot be built), and LMDB 1.0
 //! environments written by the Rust writer with pages of 1 KiB, 4 KiB and
 //! 64 KiB (the `*10` bases), are copied, damaged

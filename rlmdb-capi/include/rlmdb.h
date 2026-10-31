@@ -2,7 +2,7 @@
  *	@brief rlmdb extensions to the LMDB C API
  *
  *	rlmdb is a rewrite of LMDB in Rust. Its C library (liblmdb.a,
- *	liblmdb.so, liblmdb.dylib, built from rust/rlmdb-capi) exports the
+ *	liblmdb.so, liblmdb.dylib, built from rlmdb-capi) exports the
  *	functions of the unmodified lmdb.h (LMDB 0.9.36's) and, declared here, a
  *	few of its own that C LMDB does not have, plus the LMDB 1.0 constants a
  *	program needs with a 1.0 environment. A program that calls the
@@ -48,10 +48,11 @@
  *	#MDB_ENCRYPT give EINVAL, and opening an encrypted or checksummed 1.0
  *	file fails with #MDB_ENV_ENCRYPTION or #MDB_BAD_CHECKSUM.
  *
- *	@copyright See rust/COPYRIGHT. Redistribution and use in source and
- *	binary forms, with or without modification, are permitted only as
- *	authorized by the OpenLDAP Public License, Version 2.8 (rust/LICENSE,
- *	or <http://www.OpenLDAP.org/license.html>).
+ *	@copyright See COPYRIGHT in the top-level directory of rlmdb.
+ *	Redistribution and use in source and binary forms, with or without
+ *	modification, are permitted only as authorized by the OpenLDAP Public
+ *	License, Version 2.8 (LICENSE in the same directory, or
+ *	<http://www.OpenLDAP.org/license.html>).
  */
 #ifndef _RLMDB_H_
 #define _RLMDB_H_

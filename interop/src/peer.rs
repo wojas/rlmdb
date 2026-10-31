@@ -16,7 +16,7 @@ use crate::{bins, Error, Format, Result, TestEnv};
 /// One implementation of the peer command protocol (see `README.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Peer {
-    /// `cpeer`: C, linked against `liblmdb` built from `libraries/liblmdb`
+    /// `cpeer`: C, linked against `liblmdb` built from `tests/lmdb-c/0.9`
     /// (LMDB 0.9; opens 0.9 environments only).
     C,
     /// `rpeer`: Rust, built on the `rlmdb` crate (`src/bin/rpeer`). Both

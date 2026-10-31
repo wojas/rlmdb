@@ -1,7 +1,7 @@
 /* cpeer.h - shared declarations of the C interop peer.
  *
  * `cpeer` implements the peer command protocol documented in
- * rust/interop/README.md using only the public LMDB API (lmdb.h), except for
+ * interop/README.md using only the public LMDB API (lmdb.h), except for
  * `check-freelist`, which reads the data file directly to audit page usage.
  * A Rust peer (`rpeer`) implements the same protocol; the test harness runs
  * both against one environment and compares what they see.

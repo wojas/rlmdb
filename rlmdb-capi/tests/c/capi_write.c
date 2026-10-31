@@ -6,7 +6,7 @@
  * oracle: every expectation below must hold for C LMDB 0.9.36) and against
  * the Rust library with -DLMDB_RUST. GAP() marks C behaviour the Rust
  * implementation does not have yet; DEVIATION() marks a documented,
- * deliberate difference (rust/KNOWN_C_BUGS.md): the Rust build checks the
+ * deliberate difference (KNOWN_C_BUGS.md): the Rust build checks the
  * Rust behaviour, the C build skips the call (C would corrupt something).
  *
  * Besides the checks, the program prints a trace ("T ..." lines) of what
@@ -50,7 +50,7 @@ static int checks, failures;
 #ifdef LMDB_RUST
 #define GAP(name, cond) do { if (cond) { failures++; \
 	fprintf(stderr, "%s:%d: known gap \"%s\" now behaves like C: " \
-		"update the test and rust/rlmdb-capi/README.md\n", __FILE__, __LINE__, name); \
+		"update the test and rlmdb-capi/README.md\n", __FILE__, __LINE__, name); \
 	} else printf("known gap: %s\n", name); } while (0)
 #define DEVIATION(stmt) do { stmt; } while (0)
 #else

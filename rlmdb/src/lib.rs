@@ -7,8 +7,8 @@
 //! It is a rewrite, not a binding: no C code is linked. The C API
 //! (`liblmdb.a`/`.so`/`.dylib`, a drop-in replacement for C programs) is
 //! the separate `rlmdb-capi` crate, the command line tools are `rlmdb-tools`;
-//! both are built on this crate. See `rust/README.md` for an overview and
-//! `rust/COMPATIBILITY.md` for the exact compatibility contract.
+//! both are built on this crate. See `README.md` for an overview and
+//! `COMPATIBILITY.md` for the exact compatibility contract.
 //!
 //! # Layers
 //!
@@ -18,7 +18,7 @@
 //!   and the handle-based [`CursorId`] cursors the C API uses). It follows
 //!   the C API closely, with lifetimes instead of "do not use after" rules.
 //!   Its items are re-exported at the crate root. (A typed layer mirroring
-//!   the `heed` crate is designed in `rust/DESIGN.md` but not implemented.)
+//!   the `heed` crate is designed in `DESIGN.md` but not implemented.)
 //! * [`format`](mod@format): parsing and writing the on-disk structures
 //!   (pages, nodes, meta pages, `MDB_db` records, the lock file layout)
 //!   over byte slices.

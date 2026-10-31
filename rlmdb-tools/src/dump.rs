@@ -1,5 +1,5 @@
 //! `mdb_dump`: write databases in the portable dump format that `mdb_load`
-//! reads (`libraries/liblmdb/mdb_dump.c`; the format is described in
+//! reads (`tests/lmdb-c/0.9/mdb_dump.c`; the format is described in
 //! [`crate::dumpfmt`]).
 //!
 //! ```text

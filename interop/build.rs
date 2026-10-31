@@ -1,6 +1,7 @@
 //! Builds the C side of the interop test bed.
 //!
-//! * `liblmdb` objects from `../../libraries/liblmdb/{mdb,midl}.c`, compiled
+//! * `liblmdb` objects from `../tests/lmdb-c/0.9/{mdb,midl}.c` (the vendored
+//!   LMDB 0.9 sources, `tests/lmdb-c/README.md`), compiled
 //!   like the upstream `Makefile` does (`-pthread -O2 -g -W -Wall
 //!   -Wno-unused-parameter`, platform-default lock mode, no `MDB_DEBUG`), so
 //!   the data and lock files are the ones a normal `make` build produces.
@@ -16,12 +17,11 @@
 //!   the `mtest*` programs.
 //! * `writeops`: the script runner of the write-path differential tests
 //!   (`../rlmdb/tests/c/writeops.c`, see `rlmdb/tests/common/differential.rs`).
-//! * The LMDB 1.0 oracle: the 1.0 sources are extracted from git (the pinned
-//!   commit [`LMDB10_REF`] of `mdb.RE/1.0`, see [`extract_lmdb10`]) into
-//!   `$OUT_DIR/lmdb10/`, and the library, the tools, the `mtest*` programs,
-//!   `layout_dump`, `cpeer` and `writeops` are built from them once more, with the same
-//!   flags, under names ending in `10` (`mdb_stat10`, `mtest2_10`, see
-//!   [`name10`]).
+//! * The LMDB 1.0 oracle: from the vendored 1.0 sources in
+//!   `../tests/lmdb-c/1.0` (or `$LMDB10_DIR`, see [`lmdb10_dir`]), the
+//!   library, the tools, the `mtest*` programs, `layout_dump`, `cpeer` and
+//!   `writeops` are built once more, with the same flags, under names ending
+//!   in `10` (`mdb_stat10`, `mtest2_10`, see [`name10`]).
 //!
 //! Executables go to `$OUT_DIR/bin/` and their paths are exported to the crate
 //! as `INTEROP_<NAME>` compile-time environment variables (see `src/bins.rs`).
@@ -34,7 +34,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Upstream programs built from `libraries/liblmdb/<name>.c`.
+/// Upstream programs built from `tests/lmdb-c/0.9/<name>.c`.
 ///
 /// Not built: `mdb_drop` (not part of LMDB 0.9; the tool only exists on the
 /// 1.0 branch) and `mtest6` (it calls `mdb_dkey()`, which exists only in
@@ -53,24 +53,19 @@ const CPEER_SOURCES: &[&str] = &[
     "dataset.c",
 ];
 
-/// The commit of the LMDB 1.0 sources: `mdb.RE/1.0` after ITS#10642 and
-/// ITS#10643, that is the `LMDB_1.0.2` release plus the fixes of the DUPSORT
-/// page counts. The `LMDB_1.0.2` tag itself still has that bug, which would
-/// be baked into the oracle, so do not pin the tag. Overridden by the
-/// environment variable [`LMDB10_REF_VAR`].
-const LMDB10_REF: &str = "4865523ff0e1514d26a675d9cfd1d3a4b2b6c4c3";
+/// Environment variable naming another directory with the LMDB 1.0 sources
+/// (an absolute path, for example `libraries/liblmdb` of an upstream
+/// checkout), used instead of `tests/lmdb-c/1.0` to test against another
+/// 1.0 commit. The directory must hold [`LMDB10_LIB_FILES`] and the sources
+/// of [`UPSTREAM10_PROGRAMS`].
+const LMDB10_DIR_VAR: &str = "LMDB10_DIR";
 
-/// Environment variable that overrides [`LMDB10_REF`] with any commit-ish
-/// (a hash, a tag, a branch name), for experiments.
-const LMDB10_REF_VAR: &str = "RLMDB_LMDB10_REF";
-
-/// The branch [`LMDB10_REF`] is on, for the "fetch it" error message.
-const LMDB10_BRANCH: &str = "mdb.RE/1.0";
-
-/// Files of `libraries/liblmdb` extracted at [`LMDB10_REF`]: the library
-/// (1.0's `liblmdb.a` also holds `module.o`, the loader of crypto modules),
-/// `chacha8.[ch]` for the encryption tests, and every program of
-/// [`UPSTREAM10_PROGRAMS`].
+/// Files of the LMDB 1.0 sources besides the programs: the library (1.0's
+/// `liblmdb.a` also holds `module.o`, the loader of crypto modules) and
+/// `chacha8.[ch]` for the encryption tests. With the sources of
+/// [`UPSTREAM10_PROGRAMS`], this is the list of files that
+/// `scripts/update-c-sources.sh` vendors into `tests/lmdb-c/1.0` from the
+/// pinned `mdb.RE/1.0` commit (`tests/lmdb-c/README.md`).
 const LMDB10_LIB_FILES: &[&str] = &[
     "mdb.c",
     "midl.c",
@@ -115,7 +110,7 @@ fn main() {
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
-    let lmdb_dir = manifest_dir.join("../../libraries/liblmdb");
+    let lmdb_dir = manifest_dir.join("../tests/lmdb-c/0.9");
     let lmdb_dir = lmdb_dir.canonicalize().unwrap_or(lmdb_dir);
     let peer_dir = manifest_dir.join("c");
     let bin_dir = out_dir.join("bin");
@@ -201,7 +196,7 @@ fn main() {
         link(&bin_dir, "layout_dump", &objs, &midl_obj),
     ));
 
-    let lmdb10_dir = extract_lmdb10(&manifest_dir, &out_dir);
+    let lmdb10_dir = lmdb10_dir(&manifest_dir);
     exported.extend(build_lmdb10(
         &out_dir,
         &lmdb10_dir,
@@ -308,97 +303,32 @@ fn build_lmdb10(
     exported
 }
 
-/// Extracts the LMDB 1.0 sources into `$OUT_DIR/lmdb10/` with `git show
-/// <commit>:libraries/liblmdb/<file>` and returns that directory.
-///
-/// The commit is [`LMDB10_REF`] or `$RLMDB_LMDB10_REF`, resolved in the
-/// repository that holds this crate (`git rev-parse --show-toplevel`, which
-/// also works in linked worktrees, whose objects live in the main
-/// repository). The resolved hash is recorded in `lmdb10/.commit`; when it is
-/// unchanged and every file is there, nothing is extracted again. Fails the
-/// build with instructions when git, the repository or the commit is
-/// missing.
-fn extract_lmdb10(manifest_dir: &Path, out_dir: &Path) -> PathBuf {
-    println!("cargo:rerun-if-env-changed={LMDB10_REF_VAR}");
-    let wanted = env::var(LMDB10_REF_VAR).unwrap_or_else(|_| LMDB10_REF.to_owned());
-
-    let top = git(manifest_dir, &["rev-parse", "--show-toplevel"]).unwrap_or_else(|e| {
-        panic!(
-            "the LMDB 1.0 oracle is extracted from git, but {} is not inside a usable git \
-             repository: {e}\n(in a container, the repository's git directory must be mounted; \
-             rust/scripts/linux-test.sh does that)",
-            manifest_dir.display()
-        )
-    });
-    let top = PathBuf::from(String::from_utf8_lossy(&top).trim());
-    let commit = git(
-        &top,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{wanted}^{{commit}}"),
-        ],
-    )
-    .unwrap_or_else(|_| {
-        panic!(
-            "the LMDB 1.0 sources are taken from commit {wanted} of the {LMDB10_BRANCH} branch, \
-             which is not in this repository; run `git fetch origin {LMDB10_BRANCH}`{}",
-            if wanted == LMDB10_REF {
-                String::new()
-            } else {
-                format!(" (or fix {LMDB10_REF_VAR})")
-            }
-        )
-    });
-    let commit = String::from_utf8_lossy(&commit).trim().to_owned();
-
-    let dir = out_dir.join("lmdb10");
-    let stamp = dir.join(".commit");
-    let files: Vec<String> = LMDB10_LIB_FILES
+/// The directory with the LMDB 1.0 sources: `$LMDB10_DIR` if set, else the
+/// vendored `../tests/lmdb-c/1.0`. Registers every source file for
+/// `rerun-if-changed`; fails the build with a message when one is missing.
+fn lmdb10_dir(manifest_dir: &Path) -> PathBuf {
+    println!("cargo:rerun-if-env-changed={LMDB10_DIR_VAR}");
+    let dir = match env::var_os(LMDB10_DIR_VAR) {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => manifest_dir.join("../tests/lmdb-c/1.0"),
+    };
+    let dir = dir.canonicalize().unwrap_or(dir);
+    let files = LMDB10_LIB_FILES
         .iter()
         .map(|f| f.to_string())
-        .chain(UPSTREAM10_PROGRAMS.iter().map(|p| format!("{p}.c")))
-        .collect();
-    let up_to_date = std::fs::read_to_string(&stamp).is_ok_and(|s| s.trim() == commit)
-        && files.iter().all(|f| dir.join(f).is_file());
-    if up_to_date {
-        return dir;
+        .chain(UPSTREAM10_PROGRAMS.iter().map(|p| format!("{p}.c")));
+    for f in files {
+        let path = dir.join(&f);
+        assert!(
+            path.is_file(),
+            "the LMDB 1.0 sources are incomplete: {} is missing (the vendored sources are \
+             in tests/lmdb-c/1.0, see tests/lmdb-c/README.md; ${LMDB10_DIR_VAR} overrides \
+             the directory)",
+            path.display()
+        );
+        println!("cargo:rerun-if-changed={}", path.display());
     }
-
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).expect("remove old lmdb10 dir");
-    }
-    std::fs::create_dir_all(&dir).expect("create lmdb10 dir");
-    for f in &files {
-        let spec = format!("{commit}:libraries/liblmdb/{f}");
-        let text = git(&top, &["show", &spec])
-            .unwrap_or_else(|e| panic!("extracting the LMDB 1.0 sources: {e}"));
-        std::fs::write(dir.join(f), text).expect("write extracted source");
-    }
-    // Written last: an interrupted extraction is redone.
-    std::fs::write(&stamp, format!("{commit}\n")).expect("write lmdb10/.commit");
     dir
-}
-
-/// Runs `git -C <dir> <args>`; returns its stdout, or a message with its
-/// stderr.
-fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .map_err(|e| format!("running git: {e} (git is needed to build the LMDB 1.0 oracle)"))?;
-    if out.status.success() {
-        Ok(out.stdout)
-    } else {
-        Err(format!(
-            "`git {}` failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
-    }
 }
 
 /// A `cc::Build` with the upstream Makefile's flags.

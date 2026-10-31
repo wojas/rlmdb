@@ -10,8 +10,8 @@
  * writer meeting such a file would sooner or later corrupt data.
  *
  * The walk reads the data file with pread() and decodes the on-disk format
- * at the offsets documented in rust/DESIGN.md (LMDB 0.9) and
- * rust/DUAL_FORMAT.md (LMDB 1.0), independently of LMDB's own code, so it
+ * at the offsets documented in DESIGN.md (LMDB 0.9) and
+ * DUAL_FORMAT.md (LMDB 1.0), independently of LMDB's own code, so it
  * doubles as a check of that documentation. The snapshot is pinned with an
  * LMDB read transaction, which keeps writers from reusing its pages while
  * we read them. It also checks every B-tree descriptor (MDB_db) against
@@ -39,7 +39,7 @@
 
 /* ---- On-disk format (host byte order; see DESIGN.md) -------------------- */
 
-/* What differs between the two data-file formats (rust/DUAL_FORMAT.md §1).
+/* What differs between the two data-file formats (DUAL_FORMAT.md §1).
  * The node header, MDB_db and MDB_meta are the same in both; so are the
  * last 8 bytes of the page header (mp_pad, mp_flags, mp_lower/mp_upper or
  * mp_pages), which 1.0 moves up by the 8 bytes of mp_txnid. */

@@ -1,5 +1,5 @@
 //! Builds `cbench`, the C side of the benchmarks: `c/cbench.c` linked with
-//! the C library from `../../libraries/liblmdb/{mdb,midl}.c`, compiled with
+//! the C library from `../tests/lmdb-c/0.9/{mdb,midl}.c`, compiled with
 //! the flags the interop test bed uses (the upstream `Makefile`'s: `-pthread
 //! -O2 -g -W -Wall -Wno-unused-parameter`, no `MDB_DEBUG`, no `NDEBUG`).
 //!
@@ -19,7 +19,7 @@ fn main() {
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
-    let lmdb_dir = manifest_dir.join("../../libraries/liblmdb");
+    let lmdb_dir = manifest_dir.join("../tests/lmdb-c/0.9");
     let lmdb_dir = lmdb_dir.canonicalize().unwrap_or(lmdb_dir);
     let src = manifest_dir.join("c/cbench.c");
     for f in ["mdb.c", "midl.c", "lmdb.h", "midl.h"] {

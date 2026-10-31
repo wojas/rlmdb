@@ -1,8 +1,8 @@
-/* lmdb.h for the Rust implementation of LMDB (rust/rlmdb-capi).
+/* lmdb.h for the Rust implementation of LMDB (rlmdb-capi).
  *
  * Everything below this comment is the unmodified LMDB 0.9.36 header
- * (libraries/liblmdb/lmdb.h). liblmdb.a / liblmdb.so / liblmdb.dylib built
- * from rust/rlmdb-capi implement this ABI; see rust/rlmdb-capi/README.md for
+ * (tests/lmdb-c/0.9/lmdb.h). liblmdb.a / liblmdb.so / liblmdb.dylib built
+ * from rlmdb-capi implement this ABI; see rlmdb-capi/README.md for
  * the documented differences. The test suite checks that the copy is exact.
  */
 /** @file lmdb.h

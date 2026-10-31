@@ -5,7 +5,7 @@
 //! function; the binaries in `src/bin/` only forward `std::env::args_os()`
 //! to it:
 //!
-//! * [`stat`]: `mdb_stat` (`libraries/liblmdb/mdb_stat.c`),
+//! * [`stat`]: `mdb_stat` (`tests/lmdb-c/0.9/mdb_stat.c`),
 //! * [`dump`]: `mdb_dump` (`mdb_dump.c`),
 //! * [`load`]: `mdb_load` (`mdb_load.c`),
 //! * [`copy`]: `mdb_copy` (`mdb_copy.c`),

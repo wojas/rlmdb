@@ -42,7 +42,7 @@ static int checks, failures;
 #ifdef LMDB_RUST
 #define GAP(name, cond) do { if (cond) { failures++; \
 	fprintf(stderr, "%s:%d: known gap \"%s\" now behaves like C: " \
-		"update the test and rust/rlmdb-capi/README.md\n", __FILE__, __LINE__, name); \
+		"update the test and rlmdb-capi/README.md\n", __FILE__, __LINE__, name); \
 	} else printf("known gap: %s\n", name); } while (0)
 #else
 #define GAP(name, cond) CHECK(cond)

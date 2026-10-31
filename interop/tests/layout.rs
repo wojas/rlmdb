@@ -1,5 +1,5 @@
 //! The C build's struct layout (from `layout_dump`) against the on-disk and
-//! lock-file format described in `rust/DESIGN.md`.
+//! lock-file format described in `DESIGN.md`.
 //!
 //! These numbers are what the Rust implementation must reproduce;
 //! `rust_layout_matches_c` compares every one of them with the constants of

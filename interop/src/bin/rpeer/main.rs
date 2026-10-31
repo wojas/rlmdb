@@ -5,7 +5,7 @@
 //! ```
 //!
 //! The protocol (commands, arguments, output lines, exit codes) is
-//! documented in `rust/interop/README.md`; the C peer (`c/cpeer*.c`) is the
+//! documented in `interop/README.md`; the C peer (`c/cpeer*.c`) is the
 //! reference implementation, and this program follows it module by module:
 //!
 //! | module | C file | commands |

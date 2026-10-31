@@ -3,7 +3,7 @@
 //!
 //! LMDB 0.9 (`MDB_DATA_VERSION 1`) and LMDB 1.0 (`MDB_DATA_VERSION 3`) share
 //! every on-disk structure except a few page-level details (see
-//! `DUAL_FORMAT.md` §1 in the `rust/` directory):
+//! `DUAL_FORMAT.md` §1 in the repository root):
 //!
 //! | item | 0.9 | 1.0 |
 //! |---|---|---|

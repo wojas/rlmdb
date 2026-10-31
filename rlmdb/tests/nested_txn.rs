@@ -1,5 +1,5 @@
 //! Nested write transactions: the scenarios of the interop C peer's
-//! `nested-test` (rust/interop/c/cpeer_misc.c) written by Rust and checked
+//! `nested-test` (interop/c/cpeer_misc.c) written by Rust and checked
 //! by C (and the other way round), plus the cursor and handle rules around
 //! a child transaction.
 

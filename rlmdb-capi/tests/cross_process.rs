@@ -1,5 +1,5 @@
 //! Cross-implementation concurrency through the C API: the interop test
-//! bed's C peer (`rust/interop/c`, a plain `lmdb.h` client) is built twice,
+//! bed's C peer (`interop/c`, a plain `lmdb.h` client) is built twice,
 //! against the C library and against the Rust `liblmdb.a`, and both builds
 //! run against one environment at the same time:
 //!

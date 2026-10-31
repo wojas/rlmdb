@@ -8,7 +8,7 @@
  * It is built with exactly the flags of the library under test (see
  * build.rs), so the numbers are those of the C build on this platform.
  * tests/layout.rs parses the output and compares it with the format
- * described in rust/DESIGN.md and, in stage 2, with lmdb::format::layout.
+ * described in DESIGN.md and, in stage 2, with lmdb::format::layout.
  *
  * The same source is built twice: as layout_dump against the LMDB 0.9
  * mdb.c, and as layout_dump10 against the LMDB 1.0 one (LMDB10 below).

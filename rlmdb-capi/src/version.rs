@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn shipped_header_is_the_unmodified_c_header() {
         let ours = include_str!("../include/lmdb.h");
-        let c = include_str!("../../../libraries/liblmdb/lmdb.h");
+        let c = include_str!("../../tests/lmdb-c/0.9/lmdb.h");
         // Our copy starts with one comment block, then the C header.
         let (prefix, rest) = ours.split_once(" */\n").unwrap();
         assert!(prefix.starts_with("/* lmdb.h for the Rust implementation"));

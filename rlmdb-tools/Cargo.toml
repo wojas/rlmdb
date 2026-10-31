@@ -36,6 +36,6 @@ path = "src/bin/mdb_drop.rs"
 rlmdb = { path = "../rlmdb" }
 
 [dev-dependencies]
-# The tests build the C tools from libraries/liblmdb at test time.
+# The tests build the C tools from tests/lmdb-c/0.9 at test time.
 cc = "1"
 tempfile = "3"

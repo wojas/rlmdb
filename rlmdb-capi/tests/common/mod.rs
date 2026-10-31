@@ -1,6 +1,6 @@
 //! Building C programs for the tests, against either library:
 //!
-//! * [`Lib::C`]: the C LMDB 0.9.36 sources in `libraries/liblmdb`, compiled
+//! * [`Lib::C`]: the C LMDB 0.9.36 sources in `tests/lmdb-c/0.9`, compiled
 //!   here into `liblmdbc.a` (the oracle);
 //! * [`Lib::Rust`]: `liblmdb.a` built by cargo from this crate (cargo builds
 //!   the crate's lib, all crate types at once, before the integration tests,
@@ -53,14 +53,14 @@ impl Lib {
     }
 }
 
-/// `rust/rlmdb-capi`.
+/// `rlmdb-capi`.
 pub fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// `libraries/liblmdb`: the C sources and tools.
+/// `tests/lmdb-c/0.9`: the C sources and tools.
 pub fn c_src() -> PathBuf {
-    crate_dir().join("../../libraries/liblmdb")
+    crate_dir().join("../tests/lmdb-c/0.9")
 }
 
 /// `tests/c`: our own C test programs.
@@ -68,7 +68,7 @@ pub fn test_c_dir() -> PathBuf {
     crate_dir().join("tests/c")
 }
 
-/// `rust/interop/c`: the C peer of the interop test bed (`cpeer`), a plain
+/// `interop/c`: the C peer of the interop test bed (`cpeer`), a plain
 /// `lmdb.h` client.
 pub fn cpeer_dir() -> PathBuf {
     crate_dir().join("../interop/c")
@@ -187,7 +187,7 @@ fn remove_old_runs(base: &Path) {
 }
 
 impl Builder {
-    /// `liblmdbc.a` from `libraries/liblmdb/mdb.c` and `midl.c`.
+    /// `liblmdbc.a` from `tests/lmdb-c/0.9/mdb.c` and `midl.c`.
     fn c_lib(&self) -> &Path {
         self.c_lib.get_or_init(|| {
             let out = self.dir.join("clib");
@@ -253,7 +253,7 @@ impl Builder {
         exe
     }
 
-    /// One of the C tools or test programs in `libraries/liblmdb`
+    /// One of the C tools or test programs in `tests/lmdb-c/0.9`
     /// (`mdb_stat`, `mdb_dump`, `mdb_load`, `mtest`, …).
     pub fn tool(&self, name: &str, lib: Lib) -> PathBuf {
         self.program(name, &[c_src().join(format!("{name}.c"))], lib)
@@ -325,7 +325,7 @@ impl Builder {
         )
     }
 
-    /// The interop test bed's C peer (`rust/interop/c`), linked against
+    /// The interop test bed's C peer (`interop/c`), linked against
     /// `lib`.
     pub fn cpeer(&self, lib: Lib) -> PathBuf {
         let sources: Vec<PathBuf> = [

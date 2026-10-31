@@ -1,5 +1,5 @@
 //! Test support: a page audit of the newest snapshot, in the spirit of the
-//! C peer's `check-freelist` (rust/interop/c/cpeer_pagewalk.c), for unit
+//! C peer's `check-freelist` (interop/c/cpeer_pagewalk.c), for unit
 //! tests that cannot reach the C tools.
 //!
 //! Every page from 2 to `last_pgno` must be used exactly once: by a tree

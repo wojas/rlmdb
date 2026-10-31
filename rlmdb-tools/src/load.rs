@@ -1,6 +1,6 @@
 //! `mdb_load`: load databases from the dump format written by `mdb_dump`,
 //! or from plain text pairs of lines with `-T`
-//! (`libraries/liblmdb/mdb_load.c`; the format is described in
+//! (`tests/lmdb-c/0.9/mdb_load.c`; the format is described in
 //! [`crate::dumpfmt`]).
 //!
 //! ```text

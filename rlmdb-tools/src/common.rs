@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn version_matches_lmdb_h() {
         let h = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../libraries/liblmdb/lmdb.h"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/lmdb-c/0.9/lmdb.h"),
         )
         .unwrap();
         let field = |name: &str| {
