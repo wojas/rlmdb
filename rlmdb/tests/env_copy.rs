@@ -8,10 +8,15 @@ mod common;
 
 use std::fs;
 use std::os::fd::AsFd;
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use common::CTools;
-use rlmdb::{DatabaseFlags, Dbi, Environment, EnvironmentFlags, RwTxn, WriteFlags};
+use rlmdb::format::layout::{META_MAPSIZE, META_SIZE};
+use rlmdb::format::Meta;
+use rlmdb::{
+    DatabaseFlags, Dbi, Environment, EnvironmentFlags, Format, RwTxn, Transaction, WriteFlags,
+};
 
 fn open_rw(path: &Path) -> Environment {
     Environment::builder()
@@ -319,4 +324,123 @@ fn no_sub_dir_copy_and_plain_copy_while_writing() {
         assert_eq!(copy.stat().unwrap().entries, 501);
     }
     drop(old);
+}
+
+/// A meta page newer than the snapshot a plain copy pins: what a commit
+/// whose meta page reached the file while its write or sync failed leaves
+/// behind (C on macOS after a failed `F_FULLFSYNC`; anyone when writing the
+/// old txnid back fails too), forged here while the environment is open, so
+/// that its lock file still names the older snapshot. The copy holds the
+/// snapshot's pages, so it gives that page the snapshot's meta; C's copy
+/// keeps the page, and reading it fails (`MDB_PAGE_NOTFOUND`). Once a
+/// commit has overwritten the page, the copy is C's again.
+#[test]
+fn plain_copy_never_emits_a_meta_newer_than_its_snapshot() {
+    for format in [Format::V09, Format::V10] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = Environment::builder();
+        b.map_size(64 << 20)
+            .flags(EnvironmentFlags::NO_SYNC)
+            .format(format);
+        if format == Format::V10 {
+            b.page_size(1024);
+        }
+        let env = b.open(dir.path()).unwrap();
+        let ps = env.page_size();
+        let l = format.layout();
+        for round in 0..3usize {
+            let mut t = env.begin_rw_txn().unwrap();
+            for i in round * 200..(round + 1) * 200 {
+                put(&mut t, Dbi::MAIN, &i.to_be_bytes(), &value(i, 100));
+            }
+            t.commit().unwrap();
+        }
+        let txnid = env.info().unwrap().last_txnid as u64;
+        let data = dir.path().join("data.mdb");
+        let source = fs::read(&data).unwrap();
+        let (own, other) = ((txnid & 1) as usize, (!txnid & 1) as usize);
+        let meta_at = |i: usize| i * ps + l.meta_offset();
+        let meta = Meta::read(&source[meta_at(own)..]).unwrap();
+        assert_eq!(meta.txnid, txnid);
+
+        // The next commit's meta page, naming pages past the file's end.
+        let mut newer = meta;
+        newer.txnid = txnid + 1;
+        newer.last_pgno = meta.last_pgno + 40;
+        newer.dbs[1].root = meta.last_pgno + 20;
+        let mut bytes = [0u8; META_SIZE];
+        newer.write(&mut bytes);
+        let f = fs::OpenOptions::new().write(true).open(&data).unwrap();
+        f.write_all_at(&bytes, meta_at(other) as u64).unwrap();
+        drop(f);
+        assert_eq!(env.info().unwrap().last_txnid as u64, txnid + 1);
+        assert_eq!(env.begin_ro_txn().unwrap().id(), txnid);
+
+        let target = tempfile::tempdir().unwrap();
+        env.copy_to_path(target.path(), false).unwrap();
+        let copy = fs::read(target.path().join("data.mdb")).unwrap();
+        // The source's bytes up to the snapshot's last page, but for the
+        // part of the newer meta page that a commit writes, which is the
+        // snapshot's.
+        let mut expected = fs::read(&data).unwrap();
+        expected.truncate(source.len().min((meta.last_pgno as usize + 1) * ps));
+        let commit_part = |i: usize| meta_at(i) + META_MAPSIZE..meta_at(i) + META_SIZE;
+        expected.copy_within(commit_part(own), commit_part(other).start);
+        assert!(
+            copy == expected,
+            "{format:?}: {}",
+            first_difference(&copy, &expected, ps)
+        );
+        {
+            let copied = Environment::builder()
+                .flags(EnvironmentFlags::READ_ONLY)
+                .open(target.path())
+                .unwrap();
+            assert_eq!(copied.info().unwrap().last_txnid as u64, txnid);
+            assert_eq!(copied.stat().unwrap().entries, 600);
+            let t = copied.begin_ro_txn().unwrap();
+            let mut c = t.cursor(Dbi::MAIN).unwrap();
+            for i in 0..600usize {
+                let (k, v) = c.next().unwrap().unwrap();
+                assert_eq!((k, v), (&i.to_be_bytes()[..], &value(i, 100)[..]));
+            }
+            assert!(c.next().unwrap().is_none());
+        }
+        // C 0.9's copy keeps the newer page as it is.
+        let c = (format == Format::V09).then(common::c_tools).flatten();
+        if let Some(c) = c {
+            let mut theirs = c_copy(c, dir.path(), false);
+            assert!(theirs[commit_part(other)] == bytes[META_MAPSIZE..]);
+            let theirs_dir = tempfile::tempdir().unwrap();
+            fs::write(theirs_dir.path().join("data.mdb"), &theirs).unwrap();
+            let copied = open_ro(theirs_dir.path());
+            assert_eq!(copied.info().unwrap().last_txnid as u64, txnid + 1);
+            let t = copied.begin_ro_txn().unwrap();
+            let e = t.cursor(Dbi::MAIN).unwrap().next().unwrap_err();
+            assert_eq!(e.to_err_code(), rlmdb::consts::MDB_PAGE_NOTFOUND, "{e:?}");
+            drop(t);
+            drop(copied);
+            theirs.copy_within(commit_part(own), commit_part(other).start);
+            assert!(theirs == copy, "{}", first_difference(&theirs, &copy, ps));
+        }
+
+        // The next commit overwrites the newer page; copies are C's again.
+        let mut t = env.begin_rw_txn().unwrap();
+        put(&mut t, Dbi::MAIN, b"next", b"value");
+        t.commit().unwrap();
+        assert_eq!(env.info().unwrap().last_txnid as u64, txnid + 1);
+        let target = tempfile::tempdir().unwrap();
+        env.copy_to_path(target.path(), false).unwrap();
+        let copy = fs::read(target.path().join("data.mdb")).unwrap();
+        if let Some(c) = c {
+            let theirs = c_copy(c, dir.path(), false);
+            assert!(theirs == copy, "{}", first_difference(&theirs, &copy, ps));
+        }
+        let copied = Environment::builder()
+            .flags(EnvironmentFlags::READ_ONLY)
+            .open(target.path())
+            .unwrap();
+        assert_eq!(copied.info().unwrap().last_txnid as u64, txnid + 1);
+        assert_eq!(copied.stat().unwrap().entries, 601);
+    }
 }

@@ -84,12 +84,24 @@ not yet measured with `layout_dump` on a BSD.
   the same operations: same tree shape and page counts (including
   `md_branch_pages`/`md_leaf_pages` counting sub-DB pages), same free list
   page by page, same spill decisions. Compacting copies are byte-identical
-  to `mdb_copy -c`, plain copies to `mdb_copy`. Where C 0.9.36 would leave
-  a corrupt tree or leak pages (`KNOWN_C_BUGS.md` #11, #14, #15, #19), Rust
-  writes the correct result instead, which C reads normally. Where a C bug
-  decides shared state (sort order of misused integer keys #7, pages
-  leaked by `mdb_drop` on the main DB #21, a child's dirty room #22), the
-  bug is ported, so both sides agree.
+  to `mdb_copy -c`, plain copies to `mdb_copy`, with one exception: a plain
+  copy never writes a meta page newer than the snapshot it pins. When the
+  source's other meta page names a newer transaction, the copy gets the
+  snapshot's meta there (the part a commit writes), so both pages describe
+  the snapshot; `mdb_copy` copies the page as it is, and the newest meta
+  page of its copy then names pages the copy lacks. A sound environment
+  has no such page while the copy holds the writer lock: it takes a commit
+  whose meta page reached the file while its write or sync failed (C on
+  macOS keeps the page after a failed `F_FULLFSYNC`, `KNOWN_C_BUGS.md` #41;
+  C and rlmdb keep it when writing the old txnid back fails too) or,
+  without a lock file, a writer of another process racing the copy. So the
+  bytes differ from `mdb_copy`'s only for files that no C writer leaves
+  without such a failure (or an unserialised writer) in between. Where C
+  0.9.36 would leave a corrupt tree or leak pages (`KNOWN_C_BUGS.md` #11,
+  #14, #15, #19), Rust writes the correct result instead, which C reads
+  normally. Where a C bug decides shared state (sort order of misused
+  integer keys #7, pages leaked by `mdb_drop` on the main DB #21, a
+  child's dirty room #22), the bug is ported, so both sides agree.
 * A new Rust environment records map address 0 (`mm_address`), because
   `MDB_FIXEDMAP` is ignored; to C, 0 means "map anywhere" (#9). The
   `MDB_FIXEDMAP` bit itself is stored in the meta flags as C stores it.
@@ -247,6 +259,7 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 | Several `MDB_NOLOCK` handles of one environment in a process: read-only handles opened at once on threads; a reader of one handle keeps its pages while another commits (page numbers and free list the same as one handle with a lock file); writers of different handles serialised; a handle closed on another thread while another's reader is live; the file recognised under other names (symlink, `MDB_NOSUBDIR` path of the data file, hard link); a lock-file handle and a `NO_LOCK` handle refuse each other; the shared state gone with the last handle. Through the C API: threads that each `dlopen` the shared library (`RTLD_LOCAL` and `RTLD_GLOBAL`) and open the environment `MDB_RDONLY \| MDB_NOLOCK`, then `dlclose` and load it again, against the C and the Rust library; two read-write handles | `rlmdb` unit tests `core::registry::tests`, `core::reader` `no_lock_handles_*`, `no_lock_closing_a_handle_*`, `rlmdb/tests/rust_env.rs` (`no_lock_handles_may_share_an_environment`, `no_lock_read_only_handles_on_threads`, `no_lock_handles_serialise_writers_and_keep_readers`), `rlmdb-capi/tests/capi_dlopen.rs`, `capi_nolock.rs` |
 | Nested transactions | `rlmdb/tests/nested_txn.rs` (written by one side, checked by the other), `interop` `nested_txns`, `reader_loop_during_nested`, `rlmdb-capi/tests/c/capi_write.c` |
 | Copies byte-identical to `mdb_copy [-c]` | `rlmdb/tests/env_copy.rs`, `rlmdb-tools/tests/copy_drop.rs`, `interop` `copy_dump_equal` |
+| A plain copy of a file with a meta page newer than the snapshot it pins gets the snapshot's meta there (readable, where `mdb_copy`'s copy is not); a failed sync after the meta page write is fatal and writes the old txnid back, so a copy taken before the re-open, by another process or `NO_LOCK` handle, shows the last good snapshot (both formats) | `rlmdb/tests/env_copy.rs` (`plain_copy_never_emits_a_meta_newer_than_its_snapshot`), `rlmdb/tests/robust_io_errors.rs` (`robust_failed_meta_sync_is_fatal`, and on macOS `robust_failed_full_fsync_is_fatal`) |
 | The C API behaves as C (return codes, outputs, traces) | `rlmdb-capi/tests/c/capi_read.c`, `capi_write.c` (run against both libraries; traces must be identical; `DIFFERS()`/`DEVIATION()` mark the documented deviations), `rlmdb-capi/tests/tools.rs` (upstream `mdb_stat.c`/`mdb_dump.c` linked against both print the same) |
 | The tools behave as C's | `rlmdb-tools/tests/*.rs` (every option on every environment: same stdout, stderr, exit code; loaded environments identical as C sees them; `-V` prints rlmdb's version line where C prints its own) |
 | `mdb_version` reports 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)`; major and minor equal `lmdb.h`'s | `rlmdb-capi/tests/c/capi_read.c` (`MDB_VERSION_STRING` and 0.9.36 for C, 0.9.85 for Rust), `capi_version.c`, unit tests in `rlmdb/src/version.rs`, `rlmdb-capi/src/version.rs`, `rlmdb-tools/src/common.rs` |
@@ -283,7 +296,8 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
   leaves for the same operations, page by page: tree shape, split points,
   free list, spill decisions, sub-pages, `MDB_ovpage` references, and the
   `mp_txnid` of every page (`mdb_page_flush`'s stamp, which C 1.0 writers
-  rely on). Copies are byte-identical to `mdb_copy10` and `mdb_copy10 -c`;
+  rely on). Copies are byte-identical to `mdb_copy10` and `mdb_copy10 -c`
+  (but for a meta page newer than the snapshot, as in 0.9 files);
   a load is page for page `mdb_load10`'s.
 * **Refused 1.0 features:** encrypted environments (`MDB_ENV_ENCRYPTION`)
   and page checksums (`MDB_BAD_CHECKSUM`), with C 1.0's codes.

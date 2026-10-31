@@ -52,7 +52,7 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use crate::cmp::CmpFn;
@@ -213,9 +213,12 @@ pub struct Environment {
     readers: ReaderTable,
     pub(crate) dbis: DbiRegistry,
     flags: AtomicU32,
-    /// `MDB_FATAL_ERROR`: a meta page write failed; every new transaction
-    /// fails with `MDB_PANIC`.
+    /// `MDB_FATAL_ERROR`: a meta page write (or the sync after it) failed;
+    /// every new transaction fails with `MDB_PANIC`.
     fatal: AtomicBool,
+    /// The `errno` the sync after the next meta page write is to fail with
+    /// (0: none), for tests ([`Environment::fail_next_meta_sync`]).
+    meta_sync_fault: AtomicI32,
     /// Writer state that lives in `MDB_env` in C (`me_pgoldest`). Its mutex
     /// also serialises write transactions within this process (the shared
     /// writer mutex does that across processes; without a lock file it is
@@ -434,6 +437,7 @@ impl Environment {
             dbis: DbiRegistry::new(opts.max_dbs),
             flags: AtomicU32::new(flags),
             fatal: AtomicBool::new(false),
+            meta_sync_fault: AtomicI32::new(0),
             writer: Mutex::new(WriterState {
                 pbuf_pad: 0,
                 pg_oldest: 0,
@@ -553,9 +557,31 @@ impl Environment {
         self.fatal.load(Ordering::SeqCst)
     }
 
-    /// Sets `MDB_FATAL_ERROR` (a meta page write failed, `mdb_env_write_meta`).
+    /// Sets `MDB_FATAL_ERROR` (a meta page write or the sync after it
+    /// failed, `mdb_env_write_meta`).
     pub(crate) fn set_fatal_error(&self) {
         self.fatal.store(true, Ordering::SeqCst);
+    }
+
+    /// Makes the sync after the next meta page write of this handle fail
+    /// with `errno`, after the page has reached the file: what a failing
+    /// disk does to the `F_FULLFSYNC` after the write on macOS, or to the
+    /// `O_DSYNC` write itself elsewhere. Not part of the API: for this
+    /// crate's tests (including the integration tests).
+    #[doc(hidden)]
+    pub fn fail_next_meta_sync(&self, errno: i32) {
+        self.meta_sync_fault.store(errno, Ordering::Relaxed);
+    }
+
+    /// The failure [`Environment::fail_next_meta_sync`] asked for, once.
+    pub(crate) fn injected_meta_sync_error(&self) -> std::io::Result<()> {
+        if self.meta_sync_fault.load(Ordering::Relaxed) == 0 {
+            return Ok(());
+        }
+        match self.meta_sync_fault.swap(0, Ordering::Relaxed) {
+            0 => Ok(()),
+            errno => Err(std::io::Error::from_raw_os_error(errno)),
+        }
     }
 
     /// `MDB_IDL_UM_MAX`: the dirty list's capacity (see the field).

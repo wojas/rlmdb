@@ -12,7 +12,11 @@
 //! The result is byte for byte what C's `mdb_copy` writes. (C writes
 //! straight from its memory map; we `pread` the file, which reads the same
 //! bytes and does not hand out references to pages that are free in the
-//! snapshot and may change while they are copied.)
+//! snapshot and may change while they are copied.) One exception: a meta
+//! page newer than the snapshot, which only a commit whose meta page write
+//! or sync failed leaves (or, without a lock file, a writer of another
+//! process racing the copy), is copied as the snapshot's own meta, where C
+//! copies it as it is and its copy names pages it lacks.
 //!
 //! # Compacting copy
 //!
@@ -44,10 +48,10 @@ use crate::core::env::Environment;
 use crate::core::page_ops;
 use crate::core::txn::{Transaction, TxnCore};
 use crate::error::{Error, MdbError, Result};
-use crate::format::layout::{Format, Layout, OverflowRef};
+use crate::format::layout::{Format, Layout, OverflowRef, META_MAPSIZE, META_SIZE, META_TXNID};
 use crate::format::meta::Meta;
 use crate::format::page::{P_LEAF2, P_META};
-use crate::format::{put_u16, put_u64, Db, PageRef};
+use crate::format::{get_u64, put_u16, put_u64, Db, PageRef};
 use crate::idl::Idl;
 use crate::os;
 
@@ -160,6 +164,7 @@ impl Environment {
                 snapshot?
             }
         };
+        hide_newer_meta(self.layout(), ps, &mut buf.as_mut()[..2 * ps], txn.id());
         out.write_all(&buf.as_mut()[..2 * ps])?;
 
         let fsize = os::file_size(self.data_file())?;
@@ -238,6 +243,33 @@ impl Environment {
         }
         w.flush()
     }
+}
+
+/// Keeps the meta pages `metas` (both, as read from a data file of layout
+/// `l` with pages of `ps` bytes) of a plain copy of snapshot `txnid` from
+/// naming a newer transaction: if the other meta page holds a newer txnid
+/// and the snapshot's own page holds the snapshot, the other page gets the
+/// snapshot's meta, the part `mdb_env_write_meta` writes (from
+/// `mm_mapsize` on). Both pages then describe the snapshot.
+///
+/// The copy holds the data file up to the snapshot's last page only, and
+/// a reader of the copy takes the newer meta page, so as it is, that page
+/// would name pages the copy lacks (`MDB_PAGE_NOTFOUND`). C's
+/// `mdb_env_copyfd0` copies it as it is. Holding the writer lock, the
+/// other page is never newer in a sound environment: it takes a commit
+/// whose meta page reached the file while its write or sync failed (C on
+/// macOS leaves such a page after a failed `F_FULLFSYNC`,
+/// `KNOWN_C_BUGS.md` #41; C and rlmdb when writing the old txnid back
+/// failed too), or, without a lock file, a writer of another process that
+/// races the copy.
+fn hide_newer_meta(l: &Layout, ps: usize, metas: &mut [u8], txnid: u64) {
+    let own = (txnid & 1) as usize * ps + l.meta_offset();
+    let other = (!txnid & 1) as usize * ps + l.meta_offset();
+    let txnid_at = |metas: &[u8], meta: usize| get_u64(metas, meta + META_TXNID);
+    if txnid_at(metas, own) != Some(txnid) || txnid_at(metas, other).is_none_or(|t| t <= txnid) {
+        return;
+    }
+    metas.copy_within(own + META_MAPSIZE..own + META_SIZE, other + META_MAPSIZE);
 }
 
 /// `pread` exactly `buf.len()` bytes (`EIO` at end of file).
