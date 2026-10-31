@@ -197,13 +197,7 @@ fn cursor_ops_after_a_failed_set_on_dupfixed() {
     let Some(c_tools) = common::c_tools() else {
         return;
     };
-    let (op_args, _ops_file) = common::cursorops_ops(&ops);
-    let out = Command::new(c_tools.bin("cursorops"))
-        .arg(dir.path())
-        .arg("f")
-        .args(&op_args)
-        .output()
-        .unwrap();
+    let out = common::c_cursorops(c_tools, dir.path(), Some("f"), &ops);
     assert!(
         out.status.success(),
         "C cursorops: {}",
@@ -232,6 +226,69 @@ fn cursor_ops_after_a_failed_set_on_dupfixed() {
             continue;
         }
         assert_eq!(&cl, rl, "op {i}: {}, after {:?}", ops[i], &ops[i - 2..i]);
+    }
+}
+
+/// `cursorops` takes its script on stdin: the test above passed it on the
+/// command line and failed on FreeBSD with `E2BIG` (`ARG_MAX` is 256 KiB
+/// there). This script is larger than the default `ARG_MAX` of Linux
+/// (2 MiB), macOS (1 MiB) and FreeBSD and than a Windows command line
+/// (32767 characters), and each op on a large record carries its value (as
+/// data, which `MDB_SET_RANGE` ignores) and is longer than Linux's limit for
+/// one argument (128 KiB), so passing it on the command line fails
+/// everywhere. C must run every op, as Rust does.
+#[test]
+fn cursorops_runs_a_script_larger_than_arg_max() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    // Small records first, for the many short ops (every line prints the
+    // current record); then the large ones, for the long ops.
+    let small = |j: usize| format!("a{j:04}").into_bytes();
+    let big = |i: usize| format!("big{i:03}").into_bytes();
+    let value = |i: usize| vec![i as u8; 65_000];
+    let mut txn = env.begin_rw_txn().unwrap();
+    let db = txn.create_db(Some("t"), DatabaseFlags::CREATE).unwrap();
+    for j in 0..1000 {
+        txn.put(db, &small(j), &small(j), WriteFlags::empty())
+            .unwrap();
+    }
+    for i in 0..40 {
+        txn.put(db, &big(i), &value(i), WriteFlags::empty())
+            .unwrap();
+    }
+    txn.commit().unwrap();
+
+    let hex = common::hex;
+    let mut ops = Vec::new();
+    for i in 0..40 {
+        ops.push(format!("set_range:{}:{}", hex(&big(i)), hex(&value(i))));
+        for j in 0..500 {
+            ops.extend([format!("set:{}", hex(&small(j))), "next".to_owned()]);
+        }
+    }
+    let script_len: usize = ops.iter().map(|op| op.len() + 1).sum();
+    assert!(script_len > 4 << 20, "script of {script_len} bytes");
+
+    let txn = env.begin_ro_txn().unwrap();
+    let db = txn.open_db(Some("t")).unwrap();
+    let rust = common::rust_cursorops(&txn, db, &ops);
+    let Some(c_tools) = common::c_tools() else {
+        return;
+    };
+    let out = common::c_cursorops(c_tools, dir.path(), Some("t"), &ops);
+    assert!(
+        out.status.success(),
+        "C cursorops: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let c_lines: Vec<&str> = std::str::from_utf8(&out.stdout).unwrap().lines().collect();
+    assert_eq!(c_lines.len(), ops.len());
+    // The last long op ran and returned its record in full.
+    let found = format!("set_range rc=0 d={} | cur rc=0", hex(&value(39)));
+    let line = c_lines[ops.len() - 1001];
+    assert!(line.starts_with(&found), "{}", &line[..line.len().min(200)]);
+    for (i, (cl, rl)) in c_lines.iter().zip(&rust).enumerate() {
+        assert_eq!(cl, rl, "op {i}");
     }
 }
 

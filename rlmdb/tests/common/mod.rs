@@ -463,23 +463,6 @@ pub mod toolchain {
     }
 }
 
-/// The op arguments of a `cursorops` run: as they are; on Windows, where a
-/// command line has at most 32767 characters, one `@<file>` argument for a
-/// file with the ops, one per line, that lives as long as the returned
-/// guard.
-pub fn cursorops_ops(ops: &[String]) -> (Vec<String>, Option<tempfile::NamedTempFile>) {
-    if !cfg!(windows) {
-        return (ops.to_vec(), None);
-    }
-    let mut file = tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    for op in ops {
-        writeln!(file, "{op}").unwrap();
-    }
-    file.flush().unwrap();
-    let arg = format!("@{}", file.path().display());
-    (vec![arg], Some(file))
-}
-
 /// `tests/compat`: the shims that let the C test programs build on Windows
 /// (`posix_compat.h`; `msvc/unistd.h` for MSVC).
 pub fn compat_dir() -> PathBuf {
@@ -1183,6 +1166,33 @@ fn rc_of<T>(r: &rlmdb::Result<Option<T>>) -> i32 {
     }
 }
 
+/// Runs C's `cursorops` on database `name` (`None`: the main DB) of the
+/// environment at `env_path`, with `ops` on its standard input: a script on
+/// the command line can exceed its limit (`ARG_MAX`, 256 KiB on FreeBSD;
+/// 32767 characters on Windows). A thread writes the script while the
+/// output is read, so neither pipe fills up; a C process that dies early
+/// only cuts the script short.
+pub fn c_cursorops(c: &CTools, env_path: &Path, name: Option<&str>, ops: &[String]) -> Output {
+    let mut child = Command::new(c.bin("cursorops"))
+        .arg(env_path)
+        .arg(name.unwrap_or("-"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let script: String = ops.iter().map(|op| format!("{op}\n")).collect();
+    let writer = std::thread::spawn(move || {
+        // An error is a C process that exited (a broken pipe): its output
+        // says how far it got.
+        let _ = stdin.write_all(script.as_bytes());
+    });
+    let out = child.wait_with_output().unwrap();
+    writer.join().unwrap();
+    out
+}
+
 /// Runs `ops` on a fresh Rust cursor, printing the same lines as
 /// `cursorops`.
 pub fn rust_cursorops(txn: &RoTxn<'_>, db: Dbi, ops: &[String]) -> Vec<String> {
@@ -1286,16 +1296,7 @@ pub fn differential(
     let mut c_bugs = 0;
     for _ in 0..rounds {
         let ops = gen_ops(&mut rng, pairs, 60, flags);
-        let mut args: Vec<String> = vec![
-            env_path.to_str().unwrap().to_owned(),
-            name.unwrap_or("-").to_owned(),
-        ];
-        let (op_args, _ops_file) = cursorops_ops(&ops);
-        args.extend(op_args);
-        let out = Command::new(c.bin("cursorops"))
-            .args(&args)
-            .output()
-            .unwrap();
+        let out = c_cursorops(c, env_path, name, &ops);
         let c_lines: Vec<String> = String::from_utf8(out.stdout)
             .unwrap()
             .lines()

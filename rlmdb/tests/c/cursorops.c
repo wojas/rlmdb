@@ -1,7 +1,11 @@
 /* Test helper for differential testing of cursor semantics.
  *
  *   cursorops [-n] <env> <dbname|-> <op>...
+ *   cursorops [-n] <env> <dbname|-> < script
  *
+ * Without ops on the command line, the ops are read from stdin, one per
+ * line: a long script exceeds the command line's limit (ARG_MAX, 256 KiB
+ * on FreeBSD; 32767 characters on Windows).
  * Opens the environment read-only, a read txn and a cursor on the database
  * ("-" = main DB), then performs each op with mdb_cursor_get and prints one
  * line per op:
@@ -12,7 +16,6 @@
  * if the op left data untouched) and the second part is an MDB_GET_CURRENT
  * done right after it, showing where the cursor ended up. An op is
  * "<name>[:<hexkey>[:<hexdata>]]"; "count" calls mdb_cursor_count instead.
- * An argument "@<file>" stands for the ops in <file>, one per line.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,12 +41,26 @@ static void hexout(const MDB_val *v)
 		printf("%02x", ((unsigned char *)v->mv_data)[i]);
 }
 
-static size_t unhex(const char *s, unsigned char *out)
+static int hexval(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+/* Decodes hex digit pairs up to the first non-hex character, at most <cap>
+ * bytes. (Not with sscanf, which scans the rest of the string on every
+ * call: quadratic in the length of a value.) */
+static size_t unhex(const char *s, unsigned char *out, size_t cap)
 {
 	size_t n = 0;
-	unsigned int b;
-	while (s[0] && s[1] && sscanf(s, "%2x", &b) == 1) {
-		out[n++] = (unsigned char)b;
+	int hi, lo;
+	while (n < cap && (hi = hexval(s[0])) >= 0 && (lo = hexval(s[1])) >= 0) {
+		out[n++] = (unsigned char)(hi << 4 | lo);
 		s += 2;
 	}
 	return n;
@@ -66,10 +83,10 @@ static int do_op(MDB_cursor *cur, const char *arg)
 	if (p) {
 		const char *r = strchr(p + 1, ':');
 		key.mv_data = kbuf;
-		key.mv_size = unhex(p + 1, kbuf);
+		key.mv_size = unhex(p + 1, kbuf, sizeof(kbuf));
 		if (r) {
 			data.mv_data = dbuf;
-			data.mv_size = unhex(r + 1, dbuf);
+			data.mv_size = unhex(r + 1, dbuf, sizeof(dbuf));
 		}
 	}
 	if (!strcmp(opname, "count")) {
@@ -113,6 +130,8 @@ int main(int argc, char **argv)
 	MDB_cursor *cur;
 	unsigned int flags = MDB_RDONLY;
 	int i, rc, argi = 1;
+	/* An op with the largest key and data, in hex, and its name. */
+	static char line[2 * (4096 + 65536) + 128];
 
 	if (argc > 1 && !strcmp(argv[1], "-n")) { flags |= MDB_NOSUBDIR; argi++; }
 	if (argc - argi < 2) { fprintf(stderr, "usage\n"); return 2; }
@@ -124,21 +143,22 @@ int main(int argc, char **argv)
 		fprintf(stderr, "setup: %s\n", mdb_strerror(rc));
 		return 2;
 	}
-	for (i = argi + 2; i < argc; i++) {
-		if (argv[i][0] == '@') {
-			/* A file of ops, one per line (Windows limits a command line
-			 * to 32767 characters). */
-			static char line[300000];
-			FILE *f = fopen(argv[i] + 1, "r");
-			if (!f) { perror(argv[i] + 1); return 2; }
-			while (fgets(line, sizeof(line), f)) {
-				line[strcspn(line, "\r\n")] = 0;
-				if (*line && do_op(cur, line))
-					return 2;
+	if (argc - argi > 2) {
+		for (i = argi + 2; i < argc; i++)
+			if (do_op(cur, argv[i]))
+				return 2;
+	} else {
+		/* Binary stdin on Windows too (posix_compat.h); "\r" is cut
+		 * anyway. */
+		while (fgets(line, sizeof(line), stdin)) {
+			size_t len = strcspn(line, "\r\n");
+			if (!line[len] && !feof(stdin)) {
+				fprintf(stderr, "op too long\n");
+				return 2;
 			}
-			fclose(f);
-		} else if (do_op(cur, argv[i])) {
-			return 2;
+			line[len] = 0;
+			if (line[0] && do_op(cur, line))
+				return 2;
 		}
 	}
 	mdb_cursor_close(cur);
