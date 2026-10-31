@@ -11,8 +11,8 @@
 //!   `mdb_load`, and the `mtest` programs.
 //!
 //! The C build lives in `CARGO_TARGET_TMPDIR/rlmdb-tools-c-<hash of the
-//! sources>`, built once and shared by all test binaries (an atomic rename
-//! publishes it).
+//! sources and flags>`, built once and shared by all test binaries: the
+//! build runs under a file lock and an atomic rename publishes it.
 
 #![allow(dead_code)]
 
@@ -116,6 +116,12 @@ fn build_c() -> Result<PathBuf, String> {
             .map(|t| manifest_dir().join(format!("tests/c/{t}.c"))),
     );
     let mut h = 0xcbf2_9ce4_8422_2325u64;
+    // The compiler flags are set in this file (`cc_build`, `compile_c`) and
+    // taken from the environment by `cc`.
+    fnv(&mut h, include_bytes!("mod.rs"));
+    for var in ["CC", "CFLAGS"] {
+        fnv(&mut h, std::env::var(var).unwrap_or_default().as_bytes());
+    }
     for f in &sources {
         fnv(&mut h, f.file_name().unwrap().to_string_lossy().as_bytes());
         fnv(
@@ -124,14 +130,12 @@ fn build_c() -> Result<PathBuf, String> {
         );
     }
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let dir = base.join(format!("rlmdb-tools-c-{h:016x}"));
-    if dir.join(".ok").exists() {
-        return Ok(dir);
-    }
-    let tmp = base.join(format!("rlmdb-tools-c-{h:016x}.tmp{}", std::process::id()));
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-    cc_build(&tmp)
+    build_shared(&base, &format!("rlmdb-tools-c-{h:016x}"), compile_c)
+}
+
+/// Compiles the C library and programs into `tmp`.
+fn compile_c(tmp: &Path) -> Result<(), String> {
+    cc_build(tmp)
         .file(c_src().join("mdb.c"))
         .file(c_src().join("midl.c"))
         .include(c_src())
@@ -147,7 +151,7 @@ fn build_c() -> Result<PathBuf, String> {
                 .map(|t| (*t, manifest_dir().join(format!("tests/c/{t}.c")))),
         );
     for (name, src) in programs {
-        let mut cmd = cc_build(&tmp).get_compiler().to_command();
+        let mut cmd = cc_build(tmp).get_compiler().to_command();
         cmd.arg("-I")
             .arg(c_src())
             .arg("-o")
@@ -164,15 +168,88 @@ fn build_c() -> Result<PathBuf, String> {
             ));
         }
     }
+    Ok(())
+}
+
+/// Returns `<base>/<name>`, filled by `build` once for all test processes.
+///
+/// A directory with `.ok` is complete and reused as is. Otherwise the build
+/// runs under an advisory lock on `<base>/<name>.lock` (other processes wait
+/// for it and then reuse its result) in `<name>.tmp<pid>`, gets its `.ok`
+/// and is renamed into place. A directory without `.ok` is what a killed
+/// build or a partially restored CI cache left behind: it is removed first,
+/// as `rename` cannot replace a non-empty directory.
+fn build_shared(
+    base: &Path,
+    name: &str,
+    build: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    let dir = base.join(name);
+    if dir.join(".ok").exists() {
+        return Ok(dir);
+    }
+    fs::create_dir_all(base).map_err(|e| format!("{}: {e}", base.display()))?;
+    let lock_path = base.join(format!("{name}.lock"));
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+    lock_exclusive(&lock).map_err(|e| format!("locking {}: {e}", lock_path.display()))?;
+    if dir.join(".ok").exists() {
+        // Another process built it while we waited.
+        return Ok(dir);
+    }
+    if dir.symlink_metadata().is_ok() {
+        fs::remove_dir_all(&dir)
+            .or_else(|_| fs::remove_file(&dir))
+            .map_err(|e| format!("removing stale {}: {e}", dir.display()))?;
+    }
+    let tmp = base.join(format!("{name}.tmp{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    build(&tmp)?;
     fs::write(tmp.join(".ok"), b"ok").map_err(|e| e.to_string())?;
-    if fs::rename(&tmp, &dir).is_err() {
-        // Another test binary finished first; use its build.
+    if let Err(e) = fs::rename(&tmp, &dir) {
         let _ = fs::remove_dir_all(&tmp);
+        // Only possible where `lock_exclusive` does not lock: a concurrent
+        // build may have won.
         if !dir.join(".ok").exists() {
-            return Err("concurrent build left no usable directory".into());
+            return Err(format!(
+                "renaming {} to {}: {e}",
+                tmp.display(),
+                dir.display()
+            ));
         }
     }
+    // Returning drops `lock`, which closes the file and releases the lock.
     Ok(dir)
+}
+
+/// Takes an exclusive advisory lock on `file`, waiting for other holders;
+/// it is released when the file is closed.
+#[cfg(unix)]
+fn lock_exclusive(file: &fs::File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    loop {
+        // SAFETY: `flock` takes a descriptor, which `file` keeps open for
+        // the duration of the call, and accesses no memory of ours.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+/// Elsewhere the build is not locked (`File::lock`, Rust 1.89, replaces
+/// this once the MSRV allows); concurrent builds then race for the rename.
+#[cfg(not(unix))]
+fn lock_exclusive(_file: &fs::File) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// The executable of `tool` for `imp`.

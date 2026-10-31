@@ -38,4 +38,6 @@ rlmdb = { path = "../rlmdb" }
 [dev-dependencies]
 # The tests build the C tools from tests/lmdb-c/0.9 at test time.
 cc = "1"
+# flock() for the lock that serialises that build across test binaries.
+libc.workspace = true
 tempfile = "3"

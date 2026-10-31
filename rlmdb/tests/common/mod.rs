@@ -3,8 +3,9 @@
 //! a Rust view of a database against an expected list of pairs.
 //!
 //! The C sources are copied from `tests/lmdb-c/0.9` into a private build
-//! directory under `CARGO_TARGET_TMPDIR`, so the source tree stays clean and
-//! concurrent builds (other test binaries, the interop crate) do not clash.
+//! directory under `CARGO_TARGET_TMPDIR`, so the source tree stays clean, and
+//! built there once for all test binaries (under a file lock; an atomic
+//! rename publishes the result).
 //! They are built as the upstream `Makefile` (not vendored) builds them:
 //! its `CFLAGS` (`C_FLAGS`), `liblmdb.a` from `mdb.o` and `midl.o`, and
 //! one executable per program linked against it.
@@ -137,14 +138,14 @@ fn build_c_tools() -> Result<PathBuf, String> {
         fnv(&mut h, &fs::read(f).map_err(|e| e.to_string())?);
     }
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let dir = base.join(format!("clmdb-{h:016x}"));
-    if dir.join(".ok").exists() {
-        return Ok(dir);
-    }
-    let tmp = base.join(format!("clmdb-{h:016x}.tmp{}", std::process::id()));
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-    for f in &files {
+    build_shared(&base, &format!("clmdb-{h:016x}"), |tmp| {
+        compile_c_tools(tmp, &files)
+    })
+}
+
+/// Builds the C library and programs from `files` (copied first) in `tmp`.
+fn compile_c_tools(tmp: &Path, files: &[PathBuf]) -> Result<(), String> {
+    for f in files {
         fs::copy(f, tmp.join(f.file_name().unwrap())).map_err(|e| e.to_string())?;
     }
     // mtest6 calls mdb_dkey(), which liblmdb only defines with MDB_DEBUG.
@@ -166,25 +167,25 @@ fn build_c_tools() -> Result<PathBuf, String> {
     for obj in ["mdb", "midl"] {
         run_ok(
             Command::new(&cc)
-                .current_dir(&tmp)
+                .current_dir(tmp)
                 .args(C_FLAGS)
                 .args(["-c", &format!("{obj}.c")]),
         )?;
     }
     run_ok(
         Command::new("ar")
-            .current_dir(&tmp)
+            .current_dir(tmp)
             .args(["rs", "liblmdb.a", "mdb.o", "midl.o"]),
     )?;
     for prog in C_PROGRAMS {
-        run_ok(Command::new(&cc).current_dir(&tmp).args(C_FLAGS).args([
+        run_ok(Command::new(&cc).current_dir(tmp).args(C_FLAGS).args([
             "-o",
             prog,
             &format!("{prog}.c"),
             "liblmdb.a",
         ]))?;
     }
-    run_ok(Command::new(&cc).current_dir(&tmp).args([
+    run_ok(Command::new(&cc).current_dir(tmp).args([
         "-pthread",
         "-O2",
         "-g",
@@ -197,7 +198,7 @@ fn build_c_tools() -> Result<PathBuf, String> {
         "liblmdb.a",
     ]))?;
     for helper in ["holder", "cursorops", "writeops"] {
-        run_ok(Command::new(&cc).current_dir(&tmp).args([
+        run_ok(Command::new(&cc).current_dir(tmp).args([
             "-pthread",
             "-O2",
             "-g",
@@ -208,15 +209,88 @@ fn build_c_tools() -> Result<PathBuf, String> {
             "liblmdb.a",
         ]))?;
     }
+    Ok(())
+}
+
+/// Returns `<base>/<name>`, filled by `build` once for all test processes.
+///
+/// A directory with `.ok` is complete and reused as is. Otherwise the build
+/// runs under an advisory lock on `<base>/<name>.lock` (other processes wait
+/// for it and then reuse its result) in `<name>.tmp<pid>`, gets its `.ok`
+/// and is renamed into place. A directory without `.ok` is what a killed
+/// build or a partially restored CI cache left behind: it is removed first,
+/// as `rename` cannot replace a non-empty directory.
+fn build_shared(
+    base: &Path,
+    name: &str,
+    build: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    let dir = base.join(name);
+    if dir.join(".ok").exists() {
+        return Ok(dir);
+    }
+    fs::create_dir_all(base).map_err(|e| format!("{}: {e}", base.display()))?;
+    let lock_path = base.join(format!("{name}.lock"));
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+    lock_exclusive(&lock).map_err(|e| format!("locking {}: {e}", lock_path.display()))?;
+    if dir.join(".ok").exists() {
+        // Another process built it while we waited.
+        return Ok(dir);
+    }
+    if dir.symlink_metadata().is_ok() {
+        fs::remove_dir_all(&dir)
+            .or_else(|_| fs::remove_file(&dir))
+            .map_err(|e| format!("removing stale {}: {e}", dir.display()))?;
+    }
+    let tmp = base.join(format!("{name}.tmp{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    build(&tmp)?;
     fs::write(tmp.join(".ok"), b"ok").map_err(|e| e.to_string())?;
-    if fs::rename(&tmp, &dir).is_err() {
-        // Another process finished first; use its build.
+    if let Err(e) = fs::rename(&tmp, &dir) {
         let _ = fs::remove_dir_all(&tmp);
+        // Only possible where `lock_exclusive` does not lock: a concurrent
+        // build may have won.
         if !dir.join(".ok").exists() {
-            return Err("concurrent build left no usable directory".into());
+            return Err(format!(
+                "renaming {} to {}: {e}",
+                tmp.display(),
+                dir.display()
+            ));
         }
     }
+    // Returning drops `lock`, which closes the file and releases the lock.
     Ok(dir)
+}
+
+/// Takes an exclusive advisory lock on `file`, waiting for other holders;
+/// it is released when the file is closed.
+#[cfg(unix)]
+fn lock_exclusive(file: &fs::File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    loop {
+        // SAFETY: `flock` takes a descriptor, which `file` keeps open for
+        // the duration of the call, and accesses no memory of ours.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+/// Elsewhere the build is not locked (`File::lock`, Rust 1.89, replaces
+/// this once the MSRV allows); concurrent builds then race for the rename.
+#[cfg(not(unix))]
+fn lock_exclusive(_file: &fs::File) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Builds the interop C peer (`interop/c/cpeer*.c`, see
@@ -245,34 +319,21 @@ fn build_cpeer(tools: &CTools) -> Result<PathBuf, String> {
         );
     }
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let dir = base.join(format!("cpeer-{h:016x}"));
-    let bin = dir.join("cpeer");
-    if dir.join(".ok").exists() {
-        return Ok(bin);
-    }
-    let tmp = base.join(format!("cpeer-{h:016x}.tmp{}", std::process::id()));
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_owned());
-    let mut cmd = Command::new(&cc);
-    cmd.current_dir(&tmp)
-        .args(["-pthread", "-O2", "-g", "-I"])
-        .arg(&tools.dir)
-        .arg("-o")
-        .arg(tmp.join("cpeer"));
-    for n in names.iter().filter(|n| n.ends_with(".c")) {
-        cmd.arg(src.join(n));
-    }
-    cmd.arg(tools.dir.join("liblmdb.a"));
-    run_ok(&mut cmd)?;
-    fs::write(tmp.join(".ok"), b"ok").map_err(|e| e.to_string())?;
-    if fs::rename(&tmp, &dir).is_err() {
-        let _ = fs::remove_dir_all(&tmp);
-        if !dir.join(".ok").exists() {
-            return Err("concurrent cpeer build left no usable directory".into());
+    let dir = build_shared(&base, &format!("cpeer-{h:016x}"), |tmp| {
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_owned());
+        let mut cmd = Command::new(&cc);
+        cmd.current_dir(tmp)
+            .args(["-pthread", "-O2", "-g", "-I"])
+            .arg(&tools.dir)
+            .arg("-o")
+            .arg(tmp.join("cpeer"));
+        for n in names.iter().filter(|n| n.ends_with(".c")) {
+            cmd.arg(src.join(n));
         }
-    }
-    Ok(bin)
+        cmd.arg(tools.dir.join("liblmdb.a"));
+        run_ok(&mut cmd)
+    })?;
+    Ok(dir.join("cpeer"))
 }
 
 /// Output of a `cpeer` command: exit code, stdout, stderr.
