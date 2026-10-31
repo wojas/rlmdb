@@ -3,7 +3,8 @@
 //! oracle for what `mdb_env_info`, `mdb_reader_list` and `mdb_reader_check`
 //! report without a lock file, and the demonstration that C reuses pages
 //! of a live read transaction there) and against the Rust library, which
-//! keeps them (`KNOWN_C_BUGS.md` #35). Both must report no failures and
+//! keeps them (`KNOWN_C_BUGS.md` #35), also between two handles of the
+//! environment in one process. Both must report no failures and
 //! print the same trace, and the environments they leave behind must pass
 //! the C peer's page audit (`check-freelist`).
 
@@ -26,11 +27,13 @@ fn run_capi_nolock(lib: Lib) -> String {
         "capi_nolock against the {lib:?} library failed ({})",
         out.status
     );
-    run_ok(
-        Command::new(b.cpeer(Lib::C))
-            .arg("check-freelist")
-            .arg(scratch.join("nolock")),
-    );
+    for env in ["nolock", "two"] {
+        run_ok(
+            Command::new(b.cpeer(Lib::C))
+                .arg("check-freelist")
+                .arg(scratch.join(env)),
+        );
+    }
     stdout
 }
 

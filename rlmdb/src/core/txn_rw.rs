@@ -197,9 +197,15 @@ impl std::ops::DerefMut for FailOnPanic<'_, '_> {
 }
 
 /// The writer locks a write transaction holds: the in-process writer state
-/// and, unless `MDB_NOLOCK`, the shared writer mutex. Dropping it unlocks.
+/// of its handle and, unless `MDB_NOLOCK`, the shared writer mutex; with
+/// `MDB_NOLOCK`, the writer lock of every handle of the data file in the
+/// process instead. Dropping it unlocks in the reverse order (`Drop`, then
+/// the fields in order).
 struct WriterLock<'env> {
     state: MutexGuard<'env, WriterState>,
+    /// `NO_LOCK`: the file's in-process writer lock (`registry::LocalShared`),
+    /// held only.
+    _file: Option<MutexGuard<'env, ()>>,
     shared: Option<&'env LockRegion>,
 }
 
@@ -278,13 +284,20 @@ impl<'env> RwTxn<'env> {
         if env.is_read_only() {
             return Err(Error::errno(libc::EACCES));
         }
+        // Without a lock file, first the writer lock of every handle of the
+        // file in this process.
+        let file = env.local_shared().map(|l| l.lock_writer());
         let state = env.lock_writer_state();
         let shared = env.lock_region();
         if let Some(lock) = shared {
             lock.lock_writer(|| env.pick_meta().map(|m| m.txnid))?;
         }
         // From here on, dropping `lock` unlocks again.
-        let mut lock = WriterLock { state, shared };
+        let mut lock = WriterLock {
+            state,
+            _file: file,
+            shared,
+        };
         let (last, meta) = match shared {
             Some(l) => {
                 let t = l.txnid();

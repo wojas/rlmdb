@@ -335,11 +335,13 @@ src/os/             ALL unsafe lives here. mod.rs selects unix; unix.rs: DataMap
                     (robust pthread mutex on Linux, named semaphore on macOS)
 src/core/mod.rs     the byte-level API (see "Core layer"), Stat, Info
 src/core/env.rs     Environment, EnvironmentBuilder, open sequence, meta selection,
-                    map size, the per-process registry of open paths, the
-                    the environment's Format/Layout (sniffed from the file,
+                    map size, the environment's Format/Layout (sniffed from the file,
                     requested, or V09), sniff_format
 src/core/reader.rs  lock file and reader table: slots, oldest reader, reader_check/list;
                     the in-memory reader table without a lock file (NO_LOCK)
+src/core/registry.rs  the per-process registry of open environments (by path
+                    and by data-file identity): EBUSY with a lock file, the
+                    state NO_LOCK handles of one file share otherwise
 src/core/txn.rs     TxnCore (snapshot, DBI view, page lookup), RoTxn, InactiveTxn,
                     the Transaction trait
 src/core/dbi.rs     Dbi handles, open/close, names, stale-record refresh
@@ -418,7 +420,9 @@ Deliberate differences from heed:
   and refuses a second open of the same path (LMDB forbids opening one env
   twice in one process because of the pid-based reader locks). The core
   already has this registry (`Error::EnvAlreadyOpened`, `EBUSY` in C); it
-  is needed for correctness, not just API parity.
+  is needed for correctness, not just API parity. Under `NO_LOCK` the core
+  lets several handles open one file (they share its reader table and
+  writer lock); the heed layer must not refuse what the core allows.
 * `Env::open_databases_and_commit` / `create_databases_and_commit` helpers
   and the `OnCommit` machinery may be implemented as thin wrappers; they are
   low priority.
@@ -541,9 +545,12 @@ strings match `mdb_strerror`.
   transactions of the same process still read. rlmdb keeps an in-memory
   reader table per `Environment` instead (`core::reader::LocalReaders`):
   read transactions publish their snapshot in it and `mdb_find_oldest`
-  consults it, so the invariant holds within the process; the registry of
-  open paths makes one table cover the process. Other processes are the
-  caller's job, as `lmdb.h` says for `MDB_NOLOCK` (`KNOWN_C_BUGS.md` #35).
+  consults it, so the invariant holds within the process. Every
+  `NO_LOCK` handle of one data file in the process (C allows several)
+  shares that table and the writer lock (`core::registry`, keyed by device
+  and inode). Other processes, and other copies of the library in the
+  process, are the caller's job, as `lmdb.h` says for `MDB_NOLOCK`
+  (`KNOWN_C_BUGS.md` #35).
 * Meta pages *are* written concurrently by other processes. Read them with
   volatile reads (`ptr::read_volatile` in `os`) into an owned `Meta` value and
   validate (`magic`, `version`), re-reading as C does at txn begin

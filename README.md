@@ -226,7 +226,9 @@ not run in CI.
 * Everything observable through the C API matches C, except a short list
   of documented API-level differences (no on-disk effect): read
   transactions are never thread-bound (`MDB_NOTLS` always; a superset),
-  opening one environment twice in a process fails with `EBUSY`,
+  opening one environment twice in a process fails with `EBUSY` (except
+  under `MDB_NOLOCK`, where handles share one in-process reader table and
+  writer lock),
   misuse that crashes C returns `EINVAL`, and plain C bugs (cursor reads
   past the end of a page, stale duplicate counts, unchecked
   `MDB_DUPFIXED` sizes, ...) are not reproduced. See

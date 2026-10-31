@@ -516,7 +516,7 @@ impl<'env> RoTxn<'env> {
                 lock,
                 index: lock.acquire_slot()?,
             },
-            ReaderTable::Local(local) => ReaderSlot::Local(local.acquire()),
+            ReaderTable::Local(local) => ReaderSlot::Local(local.readers.acquire()),
         };
         // Built before the snapshot is taken so that Drop releases the slot
         // if anything below fails.

@@ -13,13 +13,21 @@
  * what mdb_env_info, mdb_reader_list and mdb_reader_check report, must be
  * the same, and the trace ("T ..." lines) must be identical.
  *
+ * The second part opens the environment twice in the process, both
+ * handles with MDB_NOLOCK (as C allows): the Rust library makes them share
+ * one reader table and writer lock, so a reader of one handle keeps its
+ * pages while the other commits, and their writers are serialised (C
+ * coordinates nothing between them, nor within one handle).
+ *
  * Prints "capi_nolock: N checks, F failures" and exits 1 on failures.
  */
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include "lmdb.h"
 
 static int checks, failures;
@@ -123,6 +131,144 @@ static void check_reader_table(MDB_env *env, const char *when)
 		info.me_maxreaders, b.s);
 }
 
+/* Opens the environment at `path` with MDB_NOLOCK, and its main DB (a DBI
+ * is per handle: C installs the comparator in mdb_dbi_open). */
+static MDB_env *open_nolock(const char *path, MDB_dbi *dbi)
+{
+	MDB_env *env;
+	MDB_txn *txn;
+	OK(mdb_env_create(&env));
+	OK(mdb_env_set_mapsize(env, 256 << 20));
+	OK(mdb_env_open(env, path, MDB_NOLOCK | MDB_NOSYNC, 0664));
+	OK(mdb_txn_begin(env, NULL, 0, &txn));
+	OK(mdb_dbi_open(txn, NULL, 0, dbi));
+	OK(mdb_txn_commit(txn));
+	return env;
+}
+
+/* Reads the values a reader holds (HELD of them, every 13th key). */
+static void hold(MDB_txn *r, MDB_dbi dbi, MDB_val *held, unsigned char **copies)
+{
+	unsigned i;
+	for (i = 0; i < HELD; i++) {
+		unsigned key = i * 13;
+		unsigned char kb[4] = { key >> 24, key >> 16, key >> 8, key };
+		MDB_val k;
+		k.mv_size = sizeof(kb);
+		k.mv_data = kb;
+		OK(mdb_get(r, dbi, &k, &held[i]));
+		copies[i] = malloc(held[i].mv_size);
+		memcpy(copies[i], held[i].mv_data, held[i].mv_size);
+	}
+}
+
+/* How many of the held values changed; frees the copies. */
+static unsigned changed_since(MDB_val *held, unsigned char **copies)
+{
+	unsigned i, changed = 0;
+	for (i = 0; i < HELD; i++) {
+		changed += memcmp(held[i].mv_data, copies[i], held[i].mv_size) != 0;
+		free(copies[i]);
+	}
+	return changed;
+}
+
+#ifdef LMDB_RUST
+/* A write transaction of handle A that waits before it ends. */
+struct writer {
+	MDB_env *env;
+	pthread_mutex_t m;
+	pthread_cond_t c;
+	int began, ended;
+};
+
+static void *write_and_wait(void *arg)
+{
+	struct writer *w = arg;
+	MDB_txn *txn;
+	OK(mdb_txn_begin(w->env, NULL, 0, &txn));
+	pthread_mutex_lock(&w->m);
+	w->began = 1;
+	pthread_cond_broadcast(&w->c);
+	pthread_mutex_unlock(&w->m);
+	usleep(200 * 1000);
+	pthread_mutex_lock(&w->m);
+	w->ended = 1;
+	pthread_mutex_unlock(&w->m);
+	mdb_txn_abort(txn);
+	return NULL;
+}
+#endif
+
+/* Two MDB_NOLOCK handles of one environment in this process. */
+static void two_handles(const char *scratch)
+{
+	char path[1024];
+	MDB_env *a, *b, *c;
+	MDB_txn *txn, *r;
+	MDB_dbi dbi, dbi_a, dbi_c;
+	MDB_stat st;
+	MDB_val held[HELD];
+	unsigned char *copies[HELD];
+	unsigned round, changed;
+
+	snprintf(path, sizeof(path), "%s/two", scratch);
+	mkdir(path, 0775);
+	a = open_nolock(path, &dbi_a);
+	b = open_nolock(path, &dbi);
+	for (round = 0; round < 3; round++)
+		commit_round(b, dbi, round);
+
+	/* A reader in A holds values while B rewrites every page. */
+	OK(mdb_txn_begin(a, NULL, MDB_RDONLY, &r));
+	hold(r, dbi_a, held, copies);
+	for (round = 3; round < 15; round++)
+		commit_round(b, dbi, round);
+	changed = changed_since(held, copies);
+	NOLOCK_READERS(changed > 0, changed == 0);
+	mdb_txn_abort(r);
+
+	/* A write transaction of B waits for the one of A. */
+#ifdef LMDB_RUST
+	{
+		struct writer w = { a, PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0 };
+		pthread_t tid;
+		CHECK(pthread_create(&tid, NULL, write_and_wait, &w) == 0);
+		pthread_mutex_lock(&w.m);
+		while (!w.began)
+			pthread_cond_wait(&w.c, &w.m);
+		pthread_mutex_unlock(&w.m);
+		OK(mdb_txn_begin(b, NULL, 0, &txn));
+		pthread_mutex_lock(&w.m);
+		CHECK(w.ended);
+		pthread_mutex_unlock(&w.m);
+		mdb_txn_abort(txn);
+		CHECK(pthread_join(tid, NULL) == 0);
+	}
+#else
+	checks++; /* C leaves serialising writers to the caller. */
+#endif
+
+	/* Closing A while a reader of B is live; a new handle C writes. */
+	OK(mdb_txn_begin(b, NULL, MDB_RDONLY, &r));
+	hold(r, dbi, held, copies);
+	mdb_env_close(a);
+	c = open_nolock(path, &dbi_c);
+	for (round = 15; round < 27; round++)
+		commit_round(c, dbi_c, round);
+	changed = changed_since(held, copies);
+	NOLOCK_READERS(changed > 0, changed == 0);
+	mdb_txn_abort(r);
+
+	OK(mdb_txn_begin(c, NULL, MDB_RDONLY, &r));
+	OK(mdb_stat(r, dbi_c, &st));
+	T("two handles: entries %zu depth %u txnid %zu", st.ms_entries, st.ms_depth,
+		mdb_txn_id(r));
+	mdb_txn_abort(r);
+	mdb_env_close(b);
+	mdb_env_close(c);
+}
+
 int main(int argc, char **argv)
 {
 	char path[1024];
@@ -220,6 +366,8 @@ int main(int argc, char **argv)
 	T("entries %zu depth %u txnid %zu", st.ms_entries, st.ms_depth, mdb_txn_id(r));
 	mdb_txn_abort(r);
 	mdb_env_close(env);
+
+	two_handles(argv[1]);
 	free(valbuf);
 
 	printf("capi_nolock: %d checks, %d failures\n", checks, failures);

@@ -43,20 +43,23 @@
 //! Dropping an [`Environment`] mirrors `mdb_env_close0`: unmap the data
 //! file, close the descriptors, clear any reader slots this process still
 //! owns, close the shared locks, unmap and close the lock file. Only then is
-//! the path removed from the process-wide registry of open environments.
+//! the environment removed from the process-wide registry of open
+//! environments (`registry`), which refuses a second open of an environment
+//! with a lock file and lets `NO_LOCK` handles of one data file share their
+//! writer lock and reader table.
 
-use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use crate::cmp::CmpFn;
 use crate::consts::*;
 use crate::core::dbi::{Dbi, DbiRegistry};
-use crate::core::reader::{LocalReaders, LockRegion, ReaderInfo, ReaderTable};
+use crate::core::reader::{LockRegion, ReaderInfo, ReaderTable};
+use crate::core::registry::{LocalShared, Registration};
 use crate::core::txn::{RoTxn, Transaction};
 use crate::core::txn_rw::{RwTxn, SpareTxn};
 use crate::core::{Info, Stat};
@@ -74,63 +77,6 @@ const MIN_PAGESIZE: usize = 256;
 
 /// Default file mode for [`EnvironmentBuilder::open`].
 const DEFAULT_MODE: u32 = 0o644;
-
-// ---------------------------------------------------------------------------
-// Process-wide registry of open environments
-// ---------------------------------------------------------------------------
-
-fn registry() -> &'static Mutex<HashSet<PathBuf>> {
-    static OPEN: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    OPEN.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-/// Membership in the registry; removed on drop. An [`Environment`] keeps it
-/// as its last field so the path is released only after every file of the
-/// environment is closed.
-struct Registration {
-    key: PathBuf,
-}
-
-impl Registration {
-    /// Registers the canonical form of `path`, failing with
-    /// [`Error::EnvAlreadyOpened`] if this process has it open already.
-    fn new(path: &Path, no_sub_dir: bool) -> Result<Registration> {
-        let key = canonical_key(path, no_sub_dir)?;
-        let mut open = registry().lock().unwrap_or_else(|e| e.into_inner());
-        if !open.insert(key.clone()) {
-            return Err(Error::EnvAlreadyOpened);
-        }
-        Ok(Registration { key })
-    }
-}
-
-impl Drop for Registration {
-    fn drop(&mut self) {
-        registry()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.key);
-    }
-}
-
-/// The canonical path identifying an environment: the directory, or with
-/// `NO_SUB_DIR` the data file (which may not exist yet).
-fn canonical_key(path: &Path, no_sub_dir: bool) -> Result<PathBuf> {
-    if !no_sub_dir {
-        return Ok(path.canonicalize()?);
-    }
-    match path.canonicalize() {
-        Ok(p) => Ok(p),
-        Err(_) => {
-            let file = path.file_name().ok_or_else(Error::einval)?;
-            let parent = match path.parent() {
-                Some(p) if !p.as_os_str().is_empty() => p.canonicalize()?,
-                _ => std::env::current_dir()?,
-            };
-            Ok(parent.join(file))
-        }
-    }
-}
 
 /// `mdb_fname_init` + `mdb_suffixes`: (data file, lock file) names.
 fn file_names(path: &Path, no_sub_dir: bool) -> (PathBuf, PathBuf) {
@@ -352,7 +298,9 @@ impl Environment {
         let (data_path, lock_path) = file_names(path, no_sub_dir);
 
         // Declared first so that it is dropped last on every error path.
-        let registration = Registration::new(path, no_sub_dir)?;
+        // With a lock file this refuses a second open before the lock file
+        // is touched (closing it would drop the first handle's locks).
+        let mut registration = Registration::claim_path(path, no_sub_dir, no_lock)?;
 
         // Decide the format before the lock file is touched: C sets up the
         // lock file first and would re-initialise a lock file of the other
@@ -381,14 +329,34 @@ impl Environment {
                 .mode(mode)
                 .open(&data_path)?
         };
+        // The NO_LOCK handles of one data file in this process share a
+        // writer lock and a reader table; with a lock file the data file
+        // must not be open in the process under another name either.
+        let local = registration.claim_file(&data_file)?;
         if read_only && !no_lock {
             // For RDONLY, get the lock file after we know the data file exists.
             lock = LockRegion::open(&lock_path, mode, opts.max_readers, true, lock_layout)?;
         }
 
         // mdb_env_open2
+        let mut header = read_header(&data_file, layout);
+        // Another NO_LOCK handle of the process may be setting up the same
+        // new file (its size grows while the meta pages are written). If
+        // there is no complete header yet, wait for that under the file's
+        // writer lock and read again; an empty file is then set up under
+        // the lock, so one handle writes the meta pages and the others see
+        // them. (A thread with a write transaction of the file in another
+        // handle always finds a complete header, so it never waits here.)
+        let setup = match local.as_deref() {
+            Some(local) if !matches!(header, Ok(Some(_))) => {
+                let guard = local.lock_writer();
+                header = read_header(&data_file, layout);
+                Some(guard)
+            }
+            _ => None,
+        };
         let max_pagesize = layout.max_pagesize;
-        let (page_size, mut meta, new_env, meta0_flags) = match read_header(&data_file, layout)? {
+        let (page_size, mut meta, new_env, meta0_flags) = match header? {
             Some((meta, meta0)) => (meta.page_size() as usize, meta, false, meta0.env_flags()),
             None => {
                 // me_os_psize, which mdb_env_set_pagesize replaces in 1.0.
@@ -426,6 +394,7 @@ impl Environment {
             meta.write_initial_pages_with_layout(&mut buf, page_size, layout);
             os::write_all_at(&data_file, &buf, 0)?;
         }
+        drop(setup);
 
         let map =
             DataMap::map_readonly(data_file.try_clone()?, map_size, flags & MDB_NORDAHEAD != 0)?
@@ -445,9 +414,12 @@ impl Environment {
         };
 
         let max_readers = lock.as_ref().map_or(opts.max_readers, |l| l.max_readers());
-        let readers = match lock {
-            Some(lock) => ReaderTable::Shared(lock),
-            None => ReaderTable::Local(LocalReaders::default()),
+        let readers = match (lock, local) {
+            (Some(lock), _) => ReaderTable::Shared(lock),
+            (None, Some(local)) => ReaderTable::Local(local),
+            // No lock file without NO_LOCK (read-only on a read-only file
+            // system): the only handle of the file in the process.
+            (None, None) => ReaderTable::Local(Arc::default()),
         };
         let env = Environment {
             map: RwLock::new(Arc::new(map)),
@@ -540,6 +512,15 @@ impl Environment {
     /// Where read transactions advertise their snapshots.
     pub(crate) fn readers(&self) -> &ReaderTable {
         &self.readers
+    }
+
+    /// Without a lock file, the writer lock and reader table this handle
+    /// shares with the file's other `NO_LOCK` handles in the process.
+    pub(crate) fn local_shared(&self) -> Option<&LocalShared> {
+        match &self.readers {
+            ReaderTable::Shared(_) => None,
+            ReaderTable::Local(local) => Some(local),
+        }
     }
 
     pub(crate) fn is_read_only(&self) -> bool {
@@ -803,16 +784,17 @@ impl Environment {
     /// Without a lock file the read transactions of this process are
     /// tracked in memory, so that its write transactions never reuse pages
     /// they read; C does not track them (`MDB_NOLOCK` leaves that to the
-    /// caller). Other processes are not covered: with `NO_LOCK`, keeping
-    /// them away while this one writes is the caller's job, as in C. The
+    /// caller). The table, like the writer lock, is shared by every
+    /// `NO_LOCK` handle of the data file in the process (each may be opened
+    /// with its own `Environment`), so this counts the read transactions of
+    /// all of them. Other processes are not covered: with `NO_LOCK`,
+    /// keeping them away while this one writes is the caller's job, as in
+    /// C. The
     /// functions that report C's lock-file table ([`Environment::info`],
     /// [`Environment::reader_list`], [`Environment::reader_check`]) report
     /// what C does without one.
     pub fn in_memory_readers(&self) -> Option<usize> {
-        match &self.readers {
-            ReaderTable::Shared(_) => None,
-            ReaderTable::Local(local) => Some(local.active()),
-        }
+        self.local_shared().map(|local| local.readers.active())
     }
 
     /// `mdb_env_get_fd`-like access to the data file.

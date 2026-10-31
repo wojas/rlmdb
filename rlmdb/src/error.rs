@@ -261,6 +261,10 @@ pub enum Error {
     /// The environment is already open in this process. LMDB must not open
     /// the same environment twice in one process: POSIX record locks are
     /// per process, so closing one handle would drop the other's locks.
+    /// Handles opened with `NO_LOCK` (no lock file) are exempt among
+    /// themselves: they share the process's reader table and writer lock
+    /// for the file. A `NO_LOCK` handle and one with a lock file of the
+    /// same file still refuse each other.
     EnvAlreadyOpened,
 }
 

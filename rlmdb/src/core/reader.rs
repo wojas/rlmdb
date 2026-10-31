@@ -15,8 +15,9 @@
 //! environment keeps a `LocalReaders` table instead, which tracks the read
 //! transactions of this process exactly as the lock file's table would; only
 //! other processes are the caller's business, as in C
-//! (`KNOWN_C_BUGS.md` #35). `ReaderTable` is the environment's choice of
-//! the two.
+//! (`KNOWN_C_BUGS.md` #35). All `NO_LOCK` handles of one data file in the
+//! process share one table (`registry::LocalShared`). `ReaderTable` is the
+//! environment's choice of the two.
 //!
 //! C counterparts and behaviours kept exactly:
 //!
@@ -51,6 +52,7 @@ use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::consts::MDB_MAGIC;
+use crate::core::registry::LocalShared;
 use crate::error::{Error, MdbError, Result};
 use crate::format::lockfile::{
     self, LockLayout, READER_PID, READER_TID, READER_TXNID, TXNINFO_FORMAT, TXNINFO_MAGIC,
@@ -91,8 +93,9 @@ pub fn format_reader_list(readers: &[ReaderInfo]) -> String {
 pub(crate) enum ReaderTable {
     /// The lock file (`me_txns`).
     Shared(LockRegion),
-    /// No lock file (`me_txns == NULL` in C, which tracks no readers then).
-    Local(LocalReaders),
+    /// No lock file (`me_txns == NULL` in C, which tracks no readers then):
+    /// the in-memory table, shared by every `NO_LOCK` handle of the file.
+    Local(Arc<LocalShared>),
 }
 
 impl ReaderTable {
@@ -102,7 +105,7 @@ impl ReaderTable {
     pub(crate) fn find_oldest(&self, txnid: u64) -> u64 {
         match self {
             ReaderTable::Shared(lock) => lock.find_oldest(txnid),
-            ReaderTable::Local(local) => local.find_oldest(txnid),
+            ReaderTable::Local(local) => local.readers.find_oldest(txnid),
         }
     }
 }
@@ -563,7 +566,7 @@ const IDLE: u64 = !0;
 
 /// The reader table of an environment without a lock file: the in-memory
 /// counterpart of the lock file's table, for the read transactions of this
-/// process (see the module documentation).
+/// process (see the module documentation), in all handles of the file.
 ///
 /// Each read transaction owns an entry ([`LocalSlot`]) as long as it (or
 /// the [`InactiveTxn`](crate::core::InactiveTxn) a reset leaves) lives, and
@@ -936,20 +939,34 @@ mod tests {
     /// A reader pins its snapshot while a dozen commits rewrite every page;
     /// then it ends and its pages are reused. Returns the newest page use.
     fn long_reader(flags: EnvironmentFlags) -> PageUse {
+        long_reader_with(flags, false)
+    }
+
+    /// [`long_reader`], with the writes in a second handle of the file if
+    /// `two_handles` (`NO_LOCK` only): its writers keep the pages of the
+    /// first handle's reader as if it were their own.
+    fn long_reader_with(flags: EnvironmentFlags, two_handles: bool) -> PageUse {
         let dir = tempfile::tempdir().unwrap();
         let env = scenario_env(dir.path(), flags);
+        let second;
+        let writer = if two_handles {
+            second = scenario_env(dir.path(), flags);
+            &second
+        } else {
+            &env
+        };
         for round in 0..3 {
-            commit_round(&env, round);
+            commit_round(writer, round);
         }
         let reader = env.begin_ro_txn().unwrap();
         let pinned = pin(&reader);
-        commit_round(&env, 3);
-        let freed = newest(&env);
+        commit_round(writer, 3);
+        let freed = newest(writer);
         assert_freed_most(&pinned, reader.id(), &freed);
         for round in 4..15 {
-            commit_round(&env, round);
+            commit_round(writer, round);
         }
-        let now = newest(&env);
+        let now = newest(writer);
         check_pinned(&reader, &pinned, &freed, &now);
         // The writers did reuse pages meanwhile (the free ones of the
         // reader's snapshot).
@@ -962,14 +979,14 @@ mod tests {
         drop(reader);
         // Once it has ended, its pages are reused.
         for round in 15..18 {
-            commit_round(&env, round);
+            commit_round(writer, round);
         }
-        let after = newest(&env);
+        let after = newest(writer);
         assert!(
             reused(&now, &after).any(|p| reader_pages.contains(&p)),
             "the ended reader's pages were not reused"
         );
-        crate::core::audit::audit(&env);
+        crate::core::audit::audit(writer);
         after
     }
 
@@ -979,6 +996,48 @@ mod tests {
         // With a lock file the writers make the same decisions.
         let locked = long_reader(EnvironmentFlags::empty());
         assert_eq!(no_lock, locked);
+    }
+
+    /// The reader in one `NO_LOCK` handle, the writers in another: the same
+    /// decisions as one handle with a lock file.
+    #[test]
+    fn no_lock_handles_of_one_file_pin_each_others_pages() {
+        let two = long_reader_with(EnvironmentFlags::NO_LOCK, true);
+        let locked = long_reader(EnvironmentFlags::empty());
+        assert_eq!(two, locked);
+    }
+
+    /// A handle closed (on another thread) while another handle's reader
+    /// is live leaves the shared table alone: later handles' writers keep
+    /// the reader's pages.
+    #[test]
+    fn no_lock_closing_a_handle_keeps_the_other_handles_readers() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = scenario_env(dir.path(), EnvironmentFlags::NO_LOCK);
+        let b = scenario_env(dir.path(), EnvironmentFlags::NO_LOCK);
+        for round in 0..3 {
+            commit_round(&a, round);
+        }
+        let reader = b.begin_ro_txn().unwrap();
+        let pinned = pin(&reader);
+        // A reader of A's that ends with it.
+        let txn = a.begin_ro_txn().unwrap();
+        commit_round(&a, 3);
+        let freed = newest(&a);
+        assert_freed_most(&pinned, reader.id(), &freed);
+        drop(txn);
+        std::thread::spawn(move || drop(a)).join().unwrap();
+        assert_eq!(b.in_memory_readers(), Some(1));
+        let c = scenario_env(dir.path(), EnvironmentFlags::NO_LOCK);
+        assert_eq!(c.in_memory_readers(), Some(1));
+        for round in 4..15 {
+            commit_round(&c, round);
+        }
+        check_pinned(&reader, &pinned, &freed, &newest(&c));
+        drop(pinned);
+        drop(reader);
+        assert_eq!(c.in_memory_readers(), Some(0));
+        crate::core::audit::audit(&c);
     }
 
     /// One round of [`spilling_reader`]: half of the keys in a write
@@ -1048,7 +1107,7 @@ mod tests {
     /// Entries of the in-memory table (claimed or not).
     fn local_entries(env: &Environment) -> usize {
         match env.readers() {
-            ReaderTable::Local(local) => local.entries.lock().unwrap().len(),
+            ReaderTable::Local(local) => local.readers.entries.lock().unwrap().len(),
             ReaderTable::Shared(_) => panic!("environment has a lock file"),
         }
     }

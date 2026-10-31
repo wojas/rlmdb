@@ -6,7 +6,10 @@
 //!   the crate's lib, all crate types at once, before the integration tests,
 //!   because the lib has an `rlib` crate type).
 //!
-//! No build script: the `cc` crate is used at test time, with the target
+//! Programs that load LMDB with `dlopen` ([`Builder::dl_program`]) use the
+//! shared builds instead: [`Builder::c_shared_lib`] and [`rust_cdylib`].
+//!
+//! No build step for the tests: the `cc` crate is used at test time, with the target
 //! triple derived from the host (the tests always run on the build host).
 //! Programs are built once per test process into
 //! `CARGO_TARGET_TMPDIR/capi/<test binary>-<pid>-<nanos>/`, so Rust-linked
@@ -87,6 +90,33 @@ pub fn rust_staticlib() -> PathBuf {
     }
     panic!(
         "liblmdb.a not found next to {}; build with `cargo test -p rlmdb-capi`",
+        exe.display()
+    );
+}
+
+/// The file name of a shared library `lib<name>` on this platform.
+pub fn shared_lib_name(name: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("lib{name}.dylib")
+    } else {
+        format!("lib{name}.so")
+    }
+}
+
+/// The Rust shared library (`liblmdb.so` / `liblmdb.dylib`), found like
+/// [`rust_staticlib`].
+pub fn rust_cdylib() -> PathBuf {
+    let exe = std::env::current_exe().expect("test executable path");
+    let deps = exe.parent().expect("deps dir");
+    let name = shared_lib_name("lmdb");
+    for dir in [deps, deps.parent().unwrap_or(deps)] {
+        let lib = dir.join(&name);
+        if lib.exists() {
+            return lib;
+        }
+    }
+    panic!(
+        "{name} not found next to {}; build with `cargo test -p rlmdb-capi`",
         exe.display()
     );
 }
@@ -262,6 +292,66 @@ impl Builder {
     /// One of our programs in `tests/c`.
     pub fn test_program(&self, name: &str, lib: Lib) -> PathBuf {
         self.program(name, &[test_c_dir().join(format!("{name}.c"))], lib)
+    }
+
+    /// The C library as a shared library (`liblmdbc.so` / `.dylib`), for
+    /// programs that load LMDB with `dlopen`.
+    pub fn c_shared_lib(&self) -> PathBuf {
+        let mut built = self.built.lock().unwrap_or_else(|e| e.into_inner());
+        let key = ("liblmdbc-shared".to_owned(), Lib::C);
+        if let Some(p) = built.get(&key) {
+            return p.clone();
+        }
+        let out_dir = self.dir.join("clib-shared");
+        fs::create_dir_all(&out_dir).unwrap();
+        let lib = out_dir.join(shared_lib_name("lmdbc"));
+        let mut cmd = cc_build(&out_dir).get_compiler().to_command();
+        cmd.args(["-shared", "-fPIC", "-o"])
+            .arg(&lib)
+            .arg(c_src().join("mdb.c"))
+            .arg(c_src().join("midl.c"))
+            .arg("-I")
+            .arg(c_src())
+            .arg("-lpthread");
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "building the shared C library failed: {cmd:?}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        built.insert(key, lib.clone());
+        lib
+    }
+
+    /// Program `name` from `tests/c` linked against no LMDB library: it
+    /// loads one with `dlopen` (`lmdb.h` only for the types and constants).
+    pub fn dl_program(&self, name: &str) -> PathBuf {
+        let mut built = self.built.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (format!("{name}-dl"), Lib::C);
+        if let Some(p) = built.get(&key) {
+            return p.clone();
+        }
+        let out_dir = self.dir.join("dl");
+        fs::create_dir_all(&out_dir).unwrap();
+        let exe = out_dir.join(name);
+        let mut cmd = cc_build(&out_dir).get_compiler().to_command();
+        cmd.arg("-I")
+            .arg(c_src())
+            .arg("-o")
+            .arg(&exe)
+            .arg(test_c_dir().join(format!("{name}.c")))
+            .arg("-lpthread");
+        if cfg!(target_os = "linux") {
+            cmd.arg("-ldl");
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "building {name} failed: {cmd:?}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        built.insert(key, exe.clone());
+        exe
     }
 
     /// Program `name` from `tests/c/<name>.c` compiled as C++ (with the C++

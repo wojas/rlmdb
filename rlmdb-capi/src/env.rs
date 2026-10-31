@@ -59,7 +59,10 @@ pub unsafe extern "C" fn mdb_env_create(env: *mut *mut MDB_env) -> c_int {
 /// `MDB_MAPASYNC` and `MDB_NOMEMINIT` are accepted and ignored;
 /// `MDB_NOTLS` is accepted and is how this implementation always behaves.
 /// Opening an environment that this process already has open fails with
-/// `EBUSY`.
+/// `EBUSY`, except that any number of `MDB_NOLOCK` handles may open one
+/// environment: they share one in-process reader table and writer lock
+/// (a handle with a lock file and a `MDB_NOLOCK` one still refuse each
+/// other).
 ///
 /// An existing data file is opened in its format (LMDB 0.9 or 1.0); a
 /// format requested with `rlmdb_env_set_format` that differs from it gives

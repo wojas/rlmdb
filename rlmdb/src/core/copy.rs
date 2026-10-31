@@ -71,7 +71,11 @@ impl Environment {
     /// With `compact`, only the pages in use are copied, renumbered, and
     /// the free list of the copy is empty (`MDB_CP_COMPACT`); see the
     /// module documentation of `copy`. Writers may continue while the copy
-    /// runs; it shows the snapshot current when it began.
+    /// runs; it shows the snapshot current when it began. A plain copy
+    /// first waits for a write transaction that is active (as C's does with
+    /// a lock file; without one, the write transactions of this process's
+    /// `NO_LOCK` handles of the file), so a thread must not start it while
+    /// it has a write transaction of the environment open.
     pub fn copy_to_path(&self, path: impl AsRef<Path>, compact: bool) -> Result<()> {
         let path = path.as_ref();
         let target = if self.raw_flags() & MDB_NOSUBDIR != 0 {
@@ -120,6 +124,11 @@ impl Environment {
         let mut buf = AlignedBuf::new(PLAIN_CHUNK.max(2 * ps));
         let txn = match self.lock_region() {
             None => {
+                // No lock file: the in-process writer lock, which every
+                // NO_LOCK handle of the file shares, keeps this process's
+                // writers from rewriting a meta page while we copy them
+                // (C takes none: other processes are the caller's job).
+                let _writers = self.local_shared().map(|l| l.lock_writer());
                 let txn = self.begin_ro_txn()?;
                 read_exact_at(self.data_file(), &mut buf.as_mut()[..2 * ps], 0)?;
                 txn

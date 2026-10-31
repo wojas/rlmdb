@@ -235,7 +235,9 @@ thread that began it, as in C: it holds the writer lock, which on Linux is
 a process-shared robust pthread mutex owned by the locking thread (on macOS
 a POSIX semaphore). Other threads beginning a write transaction wait for
 it; a second `mdb_txn_begin` for writing on the same thread deadlocks, as
-in C. Read transactions are not bound to a thread (below).
+in C (with `MDB_NOLOCK` also in another handle of the same environment,
+whose writers share the lock). Read transactions are not bound to a thread
+(below).
 
 ## Differences from C LMDB 0.9.36
 
@@ -248,8 +250,8 @@ point into the memory map or the transaction's dirty pages (zero copy).
 | Data-file formats | LMDB 0.9 only; a 1.0 file is `MDB_INVALID`. | LMDB 0.9 and 1.0 (see "`rlmdb.h`: data-file formats"); new environments are 0.9 by default. |
 | `mdb_strerror` of LMDB 1.0's codes (-30779 .. -30769) | "Invalid error code". | 1.0's messages. |
 | Threads | Without `MDB_NOTLS` a thread may hold one read transaction at a time (`MDB_BAD_RSLOT` otherwise) and a read transaction is tied to its thread. | Always behaves like `MDB_NOTLS`: any number of read transactions per thread, usable from any thread (one at a time). `MDB_NOTLS` is accepted. A superset of C. |
-| Opening one environment twice in a process | Allowed but unsafe (closing one handle drops the other's locks). | `mdb_env_open` fails with `EBUSY`. |
-| Read transactions with `MDB_NOLOCK` | Not tracked: a write transaction of the same process reuses pages a live read transaction still reads (`lmdb.h` asks the caller to prevent that). | Tracked in memory by the environment (`../KNOWN_C_BUGS.md` #35): writers of the process never reuse their pages. `mdb_env_info` (`me_numreaders` 0), `mdb_reader_list` (`(no reader locks)`) and `mdb_reader_check` (none cleared) report what C reports. Other processes remain the caller's job, as in C. |
+| Opening one environment twice in a process | Allowed but unsafe (closing one handle drops the other's locks). | `mdb_env_open` fails with `EBUSY`, except under `MDB_NOLOCK`, where handles share one in-process reader table and writer lock (see "Several handles and `dlopen`"). |
+| Read transactions with `MDB_NOLOCK` | Not tracked: a write transaction of the same process reuses pages a live read transaction still reads (`lmdb.h` asks the caller to prevent that), and writers of different handles are not serialised. | Tracked in memory (`../KNOWN_C_BUGS.md` #35), in one table for all `MDB_NOLOCK` handles of the environment in the process, which also share a writer lock: writers of the process never reuse pages its readers read. `mdb_env_info` (`me_numreaders` 0), `mdb_reader_list` (`(no reader locks)`) and `mdb_reader_check` (none cleared) report what C reports. Other processes remain the caller's job, as in C. |
 | `MDB_FIXEDMAP`, `MDB_WRITEMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT` | Honoured. | Accepted and ignored (`mdb_env_get_flags` reports them). A new environment records map address 0 (`KNOWN_C_BUGS.md` #9); a C-created `MDB_FIXEDMAP` environment's recorded address is reported by `mdb_env_info`. |
 | Handles of existing databases opened in a transaction | Visible to other transactions only after that transaction commits; closed if it aborts (read or write transaction). | Published at once and kept after commit or abort. Handles of databases *created* by a write transaction follow C (published at commit, closed on abort). |
 | A parent transaction while its nested child is active | Most functions return `MDB_BAD_TXN`, but some check the DBI first (`EINVAL` for a bad one) and `mdb_dbi_flags`, `mdb_cmp`, `mdb_dcmp` still work. | Every function on the parent returns `MDB_BAD_TXN` (`mdb_txn_id`, `mdb_txn_env` work). |
@@ -314,7 +316,40 @@ the safe Rust core cannot be used to break them:
   leaves keeping processes apart to the caller. This process's read
   transactions are tracked in memory, so its own writers keep their pages,
   but a writer in another process does not know them and may rewrite them,
-  with the consequences of the previous item.
+  with the consequences of the previous item. The same holds for another
+  copy of the library in this process (see "Several handles and
+  `dlopen`").
+
+## Several handles and `dlopen`
+
+Any number of `MDB_env` handles may have one environment open with
+`MDB_NOLOCK`, read-only or read-write, each with its own map and settings,
+opened, used and closed from any threads: for example one handle per
+embedded interpreter in a program that runs several in threads, each
+loading the library through its binding with `dlopen`. Within one copy of
+the library they share one reader table and one writer lock per data file
+(identified by device and inode, so symlinks, an `MDB_NOSUBDIR` path to
+the data file and hard links are the same file): writers of all handles
+are serialised, and none reuses a page a read transaction of another
+handle still reads. The shared state exists while one of the handles is
+open. With a lock file the rule is C's (`EBUSY`, above), and a handle with
+a lock file and an `MDB_NOLOCK` handle of one file refuse each other.
+
+`dlopen` of the library any number of times, with `RTLD_LOCAL` or
+`RTLD_GLOBAL`, returns the one loaded copy, so all handles share that
+state. A program that contains separate copies of the library (the static
+`liblmdb.a` linked into several modules, or `dlmopen` namespaces) has one
+registry per copy: each copy coordinates only its own handles, as separate
+C libraries coordinate nothing. Read-only handles are unaffected (nothing
+writes); a copy that writes must be the only user of the file, as with C
+`MDB_NOLOCK`.
+
+`dlclose` does not unload the Rust library: on Linux it is linked with `-z
+nodelete`, and on macOS dyld never unloads an image with thread-local
+variables, which Rust's standard library has. A later `dlopen` returns the
+loaded copy, with its state (the registry, the strings `mdb_strerror` and
+`rlmdb_version` return). The C library is unloaded by its last `dlclose`.
+`tests/capi_dlopen.rs` checks both.
 
 ## Known gaps
 
@@ -383,9 +418,11 @@ cargo test -p rlmdb-capi                         # macOS / host
 scripts/linux-test.sh test -p rlmdb-capi         # Linux in Docker
 ```
 
-The tests compile C programs at test time with the `cc` crate (no build
-script) against the C library (built from `../tests/lmdb-c/0.9`, the
-oracle) and against the Rust `liblmdb.a` that cargo builds for the tests.
+The tests compile C programs at test time with the `cc` crate (the crate's
+build script only sets a link option of the shared library) against the C
+library (built from `../tests/lmdb-c/0.9`, the oracle) and against the
+Rust `liblmdb.a` that cargo builds for the tests; `capi_dlopen` loads the
+shared builds of both instead.
 Each test process works in its own directory under `target/tmp/capi/`
 (see `tests/common/mod.rs`): several test runs may share a target directory
 at once (`scripts/linux-test.sh` mounts one Docker volume as `target/` for
@@ -445,6 +482,20 @@ environments.
   C build, the Rust result in the Rust build); `DEVIATION()` marks
   deliberate differences where C would corrupt data (`KNOWN_C_BUGS.md`),
   checked in the Rust build only.
+* `tests/capi_nolock.rs`: `tests/c/capi_nolock.c`, read transactions in
+  `MDB_NOLOCK` environments against both libraries: a reader holds values
+  while commits rewrite every page (C changes them, Rust keeps them), in
+  one handle and across two handles of the environment, whose writers the
+  Rust library serialises; reset, renew, and the reader information
+  (`mdb_env_info`, `mdb_reader_list`, `mdb_reader_check`) as C reports it
+  without a lock file; then the C page audit.
+* `tests/capi_dlopen.rs`: `tests/c/capi_dlopen.c`, linked against no LMDB,
+  loads the shared library with `dlopen` on several threads at once
+  (`RTLD_LOCAL` and `RTLD_GLOBAL`), each opening the same environment
+  `MDB_RDONLY | MDB_NOLOCK` with its own handle; `dlclose`; loads it again
+  three times and reruns the threads. The same binary runs with the C and
+  the Rust shared library; the traces must be identical, and the Rust
+  library must stay loaded after `dlclose`.
 * `tests/mtest.rs`: the acceptance tests above.
 * `tests/concurrency.rs`: `tests/c/capi_snapshot.c` holds read transactions
   while writers (the fixed-seed `mtest`, `tests/c/fixture.c`) commit to the

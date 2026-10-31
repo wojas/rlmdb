@@ -84,14 +84,14 @@
 //! * Transactions borrow the [`Environment`], so it cannot be closed
 //!   (dropped) while one is alive. Opening the same environment twice in
 //!   one process fails with `EBUSY`: POSIX record locks belong to the
-//!   process, and a second handle would release the first one's locks
-//!   (and, without a lock file, would not know the first one's readers).
+//!   process, and a second handle would release the first one's locks.
 //! * With [`EnvironmentFlags::NO_LOCK`] there is no lock file and no
 //!   cross-process locking, as in C, but within the process write
 //!   transactions are still serialised and read transactions are tracked
-//!   in memory: a writer never reuses pages a live [`RoTxn`] reads. (C
-//!   tracks no readers then; keeping other processes away stays the
-//!   caller's job, as in C.)
+//!   in memory: a writer never reuses pages a live [`RoTxn`] reads. Any
+//!   number of `NO_LOCK` handles may open one environment (as in C); they
+//!   share that writer lock and reader table. (C tracks no readers then;
+//!   keeping other processes away stays the caller's job, as in C.)
 //! * Slices returned by a [`RoTxn`] or its [`RoCursor`]s borrow the
 //!   transaction and stay valid until it ends. Slices returned by a
 //!   [`RwTxn`] borrow it immutably, and every change ([`RwTxn::put`],

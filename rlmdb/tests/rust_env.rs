@@ -109,28 +109,180 @@ fn already_opened_and_reopen_after_drop() {
     drop(env);
 }
 
-/// The registry covers `NO_LOCK` environments too, whatever the other open
-/// asks for: the in-memory reader table of one `Environment` then covers
-/// every read transaction of the process on that path.
+/// Without a lock file there are no record locks to lose: any number of
+/// `NO_LOCK` handles may open one environment (they share the in-process
+/// writer lock and reader table). A handle with a lock file and a `NO_LOCK`
+/// handle never share one, in either order.
 #[test]
-fn already_opened_without_a_lock_file() {
+fn no_lock_handles_may_share_an_environment() {
     let dir = tmp();
     let open = |flags| Environment::builder().flags(flags).open(dir.path());
-    let env = open(EnvironmentFlags::NO_LOCK).unwrap();
-    for flags in [
-        EnvironmentFlags::NO_LOCK,
-        EnvironmentFlags::empty(),
-        EnvironmentFlags::NO_LOCK | EnvironmentFlags::READ_ONLY,
-    ] {
+    let no_lock = EnvironmentFlags::NO_LOCK;
+    let a = open(no_lock).unwrap();
+    let b = open(no_lock).unwrap();
+    let c = open(no_lock | EnvironmentFlags::READ_ONLY).unwrap();
+    assert!(matches!(
+        open(EnvironmentFlags::empty()),
+        Err(Error::EnvAlreadyOpened)
+    ));
+    assert!(!dir.path().join("lock.mdb").exists());
+    let txn = c.begin_ro_txn().unwrap();
+    assert_eq!(a.in_memory_readers(), Some(1));
+    drop(txn);
+    drop((a, b, c));
+    let env = open(EnvironmentFlags::empty()).unwrap();
+    for flags in [no_lock, no_lock | EnvironmentFlags::READ_ONLY] {
         assert!(matches!(open(flags), Err(Error::EnvAlreadyOpened)));
     }
     drop(env);
-    let env = open(EnvironmentFlags::empty()).unwrap();
-    assert!(matches!(
-        open(EnvironmentFlags::NO_LOCK),
-        Err(Error::EnvAlreadyOpened)
-    ));
-    drop(env);
+}
+
+/// A database for the handle tests below: `n` keys, value = key repeated.
+fn fill(dir: &std::path::Path, n: u32) {
+    let env = Environment::builder()
+        .flags(EnvironmentFlags::NO_LOCK | EnvironmentFlags::NO_SYNC)
+        .open(dir)
+        .unwrap();
+    let mut txn = env.begin_rw_txn().unwrap();
+    for i in 0..n {
+        let k = i.to_be_bytes();
+        txn.put(Dbi::MAIN, &k, &k.repeat(20), WriteFlags::empty())
+            .unwrap();
+    }
+    txn.commit().unwrap();
+}
+
+/// The pattern of a program with several embedded interpreters on threads
+/// of one process, each opening the environment with its own handle,
+/// read-only and without a lock file, all at the same time.
+#[test]
+fn no_lock_read_only_handles_on_threads() {
+    let dir = tmp();
+    fill(dir.path(), 500);
+    let threads = 8;
+    let opened = std::sync::Barrier::new(threads);
+    let reading = std::sync::Barrier::new(threads);
+    let checked = std::sync::Barrier::new(threads);
+    std::thread::scope(|s| {
+        for t in 0..threads {
+            let (dir, opened, reading, checked) = (dir.path(), &opened, &reading, &checked);
+            s.spawn(move || {
+                for cycle in 0..5 {
+                    let env = Environment::builder()
+                        .flags(EnvironmentFlags::READ_ONLY | EnvironmentFlags::NO_LOCK)
+                        .open(dir)
+                        .unwrap();
+                    if cycle == 0 {
+                        opened.wait();
+                    }
+                    let txn = env.begin_ro_txn().unwrap();
+                    if cycle == 0 {
+                        // Every handle's reader is in the one table.
+                        reading.wait();
+                        assert_eq!(env.in_memory_readers(), Some(threads));
+                        checked.wait();
+                    }
+                    let mut c = txn.cursor(Dbi::MAIN).unwrap();
+                    let mut n = 0u32;
+                    while let Some((k, v)) = c.next().unwrap() {
+                        assert_eq!(k, n.to_be_bytes());
+                        assert_eq!(v, k.repeat(20), "thread {t}");
+                        n += 1;
+                    }
+                    assert_eq!(n, 500);
+                }
+            });
+        }
+    });
+    // Everything was released: an open with a lock file works again.
+    Environment::builder().open(dir.path()).unwrap();
+}
+
+/// Sets the flag when dropped (also when unwinding).
+struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Write transactions of different `NO_LOCK` handles of one file are
+/// serialised, and readers of any handle keep their values while writers
+/// of others commit; handles open and close all the while.
+#[test]
+fn no_lock_handles_serialise_writers_and_keep_readers() {
+    let dir = tmp();
+    // (Readers keep pages from reuse while the file grows.)
+    let open = || {
+        Environment::builder()
+            .map_size(64 << 20)
+            .flags(EnvironmentFlags::NO_LOCK | EnvironmentFlags::NO_SYNC)
+            .open(dir.path())
+            .unwrap()
+    };
+    let count = |txn: &dyn Transaction| -> u64 {
+        txn.get(Dbi::MAIN, b"n")
+            .unwrap()
+            .map_or(0, |v| u64::from_le_bytes(v[..8].try_into().unwrap()))
+    };
+    let (writers, rounds) = (3, 60);
+    // (Read-only handles need the data file.)
+    drop(open());
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        // The readers stop once the writers are done, also if one fails.
+        let _stop = StopOnDrop(&done);
+        let mut handles = Vec::new();
+        for _ in 0..writers {
+            handles.push(s.spawn(|| {
+                // Each writer thread with its own handle.
+                let env = open();
+                for _ in 0..rounds {
+                    let mut txn = env.begin_rw_txn().unwrap();
+                    let n = count(&txn);
+                    // A value of a page or more, so that commits free and
+                    // reuse pages.
+                    let mut v = vec![(n % 251) as u8; 5000];
+                    v[..8].copy_from_slice(&(n + 1).to_le_bytes());
+                    let mut child = txn.begin_nested_txn().unwrap();
+                    child.put(Dbi::MAIN, b"n", &v, WriteFlags::empty()).unwrap();
+                    child.commit().unwrap();
+                    std::thread::yield_now();
+                    txn.commit().unwrap();
+                }
+            }));
+        }
+        for _ in 0..3 {
+            s.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    // A fresh handle per snapshot, read-only.
+                    let env = Environment::builder()
+                        .flags(EnvironmentFlags::NO_LOCK | EnvironmentFlags::READ_ONLY)
+                        .open(dir.path())
+                        .unwrap();
+                    let txn = env.begin_ro_txn().unwrap();
+                    let held = txn.get(Dbi::MAIN, b"n").unwrap();
+                    let copy = held.map(<[u8]>::to_vec);
+                    for _ in 0..20 {
+                        std::thread::yield_now();
+                    }
+                    assert_eq!(held.map(<[u8]>::to_vec), copy, "a value changed");
+                    if let Some(v) = held {
+                        let n = u64::from_le_bytes(v[..8].try_into().unwrap());
+                        assert!(v[8..].iter().all(|&b| u64::from(b) == (n - 1) % 251));
+                    }
+                }
+            });
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+    });
+    let env = open();
+    let txn = env.begin_ro_txn().unwrap();
+    assert_eq!(count(&txn), writers * rounds);
+    assert_eq!(txn.id(), writers * rounds);
 }
 
 #[test]

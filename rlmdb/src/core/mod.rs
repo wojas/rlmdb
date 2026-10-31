@@ -79,6 +79,7 @@ mod freelist;
 mod nested;
 pub(crate) mod page_ops;
 pub mod reader;
+mod registry;
 pub mod ro_cursor;
 mod spill;
 mod split;
