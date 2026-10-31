@@ -267,7 +267,7 @@ Version 2 (LMDB 1.0, `mdb.RE/1.0` at 4865523, "mdb10.c", lines 865-1017):
 | writer lock | 64 | none | 128 | 128 | 64 | 64 |
 | `mti_readers` | 128 | 64 | 192 | 192 | 128 | 128 |
 
-The BSDs (supported, untested; `COMPATIBILITY.md`), following the C
+The BSDs (supported; FreeBSD's library and C API tests run in a VM in CI, the others are untested; `COMPATIBILITY.md`), following the C
 sources' selection (mdb.c lines 86-170, mdb10.c lines 123-240):
 
 * **FreeBSD** (11+: `MDB_USE_POSIX_MUTEX` + `MDB_USE_ROBUST`): Linux's
