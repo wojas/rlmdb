@@ -28,12 +28,18 @@
 //!   (`MNAME_LEN == sizeof(int)`). FreeBSD is Linux's case, with an 8-byte
 //!   `pthread_mutex_t` (a pointer; the mutex itself lives in a kernel object
 //!   keyed by its address).
+//! * **Windows** (`_WIN32`): two named kernel mutexes, kept like the macOS
+//!   semaphores (names in version 1, the hash in version 2, no `mt2` in
+//!   version 2), with kinds of their own ([`LockObjects::MutexNames`],
+//!   [`LockObjects::MutexHash`]). A reader slot's `mr_tid` is a `DWORD` at
+//!   offset 12, and readers take no pid locks (`MDB_PIDLOCK` 0), so
+//!   `mti_format` of version 1 is `0x1`.
 //!
 //! ```text
 //! Version 1 (LMDB 0.9), MDB_txninfo:
 //!   mt1 (padded to a multiple of CACHELINE = 64):
 //!     u32  mtb_magic        MDB_MAGIC
-//!     u32  mtb_format       MDB_LOCK_FORMAT (0x10001 on Unix)
+//!     u32  mtb_format       MDB_LOCK_FORMAT (0x10001 on Unix, 0x1 on Windows)
 //!     [MNAME_LEN] mtb_rmutex | mtb_rmname
 //!     u64  mtb_txnid        last committed txn (aligned to 8)
 //!     u32  mtb_numreaders   high-water mark of used reader slots
@@ -138,6 +144,18 @@ pub enum LockObjects {
     /// 5920-5945). The hash is read from the file; only the exclusive
     /// opener computes it.
     SemaphoreHash,
+    /// Windows kernel mutexes whose names are stored at
+    /// [`LockLayout::rlock`] and [`LockLayout::wlock`] (version 1:
+    /// `mtb_rmname`, `mt2_wmname`, `"Global\MDBr..."`, mdb.c lines
+    /// 4984-4985), read as [`LockObjects::SemaphoreNames`] are. The kernel
+    /// frees a named mutex with its last handle, and a mutex whose owner
+    /// dies is abandoned (`WAIT_ABANDONED`, C's `MDB_OWNERDEAD`).
+    MutexNames,
+    /// Windows kernel mutexes named after the hash `mtb_mutexid` at
+    /// [`LockLayout::rlock`] (version 2: `"Global\MDB"`, `'r'` or `'w'`, then
+    /// `mdb_pack85` of the hash, mdb10.c lines 5920-5945), as
+    /// [`LockObjects::SemaphoreHash`] names its semaphores; no `mt2`.
+    MutexHash,
     /// A SysV semaphore set of two (reader 0, writer 1), whose id
     /// `mtb_semid` (an `int`) is at [`LockLayout::rlock`], followed by the
     /// `int` flag `mtb_rlocked`; the writer's flag `mt2_wlocked` is at
@@ -154,12 +172,41 @@ impl LockObjects {
     /// `true` if the objects outlive the processes using them, so the last
     /// one to close the environment removes them (`mdb_env_close0`):
     /// `sem_unlink` of the named semaphores, `IPC_RMID` of the SysV set.
-    /// Process-shared mutexes live in the lock file and need nothing.
+    /// Process-shared mutexes live in the lock file and need nothing;
+    /// Windows frees a named mutex with its last handle (C only closes its
+    /// handles there).
     pub const fn removed_by_last_user(self) -> bool {
-        matches!(
-            self,
-            LockObjects::SemaphoreNames | LockObjects::SemaphoreHash | LockObjects::SysVSemaphores
-        )
+        match self {
+            LockObjects::SemaphoreNames
+            | LockObjects::SemaphoreHash
+            | LockObjects::SysVSemaphores => true,
+            LockObjects::PthreadMutexes | LockObjects::MutexNames | LockObjects::MutexHash => false,
+        }
+    }
+
+    /// `true` if the lock file stores the objects' names
+    /// ([`LockObjects::SemaphoreNames`], [`LockObjects::MutexNames`]).
+    pub const fn stores_names(self) -> bool {
+        match self {
+            LockObjects::SemaphoreNames | LockObjects::MutexNames => true,
+            LockObjects::PthreadMutexes
+            | LockObjects::SemaphoreHash
+            | LockObjects::SysVSemaphores
+            | LockObjects::MutexHash => false,
+        }
+    }
+
+    /// `true` if the lock file stores the hash `mtb_mutexid` the names are
+    /// derived from ([`LockObjects::SemaphoreHash`],
+    /// [`LockObjects::MutexHash`]).
+    pub const fn stores_hash(self) -> bool {
+        match self {
+            LockObjects::SemaphoreHash | LockObjects::MutexHash => true,
+            LockObjects::PthreadMutexes
+            | LockObjects::SemaphoreNames
+            | LockObjects::SysVSemaphores
+            | LockObjects::MutexNames => false,
+        }
     }
 }
 
@@ -230,6 +277,34 @@ mod platform {
     pub const LOCK_TYPE_V2: usize = 8;
 }
 
+// --- Windows ----------------------------------------------------------------
+
+/// Windows (`_WIN32`, both MSVC and MinGW, which lay the structures out
+/// alike): the lock file names two kernel mutexes, as the macOS one names
+/// two semaphores (mdb.c lines 776-811, mdb10.c lines 923-955).
+#[cfg(windows)]
+mod platform {
+    use super::LockObjects;
+
+    /// `MNAME_LEN` of version 1 with `_WIN32`: the space for a mutex name
+    /// (`"Global\MDBr"` and ten characters of hash).
+    pub const MNAME_LEN: usize = 32;
+    /// Alignment of the version 1 `mtb_rmname` member (a `char` array).
+    pub const MUTEX_ALIGN: usize = 1;
+    /// The shared locks of version 1: the names are stored.
+    pub const OBJECTS_V1: LockObjects = LockObjects::MutexNames;
+    /// The shared locks of version 2: the hash is stored.
+    pub const OBJECTS_V2: LockObjects = LockObjects::MutexHash;
+    /// Size and alignment of the version 2 reader lock field,
+    /// `mdb_hash_t mtb_mutexid` (`unsigned long long`).
+    pub const RLOCK_V2: (usize, usize) = (
+        core::mem::size_of::<core::ffi::c_ulonglong>(),
+        core::mem::align_of::<core::ffi::c_ulonglong>(),
+    );
+    /// `MDB_LOCK_TYPE` of version 2 (mdb10.c line 978).
+    pub const LOCK_TYPE_V2: usize = super::lock_type_win32(RLOCK_V2.1);
+}
+
 #[cfg(not(any(
     target_os = "macos",
     target_os = "ios",
@@ -238,10 +313,11 @@ mod platform {
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
-    target_os = "dragonfly"
+    target_os = "dragonfly",
+    windows
 )))]
 compile_error!(
-    "lmdb: unsupported platform; the lock file layout is only known for Linux, macOS and the BSDs"
+    "lmdb: unsupported platform; the lock file layout is only known for Linux, macOS, the BSDs and Windows"
 );
 
 // --- version 1 (LMDB 0.9) -------------------------------------------------
@@ -285,7 +361,14 @@ pub const READER_TXNID: usize = 0;
 /// Offset of `mr_pid` (`pid_t`, i32) within a reader slot.
 pub const READER_PID: usize = 8;
 /// Offset of `mr_tid` (`pthread_t`, 8 bytes) within a reader slot.
+#[cfg(unix)]
 pub const READER_TID: usize = 16;
+/// Offset of `mr_tid` within a reader slot on Windows: `MDB_THR_T` is a
+/// `DWORD` there (`GetCurrentThreadId()`), right after the `int` pid.
+#[cfg(windows)]
+pub const READER_TID: usize = 12;
+/// Size of `mr_tid`: 8 (`pthread_t`) on Unix, 4 (`DWORD`) on Windows.
+pub const READER_TID_SIZE: usize = if cfg!(windows) { 4 } else { 8 };
 
 // --- version 2 (LMDB 1.0) -------------------------------------------------
 
@@ -310,22 +393,30 @@ const V2_TXBODY: usize = align_up(
 /// Size of the `mt1` union (version 2).
 const V2_HEADER: usize = align_up(V2_TXBODY, CACHELINE);
 /// `true` if version 2 has the `mt2` union for the writer lock: with
-/// pthread mutexes and SysV semaphores, not with named semaphores
-/// (`#if !(defined(_WIN32) || defined(MDB_USE_POSIX_SEM))`, mdb10.c line
-/// 953).
-const V2_HAS_MT2: bool = matches!(
-    platform::OBJECTS_V2,
-    LockObjects::PthreadMutexes | LockObjects::SysVSemaphores
-);
+/// pthread mutexes and SysV semaphores, not with named semaphores or
+/// Windows mutexes (`#if !(defined(_WIN32) || defined(MDB_USE_POSIX_SEM))`,
+/// mdb10.c line 953).
+const V2_HAS_MT2: bool = match platform::OBJECTS_V2 {
+    LockObjects::PthreadMutexes | LockObjects::SysVSemaphores => true,
+    LockObjects::SemaphoreNames
+    | LockObjects::SemaphoreHash
+    | LockObjects::MutexNames
+    | LockObjects::MutexHash => false,
+};
 /// `MNAME_LEN` of version 2, the size of the member of `mt2`:
 /// `sizeof(int)` (`mt2_wlocked`) with SysV semaphores, else
-/// `sizeof(pthread_mutex_t)` (mdb10.c lines 535-539).
+/// `sizeof(pthread_mutex_t)` (mdb10.c lines 535-539); unused where there is
+/// no `mt2`.
 const V2_MNAME_LEN: usize = match platform::OBJECTS_V2 {
     LockObjects::SysVSemaphores => core::mem::size_of::<core::ffi::c_int>(),
-    _ => MNAME_LEN,
+    LockObjects::PthreadMutexes
+    | LockObjects::SemaphoreNames
+    | LockObjects::SemaphoreHash
+    | LockObjects::MutexNames
+    | LockObjects::MutexHash => MNAME_LEN,
 };
 /// Offset of `mti_readers[0]` (version 2): there is no `mt2` with named
-/// semaphores.
+/// semaphores or Windows mutexes.
 const V2_READERS: usize = if V2_HAS_MT2 {
     V2_HEADER + align_up(V2_MNAME_LEN, CACHELINE)
 } else {
@@ -348,12 +439,20 @@ const fn lock_type_posix_sem(hash_align: usize) -> usize {
         target_os = "ios",
         target_os = "openbsd",
         target_os = "netbsd",
-        target_os = "dragonfly"
+        target_os = "dragonfly",
+        windows
     ),
     allow(dead_code)
 )]
 const fn lock_type_posix_mutex(size: usize, align: usize) -> usize {
     10 + log2_mod(align, 5) + size / 4 % 22 * 5
+}
+
+/// `MDB_LOCK_TYPE` with `_WIN32` (mdb10.c line 978):
+/// `0 + ALIGNOF2(mdb_hash_t)/8 % 2`. (Every platform's value is tested.)
+#[cfg_attr(not(windows), allow(dead_code))]
+const fn lock_type_win32(hash_align: usize) -> usize {
+    hash_align / 8 % 2
 }
 
 /// What `MDB_lock_desc` (mdb10.c lines 1004-1017) is computed from.
@@ -393,10 +492,26 @@ const fn lock_format_v2(d: LockDescInputs) -> u32 {
 }
 
 /// The inputs of `MDB_lock_desc` for this platform.
+#[cfg(unix)]
 const LOCK_DESC_V2: LockDescInputs = LockDescInputs {
     cacheline: CACHELINE,
     pid_size: core::mem::size_of::<libc::pid_t>(),
     pthread_size: core::mem::size_of::<libc::pthread_t>(),
+    txbody_size: V2_TXBODY,
+    lock_type: platform::LOCK_TYPE_V2,
+    txnid_size: 8,
+    reader_size: READER_SIZE,
+    pidlock: MDB_PIDLOCK != 0,
+};
+
+/// The inputs of `MDB_lock_desc` on Windows: `MDB_PID_T` is `int`,
+/// `pthread_t` is `#define`d to `HANDLE` (a pointer), and readers take no
+/// pid locks (`MDB_PIDLOCK` 0).
+#[cfg(windows)]
+const LOCK_DESC_V2: LockDescInputs = LockDescInputs {
+    cacheline: CACHELINE,
+    pid_size: core::mem::size_of::<core::ffi::c_int>(),
+    pthread_size: core::mem::size_of::<*mut core::ffi::c_void>(),
     txbody_size: V2_TXBODY,
     lock_type: platform::LOCK_TYPE_V2,
     txnid_size: 8,
@@ -525,12 +640,12 @@ pub struct TxnInfoSnapshot {
     pub txnid: u64,
     /// `mti_numreaders`.
     pub num_readers: u32,
-    /// `mti_rmname` ([`LockObjects::SemaphoreNames`] only; empty otherwise).
+    /// `mti_rmname` (where [`LockObjects::stores_names`]; empty otherwise).
     pub rmname: Vec<u8>,
-    /// `mti_wmname` ([`LockObjects::SemaphoreNames`] only; empty otherwise).
+    /// `mti_wmname` (where [`LockObjects::stores_names`]; empty otherwise).
     pub wmname: Vec<u8>,
-    /// `mti_mutexid` ([`LockObjects::SemaphoreHash`] only): the hash the
-    /// semaphore names are derived from.
+    /// `mti_mutexid` (where [`LockObjects::stores_hash`]): the hash the
+    /// semaphore or mutex names are derived from.
     pub mutex_id: Option<u64>,
 }
 
@@ -546,7 +661,7 @@ impl TxnInfoSnapshot {
             let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
             Some(raw[..end].to_vec())
         };
-        let names = layout.objects == LockObjects::SemaphoreNames;
+        let names = layout.objects.stores_names();
         Some(TxnInfoSnapshot {
             magic: get_u32(buf, TXNINFO_MAGIC)?,
             format: get_u32(buf, TXNINFO_FORMAT)?,
@@ -554,9 +669,10 @@ impl TxnInfoSnapshot {
             num_readers: get_u32(buf, layout.num_readers)?,
             rmname: name(names.then_some(layout.rlock))?,
             wmname: name(layout.wlock.filter(|_| names))?,
-            mutex_id: match layout.objects {
-                LockObjects::SemaphoreHash => Some(get_u64(buf, layout.rlock)?),
-                _ => None,
+            mutex_id: if layout.objects.stores_hash() {
+                Some(get_u64(buf, layout.rlock)?)
+            } else {
+                None
             },
         })
     }
@@ -581,7 +697,10 @@ impl ReaderSnapshot {
         Some(ReaderSnapshot {
             txnid: get_u64(buf, off + READER_TXNID)?,
             pid: get_u32(buf, off + READER_PID)? as i32,
-            tid: get_u64(buf, off + READER_TID)?,
+            tid: match READER_TID_SIZE {
+                4 => u64::from(get_u32(buf, off + READER_TID)?),
+                _ => get_u64(buf, off + READER_TID)?,
+            },
         })
     }
 }
@@ -613,7 +732,8 @@ mod tests {
         assert_eq!(LOCK_V09.format, Format::V09);
         assert_eq!(LOCK_V10.format, Format::V10);
         assert_eq!((LOCK_V09.version, LOCK_V10.version), (1, 2));
-        assert_eq!(LOCK_V09.lock_format, 0x10001);
+        let pidlock = if cfg!(windows) { 0 } else { 0x10000 };
+        assert_eq!(LOCK_V09.lock_format, 1 + pidlock);
         assert_eq!(LOCK_V10.lock_format & 0xfff, 2);
     }
 
@@ -677,6 +797,16 @@ mod tests {
         assert_eq!(freebsd, 23);
         assert_eq!(lock_format_v2(inputs(32, freebsd)), 0x2986_c002);
         assert_eq!(lock_format_v2(inputs(32, 8)), 0x2889_a002);
+        // Windows x64 (MSVC and MinGW): named mutexes, int pid, HANDLE
+        // pthread_t, MDB_txbody 32, no pid locks.
+        let win = lock_type_win32(8);
+        assert_eq!(win, 1);
+        let win_inputs = LockDescInputs {
+            pidlock: false,
+            ..inputs(32, win)
+        };
+        assert_eq!(lock_desc(win_inputs), 33_080);
+        assert_eq!(lock_format_v2(win_inputs), 0x0813_8002);
         // The CACHELINE term is 0 only for 64-byte cache lines.
         let mut other = inputs(32, sem);
         other.cacheline = 128;
@@ -706,6 +836,34 @@ mod tests {
         assert_eq!(l.header_size, 64);
         assert_eq!(l.wlock, None);
         assert_eq!(l.readers, 64);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_layout() {
+        // Version 1 is laid out as on macOS (32-byte names), with
+        // MDB_PIDLOCK 0 in mti_format.
+        let l = &LOCK_V09;
+        assert_eq!(l.objects, LockObjects::MutexNames);
+        assert_eq!(l.lock_format, 0x1);
+        assert_eq!((l.rlock, l.rlock_size), (8, 32));
+        assert_eq!((l.txnid, l.num_readers), (40, 48));
+        assert_eq!(l.txbody_size, 56);
+        assert_eq!(l.header_size, 64);
+        assert_eq!(l.wlock, Some(64));
+        assert_eq!(l.readers, 128);
+        // Version 2: the hash at 24, no mt2.
+        let l = &LOCK_V10;
+        assert_eq!(l.objects, LockObjects::MutexHash);
+        assert_eq!(l.lock_format, 0x0813_8002);
+        assert_eq!((l.txnid, l.num_readers), (8, 16));
+        assert_eq!((l.rlock, l.rlock_size), (24, 8));
+        assert_eq!(l.txbody_size, 32);
+        assert_eq!(l.header_size, 64);
+        assert_eq!(l.wlock, None);
+        assert_eq!(l.readers, 64);
+        // mr_tid is a DWORD after the int pid.
+        assert_eq!((READER_PID, READER_TID, READER_TID_SIZE), (8, 12, 4));
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -808,6 +966,8 @@ mod tests {
         assert!(LockObjects::SemaphoreNames.removed_by_last_user());
         assert!(LockObjects::SemaphoreHash.removed_by_last_user());
         assert!(LockObjects::SysVSemaphores.removed_by_last_user());
+        assert!(!LockObjects::MutexNames.removed_by_last_user());
+        assert!(!LockObjects::MutexHash.removed_by_last_user());
     }
 
     #[test]
@@ -818,27 +978,25 @@ mod tests {
             buf[4..8].copy_from_slice(&l.lock_format.to_ne_bytes());
             buf[l.txnid..l.txnid + 8].copy_from_slice(&42u64.to_ne_bytes());
             buf[l.num_readers..l.num_readers + 4].copy_from_slice(&2u32.to_ne_bytes());
-            if l.objects == LockObjects::SemaphoreHash {
+            if l.objects.stores_hash() {
                 buf[l.rlock..l.rlock + 8].copy_from_slice(&0x1234u64.to_ne_bytes());
             }
-            if l.objects == LockObjects::SemaphoreNames {
+            if l.objects.stores_names() {
                 buf[l.rlock..l.rlock + 4].copy_from_slice(b"/MDB");
             }
             let off = l.reader_offset(1);
             buf[off..off + 8].copy_from_slice(&7u64.to_ne_bytes());
             buf[off + 8..off + 12].copy_from_slice(&99i32.to_ne_bytes());
-            buf[off + 16..off + 24].copy_from_slice(&5u64.to_ne_bytes());
+            let tid = off + READER_TID;
+            buf[tid..tid + READER_TID_SIZE].copy_from_slice(&5u64.to_ne_bytes()[..READER_TID_SIZE]);
 
             let h = TxnInfoSnapshot::read(&buf, l).unwrap();
             assert_eq!(h.magic, 0xBEEF_C0DE);
             assert_eq!(h.format, l.lock_format);
             assert_eq!(h.txnid, 42);
             assert_eq!(h.num_readers, 2);
-            assert_eq!(
-                h.mutex_id,
-                (l.objects == LockObjects::SemaphoreHash).then_some(0x1234)
-            );
-            let names = l.objects == LockObjects::SemaphoreNames;
+            assert_eq!(h.mutex_id, l.objects.stores_hash().then_some(0x1234));
+            let names = l.objects.stores_names();
             assert_eq!(h.rmname, if names { &b"/MDB"[..] } else { &[] });
             assert!(h.wmname.is_empty());
             let r = ReaderSnapshot::read(&buf, l, 1).unwrap();

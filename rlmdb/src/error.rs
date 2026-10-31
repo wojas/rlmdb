@@ -191,7 +191,10 @@ impl MdbError {
 /// For LMDB codes this is the `mdb_errstr[]` table (the 0.9 codes, then the
 /// ones LMDB 1.0 adds, with 1.0's texts); for positive values it is the C
 /// library's `strerror`; other negative values give
-/// `"Invalid error code"`, and `0` gives `"Successful return: 0"`.
+/// `"Invalid error code"`, and `0` gives `"Successful return: 0"`. On
+/// Windows codes other than LMDB's are the system's, as in C there: the C
+/// runtime's text for the `errno` values LMDB uses, else the system's
+/// message, which is empty for negative values.
 pub fn strerror(err: c_int) -> String {
     let lmdb_text = match err {
         0 => "Successful return: 0",
@@ -229,7 +232,9 @@ pub fn strerror(err: c_int) -> String {
         MDB_ENV_BUSY => "MDB_ENV_BUSY: Environment is busy, can't use previous snapshot",
         MDB_IS_READONLY => "MDB_IS_READONLY: Can't write in readonly txn or environment",
         MDB_ADDR_BUSY => "MDB_ADDR_BUSY: Requested map address is unavailable",
-        e if e < 0 => "Invalid error code",
+        // C on Windows asks the system (FormatMessage), which has no text
+        // for these: an empty string.
+        e if e < 0 && !cfg!(windows) => "Invalid error code",
         e => return crate::os::strerror(e),
     };
     lmdb_text.to_owned()
@@ -390,9 +395,14 @@ mod tests {
             strerror(MDB_ADDR_BUSY),
             "MDB_ADDR_BUSY: Requested map address is unavailable"
         );
-        assert_eq!(strerror(MDB_ADDR_BUSY + 1), "Invalid error code");
+        let invalid = if cfg!(windows) {
+            ""
+        } else {
+            "Invalid error code"
+        };
+        assert_eq!(strerror(MDB_ADDR_BUSY + 1), invalid);
         assert_eq!(strerror(0), "Successful return: 0");
-        assert_eq!(strerror(-1), "Invalid error code");
+        assert_eq!(strerror(-1), invalid);
         assert_eq!(strerror(libc::EACCES), "Permission denied");
         assert_eq!(
             MdbError::Other(libc::ENOENT).to_string(),

@@ -710,6 +710,98 @@ impl Drop for LockMap {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The parts of the interface Windows does differently (`windows.rs`): how
+// files are opened and identified, the lock-file protocol steps, process
+// liveness. On Unix they are the plain calls the engine used to make itself.
+// ---------------------------------------------------------------------------
+
+/// The descriptor type `copy_to_fd` takes (`mdb_filehandle_t` is an `int`).
+pub type BorrowedFile<'a> = std::os::fd::BorrowedFd<'a>;
+
+/// Sets the permissions `mode` for a file of an environment that `opts`
+/// may create.
+pub fn env_file_options(opts: &mut std::fs::OpenOptions, mode: u32) -> &mut std::fs::OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
+    opts.mode(mode)
+}
+
+/// `MDB_O_META`: the descriptor for meta-page writes, which reach the disk
+/// before the write returns ([`MDB_DSYNC`]).
+pub fn sync_write_options(opts: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
+    opts.custom_flags(MDB_DSYNC)
+}
+
+/// `MDB_O_COPY`: creates the target of `mdb_env_copy2` (`O_EXCL`, mode
+/// `0666` before the umask); `nocache` then asks the OS not to cache it
+/// ([`set_nocache`]).
+pub fn open_copy_target(path: &std::path::Path, nocache: bool) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o666)
+        .open(path)?;
+    if nocache {
+        set_nocache(&file);
+    }
+    Ok(file)
+}
+
+/// `true` if `e`, from opening `_path`, says the file does not exist
+/// (`ENOENT`, also for a missing directory; a file where a directory should
+/// be is `ENOTDIR`).
+pub fn is_missing(e: &io::Error, _path: &std::path::Path) -> bool {
+    e.kind() == io::ErrorKind::NotFound
+}
+
+/// `true` if `e` says the file system is read-only (`EROFS`).
+pub fn is_read_only_fs(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(libc::EROFS)
+}
+
+/// The identity of an open file: device and inode (`st_dev`, `st_ino`).
+pub fn file_id(file: &File) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata()?;
+    Ok((meta.dev(), meta.ino()))
+}
+
+/// Maps the data file of an environment (of any format) read-only:
+/// [`DataMap::map_readonly`]. (Windows maps 0.9 and 1.0 files the way their
+/// C releases do there.)
+pub fn map_data(
+    file: File,
+    len: usize,
+    random: bool,
+    _format: crate::format::layout::Format,
+) -> io::Result<DataMap> {
+    DataMap::map_readonly(file, len, random)
+}
+
+/// `mdb_env_share_locks`: turns our exclusive lock on byte 0 of the lock
+/// file into a shared one (an `F_SETLK` converts it).
+pub fn downgrade_lock(file: &File) -> io::Result<()> {
+    lock_byte(file, 0, LockKind::Shared, false)
+}
+
+/// Nothing to do before the lock file is closed: closing it releases the
+/// process's record locks.
+pub fn unlock_lock_file(_file: &File) {}
+
+/// `mdb_reader_pid(Pidset)`: the exclusive lock on byte `pid` of the lock
+/// file that advertises this process as alive.
+pub fn set_pid_lock(file: &File, pid: i32) -> io::Result<()> {
+    lock_byte(file, pid as u64, LockKind::Exclusive, false)
+}
+
+/// `mdb_reader_pid(Pidcheck)`: `false` only if the process is certainly
+/// dead (nobody holds the lock on byte `pid`).
+pub fn pid_alive(file: &File, pid: i32) -> bool {
+    probe_lock(file, pid as u64).unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

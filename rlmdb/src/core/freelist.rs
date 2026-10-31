@@ -144,6 +144,20 @@ impl<'env> RwTxn<'env> {
                     self.w.flags |= TXN_ERROR;
                     return Err(MdbError::MapFull.into());
                 }
+                // C 1.0 on Windows commits the pages in its view, so that
+                // every process's view shows them (`os::windows`).
+                #[cfg(windows)]
+                {
+                    let psize = self.psize();
+                    if let Err(e) = self
+                        .core
+                        .map
+                        .commit_pages(pgno as usize * psize, num * psize)
+                    {
+                        self.w.flags |= TXN_ERROR;
+                        return Err(e.into());
+                    }
+                }
                 self.core.next_pgno = pgno + num as u64;
                 pgno
             }

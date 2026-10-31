@@ -36,7 +36,6 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{fence, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
@@ -144,7 +143,8 @@ impl LocalShared {
 }
 
 /// The identity of an open data file: device and inode (`st_dev`,
-/// `st_ino`).
+/// `st_ino`; on Windows the volume serial number and the file index,
+/// `os::file_id`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct FileId {
     dev: u64,
@@ -258,11 +258,8 @@ impl Registration {
     /// [`Registration::claim_path`] claimed the path. Returns the state the
     /// file's `NO_LOCK` handles share, `None` for an exclusive claim.
     pub(crate) fn claim_file(&mut self, data_file: &File) -> Result<Option<Arc<LocalShared>>> {
-        let meta = data_file.metadata()?;
-        let id = FileId {
-            dev: meta.dev(),
-            ino: meta.ino(),
-        };
+        let (dev, ino) = crate::os::file_id(data_file)?;
+        let id = FileId { dev, ino };
         let state = claim(&mut registry().files, id, self.shared, Arc::default)?;
         self.file = Some(id);
         Ok(state)
@@ -283,18 +280,36 @@ impl Drop for Registration {
 /// `NO_SUB_DIR` the data file (which may not exist yet).
 fn canonical_key(path: &Path, no_sub_dir: bool) -> Result<PathBuf> {
     if !no_sub_dir {
-        return Ok(path.canonicalize()?);
+        return resolve(path);
     }
     match path.canonicalize() {
         Ok(p) => Ok(p),
         Err(_) => {
             let file = path.file_name().ok_or_else(Error::einval)?;
             let parent = match path.parent() {
-                Some(p) if !p.as_os_str().is_empty() => p.canonicalize()?,
+                Some(p) if !p.as_os_str().is_empty() => resolve(p)?,
                 _ => std::env::current_dir()?,
             };
             Ok(parent.join(file))
         }
+    }
+}
+
+/// The canonical form of the directory `path`. On Windows a directory that
+/// cannot be resolved is keyed by its absolute path instead: the open that
+/// follows then fails with the error C gets from opening a file in it
+/// (`ERROR_PATH_NOT_FOUND` for a missing directory, where resolving it says
+/// `ERROR_FILE_NOT_FOUND`). On Unix both are `ENOENT`.
+fn resolve(path: &Path) -> Result<PathBuf> {
+    match path.canonicalize() {
+        Ok(p) => Ok(p),
+        // The files of "" are opened in the current directory.
+        #[cfg(windows)]
+        Err(_) if path.as_os_str().is_empty() => Ok(std::env::current_dir()?),
+        #[cfg(windows)]
+        Err(e) => std::path::absolute(path).map_err(|_| e.into()),
+        #[cfg(not(windows))]
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -317,11 +332,8 @@ mod tests {
     fn claims(dir: &Path) -> Option<(usize, usize)> {
         let reg = registry();
         let path = reg.paths.get(&dir.canonicalize().unwrap())?;
-        let meta = std::fs::metadata(dir.join("data.mdb")).unwrap();
-        let id = FileId {
-            dev: meta.dev(),
-            ino: meta.ino(),
-        };
+        let (dev, ino) = crate::os::file_id(&File::open(dir.join("data.mdb")).unwrap()).unwrap();
+        let id = FileId { dev, ino };
         let file = reg.files.get(&id)?;
         Some((handles(path), handles(file)))
     }
@@ -361,7 +373,10 @@ mod tests {
         let env_dir = dir.path().join("env");
         std::fs::create_dir(&env_dir).unwrap();
         let link = dir.path().join("link");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&env_dir, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&env_dir, &link).unwrap();
         let no_lock = EnvironmentFlags::NO_LOCK;
         let no_sub_dir = EnvironmentFlags::NO_SUB_DIR;
         let a = Environment::builder()

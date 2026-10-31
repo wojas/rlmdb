@@ -86,8 +86,10 @@ name = "rlmdb"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "cc",
  "libc",
  "tempfile",
+ "windows-sys",
 ]
 
 [[package]]

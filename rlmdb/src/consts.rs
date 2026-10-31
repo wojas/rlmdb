@@ -243,9 +243,12 @@ pub const MDB_MAGIC: u32 = 0xBEEF_C0DE;
 pub const MDB_DATA_VERSION: u32 = 1;
 /// `MDB_LOCK_VERSION`: lock file format version.
 pub const MDB_LOCK_VERSION: u32 = 1;
-/// `MDB_PIDLOCK`: readers hold an fcntl lock on byte `pid` of the lock file.
-pub const MDB_PIDLOCK: u32 = 1;
-/// `MDB_LOCK_FORMAT`: `MDB_LOCK_VERSION + (MDB_PIDLOCK << 16)` on Unix.
+/// `MDB_PIDLOCK`: readers hold an fcntl lock on byte `pid` of the lock file
+/// (1 on Unix). 0 on Windows, where C checks whether a reader's process
+/// exists instead.
+pub const MDB_PIDLOCK: u32 = if cfg!(windows) { 0 } else { 1 };
+/// `MDB_LOCK_FORMAT`: `MDB_LOCK_VERSION + (MDB_PIDLOCK << 16)` (`0x10001` on
+/// Unix, `0x1` on Windows).
 pub const MDB_LOCK_FORMAT: u32 = MDB_LOCK_VERSION + (MDB_PIDLOCK << 16);
 /// `MDB_MAXKEYSIZE`: largest key (and `MDB_DUPSORT` data item) of an LMDB 0.9
 /// environment. LMDB 1.0 computes it from the page size

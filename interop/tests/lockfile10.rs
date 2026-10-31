@@ -32,7 +32,7 @@ use std::time::Duration;
 use interop::tools::{c_layout, c_layout10, run_tool_any_status, MdbStat, ReaderEntry};
 use interop::{bins, Output, Peer, PeerProcess, TestEnv};
 use rlmdb::consts::{DEFAULT_READERS, MDB_MAGIC};
-use rlmdb::format::lockfile::{LockLayout, LockObjects, TxnInfoSnapshot, LOCK_V09, LOCK_V10};
+use rlmdb::format::lockfile::{LockLayout, TxnInfoSnapshot, LOCK_V09, LOCK_V10};
 use rlmdb::{Environment, EnvironmentFlags, Error, Format, MdbError, ReaderInfo, Transaction};
 
 /// How long a peer that must wait for a lock is given to (wrongly) get it.
@@ -230,10 +230,7 @@ fn assert_v2_header(env: &TestEnv, a: &Attached, txnid: u64) -> TxnInfoSnapshot 
     assert_eq!(h.magic, MDB_MAGIC);
     assert_eq!(h.format, LOCK_V10.lock_format);
     assert_eq!(h.txnid, txnid);
-    assert_eq!(
-        h.mutex_id.is_some(),
-        LOCK_V10.objects == LockObjects::SemaphoreHash
-    );
+    assert_eq!(h.mutex_id.is_some(), LOCK_V10.objects.stores_hash());
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     assert_eq!(h.mutex_id, Some(c10_mutex_id(&env.lock_file())));
     h

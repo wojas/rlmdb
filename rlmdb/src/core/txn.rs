@@ -252,7 +252,22 @@ impl<'env> TxnCore<'env> {
         if self.env.has_fatal_error() {
             return Err(MdbError::Panic.into());
         }
-        if self.max_pgno() < self.next_pgno {
+        let mut max_pgno = self.max_pgno();
+        if max_pgno < self.next_pgno {
+            // A map shorter than the map size covers the file as it was when
+            // it was made (a read-only environment on Windows, see
+            // `os::windows`); a map of the file as it is now holds every
+            // page of the snapshot, which were written before it was
+            // published. The file may still end before `next_pgno` (pages
+            // allocated and freed again were never written; the snapshot
+            // does not use them), so the limit is then the map size, C's
+            // `me_maxpg`.
+            if let Some(map) = self.env.renew_short_map(&self.map)? {
+                self.map = map;
+                max_pgno = (self.env.map_size() / self.env.page_size()) as u64;
+            }
+        }
+        if max_pgno < self.next_pgno {
             return Err(MdbError::MapResized.into());
         }
         Ok(())
@@ -805,7 +820,6 @@ impl Drop for InactiveTxn<'_> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::os::unix::fs::FileExt;
     use std::path::Path;
 
     use super::*;
@@ -891,7 +905,7 @@ mod tests {
                 .write(true)
                 .open(dir.path().join("data.mdb"))
                 .unwrap();
-            file.write_all_at(&[0; 4], off as u64).unwrap();
+            crate::os::write_all_at(&file, &[0; 4], off as u64).unwrap();
             let e = env.begin_ro_txn().unwrap_err();
             assert!(is_corrupted(&e), "no_lock {no_lock}: {e}");
             assert_eq!(env.in_memory_readers().unwrap_or(0), 0);

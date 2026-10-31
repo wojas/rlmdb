@@ -49,8 +49,6 @@
 //! writer lock and reader table.
 
 use std::fs::{File, OpenOptions};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -323,13 +321,9 @@ impl Environment {
             lock = LockRegion::open(&lock_path, mode, opts.max_readers, false, lock_layout)?;
         }
         let data_file = if read_only {
-            File::open(&data_path)?
+            os::env_file_options(OpenOptions::new().read(true), mode).open(&data_path)?
         } else {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .mode(mode)
+            os::env_file_options(OpenOptions::new().read(true).write(true).create(true), mode)
                 .open(&data_path)?
         };
         // The NO_LOCK handles of one data file in this process share a
@@ -399,21 +393,16 @@ impl Environment {
         }
         drop(setup);
 
-        let map =
-            DataMap::map_readonly(data_file.try_clone()?, map_size, flags & MDB_NORDAHEAD != 0)?
-                .with_meta_pages(NUM_METAS * page_size);
+        let random = flags & MDB_NORDAHEAD != 0;
+        let map = os::map_data(data_file.try_clone()?, map_size, random, layout.format)?
+            .with_meta_pages(NUM_METAS * page_size);
 
         let meta_file = if read_only {
             None
         } else {
             // Synchronous fd for meta writes. Needed even with
             // MDB_NOSYNC/MDB_NOMETASYNC, in case these get reset.
-            Some(
-                OpenOptions::new()
-                    .write(true)
-                    .custom_flags(os::MDB_DSYNC)
-                    .open(&data_path)?,
-            )
+            Some(os::sync_write_options(OpenOptions::new().write(true)).open(&data_path)?)
         };
 
         let max_readers = lock.as_ref().map_or(opts.max_readers, |l| l.max_readers());
@@ -519,6 +508,34 @@ impl Environment {
         if os::MAP_NEEDS_INVALIDATE && len > 0 {
             self.data_map().invalidate(offset, len);
         }
+    }
+
+    /// The map to use in place of `old`, if `old` is shorter than the map
+    /// size (it then covers the file only as it was when it was made: a
+    /// read-only environment on Windows): the environment's map, made anew
+    /// if the file has grown past it since (also when another transaction
+    /// renewed `old` already, at an older size); `None` if `old` is not
+    /// short (always on Unix). Read transactions keep the map they use, as
+    /// with [`Environment::set_map_size`].
+    pub(crate) fn renew_short_map(&self, old: &Arc<DataMap>) -> Result<Option<Arc<DataMap>>> {
+        let size = self.map_size.load(Ordering::SeqCst);
+        if old.len() >= size {
+            return Ok(None);
+        }
+        let mut current = self.map.write().unwrap_or_else(|e| e.into_inner());
+        let file_size = self.data_file.metadata()?.len();
+        if current.len() < size && file_size > current.len() as u64 {
+            let random = self.raw_flags() & MDB_NORDAHEAD != 0;
+            let map = os::map_data(
+                self.data_file.try_clone()?,
+                size,
+                random,
+                self.layout.format,
+            )?
+            .with_meta_pages(NUM_METAS * self.page_size);
+            *current = Arc::new(map);
+        }
+        Ok(Some(Arc::clone(&current)))
     }
 
     /// The lock file's table, `None` without a lock file.
@@ -814,8 +831,13 @@ impl Environment {
             .ok_or(MdbError::Invalid)?;
         size = size.max(min_size);
         let random = self.raw_flags() & MDB_NORDAHEAD != 0;
-        let map = DataMap::map_readonly(self.data_file.try_clone()?, size, random)?
-            .with_meta_pages(NUM_METAS * self.page_size);
+        let map = os::map_data(
+            self.data_file.try_clone()?,
+            size,
+            random,
+            self.layout.format,
+        )?
+        .with_meta_pages(NUM_METAS * self.page_size);
         let mut current = self.map.write().unwrap_or_else(|e| e.into_inner());
         *current = Arc::new(map);
         self.map_size.store(size, Ordering::SeqCst);
@@ -909,7 +931,7 @@ pub fn sniff_format(path: impl AsRef<Path>, flags: EnvironmentFlags) -> Result<O
 fn sniff_data_file(data_path: &Path) -> Result<Option<Format>> {
     let file = match File::open(data_path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if os::is_missing(&e, data_path) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
     let mut head = [0u8; SNIFF_LEN];
@@ -992,7 +1014,7 @@ pub fn default_format() -> Format {
 /// The format [`DEFAULT_FORMAT_ENV`] names, read now; `None` if it is unset
 /// or names none.
 fn env_default_format() -> Option<Format> {
-    std::env::var_os(DEFAULT_FORMAT_ENV).and_then(|v| Format::from_name(v.as_bytes()))
+    std::env::var_os(DEFAULT_FORMAT_ENV).and_then(|v| Format::from_name(v.as_encoded_bytes()))
 }
 
 /// The checks of 1.0's `mdb_env_set_pagesize`: a power of two from 256 to

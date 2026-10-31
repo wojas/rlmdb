@@ -37,10 +37,10 @@ pub fn not_compared(name: &str, layout: &LockLayout) -> Option<&'static str> {
     if name.starts_with("alignof(") {
         return Some("Rust decodes byte slices and has no struct alignment");
     }
-    if name == "MNAME_LEN" && layout.objects == LockObjects::SemaphoreHash {
+    if name == "MNAME_LEN" && layout.objects.stores_hash() {
         return Some(
-            "LMDB 1.0 defines it as sizeof(pthread_mutex_t) even with named semaphores, \
-             where nothing of that size is in the lock file",
+            "LMDB 1.0 defines it as sizeof(pthread_mutex_t) even with named semaphores \
+             and Windows mutexes, where nothing of that size is in the lock file",
         );
     }
     None
@@ -52,6 +52,8 @@ fn lock_field_names(layout: &LockLayout) -> (&'static str, Option<&'static str>)
         LockObjects::PthreadMutexes => ("mtb_rmutex", Some("mt2_wmutex")),
         LockObjects::SemaphoreNames => ("mtb_rmname", Some("mt2_wmname")),
         LockObjects::SemaphoreHash => ("mtb_mutexid", None),
+        LockObjects::MutexNames => ("mtb_rmname", Some("mt2_wmname")),
+        LockObjects::MutexHash => ("mtb_mutexid", None),
         // The reader lock is two ints, `mtb_semid` and `mtb_rlocked`.
         LockObjects::SysVSemaphores => ("mtb_semid", Some("mt2_wlocked")),
     }
@@ -72,6 +74,7 @@ pub fn lock_mode(layout: &LockLayout) -> &'static str {
     match layout.objects {
         LockObjects::PthreadMutexes => "posix_mutex",
         LockObjects::SemaphoreNames | LockObjects::SemaphoreHash => "posix_sem",
+        LockObjects::MutexNames | LockObjects::MutexHash => "win32_mutex",
         LockObjects::SysVSemaphores => "sysv_sem",
     }
 }
@@ -101,7 +104,7 @@ pub fn rust_lock_lines(layout: &LockLayout) -> Vec<(String, u64)> {
         ),
         ("sizeof(MDB_txninfo.mti_readers[1])".into(), READER_SIZE),
     ];
-    if layout.objects != LockObjects::SemaphoreHash {
+    if !layout.objects.stores_hash() {
         v.push(("MNAME_LEN".into(), lock_field_size(layout)));
     }
     if layout.version >= 2 {

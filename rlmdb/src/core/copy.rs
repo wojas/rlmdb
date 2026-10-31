@@ -36,10 +36,8 @@
 //! handed over at the same points, so even those unused bytes match and
 //! the output is byte for byte C's.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
-use std::os::fd::BorrowedFd;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use crate::consts::*;
@@ -70,7 +68,8 @@ impl Environment {
     /// the directory to put `data.mdb` in (it must exist), or with
     /// [`NO_SUB_DIR`](crate::EnvironmentFlags::NO_SUB_DIR) the file name.
     /// The file must not exist yet (it is created with `O_EXCL` and mode
-    /// `0666` before the umask). No lock file is created.
+    /// `0666` before the umask; on Windows with `CREATE_NEW`, unshared). No
+    /// lock file is created.
     ///
     /// With `compact`, only the pages in use are copied, renumbered, and
     /// the free list of the copy is empty (`MDB_CP_COMPACT`); see the
@@ -87,16 +86,10 @@ impl Environment {
         } else {
             path.join("data.mdb")
         };
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o666)
-            .open(&target)?;
-        if self.page_size() >= os::os_page_size() {
-            // The source data is already in the OS cache; do not cache the
-            // copy too (needs aligned buffers with O_DIRECT, which we use).
-            os::set_nocache(&file);
-        }
+        // The source data is already in the OS cache; do not cache the copy
+        // too (needs aligned buffers with O_DIRECT or, on Windows,
+        // FILE_FLAG_NO_BUFFERING, which we use).
+        let file = os::open_copy_target(&target, self.page_size() >= os::os_page_size())?;
         let rc = self.copy_to_file(&file, compact);
         let closed = os::close(file);
         rc?;
@@ -105,9 +98,10 @@ impl Environment {
 
     /// `mdb_env_copyfd2`: write a copy of the environment's data file to
     /// `fd` (a file, pipe or socket), starting at its current position (see
-    /// [`Environment::copy_to_path`] for `compact`). The descriptor stays
-    /// open and is not synced.
-    pub fn copy_to_fd(&self, fd: BorrowedFd<'_>, compact: bool) -> Result<()> {
+    /// [`Environment::copy_to_path`] for `compact`). The descriptor (on
+    /// Windows a `HANDLE`, as C's `mdb_filehandle_t`) stays open and is not
+    /// synced.
+    pub fn copy_to_fd(&self, fd: os::BorrowedFile<'_>, compact: bool) -> Result<()> {
         // A duplicate shares the file position with `fd`.
         let file = File::from(fd.try_clone_to_owned()?);
         self.copy_to_file(&file, compact)

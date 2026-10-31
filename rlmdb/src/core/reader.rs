@@ -39,14 +39,15 @@
 //!   the lock file once it has started a read transaction
 //!   (`mdb_reader_pid(Pidset)`); `LockRegion::reader_check` probes those
 //!   locks with `F_GETLK` to clear slots of dead processes
-//!   (`mdb_reader_check0`, line 10403).
+//!   (`mdb_reader_check0`, line 10403). On Windows readers take no such
+//!   lock (`MDB_PIDLOCK` is 0) and the check asks whether the process still
+//!   exists (`os::pid_alive`), as C does there.
 //! * Slot allocation (`LockRegion::acquire_slot`) happens under the reader
 //!   mutex and follows the careful publication order of `mdb_txn_renew0`
 //!   (line 2758): reset the slot, publish it in `mti_numreaders`, then claim
 //!   it by writing our pid.
 
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -55,7 +56,8 @@ use crate::consts::MDB_MAGIC;
 use crate::core::registry::LocalShared;
 use crate::error::{Error, MdbError, Result};
 use crate::format::lockfile::{
-    LockLayout, READER_PID, READER_TID, READER_TXNID, TXNINFO_FORMAT, TXNINFO_MAGIC,
+    LockLayout, READER_PID, READER_TID, READER_TID_SIZE, READER_TXNID, TXNINFO_FORMAT,
+    TXNINFO_MAGIC,
 };
 use crate::os::shared_lock::{LockStatus, SharedLocks, SharedMutex};
 use crate::os::{self, LockKind, LockMap};
@@ -153,15 +155,14 @@ impl LockRegion {
         read_only: bool,
         layout: &'static LockLayout,
     ) -> Result<Option<LockRegion>> {
-        let file = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(mode)
-            .open(path)
+        let file = match os::env_file_options(
+            OpenOptions::new().read(true).write(true).create(true),
+            mode,
+        )
+        .open(path)
         {
             Ok(f) => f,
-            Err(e) if read_only && e.raw_os_error() == Some(libc::EROFS) => return Ok(None),
+            Err(e) if read_only && os::is_read_only_fs(&e) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
 
@@ -231,7 +232,7 @@ impl LockRegion {
     pub(crate) fn downgrade(&self, txnid: u64) -> Result<()> {
         let mut excl = self.exclusive.lock().unwrap_or_else(|e| e.into_inner());
         self.map.store_u64(self.layout.txnid, txnid);
-        os::lock_byte(&self.file, 0, LockKind::Shared, false)?;
+        os::downgrade_lock(&self.file)?;
         *excl = false;
         Ok(())
     }
@@ -340,13 +341,21 @@ impl LockRegion {
             .store_u64(self.layout.reader_offset(i) + READER_TXNID, txnid)
     }
 
+    /// `mr_tid`: a `pthread_t` (8 bytes) on Unix, a `DWORD` on Windows.
     fn slot_tid(&self, i: usize) -> u64 {
-        self.map.load_u64(self.layout.reader_offset(i) + READER_TID)
+        let off = self.layout.reader_offset(i) + READER_TID;
+        match READER_TID_SIZE {
+            4 => u64::from(self.map.load_u32(off)),
+            _ => self.map.load_u64(off),
+        }
     }
 
     fn set_slot_tid(&self, i: usize, tid: u64) {
-        self.map
-            .store_u64(self.layout.reader_offset(i) + READER_TID, tid)
+        let off = self.layout.reader_offset(i) + READER_TID;
+        match READER_TID_SIZE {
+            4 => self.map.store_u32(off, tid as u32),
+            _ => self.map.store_u64(off, tid),
+        }
     }
 
     // --- the reader mutex ---------------------------------------------------
@@ -382,7 +391,7 @@ impl LockRegion {
             let mut live = self.live_reader.lock().unwrap_or_else(|e| e.into_inner());
             if !*live {
                 // mdb_reader_pid(Pidset): advertise that this pid is alive.
-                os::lock_byte(&self.file, self.pid as u64, LockKind::Exclusive, false)?;
+                os::set_pid_lock(&self.file, self.pid)?;
                 *live = true;
             }
         }
@@ -478,9 +487,10 @@ impl LockRegion {
     }
 
     /// `mdb_reader_pid(Pidcheck)`: `false` only if the process is certainly
-    /// dead (nobody holds the lock on byte `pid`).
+    /// dead (nobody holds the lock on byte `pid`; on Windows, the process
+    /// does not exist any more).
     fn pid_alive(&self, pid: i32) -> bool {
-        os::probe_lock(&self.file, pid as u64).unwrap_or(true)
+        os::pid_alive(&self.file, pid)
     }
 
     /// `mdb_reader_check0`. `rlocked` is set if the caller holds the reader
@@ -557,6 +567,9 @@ impl Drop for LockRegion {
                 && os::lock_byte(&self.file, 0, LockKind::Exclusive, false).is_ok();
             locks.close(last_user);
         }
+        // Windows releases the lock on byte 0 now rather than "not
+        // necessarily at once" after the handle closes (mdb_env_close0).
+        os::unlock_lock_file(&self.file);
     }
 }
 
@@ -709,7 +722,7 @@ mod tests {
         );
     }
 
-    use crate::format::lockfile::{LockObjects, LOCK_V09, LOCK_V10};
+    use crate::format::lockfile::{LOCK_V09, LOCK_V10};
 
     fn open(path: &Path, layout: &'static LockLayout) -> Result<LockRegion> {
         Ok(LockRegion::open(path, 0o644, 4, false, layout)?.unwrap())
@@ -766,10 +779,7 @@ mod tests {
         assert_eq!(h.format, layout.lock_format);
         assert_eq!(h.txnid, 7);
         assert_eq!(h.num_readers, 4);
-        assert_eq!(
-            h.mutex_id.is_some(),
-            layout.objects == LockObjects::SemaphoreHash
-        );
+        assert_eq!(h.mutex_id.is_some(), layout.objects.stores_hash());
         region.lock_writer(|| Ok(7)).unwrap();
         region.unlock_writer();
     }
