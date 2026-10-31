@@ -114,6 +114,7 @@ placeholders); or a peer completes a command but prints a
 | `INTEROP_TIMEOUT_SECS` | a peer running longer is killed and the test fails (default 120) |
 | `INTEROP_RPEER` | path of the Rust peer (else found via `CARGO_BIN_EXE_rpeer` or next to the test binary) |
 | `INTEROP_KEEP` | keep the temporary directories (`interop-*`) of the environments, to look at the files after a failure |
+| `INTEROP_NO_ROBUST_MUTEX` | the writer mutex does not recover from a killed owner (QEMU user emulation, which `scripts/linux-test.sh` sets for `LINUX_TEST_TARGET` runs): `killed_writer` expects the next writer to wait, as on macOS |
 
 The tests print the page size of each environment they create (`--nocapture`):
 16384 on Apple Silicon macOS, 4096 on Linux x86-64.

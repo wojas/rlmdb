@@ -164,6 +164,7 @@ fn compile_c_tools(tmp: &Path, files: &[PathBuf]) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_owned());
+    let ar = std::env::var("AR").unwrap_or_else(|_| "ar".to_owned());
     for obj in ["mdb", "midl"] {
         run_ok(
             Command::new(&cc)
@@ -173,7 +174,7 @@ fn compile_c_tools(tmp: &Path, files: &[PathBuf]) -> Result<(), String> {
         )?;
     }
     run_ok(
-        Command::new("ar")
+        Command::new(&ar)
             .current_dir(tmp)
             .args(["rs", "liblmdb.a", "mdb.o", "midl.o"]),
     )?;

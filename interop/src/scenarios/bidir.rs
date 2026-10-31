@@ -487,9 +487,10 @@ fn writer_gets_lock(peer: Peer, env: &TestEnv, seed: u32) -> Result<()> {
 /// too): while another process has the environment open, the next writer
 /// waits forever; the scenario checks that it does wait. Once no process
 /// has the environment open, the next opener is exclusive and re-creates
-/// the semaphores, and writing works again.
+/// the semaphores, and writing works again. The same holds for the mutex
+/// under QEMU user emulation ([`robust_mutexes`](super::robust_mutexes)).
 pub fn killed_writer(pair: Pair) -> Result<()> {
-    let robust = cfg!(target_os = "linux");
+    let robust = super::robust_mutexes();
     let env = new_env(&pair, 512 * MIB)?;
     let ds = DataSet::new("data", 1000, 111);
     ds.fill(pair.writer, &env, &[])?;
@@ -529,8 +530,8 @@ pub fn killed_writer(pair: Pair) -> Result<()> {
             .spawn()?;
         match waiting.wait_for_line("READY", Duration::from_millis(1500)) {
             Ok(line) => bail!(
-                "{} got the writer semaphore of a killed writer while the environment \
-                 stayed open (POSIX semaphores are not robust): {line}",
+                "{} got the writer lock of a killed writer while the environment \
+                 stayed open (the lock is not robust here): {line}",
                 pair.reader
             ),
             // Still waiting for the semaphore, as expected.

@@ -232,6 +232,16 @@ pub fn loop_secs() -> f64 {
         .unwrap_or(1.5)
 }
 
+/// Whether the shared writer mutex recovers from a killed owner: robust
+/// process-shared mutexes on Linux, unless `$INTEROP_NO_ROBUST_MUTEX` is
+/// set. QEMU user emulation (`scripts/linux-test.sh` with
+/// `LINUX_TEST_TARGET`, which sets it) does not pass the robust futex list
+/// to the kernel, so a mutex whose owner died is never marked
+/// `EOWNERDEAD`: as with macOS semaphores, the next locker waits.
+pub fn robust_mutexes() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("INTEROP_NO_ROBUST_MUTEX").is_none()
+}
+
 const MIB: u64 = 1 << 20;
 
 fn log(msg: impl fmt::Display) {
