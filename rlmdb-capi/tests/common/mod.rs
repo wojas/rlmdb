@@ -135,6 +135,51 @@ pub fn rust_native_libs() -> &'static [&'static str] {
             "-ldl",
             "-lc",
         ]
+    } else if cfg!(target_os = "freebsd") {
+        &[
+            "-lrt",
+            "-lutil",
+            "-lexecinfo",
+            "-lkvm",
+            "-lmemstat",
+            "-lprocstat",
+            "-ldevstat",
+            "-lpthread",
+            "-lgcc_s",
+            "-lc",
+            "-lm",
+        ]
+    } else if cfg!(target_os = "netbsd") {
+        &[
+            "-lutil",
+            "-lrt",
+            "-lexecinfo",
+            "-lpthread",
+            "-lgcc_s",
+            "-lc",
+            "-lm",
+        ]
+    } else if cfg!(target_os = "openbsd") {
+        &[
+            "-lutil",
+            "-lexecinfo",
+            "-lpthread",
+            "-lc++abi",
+            "-lc",
+            "-lm",
+            "-lcompiler_rt",
+        ]
+    } else if cfg!(target_os = "dragonfly") {
+        &[
+            "-lrt",
+            "-lutil",
+            "-lexecinfo",
+            "-lkvm",
+            "-lpthread",
+            "-lgcc_pic",
+            "-lc",
+            "-lm",
+        ]
     } else {
         // macOS: -lSystem -lc -lm, all implied by the compiler driver.
         &[]

@@ -10,7 +10,8 @@
 //! * [`shared_lock`]: the two inter-process locks guarding the reader table
 //!   and the writer, implemented the way the C build on the same platform does
 //!   it (robust process-shared pthread mutexes on Linux/FreeBSD, POSIX named
-//!   semaphores on macOS).
+//!   semaphores on macOS; on OpenBSD, NetBSD and DragonFly named semaphores
+//!   for LMDB 0.9 lock files and a SysV semaphore set for LMDB 1.0 ones).
 //!
 //! Every `unsafe` block carries a `// SAFETY:` comment. Higher layers only see
 //! safe types: byte slices with lifetimes, atomics on the lock file, and

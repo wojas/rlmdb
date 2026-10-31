@@ -408,7 +408,7 @@ impl Environment {
             Some(
                 OpenOptions::new()
                     .write(true)
-                    .custom_flags(libc::O_DSYNC)
+                    .custom_flags(os::MDB_DSYNC)
                     .open(&data_path)?,
             )
         };
@@ -504,6 +504,17 @@ impl Environment {
     /// begin for its whole life.
     pub(crate) fn data_map(&self) -> Arc<DataMap> {
         Arc::clone(&self.map.read().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// `MDB_Invalidate`: after `len` bytes at `offset` were written to the
+    /// data file, drops the map's copy of them where the OS does not keep
+    /// the two in step (OpenBSD, `os::MAP_NEEDS_INVALIDATE`); nothing
+    /// elsewhere.
+    #[inline]
+    pub(crate) fn invalidate_map(&self, offset: u64, len: usize) {
+        if os::MAP_NEEDS_INVALIDATE && len > 0 {
+            self.data_map().invalidate(offset, len);
+        }
     }
 
     /// The lock file's table, `None` without a lock file.

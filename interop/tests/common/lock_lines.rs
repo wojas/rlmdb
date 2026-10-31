@@ -52,6 +52,27 @@ fn lock_field_names(layout: &LockLayout) -> (&'static str, Option<&'static str>)
         LockObjects::PthreadMutexes => ("mtb_rmutex", Some("mt2_wmutex")),
         LockObjects::SemaphoreNames => ("mtb_rmname", Some("mt2_wmname")),
         LockObjects::SemaphoreHash => ("mtb_mutexid", None),
+        // The reader lock is two ints, `mtb_semid` and `mtb_rlocked`.
+        LockObjects::SysVSemaphores => ("mtb_semid", Some("mt2_wlocked")),
+    }
+}
+
+/// `MNAME_LEN`, the size of each named lock field: an `int` with SysV
+/// semaphores (`mtb_semid`, `mt2_wlocked`), else the reader lock field.
+fn lock_field_size(layout: &LockLayout) -> usize {
+    match layout.objects {
+        LockObjects::SysVSemaphores => std::mem::size_of::<libc::c_int>(),
+        _ => layout.rlock_size,
+    }
+}
+
+/// The C name of the mode `layout_dump` prints for the locks of `layout`
+/// (`lock_mode=`).
+pub fn lock_mode(layout: &LockLayout) -> &'static str {
+    match layout.objects {
+        LockObjects::PthreadMutexes => "posix_mutex",
+        LockObjects::SemaphoreNames | LockObjects::SemaphoreHash => "posix_sem",
+        LockObjects::SysVSemaphores => "sysv_sem",
     }
 }
 
@@ -81,7 +102,7 @@ pub fn rust_lock_lines(layout: &LockLayout) -> Vec<(String, u64)> {
         ("sizeof(MDB_txninfo.mti_readers[1])".into(), READER_SIZE),
     ];
     if layout.objects != LockObjects::SemaphoreHash {
-        v.push(("MNAME_LEN".into(), layout.rlock_size));
+        v.push(("MNAME_LEN".into(), lock_field_size(layout)));
     }
     if layout.version >= 2 {
         let desc = layout.lock_format >> LOCK_VERSION_BITS;
@@ -99,8 +120,20 @@ pub fn rust_lock_lines(layout: &LockLayout) -> Vec<(String, u64)> {
             ("sizeof(MDB_txninfo.mt2)".into(), layout.readers - off),
             (format!("offsetof(MDB_txninfo.mt2.{name})"), off),
             // The writer lock has the reader lock's size (MNAME_LEN).
-            (format!("sizeof(MDB_txninfo.mt2.{name})"), layout.rlock_size),
+            (
+                format!("sizeof(MDB_txninfo.mt2.{name})"),
+                lock_field_size(layout),
+            ),
         ]);
+    }
+    if layout.objects == LockObjects::SysVSemaphores {
+        // Printed under MDB_txbody only.
+        let off = layout.rlock + lock_field_size(layout);
+        v.push(("offsetof(MDB_txbody.mtb_rlocked)".into(), off));
+        v.push((
+            "sizeof(MDB_txbody.mtb_rlocked)".into(),
+            lock_field_size(layout),
+        ));
     }
     // The reader slot fields, under both C names.
     for prefix in ["MDB_rxbody", "MDB_reader.mru.mrx"] {
@@ -118,7 +151,7 @@ pub fn rust_lock_lines(layout: &LockLayout) -> Vec<(String, u64)> {
         for (field, off, size) in [
             ("mtb_magic", TXNINFO_MAGIC, 4),
             ("mtb_format", TXNINFO_FORMAT, 4),
-            (rlock, layout.rlock, layout.rlock_size),
+            (rlock, layout.rlock, lock_field_size(layout)),
             ("mtb_txnid", layout.txnid, 8),
             ("mtb_numreaders", layout.num_readers, 4),
         ] {

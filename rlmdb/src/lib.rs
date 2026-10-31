@@ -144,7 +144,11 @@
 //! (aarch64 in Docker; robust pthread mutexes, 4 KiB pages). The lock file
 //! layout follows `size_of::<pthread_mutex_t>()` on Linux, FreeBSD and
 //! Android, so x86-64 glibc works the same way, but only the layouts above
-//! are tested against C. Windows and 32-bit targets are out of scope, as
+//! are tested against C. FreeBSD, OpenBSD, NetBSD and DragonFly use the
+//! lock primitives, sync calls and layouts of C's build there (POSIX
+//! named semaphores, and SysV semaphores for LMDB 1.0 lock files, on all
+//! but FreeBSD); they compile but are untested (`COMPATIBILITY.md`).
+//! Windows and 32-bit targets are out of scope, as
 //! are the LMDB 1.0 features (`MDB_VL32`, encryption, checksums,
 //! `MDB_PREVSNAPSHOT`).
 //! `MDB_WRITEMAP`, `MDB_FIXEDMAP`, `MDB_MAPASYNC` and `MDB_NOMEMINIT` are

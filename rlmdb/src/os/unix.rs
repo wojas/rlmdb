@@ -185,14 +185,25 @@ pub fn pwritev(file: &File, bufs: &[&[u8]], offset: u64) -> io::Result<usize> {
     }
 }
 
-/// `MDB_FDATASYNC`: `fdatasync` on Linux, `fcntl(F_FULLFSYNC)` on macOS
-/// (plain `fsync` does not flush the drive cache there).
+/// `MDB_FDATASYNC`: `fdatasync` on Linux and FreeBSD, `fcntl(F_FULLFSYNC)`
+/// on macOS (plain `fsync` does not flush the drive cache there), `fsync`
+/// on OpenBSD, NetBSD and DragonFly, as C 0.9 picks for them (mdb.c lines
+/// 136-149; FreeBSD has `fdatasync` from 11.1 on).
 pub fn fdatasync(file: &File) -> io::Result<()> {
     loop {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         // SAFETY: valid fd; F_FULLFSYNC takes no argument.
         let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) };
-        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+        // SAFETY: valid fd.
+        let rc = unsafe { libc::fsync(file.as_raw_fd()) };
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        )))]
         // SAFETY: valid fd.
         let rc = unsafe { libc::fdatasync(file.as_raw_fd()) };
         if rc == 0 {
@@ -223,9 +234,10 @@ pub fn fsync(file: &File) -> io::Result<()> {
 
 /// Asks the OS not to cache what is written through `file` (as
 /// `mdb_fopen` does for `mdb_env_copy` targets): `F_NOCACHE` on macOS,
-/// `O_DIRECT` elsewhere. Best effort, failures are ignored like in C. With
-/// `O_DIRECT`, writes must come from buffers aligned to the OS page size
-/// and have sizes that are multiples of it.
+/// `O_DIRECT` elsewhere, nothing on OpenBSD (which has neither). Best
+/// effort, failures are ignored like in C. With `O_DIRECT`, writes must
+/// come from buffers aligned to the OS page size and have sizes that are
+/// multiples of it.
 pub fn set_nocache(file: &File) {
     let fd = file.as_raw_fd();
     #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -233,7 +245,9 @@ pub fn set_nocache(file: &File) {
     unsafe {
         libc::fcntl(fd, libc::F_NOCACHE, 1);
     }
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    #[cfg(target_os = "openbsd")]
+    let _ = fd;
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "openbsd")))]
     // SAFETY: valid fd; F_GETFL/F_SETFL take no pointer arguments.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -255,6 +269,23 @@ pub fn close(file: File) -> io::Result<()> {
         Err(last_error())
     }
 }
+
+/// `MDB_DSYNC`, the flag that makes writes through the meta-page
+/// descriptor (`me_mfd`) synchronous: `O_DSYNC`, or `O_SYNC` where there is
+/// none (DragonFly), as mdb.c (line 457) chooses.
+#[cfg(not(target_os = "dragonfly"))]
+pub const MDB_DSYNC: libc::c_int = libc::O_DSYNC;
+/// `MDB_DSYNC`, the flag that makes writes through the meta-page
+/// descriptor (`me_mfd`) synchronous: `O_DSYNC`, or `O_SYNC` where there is
+/// none (DragonFly), as mdb.c (line 457) chooses.
+#[cfg(target_os = "dragonfly")]
+pub const MDB_DSYNC: libc::c_int = libc::O_SYNC;
+
+/// `true` where data written to the file through a descriptor does not
+/// show in a shared map of it until the map's copy is invalidated
+/// ([`DataMap::invalidate`], C's `MDB_Invalidate`): OpenBSD, which has no
+/// unified buffer cache (mdb.c lines 86-93).
+pub const MAP_NEEDS_INVALIDATE: bool = cfg!(target_os = "openbsd");
 
 /// `ftruncate`.
 pub fn ftruncate(file: &File, len: u64) -> io::Result<()> {
@@ -426,6 +457,37 @@ impl DataMap {
         }
     }
 
+    /// `MDB_Invalidate` (OpenBSD only, see [`MAP_NEEDS_INVALIDATE`]): after
+    /// `len` bytes at `offset` of the file were written through a
+    /// descriptor, `msync(MS_INVALIDATE)` drops the map's stale copy of
+    /// them, so the next access reads them from the file. C passes its
+    /// range as is, which `msync` refuses unless it starts on an OS page
+    /// (LMDB 1.0 pages may be smaller); here it is widened to whole OS
+    /// pages. Errors are ignored, as in C. The bytes of every page a
+    /// snapshot can reach do not change (they are re-read as they were),
+    /// so slices handed out stay valid.
+    pub fn invalidate(&self, offset: u64, len: usize) {
+        let os_page = os_page_size();
+        let Ok(offset) = usize::try_from(offset) else {
+            return;
+        };
+        let start = offset - offset % os_page;
+        let end = offset.saturating_add(len).min(self.len);
+        if start >= end {
+            return;
+        }
+        // SAFETY: [start, end) lies inside our mapping and starts on an OS
+        // page. MS_INVALIDATE changes no file contents; it only makes the
+        // next access to these pages read them from the file again.
+        unsafe {
+            libc::msync(
+                self.ptr.add(start) as *mut libc::c_void,
+                end - start,
+                libc::MS_INVALIDATE,
+            );
+        }
+    }
+
     /// Copies `out.len()` bytes at `offset` with volatile reads, for data
     /// that other processes may be writing concurrently (the meta pages).
     /// Returns `false` if the range is not mapped or beyond the file.
@@ -593,8 +655,17 @@ impl LockMap {
 
     /// Copies `len` bytes at `offset` (volatile byte reads), e.g. a
     /// semaphore name or the header. Used by the lock-file layouts that
-    /// store semaphore names (macOS); dead code on the mutex layouts.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+    /// store semaphore names; dead code on the mutex layouts.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        )),
+        allow(dead_code)
+    )]
     pub fn read_bytes(&self, offset: usize, len: usize) -> Vec<u8> {
         let p = self.checked_ptr(offset, 1);
         assert!(offset + len <= self.len, "lock file read out of bounds");
@@ -676,6 +747,24 @@ mod tests {
         let mut buf = [0u8; 4];
         assert!(m.read_volatile(8190, &mut buf));
         assert_eq!(buf, [7, 7, 9, 9]);
+    }
+
+    /// `invalidate` (only called on OpenBSD) accepts any range: pages
+    /// written through the descriptor read back through the map, and ranges
+    /// that are unaligned or reach past the map do no harm.
+    #[test]
+    fn data_map_invalidate() {
+        let f = tempfile::tempfile().unwrap();
+        f.set_len(3 * 4096).unwrap();
+        let m = DataMap::map_readonly(f.try_clone().unwrap(), 1 << 20, false).unwrap();
+        assert_eq!(m.slice(4096, 1).unwrap()[0], 0);
+        write_all_at(&f, &[5u8; 4096], 4096).unwrap();
+        m.invalidate(4096, 4096);
+        m.invalidate(4100, 10);
+        m.invalidate((1 << 20) - 1, 4096);
+        m.invalidate(u64::MAX, 1);
+        m.invalidate(0, 0);
+        assert_eq!(m.slice(4096, 4096).unwrap(), &[5u8; 4096][..]);
     }
 
     #[test]

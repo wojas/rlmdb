@@ -154,7 +154,8 @@ impl<'env> RwTxn<'env> {
     /// (`mt_dirty_room` grows accordingly).
     fn write_runs(&mut self, runs: &[(u64, PageSlot, usize)]) -> Result<()> {
         let ps = self.psize();
-        let file = self.core.env.data_file();
+        let env = self.core.env;
+        let file = env.data_file();
         let dirty = &self.core.dirty;
         let mut batch: [&[u8]; COMMIT_PAGES] = [&[]; COMMIT_PAGES];
         let mut n = 0;
@@ -165,6 +166,7 @@ impl<'env> RwTxn<'env> {
             let pos = pgno * ps as u64;
             if pos != next_pos || n == COMMIT_PAGES || wsize + size > MAX_WRITE {
                 write_batch(file, &batch[..n], wpos, wsize)?;
+                env.invalidate_map(wpos, wsize);
                 n = 0;
                 wpos = pos;
                 wsize = 0;
@@ -176,6 +178,7 @@ impl<'env> RwTxn<'env> {
             wsize += size;
         }
         write_batch(file, &batch[..n], wpos, wsize)?;
+        env.invalidate_map(wpos, wsize);
 
         // Drop the written pages from the dirty list (both lists are
         // ascending).
@@ -263,6 +266,7 @@ impl<'env> RwTxn<'env> {
                 os::fdatasync(f)?;
             }
         }
+        env.invalidate_map((toggle * ps) as u64, ps);
         if let Some(lock) = env.lock_region() {
             lock.set_txnid(txnid);
         }

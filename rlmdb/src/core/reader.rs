@@ -55,7 +55,7 @@ use crate::consts::MDB_MAGIC;
 use crate::core::registry::LocalShared;
 use crate::error::{Error, MdbError, Result};
 use crate::format::lockfile::{
-    self, LockLayout, READER_PID, READER_TID, READER_TXNID, TXNINFO_FORMAT, TXNINFO_MAGIC,
+    LockLayout, READER_PID, READER_TID, READER_TXNID, TXNINFO_FORMAT, TXNINFO_MAGIC,
 };
 use crate::os::shared_lock::{LockStatus, SharedLocks, SharedMutex};
 use crate::os::{self, LockKind, LockMap};
@@ -306,8 +306,11 @@ impl LockRegion {
     /// descriptor would drop this process's record locks when that
     /// descriptor is closed.)
     #[cfg(test)]
-    fn header(&self) -> Option<lockfile::TxnInfoSnapshot> {
-        lockfile::TxnInfoSnapshot::read(&self.map.read_bytes(0, self.layout.readers), self.layout)
+    fn header(&self) -> Option<crate::format::lockfile::TxnInfoSnapshot> {
+        crate::format::lockfile::TxnInfoSnapshot::read(
+            &self.map.read_bytes(0, self.layout.readers),
+            self.layout,
+        )
     }
 
     /// `mti_numreaders`, clamped to the slots we have mapped so that a
@@ -539,9 +542,9 @@ impl LockRegion {
 
 impl Drop for LockRegion {
     /// The lock-file part of `mdb_env_close0`: clear any slot this process
-    /// still owns, close the shared locks (unlinking the semaphores on macOS
-    /// if we are the last user), then unmap and close the file. Closing the
-    /// file releases our `fcntl` locks.
+    /// still owns, close the shared locks (removing semaphores if we are the
+    /// last user), then unmap and close the file. Closing the file releases
+    /// our `fcntl` locks.
     fn drop(&mut self) {
         let n = (self.close_readers.load(Ordering::SeqCst)).min(self.max_readers) as usize;
         for i in (0..n).rev() {
@@ -550,7 +553,7 @@ impl Drop for LockRegion {
             }
         }
         if let Some(locks) = self.locks.take() {
-            let last_user = lockfile::USES_NAMED_SEMAPHORES
+            let last_user = self.layout.objects.removed_by_last_user()
                 && os::lock_byte(&self.file, 0, LockKind::Exclusive, false).is_ok();
             locks.close(last_user);
         }

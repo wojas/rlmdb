@@ -25,6 +25,20 @@
 //!   mdb10.c lines 5935-5945 and 6064-6095). Either way, what is in the
 //!   file is read, never recomputed. Semaphores are not robust; C has the
 //!   same limitation.
+//! * **OpenBSD, NetBSD, DragonFly**: version 1 lock files as on macOS
+//!   (C 0.9 selects `MDB_USE_POSIX_SEM` for every `BSD` but FreeBSD, mdb.c
+//!   line 143), with names one character shorter on NetBSD
+//!   (`MDB_SHORT_SEMNAMES`, line 5000). Version 2 lock files (LMDB 1.0)
+//!   use a SysV semaphore set instead (`MDB_USE_SYSV_SEM`, mdb10.c lines
+//!   192-198): the exclusive opener creates it with
+//!   `semget(ftok(lockfile, 'M'), 2, mode | IPC_CREAT)`, sets both values
+//!   to 1 and stores its id in `mtb_semid`; the others check it with
+//!   `IPC_STAT` and `IPC_SET` (mdb10.c lines 6096-6110 and 6165-6173).
+//!   Every `semop` uses `SEM_UNDO`, so the kernel releases the semaphore
+//!   of a process that dies holding it, and the flag in the lock file
+//!   (`mti_rlocked`, `mti_wlocked`) that the dead holder left set makes
+//!   the next holder report [`LockStatus::OwnerDied`] (`mdb_sem_wait`,
+//!   mdb10.c line 470). The last user removes the set (`IPC_RMID`).
 //!
 //! A mutex locked here must be unlocked by the same thread on Linux (pthread
 //! mutex ownership); the reader-table mutex is only held inside one
@@ -44,8 +58,9 @@ pub enum LockStatus {
     Acquired,
     /// The lock was acquired, but its previous owner died while holding it
     /// (`EOWNERDEAD`). The protected data may need repair before
-    /// [`SharedMutex::mark_consistent`] is called. Never reported by the
-    /// semaphores used on macOS (they are not robust).
+    /// [`SharedMutex::mark_consistent`] is called. Never reported by POSIX
+    /// named semaphores (they are not robust), only by robust mutexes and
+    /// SysV semaphores.
     #[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(dead_code))]
     OwnerDied,
 }
@@ -62,7 +77,13 @@ pub struct SharedLocks {
 // Linux / FreeBSD: robust process-shared pthread mutexes in the lock file.
 // ===========================================================================
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+)))]
 mod imp {
     use super::*;
 
@@ -203,30 +224,75 @@ mod imp {
 }
 
 // ===========================================================================
-// macOS: POSIX named semaphores, named in (v1) or after (v2) the lock file.
+// macOS, OpenBSD, NetBSD, DragonFly: POSIX named semaphores, named in (v1)
+// or after (v2) the lock file; on the three BSDs, a SysV set for v2.
 // ===========================================================================
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 mod imp {
     use super::*;
     use std::ffi::CString;
     use std::os::unix::fs::MetadataExt;
 
+    /// One of the two shared locks: a POSIX named semaphore, or one
+    /// semaphore of a SysV set (version 2 lock files on OpenBSD, NetBSD and
+    /// DragonFly).
+    pub struct SharedMutex(Lock);
+
+    enum Lock {
+        Named(NamedSemaphore),
+        #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+        SysV(super::sysv::SysVSemaphore),
+    }
+
+    impl SharedMutex {
+        /// Locks the semaphore, blocking.
+        pub fn lock(&self) -> io::Result<LockStatus> {
+            match &self.0 {
+                Lock::Named(s) => s.lock(),
+                #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+                Lock::SysV(s) => s.lock(),
+            }
+        }
+
+        /// Unlocks the semaphore.
+        pub fn unlock(&self) -> io::Result<()> {
+            match &self.0 {
+                Lock::Named(s) => s.unlock(),
+                #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+                Lock::SysV(s) => s.unlock(),
+            }
+        }
+
+        /// Nothing to do: named semaphores are not robust, and a SysV
+        /// semaphore's flag is already set again by the new holder
+        /// (`mdb_mutex_consistent` is 0 with `MDB_USE_SYSV_SEM`).
+        pub fn mark_consistent(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// A POSIX named semaphore with initial value 1, used as a mutex.
-    pub struct SharedMutex {
+    struct NamedSemaphore {
         sem: *mut libc::sem_t,
         name: CString,
     }
 
     // SAFETY: semaphore handles may be used from any thread.
-    unsafe impl Send for SharedMutex {}
+    unsafe impl Send for NamedSemaphore {}
     // SAFETY: sem_wait/sem_post are thread-safe.
-    unsafe impl Sync for SharedMutex {}
+    unsafe impl Sync for NamedSemaphore {}
 
-    impl SharedMutex {
+    impl NamedSemaphore {
         /// Locks (waits on) the semaphore, retrying on `EINTR` like
         /// `mdb_sem_wait`.
-        pub fn lock(&self) -> io::Result<LockStatus> {
+        fn lock(&self) -> io::Result<LockStatus> {
             loop {
                 // SAFETY: self.sem is an open semaphore handle until drop.
                 let rc = unsafe { libc::sem_wait(self.sem) };
@@ -241,7 +307,7 @@ mod imp {
         }
 
         /// Unlocks (posts) the semaphore.
-        pub fn unlock(&self) -> io::Result<()> {
+        fn unlock(&self) -> io::Result<()> {
             // SAFETY: open semaphore handle.
             if unsafe { libc::sem_post(self.sem) } == 0 {
                 Ok(())
@@ -250,12 +316,7 @@ mod imp {
             }
         }
 
-        /// Semaphores are not robust; nothing to do.
-        pub fn mark_consistent(&self) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn open(name: CString, create_mode: Option<u32>) -> io::Result<SharedMutex> {
+        fn open(name: CString, create_mode: Option<u32>) -> io::Result<NamedSemaphore> {
             // SAFETY: name is a valid NUL-terminated string. sem_open is
             // variadic: mode and value are passed as unsigned ints, as the C
             // default argument promotions require.
@@ -273,7 +334,7 @@ mod imp {
             if sem == libc::SEM_FAILED {
                 return Err(io::Error::last_os_error());
             }
-            Ok(SharedMutex { sem, name })
+            Ok(NamedSemaphore { sem, name })
         }
 
         fn unlink(name: &CString) {
@@ -284,7 +345,7 @@ mod imp {
         }
     }
 
-    impl Drop for SharedMutex {
+    impl Drop for NamedSemaphore {
         fn drop(&mut self) {
             // SAFETY: the handle came from sem_open and is closed once.
             unsafe {
@@ -315,6 +376,11 @@ mod imp {
 
     const A85: &[u8; 85] =
         b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
+
+    /// How many characters of `mdb_hash_enc`'s 10 a version 1 name keeps:
+    /// NetBSD drops the last one, for a 14-character name
+    /// (`MDB_SHORT_SEMNAMES`, mdb.c lines 4999-5013).
+    const NAME_HASH_LEN: usize = if cfg!(target_os = "netbsd") { 9 } else { 10 };
 
     /// `mdb_pack85` of LMDB 0.9: five base-85 digits of `l`, least
     /// significant first.
@@ -359,16 +425,21 @@ mod imp {
         String::from_utf8(out).unwrap_or_default()
     }
 
-    /// The bytes C hashes: `struct { dev_t dev; ino_t ino; }`. On macOS
-    /// `dev_t` is 4 bytes and `ino_t` 8, so the C struct has 4 bytes of
-    /// padding. LMDB 0.9 leaves them *uninitialised*, so its names are not
-    /// reproducible, which is why every opener after the first reads them
-    /// from the lock file; LMDB 1.0 zeroes the struct first (mdb10.c line
-    /// 6075) but still stores the hash rather than have others recompute
-    /// it. We use zero padding.
+    /// The bytes C hashes: `struct { dev_t dev; ino_t ino; }`. `ino_t` has
+    /// 8 bytes on every platform here, so `ino` is at offset 8; `dev_t` has
+    /// 4 on macOS, OpenBSD and DragonFly (then 4 bytes of padding) and 8 on
+    /// NetBSD. LMDB 0.9 leaves the padding *uninitialised*, so its names
+    /// are not reproducible, which is why every opener after the first
+    /// reads them from the lock file; LMDB 1.0 zeroes the struct first
+    /// (mdb10.c line 6075) but still stores the hash rather than have
+    /// others recompute it. We use zero padding.
     pub fn lock_file_id_bytes(dev: u64, ino: u64) -> [u8; 16] {
+        const _: () = assert!(
+            std::mem::size_of::<libc::dev_t>() <= 8 && std::mem::size_of::<libc::ino_t>() == 8
+        );
         let mut b = [0u8; 16];
-        b[0..4].copy_from_slice(&(dev as i32).to_ne_bytes());
+        let dev = (dev as libc::dev_t).to_ne_bytes();
+        b[..dev.len()].copy_from_slice(&dev);
         b[8..16].copy_from_slice(&ino.to_ne_bytes());
         b
     }
@@ -394,7 +465,8 @@ mod imp {
         /// Creates both semaphores for a lock file of layout `layout` that
         /// we hold exclusively, and records in it what the other openers
         /// need to find them (`mdb_env_setup_locks`, `*excl > 0`): the names
-        /// (version 1) or the hash they are derived from (version 2).
+        /// (version 1), the hash they are derived from (version 2, macOS)
+        /// or the id of the SysV set (version 2, the other BSDs).
         pub fn create(
             map: &LockMap,
             file: &File,
@@ -406,6 +478,7 @@ mod imp {
             let (rname, wname) = match (layout.objects, layout.wlock) {
                 (LockObjects::SemaphoreNames, Some(wlock)) => {
                     let enc = hash_enc(&id);
+                    let enc = &enc[..NAME_HASH_LEN];
                     let rname = CString::new(format!("/MDBr{enc}")).map_err(|_| einval())?;
                     let wname = CString::new(format!("/MDBw{enc}")).map_err(|_| einval())?;
                     if rname.as_bytes_with_nul().len() > layout.rlock_size {
@@ -423,19 +496,25 @@ mod imp {
                         mutex_name_v10(mutex_id, b'w')?,
                     )
                 }
+                #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+                (LockObjects::SysVSemaphores, Some(wlock)) if layout.rlock_size == 8 => {
+                    let (r, w) = super::sysv::create(map, &md, mode, layout.rlock, wlock)?;
+                    return Ok(SharedLocks::sysv(r, w));
+                }
                 _ => return Err(einval()),
             };
             // Clean up after a previous run, if needed.
-            SharedMutex::unlink(&rname);
-            SharedMutex::unlink(&wname);
-            let rmutex = SharedMutex::open(rname, Some(mode))?;
-            let wmutex = SharedMutex::open(wname, Some(mode))?;
-            Ok(SharedLocks { rmutex, wmutex })
+            NamedSemaphore::unlink(&rname);
+            NamedSemaphore::unlink(&wname);
+            let rmutex = NamedSemaphore::open(rname, Some(mode))?;
+            let wmutex = NamedSemaphore::open(wname, Some(mode))?;
+            Ok(SharedLocks::named(rmutex, wmutex))
         }
 
         /// Opens the semaphores another process created: named in the
-        /// lock file (version 1), or named after the hash stored in it
-        /// (version 2).
+        /// lock file (version 1), named after the hash stored in it
+        /// (version 2, macOS), or the SysV set whose id is stored in it
+        /// (version 2, the other BSDs).
         pub fn attach(map: &LockMap, layout: &LockLayout) -> io::Result<SharedLocks> {
             let (rname, wname) = match (layout.objects, layout.wlock) {
                 (LockObjects::SemaphoreNames, Some(wlock)) => (
@@ -449,22 +528,56 @@ mod imp {
                         mutex_name_v10(mutex_id, b'w')?,
                     )
                 }
+                #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+                (LockObjects::SysVSemaphores, Some(wlock)) if layout.rlock_size == 8 => {
+                    let (r, w) = super::sysv::attach(map, layout.rlock, wlock)?;
+                    return Ok(SharedLocks::sysv(r, w));
+                }
                 _ => return Err(einval()),
             };
-            let rmutex = SharedMutex::open(rname, None)?;
-            let wmutex = SharedMutex::open(wname, None)?;
-            Ok(SharedLocks { rmutex, wmutex })
+            let rmutex = NamedSemaphore::open(rname, None)?;
+            let wmutex = NamedSemaphore::open(wname, None)?;
+            Ok(SharedLocks::named(rmutex, wmutex))
+        }
+
+        fn named(rmutex: NamedSemaphore, wmutex: NamedSemaphore) -> SharedLocks {
+            SharedLocks {
+                rmutex: SharedMutex(Lock::Named(rmutex)),
+                wmutex: SharedMutex(Lock::Named(wmutex)),
+            }
+        }
+
+        #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+        fn sysv(rmutex: super::sysv::SysVSemaphore, wmutex: super::sysv::SysVSemaphore) -> Self {
+            SharedLocks {
+                rmutex: SharedMutex(Lock::SysV(rmutex)),
+                wmutex: SharedMutex(Lock::SysV(wmutex)),
+            }
         }
 
         /// Closes both semaphores; if we are the last user of the
         /// environment (`last_user`, i.e. we could take the exclusive file
-        /// lock), also unlinks them, as `mdb_env_close0` does.
+        /// lock), also removes them, as `mdb_env_close0` does: `sem_unlink`
+        /// of the named ones, `IPC_RMID` of the SysV set.
         pub fn close(self, last_user: bool) {
-            let names = (self.rmutex.name.clone(), self.wmutex.name.clone());
-            drop(self);
-            if last_user {
-                SharedMutex::unlink(&names.0);
-                SharedMutex::unlink(&names.1);
+            match (self.rmutex.0, self.wmutex.0) {
+                (Lock::Named(r), Lock::Named(w)) => {
+                    let names = (r.name.clone(), w.name.clone());
+                    drop((r, w));
+                    if last_user {
+                        NamedSemaphore::unlink(&names.0);
+                        NamedSemaphore::unlink(&names.1);
+                    }
+                }
+                #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+                (Lock::SysV(r), _) => {
+                    if last_user {
+                        r.remove();
+                    }
+                }
+                // Never built: both locks are always of one kind.
+                #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+                (Lock::Named(_), Lock::SysV(_)) => {}
             }
         }
     }
@@ -492,6 +605,27 @@ mod imp {
             assert_eq!(out, b"12000");
         }
 
+        /// The hashed struct: `dev` in the platform's `dev_t`, `ino` at 8.
+        #[test]
+        fn lock_file_id_layout() {
+            let b = lock_file_id_bytes(0x0100_0004, 0x1122_3344_5566_7788);
+            let dev = (0x0100_0004u64 as libc::dev_t).to_ne_bytes();
+            assert_eq!(&b[..dev.len()], &dev[..]);
+            assert!(b[dev.len()..8].iter().all(|&x| x == 0));
+            assert_eq!(&b[8..], &0x1122_3344_5566_7788u64.to_ne_bytes()[..]);
+        }
+
+        /// A version 1 name fits `mtb_rmname` with its NUL: 15 characters,
+        /// 14 on NetBSD (C's limit there).
+        #[test]
+        fn v09_name_length() {
+            let enc = hash_enc(&lock_file_id_bytes(1, 2));
+            let name = format!("/MDBr{}", &enc[..NAME_HASH_LEN]);
+            let want = if cfg!(target_os = "netbsd") { 14 } else { 15 };
+            assert_eq!(name.len(), want);
+            assert!(name.len() < crate::format::lockfile::MNAME_LEN);
+        }
+
         /// 1.0's names: `"/MDB"`, the lock letter, then the hash in up to
         /// ten base-85 digits, least significant first, without trailing
         /// zero digits (mdb10.c `mdb_pack85`, `MUTEXNAME`).
@@ -515,6 +649,342 @@ mod imp {
                 l /= 85;
             }
             assert_eq!(&max[5..], &digits[..]);
+        }
+    }
+}
+
+// ===========================================================================
+// OpenBSD, NetBSD, DragonFly, version 2: a SysV semaphore set.
+// ===========================================================================
+
+/// The SysV semaphore set of a version 2 lock file on OpenBSD, NetBSD and
+/// DragonFly (`MDB_USE_SYSV_SEM`, mdb10.c lines 452-481, 6096-6110,
+/// 6165-6182 and 6565-6574). Also built for the unit tests on macOS, which
+/// has the same interface, so the protocol runs on a real kernel there.
+#[cfg(any(
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly",
+    all(test, any(target_os = "macos", target_os = "ios"))
+))]
+mod sysv {
+    use super::{LockMap, LockStatus};
+    use libc::{c_int, c_short, c_ushort};
+    use std::fs::Metadata;
+    use std::io;
+    use std::mem::size_of;
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    use libc::{sembuf, semctl, semget, semop, SEM_UNDO, SETALL};
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    use ffi::{sembuf, semctl, semget, semop, SEM_UNDO, SETALL};
+
+    /// The SysV semaphore calls, which the `libc` crate does not bind for
+    /// these BSDs. Prototypes and values from their `<sys/sem.h>` (the
+    /// values are 4.4BSD's, the same on all three).
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    mod ffi {
+        use libc::{c_int, c_short, c_ushort};
+
+        /// `struct sembuf`.
+        #[repr(C)]
+        #[allow(non_camel_case_types)]
+        pub struct sembuf {
+            pub sem_num: c_ushort,
+            pub sem_op: c_short,
+            pub sem_flg: c_short,
+        }
+
+        /// `SEM_UNDO`: undo the operation when the process exits.
+        pub const SEM_UNDO: c_int = 0o10000;
+        /// `SETALL`: set every value from `arg.array`.
+        pub const SETALL: c_int = 9;
+
+        extern "C" {
+            pub fn semget(key: libc::key_t, nsems: c_int, semflg: c_int) -> c_int;
+            // NetBSD's <sys/sem.h> renames it for the semid_ds with a
+            // 64-bit time_t: `__RENAME(__semctl50)`.
+            #[cfg_attr(target_os = "netbsd", link_name = "__semctl50")]
+            pub fn semctl(semid: c_int, semnum: c_int, cmd: c_int, ...) -> c_int;
+            #[cfg(not(target_os = "dragonfly"))]
+            pub fn semop(semid: c_int, sops: *mut sembuf, nsops: libc::size_t) -> c_int;
+            #[cfg(target_os = "dragonfly")]
+            pub fn semop(semid: c_int, sops: *mut sembuf, nsops: libc::c_uint) -> c_int;
+        }
+    }
+
+    /// The semaphore of the reader lock in the set (`me_rmutex->semnum`).
+    const READER: c_ushort = 0;
+    /// The semaphore of the writer lock in the set (`me_wmutex->semnum`).
+    const WRITER: c_ushort = 1;
+
+    /// Room for a `struct semid_ds`, which `IPC_STAT` fills and `IPC_SET`
+    /// reads back; larger than it on every platform here (about 100 bytes).
+    #[repr(C, align(8))]
+    struct SemidDs([u8; 512]);
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    const _: () = assert!(size_of::<libc::semid_ds>() <= size_of::<SemidDs>());
+
+    /// One semaphore of the set, used as a mutex (`struct mdb_mutex`): the
+    /// set's id, the semaphore's number, and the flag in the lock file
+    /// (`mti_rlocked` or `mti_wlocked`) that is 1 while it is held.
+    pub struct SysVSemaphore {
+        semid: c_int,
+        semnum: c_ushort,
+        locked: *mut i32,
+    }
+
+    // SAFETY: a SysV semaphore may be used from any thread. `locked` points
+    // into the lock-file mapping, which outlives this value (LockRegion
+    // closes its SharedLocks before its LockMap is unmapped, as for the
+    // pthread mutexes), and is only accessed atomically.
+    unsafe impl Send for SysVSemaphore {}
+    // SAFETY: as above; semop is thread-safe.
+    unsafe impl Sync for SysVSemaphore {}
+
+    impl SysVSemaphore {
+        fn new(map: &LockMap, semid: c_int, semnum: c_ushort, flag: usize) -> SysVSemaphore {
+            let locked = map.raw_ptr(flag, size_of::<i32>(), size_of::<i32>()) as *mut i32;
+            SysVSemaphore {
+                semid,
+                semnum,
+                locked,
+            }
+        }
+
+        fn locked(&self) -> &AtomicI32 {
+            // SAFETY: `raw_ptr` checked that the int is inside the mapping
+            // and 4-byte aligned; the mapping is live (see the Send impl)
+            // and every access to the flag is atomic.
+            unsafe { AtomicI32::from_ptr(self.locked) }
+        }
+
+        /// One `semop` of `op` on our semaphore, with `SEM_UNDO`.
+        fn semop(&self, op: c_short) -> io::Result<()> {
+            let mut sb = sembuf {
+                sem_num: self.semnum,
+                sem_op: op,
+                sem_flg: SEM_UNDO as c_short,
+            };
+            // SAFETY: `sb` is one valid sembuf, which semop only reads.
+            if unsafe { semop(self.semid, &mut sb, 1) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+
+        /// `mdb_sem_wait`: takes the semaphore (retrying on `EINTR`), then
+        /// sets the flag. A flag that was already set was left by a
+        /// holder that died (the kernel undid its `semop`): `OwnerDied`.
+        pub fn lock(&self) -> io::Result<LockStatus> {
+            loop {
+                match self.semop(-1) {
+                    Ok(()) => {
+                        return Ok(if self.locked().swap(1, Ordering::SeqCst) != 0 {
+                            LockStatus::OwnerDied
+                        } else {
+                            LockStatus::Acquired
+                        });
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        /// `UNLOCK_MUTEX`: clears the flag, then releases the semaphore.
+        pub fn unlock(&self) -> io::Result<()> {
+            self.locked().store(0, Ordering::SeqCst);
+            self.semop(1)
+        }
+
+        /// `semctl(IPC_RMID)`: removes the whole set (both semaphores).
+        pub fn remove(&self) {
+            // SAFETY: IPC_RMID takes no further argument; failure (the set
+            // is gone already) is ignored, as in C.
+            unsafe {
+                semctl(self.semid, 0, libc::IPC_RMID);
+            }
+        }
+    }
+
+    /// `ftok(lockfile, 'M')` (mdb10.c line 6098), from the lock file's
+    /// `fstat` rather than its path, which is not at hand here: the
+    /// `ftok` of every BSD libc (macOS's included) is
+    /// `(id & 0xff) << 24 | (st_dev & 0xff) << 16 | (st_ino & 0xffff)`.
+    /// The key only picks the set the exclusive opener (re)initialises;
+    /// everyone else uses the id stored in the lock file.
+    pub fn ftok_key(md: &Metadata) -> libc::key_t {
+        let key = (u32::from(b'M') << 24)
+            | (((md.dev() & 0xff) as u32) << 16)
+            | ((md.ino() & 0xffff) as u32);
+        key as libc::key_t
+    }
+
+    /// The pair of locks on set `semid`, with their flags at `rlock +
+    /// sizeof(int)` (`mti_rlocked`) and `wlock` (`mti_wlocked`).
+    fn pair(
+        map: &LockMap,
+        semid: c_int,
+        rlock: usize,
+        wlock: usize,
+    ) -> (SysVSemaphore, SysVSemaphore) {
+        (
+            SysVSemaphore::new(map, semid, READER, rlock + size_of::<c_int>()),
+            SysVSemaphore::new(map, semid, WRITER, wlock),
+        )
+    }
+
+    /// Creates (or reuses) the set for a lock file that we hold
+    /// exclusively and whose metadata is `md`, sets both semaphores to 1,
+    /// and stores its id at `rlock` (`mti_semid`) and cleared flags
+    /// (`mdb_env_setup_locks`, `*excl > 0`).
+    pub fn create(
+        map: &LockMap,
+        md: &Metadata,
+        mode: u32,
+        rlock: usize,
+        wlock: usize,
+    ) -> io::Result<(SysVSemaphore, SysVSemaphore)> {
+        // SAFETY: semget takes plain integers.
+        let semid = unsafe { semget(ftok_key(md), 2, (mode & 0o777) as c_int | libc::IPC_CREAT) };
+        if semid < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut vals: [c_ushort; 2] = [1, 1];
+        // SAFETY: SETALL reads one value per semaphore (2) from
+        // `arg.array`. The `union semun` argument is passed as the pointer
+        // it holds: the C ABIs pass a pointer-sized union like a pointer.
+        if unsafe { semctl(semid, 0, SETALL, vals.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        map.store_i32(rlock, semid);
+        map.store_i32(rlock + size_of::<c_int>(), 0);
+        map.store_i32(wlock, 0);
+        Ok(pair(map, semid, rlock, wlock))
+    }
+
+    /// Uses the set whose id another process stored at `rlock`, after
+    /// checking, as C does, that we may read it (`IPC_STAT`) and change it
+    /// (`IPC_SET`, which only its owner, its creator and root pass).
+    pub fn attach(
+        map: &LockMap,
+        rlock: usize,
+        wlock: usize,
+    ) -> io::Result<(SysVSemaphore, SysVSemaphore)> {
+        let semid = map.load_i32(rlock);
+        let mut buf = SemidDs([0; 512]);
+        for cmd in [libc::IPC_STAT, libc::IPC_SET] {
+            // SAFETY: IPC_STAT writes and IPC_SET reads one struct
+            // semid_ds through `arg.buf`, passed as the pointer (see
+            // `create`); `buf` is larger than that struct and aligned.
+            if unsafe { semctl(semid, 0, cmd, buf.0.as_mut_ptr()) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(pair(map, semid, rlock, wlock))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        /// `semctl(GETVAL)` (5 on every BSD and macOS), for the tests.
+        const GETVAL: c_int = 5;
+
+        /// Where the tests put the set: `mtb_semid` at 20, `mt2_wlocked`
+        /// at 64, as in the version 2 layout of these BSDs.
+        const RLOCK: usize = 20;
+        const WLOCK: usize = 64;
+
+        /// Removes the set when a test ends, even by panicking.
+        struct Remove(c_int);
+
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                // SAFETY: IPC_RMID takes no further argument.
+                unsafe {
+                    semctl(self.0, 0, libc::IPC_RMID);
+                }
+            }
+        }
+
+        fn value(semid: c_int, semnum: c_ushort) -> c_int {
+            // SAFETY: GETVAL takes no further argument.
+            unsafe { semctl(semid, c_int::from(semnum), GETVAL) }
+        }
+
+        #[test]
+        fn ftok_matches_libc() {
+            let f = tempfile::NamedTempFile::new().unwrap();
+            let path = CString::new(f.path().as_os_str().as_bytes()).unwrap();
+            // SAFETY: a valid NUL-terminated path.
+            let want = unsafe { libc::ftok(path.as_ptr(), c_int::from(b'M')) };
+            assert_ne!(want, -1);
+            assert_eq!(ftok_key(&f.as_file().metadata().unwrap()), want);
+        }
+
+        /// Lock, unlock, a second handle on the set, and the robustness:
+        /// a process that dies holding the writer lock leaves it free and
+        /// its flag set, and the next holder is told.
+        #[test]
+        fn protocol() {
+            let f = tempfile::tempfile().unwrap();
+            f.set_len(4096).unwrap();
+            let map = LockMap::map(&f, 4096).unwrap();
+            let (r, w) = create(&map, &f.metadata().unwrap(), 0o600, RLOCK, WLOCK).unwrap();
+            let _remove = Remove(r.semid);
+            assert_eq!(map.load_i32(RLOCK), r.semid);
+            assert_eq!((value(r.semid, READER), value(r.semid, WRITER)), (1, 1));
+
+            assert_eq!(r.lock().unwrap(), LockStatus::Acquired);
+            assert_eq!(map.load_i32(RLOCK + 4), 1);
+            assert_eq!(value(r.semid, READER), 0);
+            r.unlock().unwrap();
+            assert_eq!(map.load_i32(RLOCK + 4), 0);
+            assert_eq!(value(r.semid, READER), 1);
+
+            // Another opener finds the set through the stored id.
+            let (_r2, w2) = attach(&map, RLOCK, WLOCK).unwrap();
+            assert_eq!(w2.semid, w.semid);
+            assert_eq!(w2.lock().unwrap(), LockStatus::Acquired);
+            assert_eq!(map.load_i32(WLOCK), 1);
+            w2.unlock().unwrap();
+
+            // A child takes the writer lock and exits without releasing it.
+            // SAFETY: the child only calls semop (through `lock`, which
+            // does not allocate on success) and _exit.
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0);
+            if pid == 0 {
+                let ok = w.lock().is_ok();
+                // SAFETY: ends the child without running the parent's
+                // destructors or atexit handlers.
+                unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+            }
+            let mut status = 0;
+            // SAFETY: waits for our own child.
+            assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+            assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+            // SEM_UNDO gave the semaphore back; the flag is still set.
+            assert_eq!(value(w.semid, WRITER), 1);
+            assert_eq!(map.load_i32(WLOCK), 1);
+            assert_eq!(w.lock().unwrap(), LockStatus::OwnerDied);
+            w.unlock().unwrap();
+            assert_eq!(w.lock().unwrap(), LockStatus::Acquired);
+            w.unlock().unwrap();
+
+            // The last user removes the set.
+            r.remove();
+            assert_eq!(value(r.semid, READER), -1);
+            assert!(attach(&map, RLOCK, WLOCK).is_err());
         }
     }
 }

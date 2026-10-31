@@ -32,9 +32,7 @@ use std::time::Duration;
 use interop::tools::{c_layout, c_layout10, run_tool_any_status, MdbStat, ReaderEntry};
 use interop::{bins, Output, Peer, PeerProcess, TestEnv};
 use rlmdb::consts::{DEFAULT_READERS, MDB_MAGIC};
-use rlmdb::format::lockfile::{
-    LockLayout, LockObjects, TxnInfoSnapshot, LOCK_V09, LOCK_V10, USES_NAMED_SEMAPHORES,
-};
+use rlmdb::format::lockfile::{LockLayout, LockObjects, TxnInfoSnapshot, LOCK_V09, LOCK_V10};
 use rlmdb::{Environment, EnvironmentFlags, Error, Format, MdbError, ReaderInfo, Transaction};
 
 /// How long a peer that must wait for a lock is given to (wrongly) get it.
@@ -52,12 +50,9 @@ fn lock_file_lines_match_c() {
             "layout_dump10",
         ),
     ] {
-        let expected_mode = if USES_NAMED_SEMAPHORES {
-            "posix_sem"
-        } else {
-            "posix_mutex"
-        };
-        assert_eq!(c.lock_mode, expected_mode, "{tool}");
+        // One mode per version: the BSDs other than FreeBSD use named
+        // semaphores for 0.9 and a SysV set for 1.0.
+        assert_eq!(c.lock_mode, lock_lines::lock_mode(layout), "{tool}");
         let mismatches = lock_lines::lock_line_mismatches(c, layout);
         assert!(
             mismatches.is_empty(),

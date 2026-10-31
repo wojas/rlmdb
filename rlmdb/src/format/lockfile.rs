@@ -20,6 +20,14 @@
 //!   stores their 32-byte *names* (`MNAME_LEN == 32`); version 2 stores a
 //!   64-bit hash, `mtb_mutexid`, that the names are derived from, and has no
 //!   second cache line for the writer lock.
+//! * **OpenBSD, NetBSD, DragonFly** (mdb.c lines 143-149, mdb10.c lines
+//!   192-203): version 1 as on macOS (named semaphores, `MNAME_LEN == 32`;
+//!   NetBSD names are one character shorter). Version 2 uses a SysV
+//!   semaphore set (`MDB_USE_SYSV_SEM`): its id `mtb_semid` and a flag
+//!   `mtb_rlocked` in `mt1`, the flag `mt2_wlocked` in `mt2`
+//!   (`MNAME_LEN == sizeof(int)`). FreeBSD is Linux's case, with an 8-byte
+//!   `pthread_mutex_t` (a pointer; the mutex itself lives in a kernel object
+//!   keyed by its address).
 //!
 //! ```text
 //! Version 1 (LMDB 0.9), MDB_txninfo:
@@ -61,6 +69,17 @@
 //! | writer lock | 64 | none | 128 | 128 | 64 | 64 |
 //! | `mti_readers` | 128 | 64 | 192 | 192 | 128 | 128 |
 //!
+//! The BSDs, computed from the C declarations, not measured (64-bit; no
+//! `layout_dump` has run there yet):
+//!
+//! | | FreeBSD v1 | FreeBSD v2 | Open/Net/DragonFly v1 | v2 (SysV) |
+//! |---|---|---|---|---|
+//! | `mti_format` | `0x10001` | `0x2986c002` | `0x10001` | `0x2889a002` |
+//! | `mti_txnid`, `mti_numreaders` | 16, 24 | 8, 16 | 40, 48 | 8, 16 |
+//! | reader lock: offset, size | 8, 8 | 24, 8 | 8, 32 | 20, 8 |
+//! | writer lock | 64 | 64 | 64 | 64 |
+//! | `mti_readers` | 128 | 128 | 128 | 128 |
+//!
 //! The file size is `readers + maxreaders * 64`
 //! (`(maxreaders-1) * sizeof(MDB_reader) + sizeof(MDB_txninfo)`).
 //!
@@ -90,8 +109,16 @@ const fn log2_mod(p2: usize, n: u32) -> usize {
     7 - 86 / (p2 % ((1 << n) - 1) + 11)
 }
 
-/// `true` where the C build uses POSIX named semaphores (`MDB_USE_POSIX_SEM`).
-pub const USES_NAMED_SEMAPHORES: bool = cfg!(any(target_os = "macos", target_os = "ios"));
+/// `true` where the C 0.9 build uses POSIX named semaphores
+/// (`MDB_USE_POSIX_SEM`). C 1.0 uses them only on macOS; the other BSDs
+/// switch to SysV semaphores ([`LOCK_V10`]`.objects`).
+pub const USES_NAMED_SEMAPHORES: bool = cfg!(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+));
 
 /// How the two shared locks of an environment are kept in the lock file
 /// (`MDB_USE_POSIX_MUTEX` or `MDB_USE_POSIX_SEM` in mdb.c).
@@ -111,6 +138,29 @@ pub enum LockObjects {
     /// 5920-5945). The hash is read from the file; only the exclusive
     /// opener computes it.
     SemaphoreHash,
+    /// A SysV semaphore set of two (reader 0, writer 1), whose id
+    /// `mtb_semid` (an `int`) is at [`LockLayout::rlock`], followed by the
+    /// `int` flag `mtb_rlocked`; the writer's flag `mt2_wlocked` is at
+    /// [`LockLayout::wlock`] (OpenBSD, NetBSD, DragonFly, version 2:
+    /// `MDB_USE_SYSV_SEM`, mdb10.c lines 452-481 and 6096-6110). A flag is
+    /// set while its semaphore is held; `SEM_UNDO` releases the semaphore
+    /// of a process that dies holding it, and the flag it leaves set tells
+    /// the next holder (`MDB_OWNERDEAD`). The id is read from the file;
+    /// only the exclusive opener creates the set.
+    SysVSemaphores,
+}
+
+impl LockObjects {
+    /// `true` if the objects outlive the processes using them, so the last
+    /// one to close the environment removes them (`mdb_env_close0`):
+    /// `sem_unlink` of the named semaphores, `IPC_RMID` of the SysV set.
+    /// Process-shared mutexes live in the lock file and need nothing.
+    pub const fn removed_by_last_user(self) -> bool {
+        matches!(
+            self,
+            LockObjects::SemaphoreNames | LockObjects::SemaphoreHash | LockObjects::SysVSemaphores
+        )
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -141,7 +191,7 @@ mod platform {
     use super::LockObjects;
 
     /// `MNAME_LEN` with `MDB_USE_POSIX_MUTEX`: `sizeof(pthread_mutex_t)`
-    /// (40 on x86-64 glibc, 48 on aarch64 glibc).
+    /// (40 on x86-64 glibc, 48 on aarch64 glibc, 8 on FreeBSD).
     pub const MNAME_LEN: usize = core::mem::size_of::<libc::pthread_mutex_t>();
     /// `alignof(pthread_mutex_t)`.
     pub const MUTEX_ALIGN: usize = core::mem::align_of::<libc::pthread_mutex_t>();
@@ -155,15 +205,43 @@ mod platform {
     pub const LOCK_TYPE_V2: usize = super::lock_type_posix_mutex(MNAME_LEN, MUTEX_ALIGN);
 }
 
+#[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+mod platform {
+    use super::LockObjects;
+
+    /// `MNAME_LEN` of version 1 with `MDB_USE_POSIX_SEM`, which C 0.9
+    /// selects for every BSD but FreeBSD (`defined(BSD)`, mdb.c line 143).
+    pub const MNAME_LEN: usize = 32;
+    /// Alignment of the version 1 `mtb_rmname` member (a `char` array).
+    pub const MUTEX_ALIGN: usize = 1;
+    /// The shared locks of version 1.
+    pub const OBJECTS_V1: LockObjects = LockObjects::SemaphoreNames;
+    /// The shared locks of version 2: C 1.0 selects `MDB_USE_SYSV_SEM`
+    /// for these BSDs (mdb10.c lines 192-198).
+    pub const OBJECTS_V2: LockObjects = LockObjects::SysVSemaphores;
+    /// Size and alignment of the version 2 reader lock fields,
+    /// `int mtb_semid` and `int mtb_rlocked`.
+    pub const RLOCK_V2: (usize, usize) = (
+        2 * core::mem::size_of::<core::ffi::c_int>(),
+        core::mem::align_of::<core::ffi::c_int>(),
+    );
+    /// `MDB_LOCK_TYPE` of version 2 with `MDB_USE_SYSV_SEM` (mdb10.c line
+    /// 982).
+    pub const LOCK_TYPE_V2: usize = 8;
+}
+
 #[cfg(not(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "linux",
     target_os = "android",
-    target_os = "freebsd"
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
 )))]
 compile_error!(
-    "lmdb: unsupported platform; the lock file layout is only known for Linux, FreeBSD and macOS"
+    "lmdb: unsupported platform; the lock file layout is only known for Linux, macOS and the BSDs"
 );
 
 // --- version 1 (LMDB 0.9) -------------------------------------------------
@@ -221,7 +299,8 @@ const LOCK_VERSION_BITS: u32 = 12;
 const V2_TXNID: usize = 8;
 /// Offset of `mti_numreaders` (version 2).
 const V2_NUMREADERS: usize = 16;
-/// Offset of `mtb_rmutex` / `mtb_mutexid`, the last member (version 2).
+/// Offset of `mtb_rmutex` / `mtb_mutexid` / `mtb_semid`, the last
+/// member(s) (version 2).
 const V2_RLOCK: usize = align_up(V2_NUMREADERS + 4, platform::RLOCK_V2.1);
 /// `sizeof(MDB_txbody)` (version 2).
 const V2_TXBODY: usize = align_up(
@@ -230,12 +309,27 @@ const V2_TXBODY: usize = align_up(
 );
 /// Size of the `mt1` union (version 2).
 const V2_HEADER: usize = align_up(V2_TXBODY, CACHELINE);
+/// `true` if version 2 has the `mt2` union for the writer lock: with
+/// pthread mutexes and SysV semaphores, not with named semaphores
+/// (`#if !(defined(_WIN32) || defined(MDB_USE_POSIX_SEM))`, mdb10.c line
+/// 953).
+const V2_HAS_MT2: bool = matches!(
+    platform::OBJECTS_V2,
+    LockObjects::PthreadMutexes | LockObjects::SysVSemaphores
+);
+/// `MNAME_LEN` of version 2, the size of the member of `mt2`:
+/// `sizeof(int)` (`mt2_wlocked`) with SysV semaphores, else
+/// `sizeof(pthread_mutex_t)` (mdb10.c lines 535-539).
+const V2_MNAME_LEN: usize = match platform::OBJECTS_V2 {
+    LockObjects::SysVSemaphores => core::mem::size_of::<core::ffi::c_int>(),
+    _ => MNAME_LEN,
+};
 /// Offset of `mti_readers[0]` (version 2): there is no `mt2` with named
 /// semaphores.
-const V2_READERS: usize = if USES_NAMED_SEMAPHORES {
-    V2_HEADER
+const V2_READERS: usize = if V2_HAS_MT2 {
+    V2_HEADER + align_up(V2_MNAME_LEN, CACHELINE)
 } else {
-    V2_HEADER + align_up(MNAME_LEN, CACHELINE)
+    V2_HEADER
 };
 
 /// `MDB_LOCK_TYPE` with `MDB_USE_POSIX_SEM` (mdb10.c line 980):
@@ -248,7 +342,16 @@ const fn lock_type_posix_sem(hash_align: usize) -> usize {
 /// `MDB_LOCK_TYPE` with `MDB_USE_POSIX_MUTEX` (mdb10.c line 987): only the
 /// size and alignment of `pthread_mutex_t` are checked,
 /// `10 + LOG2_MOD(ALIGNOF2(pthread_mutex_t), 5) + sizeof(pthread_mutex_t) / 4 % 22 * 5`.
-#[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(dead_code))]
+#[cfg_attr(
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ),
+    allow(dead_code)
+)]
 const fn lock_type_posix_mutex(size: usize, align: usize) -> usize {
     10 + log2_mod(align, 5) + size / 4 % 22 * 5
 }
@@ -323,14 +426,16 @@ pub struct LockLayout {
     pub txnid: usize,
     /// Offset of `mti_numreaders` (u32).
     pub num_readers: usize,
-    /// Offset of the reader lock field: `mti_rmutex` (Linux), `mti_rmname`
-    /// (macOS, version 1) or `mti_mutexid` (macOS, version 2).
+    /// Offset of the reader lock field: `mti_rmutex` (Linux, FreeBSD),
+    /// `mti_rmname` (named semaphores, version 1), `mti_mutexid` (macOS,
+    /// version 2) or `mti_semid` followed by `mti_rlocked` (the other BSDs,
+    /// version 2).
     pub rlock: usize,
     /// Size of the reader lock field.
     pub rlock_size: usize,
-    /// Offset of the writer lock field `mti_wmutex` / `mti_wmname` (the
-    /// `mt2` union), which has [`MNAME_LEN`] bytes; `None` where there is
-    /// none (macOS, version 2).
+    /// Offset of the writer lock field `mti_wmutex` / `mti_wmname` /
+    /// `mti_wlocked` (the `mt2` union); `None` where there is none (macOS,
+    /// version 2).
     pub wlock: Option<usize>,
     /// `sizeof(MDB_txbody)`.
     pub txbody_size: usize,
@@ -367,11 +472,7 @@ pub static LOCK_V10: LockLayout = LockLayout {
     num_readers: V2_NUMREADERS,
     rlock: V2_RLOCK,
     rlock_size: platform::RLOCK_V2.0,
-    wlock: if USES_NAMED_SEMAPHORES {
-        None
-    } else {
-        Some(V2_HEADER)
-    },
+    wlock: if V2_HAS_MT2 { Some(V2_HEADER) } else { None },
     txbody_size: V2_TXBODY,
     header_size: V2_HEADER,
     readers: V2_READERS,
@@ -569,6 +670,13 @@ mod tests {
         let x86_64 = lock_type_posix_mutex(40, 8);
         assert_eq!(x86_64, 63);
         assert_eq!(lock_format_v2(inputs(64, x86_64)), 0x2c2f_6002);
+        // The BSDs, from the C declarations (no layout_dump10 has run
+        // there): FreeBSD's 8-byte pthread_mutex_t, MDB_txbody 32; the
+        // other BSDs' SysV semaphores (MDB_LOCK_TYPE 8), MDB_txbody 32.
+        let freebsd = lock_type_posix_mutex(8, 8);
+        assert_eq!(freebsd, 23);
+        assert_eq!(lock_format_v2(inputs(32, freebsd)), 0x2986_c002);
+        assert_eq!(lock_format_v2(inputs(32, 8)), 0x2889_a002);
         // The CACHELINE term is 0 only for 64-byte cache lines.
         let mut other = inputs(32, sem);
         other.cacheline = 128;
@@ -640,6 +748,66 @@ mod tests {
         assert_eq!(l.header_size, 128);
         assert_eq!(l.wlock, Some(128));
         assert_eq!(l.readers, 192);
+    }
+
+    /// FreeBSD: Linux's layout with an 8-byte `pthread_mutex_t` (computed
+    /// from the C declarations, not measured).
+    #[cfg(all(target_os = "freebsd", target_pointer_width = "64"))]
+    #[test]
+    fn freebsd_layout() {
+        let l = &LOCK_V09;
+        assert_eq!(l.objects, LockObjects::PthreadMutexes);
+        assert_eq!(MNAME_LEN, 8);
+        assert_eq!((l.rlock, l.rlock_size), (8, 8));
+        assert_eq!((l.txnid, l.num_readers), (16, 24));
+        assert_eq!(l.txbody_size, 32);
+        assert_eq!(l.header_size, 64);
+        assert_eq!(l.wlock, Some(64));
+        assert_eq!(l.readers, 128);
+        let l = &LOCK_V10;
+        assert_eq!(l.objects, LockObjects::PthreadMutexes);
+        assert_eq!(l.lock_format, 0x2986_c002);
+        assert_eq!((l.txnid, l.num_readers), (8, 16));
+        assert_eq!((l.rlock, l.rlock_size), (24, 8));
+        assert_eq!(l.txbody_size, 32);
+        assert_eq!(l.header_size, 64);
+        assert_eq!(l.wlock, Some(64));
+        assert_eq!(l.readers, 128);
+    }
+
+    /// OpenBSD, NetBSD, DragonFly: version 1 as on macOS, version 2 with
+    /// SysV semaphores (computed from the C declarations, not measured).
+    #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+    #[test]
+    fn bsd_semaphore_layout() {
+        let l = &LOCK_V09;
+        assert_eq!(l.objects, LockObjects::SemaphoreNames);
+        assert_eq!((l.rlock, l.rlock_size), (8, 32));
+        assert_eq!((l.txnid, l.num_readers), (40, 48));
+        assert_eq!(l.txbody_size, 56);
+        assert_eq!(l.header_size, 64);
+        assert_eq!(l.wlock, Some(64));
+        assert_eq!(l.readers, 128);
+        // Version 2: magic, format, txnid@8, numreaders@16, semid@20,
+        // rlocked@24 -> 28 -> 32; mt2 holds wlocked.
+        let l = &LOCK_V10;
+        assert_eq!(l.objects, LockObjects::SysVSemaphores);
+        assert_eq!(l.lock_format, 0x2889_a002);
+        assert_eq!((l.txnid, l.num_readers), (8, 16));
+        assert_eq!((l.rlock, l.rlock_size), (20, 8));
+        assert_eq!(l.txbody_size, 32);
+        assert_eq!(l.header_size, 64);
+        assert_eq!(l.wlock, Some(64));
+        assert_eq!(l.readers, 128);
+    }
+
+    /// Who removes the shared lock objects when the last user closes.
+    #[test]
+    fn removed_by_last_user() {
+        assert!(!LockObjects::PthreadMutexes.removed_by_last_user());
+        assert!(LockObjects::SemaphoreNames.removed_by_last_user());
+        assert!(LockObjects::SemaphoreHash.removed_by_last_user());
+        assert!(LockObjects::SysVSemaphores.removed_by_last_user());
     }
 
     #[test]
