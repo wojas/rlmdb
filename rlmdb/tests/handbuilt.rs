@@ -9,10 +9,11 @@ mod common;
 
 use common::*;
 use rlmdb::consts::{MDB_DUPSORT, P_INVALID};
+use rlmdb::format::layout::{V09, V10};
 use rlmdb::format::node::{F_DUPDATA, F_SUBDATA};
 use rlmdb::format::page::{NodeData, P_BRANCH, P_DIRTY, P_LEAF, P_SUBP};
-use rlmdb::format::{overflow_pages_for, Db, Meta, PageMut};
-use rlmdb::{Dbi, Error, MdbError, Transaction};
+use rlmdb::format::{overflow_pages_for, Db, Layout, Meta, PageMut};
+use rlmdb::{Dbi, Error, MdbError, Transaction, WriteFlags};
 
 const PS: usize = 4096;
 
@@ -290,15 +291,20 @@ fn corrupt_pages_give_errors_not_panics() {
 /// A file of `PS`-byte pages: the meta pages, then `pages` (page 2 on),
 /// with the main DB record `main`.
 fn file_of(pages: &[Vec<u8>], main: Db) -> Vec<u8> {
-    let mut m0 = Meta::new_env(PS as u32, 1 << 20, 0);
+    file_with(&V09, PS, pages, main)
+}
+
+/// [`file_of`] in the format of `layout`, with pages of `ps` bytes.
+fn file_with(layout: &Layout, ps: usize, pages: &[Vec<u8>], main: Db) -> Vec<u8> {
+    let mut m0 = Meta::new_env_with_layout(layout, ps as u32, 1 << 20, 0);
     m0.dbs[0].root = P_INVALID;
     let mut m1 = m0;
     m1.txnid = 1;
     m1.last_pgno = 1 + pages.len() as u64;
     m1.dbs[1] = main;
-    let mut file = vec![0u8; 2 * PS];
-    m0.write_initial_pages(&mut file, PS);
-    m1.write(&mut file[PS + 16..]);
+    let mut file = vec![0u8; 2 * ps];
+    m0.write_initial_pages_with_layout(&mut file, ps, layout);
+    m1.write(&mut file[ps + layout.meta_offset()..]);
     for page in pages {
         file.extend_from_slice(page);
     }
@@ -437,5 +443,100 @@ fn deep_trees_and_short_get_stacks() {
             assert!(full(txn.get(db, b"k")), "sub-DB depth {depth}");
             assert!(matches!(c.set(b"k"), Err(Error::Mdb(MdbError::CursorFull))));
         }
+    }
+}
+
+/// A tree as deep as a cursor stack (`CURSOR_STACK`, 32 levels; a real
+/// one would have more than 2^31 pages, so this file is damaged: every
+/// branch page names one child several times) whose pages along the path
+/// to its last key are all full: a put after that key splits every level,
+/// up to the root, and the new root would be a 33rd level under the
+/// cursors on the old one. C writes past the end of its cursor stacks;
+/// rlmdb panicked with an index out of bounds in `mdb_page_split` (which
+/// aborts a C caller). It must fail the put with `MDB_CURSOR_FULL`, which
+/// fails the transaction, and leave the file as it was.
+///
+/// Pages of 256 bytes, in both formats: pages 2..=32 are branch pages of
+/// the implicit first child and three 58-byte separators, every child
+/// being the next page; page 33 is a leaf of three 58-byte keys with
+/// 1-byte values. The put goes through `mdb_put` and through a cursor
+/// handle (the C API's `mdb_cursor_put`), with another cursor on the leaf.
+#[test]
+fn root_split_beyond_the_cursor_stack_fails_the_txn() {
+    const PS256: usize = 256;
+    let key = |c: u8| vec![c; 58];
+    for layout in [&V09, &V10] {
+        let mut pages = Vec::new();
+        for pgno in 2..=32 {
+            let mut buf = vec![0u8; PS256];
+            let mut p = PageMut::with_layout(&mut buf, layout);
+            p.init(pgno, P_BRANCH);
+            p.add_node(0, b"", NodeData::Child(pgno + 1), 0).unwrap();
+            for (i, c) in (b'b'..=b'd').enumerate() {
+                p.add_node(i + 1, &key(c), NodeData::Child(pgno + 1), 0)
+                    .unwrap();
+            }
+            assert!(p.add_node(4, &key(b'e'), NodeData::Child(2), 0).is_err());
+            pages.push(buf);
+        }
+        let mut buf = vec![0u8; PS256];
+        let mut p = PageMut::with_layout(&mut buf, layout);
+        p.init(33, P_LEAF);
+        for (i, c) in (b'd'..=b'f').enumerate() {
+            p.add_node(i, &key(c), NodeData::Inline(&[c]), 0).unwrap();
+        }
+        assert!(p
+            .add_node(3, &key(b'g'), NodeData::Inline(b"g"), 0)
+            .is_err());
+        pages.push(buf);
+        let main = Db {
+            depth: 32,
+            branch_pages: 31,
+            leaf_pages: 1,
+            entries: 3,
+            root: 2,
+            ..Db::default()
+        };
+        let file = file_with(layout, PS256, &pages, main);
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data.mdb");
+        std::fs::write(&data, &file).unwrap();
+        let env = open_rw(dir.path(), 2);
+        let what = format!("{:?}", env.format());
+        assert_eq!((env.format(), env.page_size()), (layout.format, PS256));
+        {
+            let txn = env.begin_ro_txn().unwrap();
+            assert_eq!(txn.get(Dbi::MAIN, &key(b'e')).unwrap(), Some(&b"e"[..]));
+        }
+        let cursor_full = |r: rlmdb::Result<()>, how: &str| match r {
+            Err(Error::Mdb(MdbError::CursorFull)) => {}
+            r => panic!("{what}: {how}: expected MDB_CURSOR_FULL, got {r:?}"),
+        };
+        let bad_txn = |r: rlmdb::Result<()>, how: &str| match r {
+            Err(Error::Mdb(MdbError::BadTxn)) => {}
+            r => panic!("{what}: commit after {how}: expected MDB_BAD_TXN, got {r:?}"),
+        };
+
+        let mut txn = env.begin_rw_txn().unwrap();
+        let r = txn.put(Dbi::MAIN, &key(b'g'), b"g", WriteFlags::empty());
+        cursor_full(r, "put");
+        bad_txn(txn.commit(), "put");
+
+        let mut txn = env.begin_rw_txn().unwrap();
+        let (c0, c1) = (
+            txn.open_cursor(Dbi::MAIN).unwrap(),
+            txn.open_cursor(Dbi::MAIN).unwrap(),
+        );
+        let on_leaf = txn.cursor_get(c1, Some(&key(b'f')), None, rlmdb::CursorOp::Set);
+        assert!(matches!(on_leaf, Ok(Some(_))), "{what}");
+        let r = txn.cursor_put(c0, &key(b'g'), b"g", WriteFlags::empty());
+        cursor_full(r, "cursor put");
+        bad_txn(txn.commit(), "cursor put");
+
+        drop(env);
+        assert!(
+            std::fs::read(&data).unwrap() == file,
+            "{what}: file changed"
+        );
     }
 }

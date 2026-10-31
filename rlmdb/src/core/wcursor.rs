@@ -1259,10 +1259,11 @@ impl<'env> RwTxn<'env> {
                 let n = snum.min(CURSOR_STACK);
                 (0..n)
                     .find(|&level| {
-                        !(level == 0 && w.subp)
-                            && !dirty
-                                .at(w.pg_slot[level], w.pg[level])
-                                .is_some_and(|page| page_ops::flags(l, page) & P_DIRTY != 0)
+                        let subpage = level == 0 && w.subp;
+                        let dirty_here = dirty
+                            .at(w.pg_slot[level], w.pg[level])
+                            .is_some_and(|page| page_ops::flags(l, page) & P_DIRTY != 0);
+                        !subpage && !dirty_here
                     })
                     .unwrap_or(snum)
             };

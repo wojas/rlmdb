@@ -17,6 +17,10 @@
 //! copy of the cursor is tracked so that the nested split's fixups adjust
 //! it (`WITH_CURSOR_TRACKING`). Finally every other cursor on the split
 //! page is moved to wherever its node went.
+//!
+//! A root split adds a level under every cursor on the tree; one that
+//! would not fit a cursor stack fails with `MDB_CURSOR_FULL`, where C
+//! overruns the stack ([`RwTxn::check_root_push`]).
 
 use crate::consts::*;
 use crate::core::cursor::{corrupted, C_INITIALIZED};
@@ -24,7 +28,7 @@ use crate::core::cursor_put::{branch_size, leaf_size, NodeVal, SPLIT_REPLACE};
 use crate::core::page_ops;
 use crate::core::txn_rw::{RwTxn, TXN_ERROR};
 use crate::core::wcursor::CRef;
-use crate::error::Result;
+use crate::error::{MdbError, Result};
 use crate::format::layout::{Layout, NODE_SIZE};
 use crate::format::node::F_BIGDATA;
 use crate::format::page::{P_BRANCH, P_LEAF, P_LEAF2};
@@ -80,6 +84,9 @@ impl<'env> RwTxn<'env> {
         };
         let is_leaf = mp_flags & P_LEAF != 0;
         let is_leaf2 = mp_flags & P_LEAF2 != 0;
+        if self.cur(mc).top < 1 {
+            self.check_root_push(mc, mp)?;
+        }
 
         // Create a right sibling.
         let rp = self.page_new(mc, mp_flags, 1)?;
@@ -95,8 +102,9 @@ impl<'env> RwTxn<'env> {
             let pp = self.page_new(mc, P_BRANCH, 1)?;
             // Shift current top to make room for new parent.
             {
+                // `check_root_push` made sure level `snum` exists.
                 let w = self.cur_mut(mc);
-                for i in (1..=w.snum.min(CURSOR_STACK - 1)).rev() {
+                for i in (1..=w.snum).rev() {
                     w.pg[i] = w.pg[i - 1];
                     w.ki[i] = w.ki[i - 1];
                 }
@@ -504,27 +512,18 @@ impl<'env> RwTxn<'env> {
         let mc_ki_ptop = self.cur(mc).ki[ptop];
         let m = self.cur(mn).clone();
         for s in 0..self.w.cursors.len() {
-            let Some(m3) = self.w.cursors.peer(s, dbi, sub) else {
+            let Some(m3) = self.split_peer(s, mc, dbi, sub) else {
                 continue;
             };
-            if m3 == mc {
-                continue;
-            }
-            let m2_init = self.w.cursors.slot(s).is_some_and(|sl| sl.main.is_init());
             let w3 = self.cur_mut(m3);
-            if !(m2_init && w3.flags & C_INITIALIZED != 0) {
-                continue;
-            }
-            if w3.subp && w3.snum <= 1 {
-                // A sub-page cursor: sub-pages are never split.
-                continue;
-            }
             if let Some(nr) = new_root {
                 // Sub cursors may be on a different DB.
                 if w3.pg[0] != mp {
                     continue;
                 }
-                // Root split.
+                // Root split. `check_root_push` made sure level `snum`
+                // exists; `nr` is the old `md_depth`, which a damaged file
+                // may record larger than the stack.
                 for k in (0..=nr.min(CURSOR_STACK - 2)).rev() {
                     w3.ki[k + 1] = w3.ki[k];
                     w3.pg[k + 1] = w3.pg[k];
@@ -551,6 +550,53 @@ impl<'env> RwTxn<'env> {
             {
                 w3.ki[ptop] = w3.ki[ptop].wrapping_add(1);
             }
+        }
+        Ok(())
+    }
+
+    /// The cursor of slot `s` that a split through `mc` (on `dbi`, a
+    /// sub-cursor if `sub`) fixes up, if any: a tracked cursor of the same
+    /// tree other than `mc`, positioned (its slot's main cursor too), and
+    /// not on a `P_SUBP` sub-page (sub-pages are never split).
+    fn split_peer(&self, s: usize, mc: CRef, dbi: usize, sub: bool) -> Option<CRef> {
+        let m3 = self.w.cursors.peer(s, dbi, sub)?;
+        if m3 == mc {
+            return None;
+        }
+        let m2_init = self.w.cursors.slot(s).is_some_and(|sl| sl.main.is_init());
+        let w3 = self.cur(m3);
+        if !(m2_init && w3.flags & C_INITIALIZED != 0) || (w3.subp && w3.snum <= 1) {
+            return None;
+        }
+        Some(m3)
+    }
+
+    /// Before splitting the root page `mp` through `mc`: fails with
+    /// `MDB_CURSOR_FULL` if the new root would not fit under a cursor it is
+    /// pushed under, `mc` itself or one of the cursors on `mp` that
+    /// [`RwTxn::split_fixups`] moves down a level (other tracked cursors,
+    /// and the copies of the outer splits of a split that went up the
+    /// tree). Only a tree as deep as the stack gets there (`CURSOR_STACK`
+    /// levels: a damaged file, or in theory one of more than 2^31 pages).
+    ///
+    /// C has no such check and writes past the end of `mc_pg` and `mc_ki`
+    /// (`KNOWN_C_BUGS.md` #36); the split fails instead, before it changes
+    /// anything, and with it the write transaction, as after any error of
+    /// `mdb_page_split`.
+    fn check_root_push(&self, mc: CRef, mp: u64) -> Result<()> {
+        let (dbi, sub, snum) = {
+            let w = self.cur(mc);
+            (w.dbi, w.is_sub(), w.snum)
+        };
+        let full = snum >= CURSOR_STACK
+            || (0..self.w.cursors.len())
+                .filter_map(|s| self.split_peer(s, mc, dbi, sub))
+                .any(|m3| {
+                    let w3 = self.cur(m3);
+                    w3.pg[0] == mp && w3.snum >= CURSOR_STACK
+                });
+        if full {
+            return Err(MdbError::CursorFull.into());
         }
         Ok(())
     }
