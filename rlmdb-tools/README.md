@@ -143,12 +143,20 @@ Other differences:
   `mdb_copy` reports the write error), but `SIGINT`, `SIGTERM` and `SIGHUP`
   terminate them at once: catching them would need `unsafe` code. The
   environment stays consistent either way (the tools are read-only or
-  commit atomically).
+  commit atomically). Windows has no `SIGPIPE`: there C `mdb_dump` writes
+  on to a closed pipe and exits with 0, and so does the Rust one.
 * **Write errors.** C ignores errors writing standard output (or the
   `-f` file of `mdb_dump`) and exits with 0. The Rust tools report them
   (`mdb_dump: <path>: No space left on device`, or
   `<tool>: write error: …` when it shows only at the final flush) and exit
   with 1. A closed pipe at the final flush is ignored, as in C.
+* **Windows.** The tools write and read text as the C runtime's text mode
+  does (`\r\n` line ends; `mdb_copy`'s copy on standard output is
+  binary), print `%p` values as the C runtime of the toolchain does (16
+  hex digits: upper case with MSVC, lower case with MinGW-w64), and parse
+  options as MinGW-w64's `getopt` does (MSVC has none; the C tools built
+  with it here get a shim that behaves the same,
+  `tests/compat/msvc/unistd.h`).
 * **`mdb_load` with `mapaddr=`** in the header opens the environment with
   `MDB_FIXEDMAP` as C does, but `rlmdb` ignores that flag (it never
   maps at a fixed address), so a new environment records address 0 and its

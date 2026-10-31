@@ -35,8 +35,9 @@ not a binding. The goals, in priority order:
 
 Out of scope for now (leave the door open, do not design it away):
 
-* Windows. Keep OS specifics behind the `os` module so a `windows.rs` can be
-  added later. Only `unix` is implemented.
+* (Windows, 64-bit with MSVC or MinGW, is implemented in `os/windows.rs`;
+  see the Windows part of the lock-file section. Keep every OS specific
+  behind the `os` module.)
 * 32-bit targets. The on-disk format depends on `sizeof(size_t)`; we hard-code
   the 64-bit layout and emit `compile_error!` on 32-bit targets.
 * `MDB_VL32`, encryption / checksums (1.0 features, not in 0.9 anyway).
@@ -308,6 +309,47 @@ sources' selection (mdb.c lines 86-170, mdb10.c lines 123-240):
 
 These values are computed from the C declarations; nobody has run
 `layout_dump` on a BSD yet.
+
+**Windows** (`_WIN32`, x86-64, MSVC and MinGW alike; `os/windows.rs`, whose
+module documentation lists every Windows decision):
+
+* The shared locks are two named kernel mutexes, kept like the macOS
+  semaphores but with lock kinds of their own (`LockObjects::MutexNames`,
+  `MutexHash`: nothing to remove when the last user closes, no `mt2`):
+  version 1 stores their 32-byte names, `"Global\MDBr<enc>"` and
+  `"Global\MDBw<enc>"` (`mti_rmname`, `mti_wmname`), version 2 the 64-bit hash
+  `mti_mutexid` at 24 (names `"Global\MDB"`, `'r'`/`'w'`, `mdb_pack85` of the
+  hash; no `mt2`). The hash is FNV-1a of `struct { DWORD volume; DWORD nhigh;
+  DWORD nlow; }` of the lock file (`GetFileInformationByHandle`, 12 bytes
+  without padding); in version 1 each `mdb_pack85` takes an `unsigned long`,
+  32 bits on Windows, so each half gives five digits of its own 32 bits. The
+  exclusive opener creates the mutexes (`CreateMutexA`, a NULL DACL as C's
+  `mdb_all_sa`), others open them (`OpenMutexA(SYNCHRONIZE)`). A mutex whose
+  owner died is abandoned (`WAIT_ABANDONED`, C's `MDB_OWNERDEAD`): the
+  same repair as after a dead owner of a robust pthread mutex.
+* Version 1 is laid out as on macOS (names at 8, `txnid` 40, `numreaders` 48,
+  writer name at 64, readers at 128); `mti_format` is `0x1` (`MDB_PIDLOCK`
+  is 0). Version 2: `txnid` 8, `numreaders` 16, hash 24, `MDB_txbody` 32,
+  readers at 64; `mti_format` `0x08138002` (`MDB_LOCK_TYPE` 1, `MDB_PID_T`
+  `int`, `pthread_t` a `HANDLE`, no pid lock).
+* A reader slot's `mr_tid` is a `DWORD` (`GetCurrentThreadId`) at offset 12,
+  after the `int` pid (`format::lockfile::READER_TID`, `READER_TID_SIZE`).
+* Byte 0 of the lock file is locked with `LockFileEx`: exclusive without
+  waiting, else shared and waiting, as on Unix. Windows locks belong to the
+  handle, and the downgrade is a shared lock through the same handle followed
+  by `UnlockFile` (`mdb_env_share_locks`). The lock is released explicitly
+  before the file is closed (`mdb_env_close0`).
+* Readers take no pid lock; `mdb_reader_check` asks whether the process
+  exists (`OpenProcess`; `KNOWN_C_BUGS.md` #42 on C's missing
+  `SYNCHRONIZE` right).
+* The data file map follows the C release of the format: 0.9 extends the file
+  to the map size and maps it (`CreateFileMapping`), so a 0.9 data file on
+  Windows is as long as its map; 1.0 maps a `SEC_RESERVE` section with a
+  reserved view (`NtCreateSection`, `NtMapViewOfSection`) and the file grows
+  with the writes; a writer commits the pages it takes from the end of the
+  map in its view (`VirtualAlloc`, as C 1.0's `mdb_page_alloc` does), which
+  is what makes them visible in other processes' views. A 0.9 file is never shrunk when the map size shrinks (C
+  would try, and fails while another process maps more).
 
 Both versions:
 
@@ -592,7 +634,11 @@ strings match `mdb_strerror`.
 * The data file is mapped `PROT_READ, MAP_SHARED` at `map_size` bytes (may be
   larger than the file). `os::DataMap::slice(offset, len) -> Option<&[u8]>`
   is bounds-checked against the map; `TxnCore::page` checks page numbers
-  against the snapshot's `last_pg`.
+  against the snapshot's `last_pg`. On Windows the map is a read-only file
+  view (`FILE_MAP_READ`), as long as the map size for 0.9 files (which are
+  extended to it, as C 0.9 does there) and a reserved view that the file
+  grows into for 1.0 files (C 1.0's `SEC_RESERVE` section); a read-only
+  handle maps the file as it is, like C's `MDB_RDONLY`.
 * LMDB's MVCC guarantees that pages reachable from a snapshot are not modified
   while a reader slot pins that snapshot. This is the same invariant the C
   code relies on; document it in `os::Mmap`.

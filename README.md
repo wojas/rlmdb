@@ -150,6 +150,7 @@ cc -I rlmdb-capi/include -o mtest tests/lmdb-c/0.9/mtest.c \
 # shared library, either platform
 cc -I rlmdb-capi/include -o mtest tests/lmdb-c/0.9/mtest.c \
    -L target/release -llmdb
+gcc -I rlmdb-capi/include -o mtest tests/lmdb-c/0.9/mtest.c target/release/liblmdb.dll.a  # Windows, MinGW (MSVC: lmdb.dll.lib)
 ```
 
 With the shared library, the loader must find it at run time

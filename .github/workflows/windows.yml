@@ -1,0 +1,77 @@
+# Windows x86-64 with both Rust toolchains: lints, rustdoc and the whole test
+# suite. The tests build the C reference library from tests/lmdb-c with the
+# toolchain's C compiler: MSVC's cl (found by the cc crate in the runner's
+# Visual Studio) or MinGW-w64's gcc from MSYS2. Formatting does not depend on
+# the platform and is checked in ci.yml.
+#
+# The checkout keeps the repository's line endings (no core.autocrlf): the
+# tests compare files and outputs byte for byte.
+#
+# RLMDB_DEFAULT_FORMAT is deliberately not set: the tests assume it is unset
+# (see scripts/check-all.sh).
+name: Windows
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  msvc:
+    name: Windows x86-64 (MSVC)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: doc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: test
+        run: cargo test --workspace --no-fail-fast
+
+  gnu:
+    name: Windows x86-64 (GNU, MinGW-w64)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+      # The C compiler (gcc, ar) for the cc crate and the tests, ahead of any
+      # other MinGW on the runner's PATH.
+      - name: MinGW-w64 on PATH
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin"
+      - name: Rust (GNU toolchain)
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal --component clippy
+          rustup default stable-x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: doc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: test
+        run: cargo test --workspace --no-fail-fast

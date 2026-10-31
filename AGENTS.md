@@ -182,7 +182,10 @@ deferred until the core has been validated through the C API.
   work done. `--no-linux` skips the container only for quick iteration.
   CI (`.github/workflows/`) runs the host steps on Linux x86-64, Linux
   arm64 and macOS, and the ignored tests nightly; it is not a substitute
-  for running the checks locally.
+  for running the checks locally. `windows.yml` runs clippy, rustdoc and
+  the tests on Windows with both toolchains (MSVC, MinGW-w64);
+  `scripts/windows-test.sh` runs a command in a copy of the checkout on a
+  Windows machine over ssh.
 * Long tests are `#[ignore]`d; run `cargo test -p rlmdb --release --
   --ignored` after changes to the write path or spilling.
 * New behaviour needs a test on the appropriate level: unit tests next to
@@ -194,8 +197,9 @@ deferred until the core has been validated through the C API.
 
 ## 9. Not implemented yet, and what that means
 
-* Planned: Windows. Keep every OS specific behind `rlmdb/src/os/` so a
-  `windows.rs` can be added without touching the engine.
+* Windows (64-bit, MSVC and MinGW) is implemented in
+  `rlmdb/src/os/windows.rs`, whose module documentation lists every
+  Windows decision. Keep every OS specific behind `rlmdb/src/os/`.
 * Possible later: `MDB_WRITEMAP` (dirty pages are owned buffers today;
   keep the page backing replaceable), the typed Rust API, LMDB 1.0
   features beyond its data file (`MDB_PREVSNAPSHOT`, two-phase commit,

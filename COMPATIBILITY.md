@@ -21,11 +21,14 @@ table below), 64-bit.
 | OpenBSD (64-bit) | LMDB 0.9 lock file: POSIX named semaphores as on macOS (names in the lock file; slots at 128). LMDB 1.0 lock file: a SysV semaphore set, `semget(ftok(lockfile, 'M'))`, its id `mtb_semid` at 20, `mtb_rlocked` at 24, `mt2_wlocked` at 64, slots at 128. `fsync` for `MDB_FDATASYNC`; meta fd `O_DSYNC`; after every write to the data file `msync(MS_INVALIDATE)` of the map (no unified buffer cache); no `O_DIRECT` for copies | untested; compiles and lints with nightly `-Zbuild-std` (tier 3), not in CI |
 | NetBSD (64-bit) | as OpenBSD, but semaphore names of 14 characters (C's `MDB_SHORT_SEMNAMES`) and no invalidation | untested; compiles and lints in CI (`Check BSD targets`) |
 | DragonFly (64-bit) | as OpenBSD, but no invalidation and meta fd `O_SYNC` (there is no `O_DSYNC`) | untested; compiles and lints with nightly `-Zbuild-std` (tier 3), not in CI |
-| Windows, 32-bit targets | | not supported (`compile_error!`) |
+| Windows x86-64, MinGW-w64 (`x86_64-pc-windows-gnu`) | named mutexes `Global\MDBr…`, `Global\MDBw…` (names in the lock file, version 2: their hash); `LockFileEx` on byte 0; no pid locks; slots at 128 (version 1), 64 (version 2) | tested on Windows 10 with Rust stable and MinGW-w64 gcc (MSYS2): the workspace suite passes as on macOS (`cargo test --workspace`, through `scripts/windows-test.sh`), the interop matrix with C 0.9.36 and 1.0 built by gcc included; the upstream `mtest*.c` and tools and the `rlmdb-capi` test programs linked against `lmdb.dll` and `liblmdb.a` agree with C |
+| Windows x86-64, MSVC (`x86_64-pc-windows-msvc`) | as MinGW (both toolchains lay C's structures out alike) | builds and passes `cargo clippy` (Rust side; the C reference built by a stand-in compiler); not run yet: no Visual Studio Build Tools on the test machine. CI: `.github/workflows/windows.yml`, MSVC and GNU jobs |
+| 32-bit targets | | not supported (`compile_error!`) |
 
 C and Rust processes must share the platform ABI: a lock file is only
 meaningful between processes that agree on `pthread_mutex_t` (Linux) or
-the semaphore naming (macOS). This is the same restriction C has between
+the semaphore naming (macOS); on Windows, C and rlmdb built with MSVC or
+with MinGW all share one layout and the same mutex names. This is the same restriction C has between
 two C builds; it does not hold across a musl and a glibc build, or a C
 build with non-default lock options (`MDB_USE_SYSV_SEM` where it is not
 C 1.0's default, a Linux build with `MDB_USE_POSIX_SEM`).
@@ -73,7 +76,9 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
   A Rust process can be the first opener (it creates and initialises the
   lock file, the mutexes or semaphores) or a later one; C on the other
   side either way. Reader liveness uses the same `fcntl` byte locks at the
-  process id.
+  process id. On Windows `mti_format` is `0x1` (`MDB_PIDLOCK` 0): readers
+  take no pid locks, and `mdb_reader_check` asks whether the process
+  exists, as C does there (`KNOWN_C_BUGS.md` #42 for the one difference).
 * **Lock file: format 2** (LMDB 1.0's `MDB_LOCK_VERSION 2`), the lock file
   of LMDB 1.0 data files: the version follows the data format. Header
   `magic, format, txnid, numreaders`, then the reader lock; `mti_format` is
@@ -83,7 +88,8 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
   in an emulated x86-64 container; the test runs do not cover x86-64).
   On macOS the file holds a 64-bit hash (`mtb_mutexid`) and
   the semaphore names are derived from it, as 1.0 does; there is no writer
-  lock cache line, so the reader slots start at 64. On Linux the mutexes
+  lock cache line, so the reader slots start at 64. Windows does the same
+  with its mutexes (`Global\MDB` names), `mti_format` `0x08138002`. On Linux the mutexes
   are at 24 and 128 (64 on x86-64), the slots at 192 (128). rlmdb creates
   and attaches to it as C 1.0 does. On the BSDs (computed, not measured):
   FreeBSD `0x2986c002`, mutexes at 24 and 64, slots at 128; OpenBSD,
@@ -95,7 +101,17 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
   Rust alike.
 * **Page size** is chosen when an environment is created and recorded in
   the file, as in C: the OS page size, capped at 32 KiB (`MAX_PAGESIZE`):
-  4 KiB on Linux, 16 KiB on Apple Silicon macOS. An existing environment
+  4 KiB on Linux and Windows, 16 KiB on Apple Silicon macOS.
+* **Data file size on Windows** follows the C release of the format there:
+  a 0.9 file opened for writing is extended to the map size (C 0.9 maps
+  only what the file holds, so it sets the file to the map size first, and
+  so does rlmdb), a 1.0 file grows with the writes (C 1.0's reserved
+  section; a writer commits the pages it adds in its view, as C 1.0 does,
+  which is what makes them visible to the other processes). rlmdb never shrinks a 0.9 file when the map size shrinks; C
+  0.9 tries, and fails (`ERROR_USER_MAPPED_FILE`) while another process
+  maps more, for C and Rust peers alike. A read-only 1.0 environment maps
+  the file as it is and maps it again when a snapshot needs more (C 1.0's
+  faults instead, `KNOWN_C_BUGS.md`, "LMDB 1.0"). An existing environment
   is always opened with the page size recorded in it.
 * **Maximum key size** is 511 bytes (`mdb_env_get_maxkeysize`), also for
   `MDB_DUPSORT` data items; the item size that moves a value to overflow

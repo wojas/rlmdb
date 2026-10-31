@@ -1,7 +1,8 @@
 # rlmdb-capi: the LMDB C API over the Rust implementation
 
 `rlmdb-capi` builds `liblmdb.a`, `liblmdb.so` (Linux) and `liblmdb.dylib`
-(macOS) from the Rust rewrite in `../rlmdb`. They export the `mdb_*`
+(macOS), on Windows `lmdb.dll` with its import library and a static
+library (see "Windows" below), from the Rust rewrite in `../rlmdb`. They export the `mdb_*`
 symbols of LMDB 0.9.36 with the same ABI, error codes and flag values, so
 existing C programs compile against `include/lmdb.h` (the unmodified 0.9.36
 header, with one comment added on top) and link against the Rust library
@@ -38,6 +39,8 @@ native-static-libs`):
 |---|---|
 | Linux (glibc) | `liblmdb.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc` |
 | macOS | `liblmdb.a` (needs `-lSystem -lc -lm`, which the compiler driver adds) |
+| Windows, MinGW-w64 (`x86_64-pc-windows-gnu`) | `liblmdb.a -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp` |
+| Windows, MSVC (`x86_64-pc-windows-msvc`) | `lmdb.lib legacy_stdio_definitions.lib kernel32.lib ntdll.lib userenv.lib ws2_32.lib dbghelp.lib` (compile with `cl /MD`: the library uses the dynamic C runtime, `msvcrt`) |
 
 For example `cc -I rlmdb-capi/include -o mdb_stat
 tests/lmdb-c/0.9/mdb_stat.c target/release/liblmdb.a -lpthread
@@ -54,6 +57,40 @@ native-static-libs` of the Rust targets): FreeBSD `-lrt -lutil -lexecinfo
 Note: the library target is named `lmdb` so that the artifacts are called
 `liblmdb.*`; the Rust library it is built on is the `rlmdb` package
 (lib `rlmdb`).
+
+### Windows
+
+64-bit Windows with either Rust toolchain; `cargo build -p rlmdb-capi
+--release` (add `--target x86_64-pc-windows-gnu` or use that toolchain for
+MinGW) writes to `target/release/`:
+
+| | MSVC | MinGW-w64 |
+|---|---|---|
+| DLL | `lmdb.dll` | `lmdb.dll` |
+| its import library | `lmdb.dll.lib` | `liblmdb.dll.a` |
+| static library | `lmdb.lib` | `liblmdb.a` |
+
+Link a C program against the DLL through its import library, which needs
+nothing else (`cl /I rlmdb-capi\include prog.c target\release\lmdb.dll.lib`,
+`gcc -I rlmdb-capi/include prog.c target/release/liblmdb.dll.a`), and put
+`lmdb.dll` next to the program or on `PATH`; or link the static library
+with the system libraries of the table above. `lmdb.h` has no
+`__declspec(dllimport)`: the functions are reached through the import
+library's stubs, as with a C `lmdb.dll`. A program that calls `LoadLibrary`
+and `FreeLibrary` gets a fresh copy of the DLL after the last
+`FreeLibrary`, as with C's DLL (no `-z nodelete` counterpart is needed).
+
+On Windows the types and texts follow C LMDB's `_WIN32` build:
+`mdb_filehandle_t` is a `HANDLE` (`mdb_env_get_fd` gives the data file's,
+`INVALID_HANDLE_VALUE` before the open; `mdb_env_copyfd` takes one),
+`mdb_mode_t` is `int` with MSVC and MinGW's 16-bit `mode_t` (ignored, as in
+C), paths are UTF-8, and errors that come from the system are `GetLastError`
+codes whose `mdb_strerror` text is the system's message (the C runtime's
+`strerror` for the `errno` values LMDB uses itself); each such text is kept
+for the life of the process, where C returns a buffer on its stack. The
+upstream `mtest*.c` and tools build unchanged with MinGW's `gcc`; MSVC has
+no `getopt`, which the tools need, so the tests give `cl` the
+`tests/compat/msvc/unistd.h` of this repository.
 
 ## Functions
 
@@ -423,6 +460,7 @@ C library and against the Rust `liblmdb.a`:
 ```sh
 cargo test -p rlmdb-capi                         # macOS / host
 scripts/linux-test.sh test -p rlmdb-capi         # Linux in Docker
+WINDOWS_HOST=<ssh host> scripts/windows-test.sh cargo test -p rlmdb-capi
 ```
 
 The tests compile C programs at test time with the `cc` crate (the crate's
