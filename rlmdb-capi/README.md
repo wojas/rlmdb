@@ -266,6 +266,7 @@ point into the memory map or the transaction's dirty pages (zero copy).
 | NULL handles and outputs where C would crash (`mdb_txn_begin(NULL, …)`, `mdb_dbi_open(…, NULL)`, `mdb_cursor_put(…, NULL data, …)`, `mdb_env_copy2(NULL, …)`, `mdb_cursor_dbi(NULL)`, `mdb_env_stat` before open, …) | Crash. | `EINVAL` (or 0/NULL for functions without an error result). |
 | `mdb_env_open` after a failed open on the same handle | Not allowed (`mdb_env_close` only). | Allowed. |
 | `mdb_env_set_mapsize` on an open environment | No transaction may be active in the process. | Read transactions may be active (they keep their old map); `EINVAL` while a write transaction is active, as in C. |
+| A thread that exits with its write transaction still open (a bug in the program) | Linux: the writer mutex reports its dead owner (`EOWNERDEAD`); the next `mdb_txn_begin` for writing in the same process returns `MDB_PANIC` and the environment is unusable, other processes recover and go on. macOS: every writer waits forever (semaphores are not robust). | Every later writer in the same process waits forever, on Linux too (write transactions of one process are also serialised by an in-process lock, which the abandoned transaction still holds). Other processes behave as with C. |
 | `mdb_env_set_assert` | Calls the function on internal assertion failures. | Stored, never called: the Rust core returns errors instead of asserting. |
 | `mdb_set_relfunc` / `mdb_set_relctx` | Stored, never called. | Validated and ignored. |
 | C bugs not ported | See `../KNOWN_C_BUGS.md`. Visible through the C API: #4–#6 and #8 (`mdb_cursor_get`/`mdb_cursor_count` on cursors left past the end), #12 (`MDB_DUPFIXED` items of another size: `MDB_BAD_VALSIZE`), #13 (`MDB_CURRENT` on a cursor not on an item: `MDB_NOTFOUND`), #14 (stale duplicate counts of other cursors), #15 (`MDB_CURRENT` growing a duplicate on a full sub-page), #16 (`MDB_RESERVE` on `MDB_DUPSORT`: `EINVAL`), #17 (`MDB_DUPFIXED` without `MDB_DUPSORT`: `MDB_INCOMPATIBLE` on writes). | |
@@ -296,6 +297,18 @@ the safe Rust core cannot be used to break them:
 * Another program truncating or rewriting the data file in place (outside
   the LMDB protocol) while it is mapped: pages of a live snapshot are read
   without copying; a shrunken file raises `SIGBUS`, as in C.
+* Damage that makes writers reuse pages a reader still sees: a free list
+  in the data file that lists a page still in use, or a lock file into
+  which another program wrote a too-high `mti_txnid` or cleared the slot of
+  a live reader. The writer (C's or this one) then rewrites such a page,
+  and values a read transaction returned change under it. This is the one
+  case where a damaged file reaches the Rust core's guarantees too: every
+  access stays bounds-checked, so the result is wrong data or
+  `MDB_CORRUPTED`, never an access outside the map, but formally a value
+  changing under a live Rust reference is undefined behaviour
+  (`os::DataMap` in `rlmdb`). Free-list records that name meta pages or
+  pages past the end are refused; other lock-file damage only yields
+  errors (`rlmdb/tests/robust_lockfile.rs`).
 
 ## Known gaps
 
