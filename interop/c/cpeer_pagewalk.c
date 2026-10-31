@@ -420,6 +420,23 @@ free_record(struct tree *t, const struct node *n, const unsigned char *data)
 	w->free_listed += count;
 }
 
+/* The header of a P_LEAF2 page or sub-page of `size` bytes: packed items
+ * of mp_pad bytes, no pointers, no nodes. mp_lower and mp_upper only count
+ * (mdb_node_add: mp_lower += sizeof(indx_t), mp_upper -= ksize -
+ * sizeof(indx_t), unsigned and stored modulo 2^16), so mp_upper lies past
+ * the end of a page of 1-byte items. What holds: the items fit, and
+ * SIZELEFT is exactly the space after them. */
+static int
+leaf2_ok(const unsigned char *p, size_t size)
+{
+	size_t used;
+
+	if (PG_LOWER(p) < EMPTY_LOWER)
+		return 0;
+	used = PAGEHDRSZ + (size_t)PG_NUMKEYS(p) * PG_PAD(p);
+	return used <= size && (uint16_t)(PG_UPPER(p) - PG_LOWER(p)) == size - used;
+}
+
 /* A leaf node of a main/named/sub DB. */
 static void
 leaf_node(struct tree *t, const struct node *n)
@@ -452,7 +469,8 @@ leaf_node(struct tree *t, const struct node *n)
 		const unsigned char *sp = n->data;
 		unsigned int want = P_LEAF | P_SUBP | (t->dupfixed ? P_LEAF2 : 0);
 		if (n->dsize < PAGEHDRSZ || (PG_FLAGS(sp) & ~(unsigned)fmt->subp_dirty) != want ||
-			PG_LOWER(sp) < EMPTY_LOWER || PG_LOWER(sp) + PAGEBASE > n->dsize) {
+			(t->dupfixed ? !leaf2_ok(sp, n->dsize) :
+			 PG_LOWER(sp) < EMPTY_LOWER || PG_LOWER(sp) + PAGEBASE > n->dsize)) {
 			fail(w, "bad sub-page in DB %s (flags 0x%x, %u bytes)",
 				w->names[t->use - USE_DB], PG_FLAGS(sp), n->dsize);
 			return;
@@ -499,7 +517,8 @@ walk_page(struct tree *t, uint64_t pgno, unsigned int level)
 		goto out;
 	}
 	check_txnid(w, pgno, page);
-	if (PG_LOWER(page) < EMPTY_LOWER || PG_LOWER(page) > PG_UPPER(page) ||
+	if ((flags & P_LEAF2) ? !leaf2_ok(page, w->psize) :
+		PG_LOWER(page) < EMPTY_LOWER || PG_LOWER(page) > PG_UPPER(page) ||
 		PG_UPPER(page) + PAGEBASE > w->psize) {
 		fail(w, "page %llu: bad lower/upper %u/%u", (unsigned long long)pgno,
 			PG_LOWER(page), PG_UPPER(page));

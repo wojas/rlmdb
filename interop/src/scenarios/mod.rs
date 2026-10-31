@@ -729,7 +729,10 @@ pub fn fill_verify_dupsort(pair: Pair) -> Result<()> {
     Ok(())
 }
 
-/// `MDB_DUPFIXED`: `P_LEAF2` sub-pages and sub-DBs, `MDB_GET_MULTIPLE`.
+/// `MDB_DUPFIXED`: `P_LEAF2` sub-pages and sub-DBs, `MDB_GET_MULTIPLE`;
+/// items of 1 to 3 bytes, filled and then partly deleted (with 1-byte
+/// items `mp_upper` of a `P_LEAF2` page or sub-page lies past its end,
+/// which both page audits must accept).
 pub fn fill_verify_dupfixed(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 256 * MIB)?;
     let dups = pair.subdb_dups(2000, 16).to_string();
@@ -745,8 +748,32 @@ pub fn fill_verify_dupfixed(pair: Pair) -> Result<()> {
         &DataSet::new("df_small", 500, 13).with(&["--dupfixed", "--dups", "5", "--valsize", "8"]),
         &[],
     )?;
+    for size in [1u32, 2, 3] {
+        // A 1-byte item has 256 values; at 256-byte pages they need sub-DBs.
+        let dups = if size == 1 {
+            256
+        } else {
+            pair.subdb_dups(1000, size)
+        };
+        let ds = DataSet::new(&format!("df{size}"), 20, 40 + size).with(&[
+            "--dupfixed",
+            "--dups",
+            &dups.to_string(),
+            "--valsize",
+            &size.to_string(),
+        ]);
+        fill_verify(&pair, &env, &ds, &[])?;
+        ds.delete(pair.writer, &env, 3, &[])?;
+        for peer in pair.verifiers() {
+            ds.after_delete(3).verify(peer, &env)?;
+        }
+    }
     let a = audit(&pair, &env)?;
     ensure!(subdbs(&a, "df")? > 0, "df has no sub-DBs");
+    ensure!(
+        a.db("df1")?.subpages.unwrap_or(0) + subdbs(&a, "df1")? > 0,
+        "df1 has no duplicates"
+    );
     Ok(())
 }
 

@@ -543,11 +543,23 @@ fn copy_used(l: &Layout, dst: &mut [u8], src: &[u8], ps: usize) -> Result<()> {
     let lower = page_ops::lower(l, src);
     let upper = page_ops::upper(l, src);
     let flags = page_ops::flags(l, src);
-    if src.len() < ps || dst.len() < ps || lower > upper || upper > ps {
+    if src.len() < ps || dst.len() < ps {
+        return Err(bad());
+    }
+    if flags & P_LEAF2 != 0 {
+        // `mp_lower`/`mp_upper` only count here, and 1-byte items take
+        // `mp_upper` past the page end (`page_ops::leaf2_count`): the free
+        // tail is C's `(indx_t)(upper - lower)`.
+        let unused = usize::from(upper.wrapping_sub(lower) as u16) & !7;
+        let used = ps.checked_sub(unused).ok_or_else(bad)?;
+        dst[..used].copy_from_slice(&src[..used]);
+        return Ok(());
+    }
+    if lower > upper || upper > ps {
         return Err(bad());
     }
     let unused = (upper - lower) & !7;
-    if unused != 0 && flags & P_LEAF2 == 0 {
+    if unused != 0 {
         let upper = upper & !7;
         let lower = (lower + 7) & !7;
         dst[..lower].copy_from_slice(&src[..lower]);

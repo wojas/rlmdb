@@ -284,10 +284,31 @@ pub(crate) fn insert_leaf2(
     }
     p.copy_within(start..end, start + ksize);
     p[start..start + ksize].copy_from_slice(key);
-    // Just using these for counting.
-    set_lower(l, p, lower(l, p) + 2);
-    set_upper(l, p, upper(l, p).checked_sub(ksize.checked_sub(2)?)?);
+    leaf2_count(l, p, 1, ksize);
     Some(())
+}
+
+/// The `mp_lower`/`mp_upper` bookkeeping of a `P_LEAF2` page after `n`
+/// items of `ksize` bytes were added to it (`n < 0`: removed), as
+/// `mdb_node_add`, `mdb_node_del` and `mdb_page_split` do it.
+///
+/// A `P_LEAF2` page has no pointer array and no node area; C uses the two
+/// fields "just for counting": `mp_lower` grows by `sizeof(indx_t)` per
+/// item, so that `NUMKEYS` works, and `mp_upper` drops by
+/// `ksize - sizeof(indx_t)`, so that `SIZELEFT` drops by `ksize`. C
+/// computes that difference unsigned and stores the result modulo 2^16:
+/// for 1-byte items (`MDB_DUPFIXED` values of one byte) it is negative,
+/// and `mp_upper` grows by one per item, past the end of the page. That is
+/// what C writes and what C readers expect (they never use `mp_upper` of a
+/// `P_LEAF2` page as an offset), so the stored fields are updated here
+/// with the same wrapping 16-bit arithmetic, for every `ksize`.
+pub(crate) fn leaf2_count(l: &Layout, p: &mut [u8], n: isize, ksize: usize) {
+    let n = n as i64;
+    let lower = i64::from(hdr(p, l.lower_offset())) + 2 * n;
+    let upper = i64::from(hdr(p, l.upper_offset())) - n * (ksize as i64 - 2);
+    // `as u16` keeps the low 16 bits, as C's store into an `indx_t` does.
+    put_u16(p, l.lower_offset(), lower as u16);
+    put_u16(p, l.upper_offset(), upper as u16);
 }
 
 /// The on-page size of node `i` (header, key and inline data or overflow
@@ -318,8 +339,7 @@ pub(crate) fn delete_node(l: &Layout, p: &mut [u8], indx: usize, ksize: usize) -
             return None;
         }
         p.copy_within(base + ksize..end, base);
-        set_lower(l, p, lower(l, p) - 2);
-        set_upper(l, p, upper(l, p) + ksize.checked_sub(2)?);
+        leaf2_count(l, p, -1, ksize);
         return Some(());
     }
 
@@ -654,6 +674,34 @@ mod tests {
         assert_eq!(num_keys(L, &buf), 2);
         assert_eq!(upper(L, &buf), PS - 2 * 2);
         assert!(insert_leaf2(L, &mut buf, 0, b"xx", 4).is_none());
+    }
+
+    /// 1-byte items: C's unsigned `mp_upper -= ksize - sizeof(indx_t)`
+    /// moves `mp_upper` up by one per item, past the page end, while
+    /// `SIZELEFT` still drops by one; deleting moves it back.
+    #[test]
+    fn leaf2_one_byte_items() {
+        for l in [&V09, V10L] {
+            let mut buf = vec![0u8; PS];
+            PageMut::with_layout(&mut buf, l).init(3, P_LEAF | P_LEAF2);
+            let free = size_left(l, &buf);
+            for (i, k) in b"bdac".iter().enumerate() {
+                let at = [0, 1, 0, 2][i];
+                insert_leaf2(l, &mut buf, at, &[*k], 1).unwrap();
+            }
+            assert_eq!(&buf[l.page_hdr..l.page_hdr + 4], b"abcd");
+            assert_eq!(num_keys(l, &buf), 4);
+            assert_eq!(upper(l, &buf), PS + 4);
+            assert_eq!(size_left(l, &buf), free - 4);
+            delete_node(l, &mut buf, 0, 1).unwrap();
+            assert_eq!(&buf[l.page_hdr..l.page_hdr + 3], b"bcd");
+            assert_eq!((num_keys(l, &buf), upper(l, &buf)), (3, PS + 3));
+            // 2-byte items leave mp_upper alone.
+            let mut buf = vec![0u8; PS];
+            PageMut::with_layout(&mut buf, l).init(3, P_LEAF | P_LEAF2);
+            insert_leaf2(l, &mut buf, 0, b"zz", 2).unwrap();
+            assert_eq!((num_keys(l, &buf), upper(l, &buf)), (1, PS));
+        }
     }
 
     #[test]

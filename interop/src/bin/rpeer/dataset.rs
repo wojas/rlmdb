@@ -98,7 +98,13 @@ impl DataSet {
         if f & MDB_INTEGERDUP != 0 && self.valsize != 4 && self.valsize != 8 {
             return Err("--intdup needs --valsize 4 or 8");
         }
-        if f & MDB_DUPSORT != 0 && !(4..=511).contains(&self.valsize) {
+        if f & MDB_DUPFIXED != 0 && !(1..=511).contains(&self.valsize) {
+            return Err("DUPFIXED values must be 1..511 bytes (--valsize)");
+        }
+        if f & MDB_DUPFIXED != 0 && self.valsize < 4 && self.dups > 1 << (8 * self.valsize) {
+            return Err("--dups exceeds the distinct values of --valsize");
+        }
+        if f & MDB_DUPSORT != 0 && f & MDB_DUPFIXED == 0 && !(4..=511).contains(&self.valsize) {
             return Err("DUPSORT values must be 4..511 bytes (--valsize)");
         }
         if f & MDB_DUPSORT != 0 && self.big != 0 {
@@ -171,8 +177,11 @@ impl DataSet {
     /// `ds_value`: value `d` of key `i` (`vlen(i, d)` bytes).
     ///
     /// `--intdup`: a native `u64` `tag << 32 | d`, or the native `u32` tag.
-    /// Otherwise the tag as 4 big-endian bytes (truncated if shorter), then
-    /// SplitMix64 words from `seed * 0x9e3779b97f4a7c15 ^ i << 16 ^ d`.
+    /// `MDB_DUPFIXED` values under 4 bytes: the low bytes of the tag,
+    /// big-endian (distinct: `d` only changes those, and `--dups` is
+    /// limited to fit). Otherwise the tag as 4 big-endian bytes (truncated
+    /// if shorter), then SplitMix64 words from
+    /// `seed * 0x9e3779b97f4a7c15 ^ i << 16 ^ d`.
     pub fn value(&self, i: u32, d: u32) -> Vec<u8> {
         let len = self.vlen(i, d);
         let tag = self.value_tag(i, d);
@@ -184,6 +193,9 @@ impl DataSet {
             } else {
                 tag.to_ne_bytes().to_vec()
             };
+        }
+        if self.flags & MDB_DUPFIXED != 0 && len < 4 {
+            return tag.to_be_bytes()[4 - len..].to_vec();
         }
         let mut buf = vec![0u8; len];
         let head = len.min(4);

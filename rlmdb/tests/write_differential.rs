@@ -138,6 +138,49 @@ fn diff_intdup() {
     run_profile(p, 0xd7, 10, 800);
 }
 
+/// `MDB_DUPFIXED` items of 1 byte, and of 2 and 3 bytes as neighbours. A
+/// `P_LEAF2` page counts its items in `mp_lower`/`mp_upper`, `mp_upper`
+/// dropping by `ksize - sizeof(indx_t)` per item: unsigned in C, so for
+/// 1-byte items it grows past the page end. rlmdb refused the first such
+/// insert with `MDB_PAGE_FULL`. With pages of 4 KiB and more the 256
+/// possible 1-byte values stay on sub-pages (growing, shrinking, the C
+/// audit of their sizes); 1.0's small pages also take them to sub-DBs and
+/// split them (`interop/tests/write_differential10.rs`).
+#[test]
+fn diff_dupfixed_small_items() {
+    for size in [1, 2, 3] {
+        eprintln!("items of {size} bytes");
+        let p = Profile {
+            dupfixed_size: Some(size),
+            ..Profile::new(MDB_DUPSORT | MDB_DUPFIXED, 4)
+        };
+        run_profile(p, 0xf0 + size as u64, 6, 1200);
+    }
+}
+
+/// [`differential::dupfixed_1byte_script`]: one key's sub-page grows to
+/// all 256 1-byte values and shrinks again.
+#[test]
+fn diff_dupfixed_1byte_script() {
+    let c = require_c!();
+    let p = Profile::new(MDB_DUPSORT | MDB_DUPFIXED, 0);
+    let ops = differential::dupfixed_1byte_script();
+    assert_eq!(run_round(c, &p, 2, Ops::List(ops), "1byte"), Round::Same);
+}
+
+/// [`diff_dupfixed_small_items`] with 1-byte items in nested transactions
+/// and with drops.
+#[test]
+fn diff_nested_dupfixed_1byte() {
+    let p = Profile {
+        nested: true,
+        drops: true,
+        dupfixed_size: Some(1),
+        ..Profile::new(MDB_DUPSORT | MDB_DUPFIXED, 4)
+    };
+    run_profile(p, 0xf4, 6, 1200);
+}
+
 #[test]
 fn diff_deep_plain() {
     let p = Profile {

@@ -216,16 +216,34 @@ fn lower_upper_ok(l: &Layout, lower: usize, upper: usize, psize: usize) -> bool 
     lower >= l.empty_lower() && lower <= upper && upper + l.ptr_base <= psize
 }
 
+/// The check of the header of a `P_LEAF2` page or sub-page of `size`
+/// bytes: packed items of `mp_pad` bytes, no pointers, no nodes.
+/// `mp_lower` and `mp_upper` only count (`mdb_node_add`: `mp_lower +=
+/// sizeof(indx_t)`, `mp_upper -= ksize - sizeof(indx_t)`, unsigned and
+/// stored modulo 2^16), so `mp_upper` lies past the end of a page of 1-byte
+/// items. What holds: the items fit, and `SIZELEFT` is exactly the space
+/// after them.
+fn leaf2_ok(l: &Layout, p: &PageRef<'_>, size: usize) -> bool {
+    if usize::from(p.lower()) < l.empty_lower() {
+        return false;
+    }
+    let used = l.page_hdr + p.num_keys() * usize::from(p.pad());
+    used <= size && usize::from(p.upper().wrapping_sub(p.lower())) == size - used
+}
+
 /// The check of a `P_SUBP` sub-page header in a node with `dsize` data
 /// bytes: flags `P_LEAF|P_SUBP` (`|P_LEAF2` in a `MDB_DUPFIXED` DB), which
 /// 0.9 may combine with `P_DIRTY` (C 0.9 writes 0x52, 1.0 0x42), and its
-/// node pointers within the node.
+/// node pointers within the node (its items, [`leaf2_ok`]).
 fn subpage_ok(l: &Layout, sp: &PageRef<'_>, dsize: usize, dupfixed: bool) -> bool {
     let want = P_LEAF | P_SUBP | if dupfixed { P_LEAF2 } else { 0 };
     let lower = usize::from(sp.lower());
     sp.flags() & !l.subpage_dirty() == want
-        && lower >= l.empty_lower()
-        && lower + l.ptr_base <= dsize
+        && if dupfixed {
+            leaf2_ok(l, sp, dsize)
+        } else {
+            lower >= l.empty_lower() && lower + l.ptr_base <= dsize
+        }
 }
 
 impl Walker<'_> {
@@ -523,7 +541,12 @@ impl Walker<'_> {
         }
         self.check_txnid(pgno, &page);
         let (lower, upper) = (usize::from(page.lower()), usize::from(page.upper()));
-        if !lower_upper_ok(l, lower, upper, self.psize) {
+        let header_ok = if page.is_leaf2() {
+            leaf2_ok(l, &page, self.psize)
+        } else {
+            lower_upper_ok(l, lower, upper, self.psize)
+        };
+        if !header_ok {
             self.fail(format!("page {pgno}: bad lower/upper {lower}/{upper}"));
             return;
         }
@@ -1009,6 +1032,37 @@ mod tests {
         assert_eq!(p.lower(), 4);
         assert!(subpage_ok(&V10, &p, 28, false));
         assert!(!subpage_ok(&V10, &p, 27, false));
+    }
+
+    /// `P_LEAF2` headers: with 1-byte items `mp_upper` grows past the end
+    /// of the (sub-)page, as C writes it; `SIZELEFT` must be the space
+    /// after the items.
+    #[test]
+    fn leaf2_headers() {
+        for l in [&V09, &V10] {
+            for ksize in [1usize, 2, 3, 4] {
+                let len = l.page_hdr + 8 * ksize;
+                let mut sp = vec![0u8; len];
+                let mut p = PageMut::with_layout(&mut sp, l);
+                p.init(9, P_LEAF | P_LEAF2 | P_SUBP);
+                p.set_pad(ksize as u16);
+                for i in 0..6u8 {
+                    p.add_leaf2_key(usize::from(i), &vec![i; ksize]).unwrap();
+                }
+                let p = PageRef::with_layout(&sp, l).unwrap();
+                assert_eq!(p.num_keys(), 6);
+                assert_eq!(p.size_left(), 2 * ksize);
+                if ksize == 1 {
+                    // 6 items moved mp_upper up by 6, past the end.
+                    assert_eq!(usize::from(p.upper()) + l.ptr_base, len + 6);
+                }
+                assert!(subpage_ok(l, &p, len, true));
+                assert!(leaf2_ok(l, &p, len));
+                // A size that disagrees with SIZELEFT, either way.
+                assert!(!leaf2_ok(l, &p, len - 1));
+                assert!(!leaf2_ok(l, &p, len + 1));
+            }
+        }
     }
 
     /// Nodes of a 1.0 leaf: the data of a node with an odd key size starts

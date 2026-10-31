@@ -320,7 +320,10 @@ fn gen_key(rng: &mut Rng, p: &Profile) -> Vec<u8> {
 fn gen_data(rng: &mut Rng, p: &Profile) -> Vec<u8> {
     if let Some(sz) = p.dupfixed_size {
         let v = rng.below(400) as u64;
-        let mut d = v.to_be_bytes().to_vec();
+        let be = v.to_be_bytes();
+        // Items shorter than 8 bytes keep the low bytes (a 1-byte item
+        // takes all 256 values), longer ones are padded.
+        let mut d = be[be.len().saturating_sub(sz)..].to_vec();
         d.resize(sz, b'f');
         return d;
     }
@@ -538,6 +541,38 @@ fn gen_op(rng: &mut Rng, p: &Profile, ncur: usize) -> String {
             }
         }
     }
+}
+
+/// A script (for [`Ops::List`], two cursors) on an `MDB_DUPSORT |
+/// MDB_DUPFIXED` DB with 1-byte items: all 256 values of one key in a
+/// scrambled order, read back with `MDB_GET_MULTIPLE`/`MDB_NEXT_MULTIPLE`,
+/// some deleted in an aborted nested transaction, then all but 16 deleted
+/// one by one and a few with the cursor. On sub-pages that grows and
+/// shrinks them; with 1.0's 256-byte pages the key's sub-DB splits its
+/// `P_LEAF2` page and then merges and rebalances `P_LEAF2` pages.
+pub fn dupfixed_1byte_script() -> Vec<String> {
+    let k = hex(b"k");
+    let v = |i: usize| hex(&[(i * 167 % 256) as u8]);
+    let mut ops: Vec<String> = (0..256).map(|i| format!("p:{k}:{}:0", v(i))).collect();
+    ops.push(format!("g:0:{MDB_FIRST}"));
+    ops.push(format!("g:0:{MDB_GET_MULTIPLE}"));
+    for _ in 0..4 {
+        ops.push(format!("g:0:{MDB_NEXT_MULTIPLE}"));
+    }
+    ops.push(format!("g:1:{MDB_LAST}"));
+    ops.push("nb".into());
+    ops.extend((0..40).map(|i| format!("d:{k}:{}", v(i * 3))));
+    ops.push("na".into());
+    for i in 0..240 {
+        ops.push(format!("d:{k}:{}", v(i * 91)));
+        if i % 16 == 0 {
+            ops.push(format!("g:1:{MDB_PREV_DUP}"));
+        }
+    }
+    ops.push(format!("g:0:{MDB_FIRST}"));
+    ops.extend(std::iter::repeat_n("cd:0:0".to_string(), 3));
+    ops.push(format!("g:0:{MDB_GET_MULTIPLE}"));
+    ops
 }
 
 /// Where the ops of a round come from.

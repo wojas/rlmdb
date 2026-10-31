@@ -185,6 +185,10 @@ impl Dataset {
             }
             return tag.to_ne_bytes().to_vec();
         }
+        if self.flags & MDB_DUPFIXED != 0 && len < 4 {
+            // The low bytes of the tag (interop/README.md).
+            return tag.to_be_bytes()[4 - len..].to_vec();
+        }
         let mut buf = Vec::with_capacity(len);
         for off in 0..4.min(len) {
             buf.push((tag >> (24 - 8 * off)) as u8);

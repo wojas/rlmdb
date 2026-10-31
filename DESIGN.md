@@ -98,6 +98,10 @@ All integers are host-endian (LMDB does not byte-swap). We implement the
   `F_DUPDATA 4` (data is a `P_SUBP` sub-page, or with `F_SUBDATA` a sub-DB).
 * `P_LEAF2` pages (for `MDB_DUPFIXED` sub-DBs): no `mp_ptrs`, no node
   headers; fixed-size keys packed from offset 16, key size in `mp_pad`.
+  `mp_lower`/`mp_upper` only count: each item adds 2 to `mp_lower` and
+  subtracts `ksize - 2` from `mp_upper`, unsigned and modulo 2^16, so with
+  1-byte items `mp_upper` lies past the end of the page (`mdb_node_add`;
+  `SIZELEFT` is still the free space after the items).
 * `MDB_db` (line 1058, 48 bytes): `md_pad:u32, md_flags:u16, md_depth:u16,
   md_branch_pages:u64, md_leaf_pages:u64, md_overflow_pages:u64,
   md_entries:u64, md_root:u64` (`P_INVALID = !0` means empty tree).

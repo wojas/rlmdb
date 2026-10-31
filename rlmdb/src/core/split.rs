@@ -439,24 +439,18 @@ impl<'env> RwTxn<'env> {
         let hdr = l.page_hdr;
         let x = newindx as isize - split_indx as isize;
         let split = hdr + split_indx * ksize;
-        let rsize = (nkeys - split_indx) * ksize;
-        let lsize = (nkeys - split_indx) * 2;
+        let moved = nkeys - split_indx;
+        let rsize = moved * ksize;
         let keys = src.get(split..split + rsize).ok_or_else(corrupted)?;
         let sepkey = if newindx == split_indx {
             newkey
         } else {
             keys.get(..ksize).ok_or_else(corrupted)?
         };
-        {
-            let page = self.dirty_mut(mp)?;
-            page_ops::set_lower(l, page, page_ops::lower(l, page) - lsize);
-            page_ops::set_upper(l, page, page_ops::upper(l, page) + rsize - lsize);
-        }
-        {
-            let page = self.dirty_mut(rp)?;
-            page_ops::set_lower(l, page, page_ops::lower(l, page) + lsize);
-            page_ops::set_upper(l, page, page_ops::upper(l, page) - (rsize - lsize));
-        }
+        // C's `mp_lower -= lsize; mp_upper += rsize - lsize` and the reverse
+        // on `rp`, wrapping as C's unsigned arithmetic does (1-byte items).
+        page_ops::leaf2_count(l, self.dirty_mut(mp)?, -(moved as isize), ksize);
+        page_ops::leaf2_count(l, self.dirty_mut(rp)?, moved as isize, ksize);
         if x < 0 {
             // The new key goes left: all keys from split_indx move right.
             {
@@ -467,8 +461,7 @@ impl<'env> RwTxn<'env> {
             let ins = hdr + newindx * ksize;
             page.copy_within(ins..split, ins + ksize);
             page[ins..ins + ksize].copy_from_slice(newkey);
-            page_ops::set_lower(l, page, page_ops::lower(l, page) + 2);
-            page_ops::set_upper(l, page, page_ops::upper(l, page) - (ksize - 2));
+            page_ops::leaf2_count(l, page, 1, ksize);
         } else {
             let x = x as usize;
             let page = self.dirty_mut(rp)?;
@@ -476,8 +469,7 @@ impl<'env> RwTxn<'env> {
             let ins = hdr + x * ksize;
             page[ins..ins + ksize].copy_from_slice(newkey);
             page[ins + ksize..ins + ksize + rsize - x * ksize].copy_from_slice(&keys[x * ksize..]);
-            page_ops::set_lower(l, page, page_ops::lower(l, page) + 2);
-            page_ops::set_upper(l, page, page_ops::upper(l, page) - (ksize - 2));
+            page_ops::leaf2_count(l, page, 1, ksize);
             let w = self.cur_mut(mc);
             let t = w.top;
             w.ki[t] = x as u16;

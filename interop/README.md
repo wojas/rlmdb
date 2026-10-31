@@ -91,7 +91,7 @@ scripts/linux-test.sh test -p rlmdb-interop       # the same on Linux (Docker)
 | `tests/layout.rs` | the C struct layout against DESIGN.md, and every `layout_dump` value against `lmdb::consts`/`lmdb::format::layout` |
 | `tests/oracle10.rs` | the LMDB 1.0 build: tool versions, the `layout_dump10` numbers (page header, `MDB_ovpage`, lock-file header, the `MDB_LOCK_FORMAT` formula, maximum key size), the two dumps lining up, 0.9 and 1.0 refusing each other's environments, `cpeer10`, every 1.0 `mtest*` |
 | `tests/audit10.rs` | `cpeer10 check-freelist` and `pagecmp` on 1.0 files written by the C 1.0 programs (page sizes 256 to 65536, copies, `mtest*`): good files pass, broken copies (leaked page, page used twice, bad `mp_txnid`, `MDB_ovpage`, sub-page flags) fail; `pagecmp` refuses 0.9 against 1.0 |
-| `tests/write_differential10.rs` | the write path of the 1.0 format against C 1.0: the lock-step harness of `rlmdb/tests/common/differential.rs` with `writeops10` at 1, 4, 16 and 64 KiB pages (plain, integer, reverse, DUPSORT, DUPFIXED, deep trees, overwrites, nested transactions, drops, Rust-side spills; `diff10_spill_full_size` `#[ignore]`d), every step compared, then `mdb_dump10`, `cpeer10 check-freelist` and `pagecmp` (page by page, `mp_txnid` included) |
+| `tests/write_differential10.rs` | the write path of the 1.0 format against C 1.0: the lock-step harness of `rlmdb/tests/common/differential.rs` with `writeops10` at 1, 4, 16 and 64 KiB pages (plain, integer, reverse, DUPSORT, DUPFIXED (items of 1 to 3 bytes also at 256 and 512 B pages), deep trees, overwrites, nested transactions, drops, Rust-side spills; `diff10_spill_full_size` `#[ignore]`d), every step compared, then `mdb_dump10`, `cpeer10 check-freelist` and `pagecmp` (page by page, `mp_txnid` included) |
 | `tests/capi10.rs` | the C API with 1.0 environments against C 1.0: `cpeer_capi` creates one with `RLMDB_DEFAULT_FORMAT=1.0` (and a 0.9 one without), fills 1.0 files of 1 KiB and 64 KiB pages that `mdb_load10` created (opened without a format request; inline values of 20000 bytes on 64 KiB pages), and `cpeer10 verify`, the C 1.0 page audit, `mdb_dump10` and `mdb_stat10` agree; the reverse with `cpeer10` writing and `cpeer_capi verify`/`dump` reading, keys over 511 bytes from `mdb_load10` included |
 | `tests/tools10.rs` | the Rust tools (`rtools`) on 1.0 files against `mdb_load10` (`-F 1.0` and `RLMDB_DEFAULT_FORMAT=1.0`: same messages, same pages; empty keys), `mdb_stat10` and `mdb_dump10` (every option both have, on `mdb_load10` files at 1, 4, 64 KiB pages and on `mtest*10` environments), `mdb_drop10` (same files, also emptying the main DB), `mdb_copy10` (byte-identical copies); C 1.0's process map address is normalised (`KNOWN_C_BUGS.md`, "LMDB 1.0") |
 | `tests/format10.rs` | rlmdb reading C 1.0's files (`mdb_load10` at 512 B to 64 KiB pages, `mtest*10`) against `mdb_dump10`/`mdb_stat10`; rlmdb loading what `mdb_load10` loads (same pages); copies byte-identical to `mdb_copy10 [-c]`; C 1.0 and rlmdb writing one environment in turns; a C 1.0 reader pinning pages against an rlmdb writer and the reverse, both writing an environment both keep open |
@@ -383,7 +383,7 @@ Commands that only read open the environment with `MDB_RDONLY`: `verify`,
 | `--intdup` | `MDB_DUPSORT \| MDB_DUPFIXED \| MDB_INTEGERDUP` (4- or 8-byte values) |
 | `--revkey` | `MDB_REVERSEKEY` |
 | `--revdup` | `MDB_DUPSORT \| MDB_REVERSEDUP` |
-| `--valsize N` | value size (max size for DUPSORT); default 32, DUPSORT 16, `--intdup` 8 |
+| `--valsize N` | value size (max size for DUPSORT, 4..511; DUPFIXED 1..511); default 32, DUPSORT 16, `--intdup` 8 |
 | `--big N` | items with `i % 3 == 0` get `N`-byte values (overflow pages); not with DUPSORT |
 | `--dups N` | max values per key (DUPSORT; default 5) |
 | `--deleted-every N` | the data set as left by `delete --every N` |
@@ -544,7 +544,11 @@ a tree (free DB, main DB, named DBs, DUPSORT sub-DBs; branch, leaf and
 overflow pages), or listed in a free DB record. It also checks each
 `MDB_db` against its tree (depth = leaf level, page counts, entries; a
 DUPSORT DB's branch/leaf counts include its sub-DBs' pages), page numbers in
-headers, free lists sorted descending, sub-page headers. Output:
+headers, free lists sorted descending, sub-page headers. `mp_lower` and
+`mp_upper` must bound the pointers and nodes, except on `P_LEAF2` pages and
+sub-pages, where they only count the items (with 1-byte items `mp_upper`
+lies past the end): there the items must fit and `SIZELEFT` must be the
+space after them. Output:
 
 ```
 psize=16384
@@ -619,6 +623,8 @@ vlen(i, d)  = valsize                     for DUPFIXED/INTEGERDUP
             = 4 + fmix32(tag(i, d)) % (valsize - 3)   for other DUPSORT (4..valsize)
             = big if big and i % 3 == 0, else valsize   for plain DBs
 value(i, d) = --intdup, 8 bytes: u64 native (tag << 32 | d); 4 bytes: u32 native tag
+            = DUPFIXED, vlen < 4: the low vlen bytes of tag, big-endian
+              (distinct: dups <= 256^vlen is required)
             = otherwise: tag as 4 bytes big-endian (truncated if vlen < 4), then
               splitmix64 words, each written little-endian, truncated at vlen,
               from state = seed * 0x9e3779b97f4a7c15 ^ (i << 16) ^ d

@@ -57,7 +57,11 @@ ds_finish(struct dataset *ds)
 
 	if ((f & MDB_INTEGERDUP) && ds->valsize != 4 && ds->valsize != 8)
 		return "--intdup needs --valsize 4 or 8";
-	if ((f & MDB_DUPSORT) && (ds->valsize < 4 || ds->valsize > 511))
+	if ((f & MDB_DUPFIXED) && (ds->valsize < 1 || ds->valsize > 511))
+		return "DUPFIXED values must be 1..511 bytes (--valsize)";
+	if ((f & MDB_DUPFIXED) && ds->valsize < 4 && ds->dups > 1u << (8 * ds->valsize))
+		return "--dups exceeds the distinct values of --valsize";
+	if ((f & MDB_DUPSORT) && !(f & MDB_DUPFIXED) && (ds->valsize < 4 || ds->valsize > 511))
 		return "DUPSORT values must be 4..511 bytes (--valsize)";
 	if ((f & MDB_DUPSORT) && ds->big)
 		return "--big cannot be used with DUPSORT (dup data is limited to 511 bytes)";
@@ -133,6 +137,13 @@ ds_value(const struct dataset *ds, uint32_t i, uint32_t d,
 		} else {
 			memcpy(buf, &tag, 4);
 		}
+		return;
+	}
+	/* DUPFIXED values under 4 bytes: the low bytes of the tag, big-endian
+	 * (distinct, as d only changes them: --dups is limited to fit). */
+	if ((ds->dbflags & MDB_DUPFIXED) && len < 4) {
+		for (off = 0; off < len; off++)
+			buf[off] = (unsigned char)(tag >> (8 * (len - 1 - off)));
 		return;
 	}
 	/* 4-byte big-endian tag, then a SplitMix64 stream (little-endian words). */

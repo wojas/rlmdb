@@ -223,6 +223,56 @@ fn diff10_dupfixed_items_over_a_quarter_page() {
     }
 }
 
+/// `MDB_DUPFIXED` items of 1 byte, and of 2 and 3 bytes as neighbours
+/// (`rlmdb/tests/write_differential.rs`, `diff_dupfixed_small_items`): with
+/// 1-byte items `mp_upper` of a `P_LEAF2` page grows past its end. At
+/// 256 and 512 bytes per page the 256 possible 1-byte values also go to
+/// sub-DBs, whose `P_LEAF2` pages split and merge when one key has most
+/// of them; the larger pages keep them on sub-pages.
+#[test]
+fn diff10_dupfixed_small_items() {
+    for ps in [256, 512].into_iter().chain(PAGE_SIZES) {
+        for size in [1, 2, 3] {
+            eprintln!("page size {ps}, items of {size} bytes");
+            let p = for_page_size(
+                Profile {
+                    dupfixed_size: Some(size),
+                    ..Profile::new(MDB_DUPSORT | MDB_DUPFIXED, 4)
+                },
+                ps,
+            );
+            differential::run_profile(&C10::new(ps), p, 0x1f0 + size as u64 + ps as u64, 4, 1200);
+        }
+    }
+    // One key at 256-byte pages: its 1-byte items fill the 232 slots of a
+    // `P_LEAF2` page of its sub-DB, which splits (and merges again).
+    eprintln!("page size 256, items of 1 byte, one key");
+    let p = for_page_size(
+        Profile {
+            dupfixed_size: Some(1),
+            ..Profile::new(MDB_DUPSORT | MDB_DUPFIXED, 1)
+        },
+        256,
+    );
+    differential::run_profile(&C10::new(256), p, 0x1fe, 4, 3000);
+}
+
+/// [`differential::dupfixed_1byte_script`] at every page size: at 256
+/// bytes per page the key's sub-DB splits its `P_LEAF2` page of 1-byte
+/// items, then merges and rebalances them as they are deleted.
+#[test]
+fn diff10_dupfixed_1byte_script() {
+    let p = Profile::new(MDB_DUPSORT | MDB_DUPFIXED, 0);
+    for ps in [256, 512].into_iter().chain(PAGE_SIZES) {
+        let ops = differential::dupfixed_1byte_script();
+        assert_eq!(
+            differential::run_round(&C10::new(ps), &p, 2, Ops::List(ops), "1byte"),
+            Round::Same,
+            "page size {ps}"
+        );
+    }
+}
+
 #[test]
 fn diff10_intdup() {
     run_profiles(

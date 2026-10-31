@@ -509,7 +509,8 @@ impl<'a> PageMut<'a> {
 
     /// Inserts a key into a `P_LEAF2` page at index `indx`, as the `IS_LEAF2`
     /// branch of `mdb_node_add` does (keys shift up, `mp_lower += 2`,
-    /// `mp_upper -= ksize - 2`). The key size is `key.len()`.
+    /// `mp_upper -= ksize - 2`, modulo 2^16 as in C: `mp_upper` grows for
+    /// 1-byte keys). The key size is `key.len()`.
     #[allow(clippy::result_unit_err)]
     pub fn add_leaf2_key(&mut self, indx: usize, key: &[u8]) -> Result<(), ()> {
         let (nkeys, lower, upper, size_left) = {
@@ -522,6 +523,7 @@ impl<'a> PageMut<'a> {
             )
         };
         let ksize = key.len();
+        let ksize16 = u16::try_from(ksize).map_err(|_| ())?;
         if indx > nkeys || size_left < ksize {
             return Err(());
         }
@@ -531,7 +533,7 @@ impl<'a> PageMut<'a> {
         self.buf.copy_within(start..end, start + ksize);
         self.buf[start..start + ksize].copy_from_slice(key);
         self.set_lower(lower + 2);
-        self.set_upper(upper - (ksize as u16 - 2));
+        self.set_upper(upper.wrapping_sub(ksize16).wrapping_add(2));
         Ok(())
     }
 }

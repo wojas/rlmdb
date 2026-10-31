@@ -752,6 +752,104 @@ static void test_cursors(void)
 
 /* ---------------------------------------------------------------------- */
 
+/* MDB_DUPFIXED items of 1, 2 and 3 bytes. A P_LEAF2 (sub-)page counts its
+ * items in mp_lower/mp_upper, mp_upper dropping by ksize - sizeof(indx_t)
+ * per item: unsigned in mdb_node_add, so for 1-byte items mp_upper grows
+ * past the end of the page. The Rust library refused such an insert with
+ * MDB_PAGE_FULL; the 2- and 3-byte databases guard the neighbours. */
+static void test_dupfixed_small(void)
+{
+	MDB_env *env = new_env("small", 1UL << 22, 8, 0);
+	MDB_txn *txn, *r;
+	MDB_cursor *c;
+	MDB_dbi db;
+	MDB_val k, d, m[2];
+	unsigned char v[3], items[3 * 256], prev;
+	char name[32];
+	size_t size, cnt, total;
+	int i, rc;
+
+	OK(mdb_txn_begin(env, NULL, 0, &txn));
+	for (size = 1; size <= 3; size++) {
+		snprintf(name, sizeof(name), "fixed%zu", size);
+		OK(mdb_dbi_open(txn, name, MDB_CREATE | MDB_DUPSORT | MDB_DUPFIXED, &db));
+		/* "a": 200 single puts in a scrambled order (167 is odd, so
+		 * i * 167 mod 256 visits every byte once) */
+		k = sv("a");
+		memset(v, 'x', sizeof(v));
+		for (i = 0; i < 200; i++) {
+			v[0] = (unsigned char)(i * 167);
+			d = bv(v, size);
+			OK(mdb_put(txn, db, &k, &d, 0));
+		}
+		snprintf(name, sizeof(name), "fixed%zu after 200 puts", size);
+		trace_stat(name, txn, db);
+		/* "b": all 256 first bytes at once */
+		for (i = 0; i < 256; i++) {
+			memset(items + i * size, 'y', size);
+			items[i * size] = (unsigned char)(255 - i);
+		}
+		OK(mdb_cursor_open(txn, db, &c));
+		k = sv("b");
+		m[0] = bv(items, size);
+		m[1].mv_size = 256;
+		m[1].mv_data = NULL;
+		OK(mdb_cursor_put(c, &k, m, MDB_MULTIPLE));
+		CHECK(m[1].mv_size == 256);
+		OK(mdb_cursor_count(c, &cnt));
+		CHECK(cnt == 256);
+		/* every third value of "a" goes again */
+		k = sv("a");
+		for (i = 0; i < 200; i += 3) {
+			v[0] = (unsigned char)(i * 167);
+			d = bv(v, size);
+			OK(mdb_del(txn, db, &k, &d));
+		}
+		snprintf(name, sizeof(name), "fixed%zu after deletes", size);
+		trace_stat(name, txn, db);
+		/* the values of "a" are sorted, one item each */
+		OK(mdb_cursor_get(c, &k, &d, MDB_SET));
+		OK(mdb_cursor_get(c, &k, &d, MDB_FIRST_DUP));
+		CHECK(d.mv_size == size);
+		prev = *(unsigned char *)d.mv_data;
+		cnt = 1;
+		while ((rc = mdb_cursor_get(c, &k, &d, MDB_NEXT_DUP)) == 0) {
+			CHECK(d.mv_size == size && *(unsigned char *)d.mv_data > prev);
+			prev = *(unsigned char *)d.mv_data;
+			cnt++;
+		}
+		RC(rc, MDB_NOTFOUND);
+		T("fixed%zu: a has %zu values", size, cnt);
+		/* MDB_GET_MULTIPLE / MDB_NEXT_MULTIPLE return whole items */
+		k = sv("b");
+		OK(mdb_cursor_get(c, &k, &d, MDB_SET));
+		OK(mdb_cursor_get(c, &k, &d, MDB_GET_MULTIPLE));
+		total = 0;
+		do {
+			CHECK(d.mv_size % size == 0);
+			T("fixed%zu: multiple %zu bytes, first %u", size, d.mv_size,
+				*(unsigned char *)d.mv_data);
+			total += d.mv_size;
+		} while ((rc = mdb_cursor_get(c, &k, &d, MDB_NEXT_MULTIPLE)) == 0);
+		RC(rc, MDB_NOTFOUND);
+		CHECK(total == 256 * size);
+		mdb_cursor_close(c);
+	}
+	OK(mdb_txn_commit(txn));
+
+	OK(mdb_txn_begin(env, NULL, MDB_RDONLY, &r));
+	for (size = 1; size <= 3; size++) {
+		snprintf(name, sizeof(name), "fixed%zu", size);
+		OK(mdb_dbi_open(r, name, 0, &db));
+		snprintf(name, sizeof(name), "fixed%zu committed", size);
+		trace_stat(name, r, db);
+	}
+	mdb_txn_abort(r);
+	mdb_env_close(env);
+}
+
+/* ---------------------------------------------------------------------- */
+
 static void test_comparators(void)
 {
 	MDB_env *env = new_env("cmp", 1UL << 22, 4, 0);
@@ -1304,6 +1402,8 @@ int main(int argc, char **argv)
 	test_nested();
 	test_copy("cursors");
 	test_copy("put");
+	test_dupfixed_small();
+	test_copy("small");
 
 	printf("capi_write: %d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
