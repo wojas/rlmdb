@@ -139,10 +139,19 @@ fn magnitude(digits: &[u8], radix: u32) -> u64 {
     })
 }
 
-/// `atoi(s)`, i.e. `(int)strtol(s, NULL, 10)` on a 64-bit `long`.
+/// `atoi(s)` of the C runtime the C tools are built with, which differ
+/// past the range of `int`: glibc and macOS compute `(int)strtol(s, NULL,
+/// 10)` on a 64-bit `long` and MinGW's msvcrt accumulates in a wrapping
+/// `int`, both keeping the low 32 bits (`99999999999` is `1215752191`);
+/// MSVC's UCRT saturates at `INT_MAX`/`INT_MIN` (and sets `ERANGE`).
 pub fn atoi(s: &[u8]) -> i32 {
     let (negative, digits) = split_number(cstr(s), 10);
     let m = magnitude(digits, 10);
+    if cfg!(target_env = "msvc") {
+        let limit = if negative { 1 << 31 } else { (1 << 31) - 1 };
+        let m = m.min(limit) as i64;
+        return (if negative { -m } else { m }) as i32;
+    }
     let v: i64 = if negative {
         if m > i64::MAX as u64 {
             i64::MIN
@@ -177,7 +186,18 @@ mod tests {
         assert_eq!(atoi(b"3\n"), 3);
         assert_eq!(atoi(b"  -12x"), -12);
         assert_eq!(atoi(b"x"), 0);
-        assert_eq!(atoi(b"4294967299"), 3);
+        // Past int: the low 32 bits, or INT_MAX/INT_MIN with MSVC's UCRT.
+        let msvc = cfg!(target_env = "msvc");
+        assert_eq!(atoi(b"4294967299"), if msvc { i32::MAX } else { 3 });
+        assert_eq!(
+            atoi(b"99999999999"),
+            if msvc { i32::MAX } else { 1_215_752_191 }
+        );
+        assert_eq!(atoi(b"-2147483648"), i32::MIN);
+        assert_eq!(
+            atoi(b"-99999999999"),
+            if msvc { i32::MIN } else { -1_215_752_191 }
+        );
         assert_eq!(scan_unsigned(b"1048576", 10), Some(1_048_576));
         assert_eq!(scan_unsigned(b" +7z", 10), Some(7));
         assert_eq!(scan_unsigned(b"-1", 10), Some(u64::MAX));

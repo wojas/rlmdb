@@ -157,6 +157,16 @@ Other differences:
   options as MinGW-w64's `getopt` does (MSVC has none; the C tools built
   with it here get a shim that behaves the same,
   `tests/compat/msvc/unistd.h`).
+* **The C runtime's numbers.** `mdb_load` reads `VERSION=` with `atoi`, as
+  C does, and the C runtimes differ past the range of `int`: glibc, macOS
+  and MinGW's msvcrt keep the low 32 bits (`VERSION=99999999999` is
+  "unsupported VERSION 1215752191"), MSVC's UCRT saturates (2147483647).
+  The Rust tools follow the runtime of the toolchain they are built with,
+  as the C tools they are compared with do (`cfmt::atoi`). The other
+  numbers of a dump header are read like `sscanf("%zu")`/`"%u"`/`"%p"`:
+  the low bits of a value that fits in 64 bits, as every runtime does;
+  past 64 bits `strtoull`'s saturation, which glibc and macOS have (not
+  measured against the Windows runtimes).
 * **`mdb_load` with `mapaddr=`** in the header opens the environment with
   `MDB_FIXEDMAP` as C does, but `rlmdb` ignores that flag (it never
   maps at a fixed address), so a new environment records address 0 and its
