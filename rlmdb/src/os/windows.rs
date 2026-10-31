@@ -80,7 +80,7 @@
 //!   the process with `PROCESS_QUERY_LIMITED_INFORMATION` alone, so its
 //!   `WaitForSingleObject` always fails and a process that exited while
 //!   someone still holds a handle to it counts as alive; this opens it with
-//!   `SYNCHRONIZE` too (`KNOWN_C_BUGS.md` #38).
+//!   `SYNCHRONIZE` too (`KNOWN_C_BUGS.md` #42).
 //! * The reader slot's `mr_tid` is a `DWORD` (`GetCurrentThreadId`) at
 //!   offset 12, `mr_pid` the `int` from `GetCurrentProcessId`
 //!   (`format::lockfile::READER_TID`).

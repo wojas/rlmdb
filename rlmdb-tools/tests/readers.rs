@@ -42,7 +42,7 @@ impl Holder {
     /// Kills the process (SIGKILL): its reader slot stays in the table.
     /// Dropping it closes the process handle too: Windows keeps a dead
     /// process's object while a handle to it is open, and C's reader check
-    /// would count it as alive (`KNOWN_C_BUGS.md` #38).
+    /// would count it as alive (`KNOWN_C_BUGS.md` #42).
     fn kill(mut self) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();

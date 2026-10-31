@@ -292,7 +292,7 @@ fn malformed_input() {
         if cfg!(windows) && case.starts_with("maxreaders=-1") {
             // C sizes the lock file in a 32-bit off_t on Windows: for this
             // many readers the size wraps and the open fails in another
-            // way than rlmdb's (KNOWN_C_BUGS.md #39). Both fail to open.
+            // way than rlmdb's (KNOWN_C_BUGS.md #43). Both fail to open.
             let dir = tempdir();
             let l = load_both(dir.path(), Start::New, &[], case.as_bytes());
             assert_eq!((l.c.code, l.r.code), (1, 1));
