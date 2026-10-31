@@ -14,10 +14,10 @@
 //!   touches the lock file.
 //! * Without one (`NO_LOCK`), any number of handles may open a data file.
 //!   They share one [`LocalShared`]: the writer lock that serialises their
-//!   write transactions and the reader table in which their read
-//!   transactions pin snapshots, so a writer of any handle keeps the pages
-//!   of readers of every handle (C coordinates nothing there,
-//!   `KNOWN_C_BUGS.md` #35). It exists while one of them is open.
+//!   write transactions, the last committed txnid and the reader table in
+//!   which their read transactions pin snapshots, so a writer of any handle
+//!   keeps the pages of readers of every handle (C coordinates nothing
+//!   there, `KNOWN_C_BUGS.md` #35). It exists while one of them is open.
 //! * A handle with a lock file and a `NO_LOCK` handle never share a file
 //!   (their readers would be invisible to each other's writers): whichever
 //!   comes second gets `EBUSY`.
@@ -38,28 +38,108 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{fence, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
-use crate::core::reader::LocalReaders;
+use crate::core::reader::{LocalReaders, LocalSlot};
 use crate::error::{Error, Result};
 
 /// What the handles of one data file without a lock file share in this
-/// process: the in-process stand-ins for the lock file's writer mutex and
-/// reader table.
-#[derive(Debug, Default)]
+/// process: the in-process stand-ins for the lock file's writer mutex,
+/// `mti_txnid` and reader table.
+#[derive(Debug)]
 pub(crate) struct LocalShared {
     /// Serialises the write transactions of every handle of the file (and
     /// the set-up of a new file, and the meta-page snapshot of a plain
-    /// copy), where the lock file's writer mutex would.
+    /// copy), where the lock file's writer mutex would. Holding it, nobody
+    /// in this process writes a meta page.
     writer: Mutex<()>,
+    /// The last committed transaction (`mti_txnid`), which read
+    /// transactions publish and pin as they would the lock file's (see
+    /// `RoTxn::take_snapshot`). [`TXNID_UNKNOWN`] until the first handle
+    /// has read the file's header ([`LocalShared::init_txnid`]); from then
+    /// on changed only under `writer`, and never back.
+    txnid: AtomicU64,
     /// The read transactions of every handle of the file.
     pub(crate) readers: LocalReaders,
+}
+
+/// The committed txnid of a [`LocalShared`] before a handle has read the
+/// file's header (the txnid of an idle reader slot, `(txnid_t)-1`).
+const TXNID_UNKNOWN: u64 = !0;
+
+impl Default for LocalShared {
+    fn default() -> Self {
+        LocalShared {
+            writer: Mutex::new(()),
+            txnid: AtomicU64::new(TXNID_UNKNOWN),
+            readers: LocalReaders::default(),
+        }
+    }
 }
 
 impl LocalShared {
     /// Locks the writer lock, for as long as the guard lives.
     pub(crate) fn lock_writer(&self) -> MutexGuard<'_, ()> {
         self.writer.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Locks the writer lock if nobody holds it (this thread included).
+    pub(crate) fn try_lock_writer(&self) -> Option<MutexGuard<'_, ()>> {
+        match self.writer.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// The last committed transaction of the file (`mti_txnid`).
+    pub(crate) fn txnid(&self) -> u64 {
+        self.txnid.load(Ordering::SeqCst)
+    }
+
+    /// Publishes the last committed txnid in `slot` and returns it,
+    /// re-reading until both agree, as
+    /// [`LockRegion::publish_current_txnid`](crate::core::reader::LockRegion::publish_current_txnid)
+    /// does with `mti_txnid`.
+    pub(crate) fn publish_current_txnid(&self, slot: &LocalSlot) -> u64 {
+        loop {
+            let t = self.txnid();
+            slot.publish(t);
+            if self.txnid() == t {
+                return t;
+            }
+        }
+    }
+
+    /// Sets the last committed transaction: by a writer, holding the writer
+    /// lock, as `mdb_env_write_meta` sets `mti_txnid`. Ordered before the
+    /// caller's later writes, so that a reader that sees any of them (a
+    /// meta page being rewritten) sees the new txnid when it re-checks.
+    pub(crate) fn set_txnid(&self, txnid: u64) {
+        self.txnid.store(txnid, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+    }
+
+    /// Adopts `newest`, the txnid of the newest meta page, read while
+    /// holding the writer lock (`_writer`), if it is newer than what this
+    /// process knows: a commit of another process (`NO_LOCK` leaves keeping
+    /// processes apart to the caller, as in C, so such a commit happened
+    /// while no transaction of ours ran). Returns whether it was newer.
+    pub(crate) fn adopt_txnid(&self, _writer: &MutexGuard<'_, ()>, newest: u64) -> bool {
+        self.txnid.fetch_max(newest, Ordering::SeqCst) < newest
+    }
+
+    /// Sets the last committed transaction from the newest meta page of the
+    /// file's header (`newest`) unless it is known: every handle calls this
+    /// once it has read the header and before it begins a transaction, so
+    /// the first one to get here sets it, while no writer can have
+    /// committed (no handle has finished opening), and later ones leave it.
+    pub(crate) fn init_txnid(&self, newest: u64) {
+        let order = Ordering::SeqCst;
+        let _ = self
+            .txnid
+            .compare_exchange(TXNID_UNKNOWN, newest, order, order);
     }
 }
 

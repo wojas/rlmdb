@@ -625,8 +625,8 @@ impl LocalReaders {
     pub(crate) fn find_oldest(&self, txnid: u64) -> u64 {
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         // Pairs with the fence in `LocalSlot::publish`: a reader whose
-        // publication we miss sees the meta page of every commit before
-        // this point and retries (`RoTxn::take_snapshot`).
+        // publication we miss sees the committed txnid move when it
+        // re-checks it, and retries (`RoTxn::take_snapshot`).
         fence(Ordering::SeqCst);
         entries
             .iter()
@@ -650,7 +650,8 @@ impl LocalSlot {
     /// that looked before.
     pub(crate) fn publish(&self, txnid: u64) {
         self.0.txnid.store(txnid, Ordering::SeqCst);
-        // Order the store before the caller's re-read of the meta page.
+        // Order the store before the caller's re-read of the committed
+        // txnid.
         fence(Ordering::SeqCst);
     }
 

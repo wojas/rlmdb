@@ -285,6 +285,98 @@ fn no_lock_handles_serialise_writers_and_keep_readers() {
     assert_eq!(txn.id(), writers * rounds);
 }
 
+/// Without a lock file, a read transaction reads the snapshot whose txnid
+/// it pins, also when it begins while commits replace the meta page it
+/// copies: one writer stores each transaction's txnid as the value of
+/// `counter`, and readers on other threads check it against `RoTxn::id`.
+/// Readers that pinned a newer snapshot than they read would let the
+/// writer reuse their pages, so some readers also hold their value across
+/// many commits and check that it does not change. Both formats, with
+/// readers in the writer's handle and in another handle of the file.
+#[test]
+fn no_lock_readers_pin_the_snapshot_they_read() {
+    for format in [Format::V09, Format::V10] {
+        for two_handles in [false, true] {
+            no_lock_snapshot_matches_its_id(format, two_handles);
+        }
+    }
+}
+
+fn no_lock_snapshot_matches_its_id(format: Format, two_handles: bool) {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    let dir = tmp();
+    let open = || {
+        Environment::builder()
+            .format(format)
+            .map_size(64 << 20)
+            .flags(EnvironmentFlags::NO_LOCK | EnvironmentFlags::NO_SYNC)
+            .open(dir.path())
+            .unwrap()
+    };
+    let writer_env = open();
+    let other = two_handles.then(open);
+    let reader_env = other.as_ref().unwrap_or(&writer_env);
+    // The value of `counter` in transaction `id`: the id, then a filler
+    // that changes with it.
+    let value = |id: u64| -> Vec<u8> {
+        let mut v = vec![id as u8; 64];
+        v[..8].copy_from_slice(&id.to_le_bytes());
+        v
+    };
+    let check = |txn: &rlmdb::RoTxn<'_>, v: &[u8], what: &str| {
+        let id = u64::from_le_bytes(v[..8].try_into().unwrap());
+        assert_eq!(
+            (txn.id(), v),
+            (id, &value(id)[..]),
+            "{format:?}, two handles {two_handles}: {what}"
+        );
+    };
+    let (commits, held_commits) = (4000, 20);
+    let committed = AtomicU64::new(0);
+    let done = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let _stop = StopOnDrop(&done);
+        let (committed, done) = (&committed, &done);
+        for t in 0..6 {
+            s.spawn(move || {
+                while !done.load(Ordering::SeqCst) {
+                    let txn = reader_env.begin_ro_txn().unwrap();
+                    let Some(held) = txn.get(Dbi::MAIN, b"counter").unwrap() else {
+                        assert_eq!(txn.id(), 0);
+                        continue;
+                    };
+                    check(&txn, held, "snapshot and value differ");
+                    if t % 2 == 1 {
+                        // Hold the value while the writer commits.
+                        let copy = held.to_vec();
+                        let start = committed.load(Ordering::SeqCst);
+                        while committed.load(Ordering::SeqCst) < start + held_commits
+                            && !done.load(Ordering::SeqCst)
+                        {
+                            std::thread::yield_now();
+                        }
+                        assert_eq!(held, &copy[..], "a held value changed");
+                        check(&txn, held, "a held value changed");
+                    }
+                }
+            });
+        }
+        for _ in 0..commits {
+            let mut txn = writer_env.begin_rw_txn().unwrap();
+            let id = txn.id();
+            txn.put(Dbi::MAIN, b"counter", &value(id), WriteFlags::empty())
+                .unwrap();
+            txn.commit().unwrap();
+            committed.store(id, Ordering::SeqCst);
+        }
+    });
+    let txn = reader_env.begin_ro_txn().unwrap();
+    assert_eq!(txn.id(), commits);
+    let v = txn.get(Dbi::MAIN, b"counter").unwrap().unwrap();
+    check(&txn, v, "end");
+}
+
 #[test]
 fn read_only_open_requires_existing_files() {
     let dir = tmp();

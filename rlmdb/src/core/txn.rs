@@ -22,12 +22,14 @@
 //! database beyond our `map_size`), begin fails with `MDB_MAP_RESIZED`.
 //!
 //! Without a lock file there is no `mti_txnid` and C does not track readers
-//! (`mdb_txn_renew0` just takes the newest meta page). Here the transaction
-//! takes an entry of the environment's in-memory reader table
-//! (`reader::LocalReaders`) instead of a slot, publishes the txnid of the
-//! newest meta page in it and then re-checks that meta page; see
-//! `RoTxn::take_snapshot`. Writers of the process then keep its pages as
-//! they would for a lock-file slot.
+//! (`mdb_txn_renew0` just takes the newest meta page, and may copy a page a
+//! writer of the process is rewriting). Here the transaction takes an entry
+//! of the environment's in-memory reader table (`reader::LocalReaders`)
+//! instead of a slot, and steps 2 and 3 use the last committed txnid that
+//! the file's `NO_LOCK` handles in the process share
+//! (`registry::LocalShared`), which their writers set as they would set
+//! `mti_txnid`; see `RoTxn::take_snapshot`. Writers of the process then
+//! keep its pages as they would for a lock-file slot.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -39,6 +41,7 @@ use crate::core::dbi::{init_txn_dbs, Dbi, TxnDb, DB_USRVALID, DB_VALID};
 use crate::core::dirty::{DirtyPages, Layer, PageSlot, SpillSet};
 use crate::core::env::Environment;
 use crate::core::reader::{LocalSlot, LockRegion, ReaderTable};
+use crate::core::registry::LocalShared;
 use crate::core::Stat;
 use crate::error::{Error, MdbError, Result};
 use crate::flags::DatabaseFlags;
@@ -449,9 +452,12 @@ enum ReaderSlot<'env> {
         lock: &'env LockRegion,
         index: usize,
     },
-    /// An entry of the in-memory table (no lock file); released when
-    /// dropped.
-    Local(LocalSlot),
+    /// An entry of the in-memory table of `shared` (no lock file);
+    /// released when dropped.
+    Local {
+        shared: &'env LocalShared,
+        slot: LocalSlot,
+    },
     /// None: given to the [`InactiveTxn`] by a reset, or taken from us
     /// (`MDB_BAD_RSLOT`).
     None,
@@ -461,7 +467,7 @@ impl std::fmt::Debug for ReaderSlot<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReaderSlot::Shared { index, .. } => f.debug_tuple("Shared").field(index).finish(),
-            ReaderSlot::Local(_) => f.write_str("Local"),
+            ReaderSlot::Local { .. } => f.write_str("Local"),
             ReaderSlot::None => f.write_str("None"),
         }
     }
@@ -472,7 +478,7 @@ impl ReaderSlot<'_> {
     fn reset(&self) {
         match self {
             ReaderSlot::Shared { lock, index } => lock.reset_slot(*index),
-            ReaderSlot::Local(slot) => slot.reset(),
+            ReaderSlot::Local { slot, .. } => slot.reset(),
             ReaderSlot::None => {}
         }
     }
@@ -482,9 +488,18 @@ impl ReaderSlot<'_> {
         match std::mem::replace(self, ReaderSlot::None) {
             ReaderSlot::Shared { lock, index } => lock.release_slot(index),
             // Dropping the entry releases it.
-            ReaderSlot::Local(_) | ReaderSlot::None => {}
+            ReaderSlot::Local { .. } | ReaderSlot::None => {}
         }
     }
+}
+
+/// Whether the data file holds a commit newer than snapshot `txnid`, whose
+/// meta page we copied (`meta`): that page holds another one, or the other
+/// meta page a newer one. Only possible without a lock file, where other
+/// processes do not publish their commits to us.
+fn newer_commit_on_file(env: &Environment, txnid: u64, meta: &Meta) -> bool {
+    let other = ((txnid & 1) ^ 1) as usize;
+    meta.txnid != txnid || env.meta_ids(other).is_some_and(|(_, t)| t > txnid)
 }
 
 /// A read-only transaction (`MDB_txn` with `MDB_RDONLY`).
@@ -516,7 +531,10 @@ impl<'env> RoTxn<'env> {
                 lock,
                 index: lock.acquire_slot()?,
             },
-            ReaderTable::Local(local) => ReaderSlot::Local(local.readers.acquire()),
+            ReaderTable::Local(shared) => ReaderSlot::Local {
+                shared,
+                slot: shared.readers.acquire(),
+            },
         };
         // Built before the snapshot is taken so that Drop releases the slot
         // if anything below fails.
@@ -546,22 +564,39 @@ impl<'env> RoTxn<'env> {
                     break (txnid, meta);
                 }
             },
-            ReaderSlot::Local(slot) => loop {
-                // No lock file: the newest meta page, as C's
-                // `mdb_env_pick_meta`, then publish its txnid.
-                let meta = env.pick_meta()?;
-                slot.publish(meta.txnid);
-                // A writer that looked at the table before the publication
-                // did not see it. Pages of snapshot N are freed by commits
-                // after N, and a writer with txnid W reuses only pages
-                // freed by commits before W - 1 (`find_oldest` returns at
-                // most W - 1), so only a writer from N + 3 on can reuse
-                // them. It begins after commit N + 2, which rewrote meta
-                // page N & 1: if that page still holds N, every writer that
-                // could reuse the snapshot's pages looks at the table
-                // after the publication. Otherwise try the newer snapshot.
-                if env.meta_ids((meta.txnid & 1) as usize).map(|(_, t)| t) == Some(meta.txnid) {
-                    break (meta.txnid, meta);
+            ReaderSlot::Local { shared, slot } => loop {
+                // No lock file: the same protocol, with the txnid that the
+                // file's writers in this process set where they would set
+                // `mti_txnid` (`LocalShared`). It never goes back, and
+                // while a writer of ours rewrites a meta page it names the
+                // snapshot that writer began from, on the other meta page
+                // (`RwTxn::write_meta`). So if it did not move, no writer
+                // of ours touched our meta page while we copied it, and
+                // every writer that may reuse the snapshot's pages (from
+                // txnid + 3 on, see `find_oldest`) begins after the
+                // re-check and sees our publication.
+                let txnid = shared.publish_current_txnid(slot);
+                let meta = env.read_meta((txnid & 1) as usize)?;
+                if shared.txnid() != txnid {
+                    continue;
+                }
+                if !newer_commit_on_file(env, txnid, &meta) {
+                    break (txnid, meta);
+                }
+                // The file holds a newer commit: one of another process
+                // (which `NO_LOCK` leaves to the caller to keep apart from
+                // ours, as in C), or one of ours being written. Without a
+                // writer of ours, nobody in this process writes meta pages:
+                // adopt it and start over. With one, keep this snapshot
+                // (the copy is consistent; a newer snapshot of another
+                // process's on our meta page is newer than the one we pin,
+                // so its pages are kept too): the writer publishes its
+                // commit, which builds on the newest one, when it is done.
+                let Some(writer) = shared.try_lock_writer() else {
+                    break (txnid, meta);
+                };
+                if !shared.adopt_txnid(&writer, env.pick_meta()?.txnid) {
+                    break (txnid, meta);
                 }
             },
             ReaderSlot::None => return Err(MdbError::BadRslot.into()),
@@ -604,7 +639,7 @@ impl<'env> RoTxn<'env> {
     pub fn reader_slot(&self) -> Option<usize> {
         match self.slot {
             ReaderSlot::Shared { index, .. } => Some(index),
-            ReaderSlot::Local(_) | ReaderSlot::None => None,
+            ReaderSlot::Local { .. } | ReaderSlot::None => None,
         }
     }
 }

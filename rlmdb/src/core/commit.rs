@@ -13,7 +13,8 @@
 //! 5. write the tail of the meta page `txnid % 2` (from `mm_mapsize` on)
 //!    through the `O_DSYNC` descriptor (unless `NO_SYNC`/`NO_META_SYNC`);
 //!    only now does the new snapshot exist on disk;
-//! 6. publish the txnid in the lock file, so new readers pick it up.
+//! 6. publish the txnid in the lock file, so new readers pick it up
+//!    (without one, in the state the file's `NO_LOCK` handles share).
 //!
 //! A transaction without dirty pages commits without writing anything
 //! (`MDB_END_EMPTY_COMMIT`).
@@ -194,6 +195,15 @@ impl<'env> RwTxn<'env> {
     /// (`MDB_FATAL_ERROR`; later transactions fail with `MDB_PANIC`), after
     /// trying to put the old txnid back so the half-written page is not
     /// used.
+    ///
+    /// Without a lock file the txnid is published in the state the file's
+    /// `NO_LOCK` handles share (`registry::LocalShared`). Readers copy the
+    /// meta page of the txnid they find there and re-check it afterwards,
+    /// as with `mti_txnid` (`RoTxn::take_snapshot`), so it must not name
+    /// the page being rewritten: first it is set to the snapshot this
+    /// transaction began from (`txnid - 1`, on the other meta page). It
+    /// already is that unless another process committed since this process
+    /// last published a commit.
     fn write_meta(&mut self) -> Result<()> {
         let env = self.core.env;
         let ps = self.psize();
@@ -231,6 +241,10 @@ impl<'env> RwTxn<'env> {
             (true, Some(f)) => f,
             _ => env.data_file(),
         };
+        let local = env.local_shared();
+        if let Some(local) = local {
+            local.set_txnid(txnid.wrapping_sub(1));
+        }
         if let Err(e) = os::write_all_at(fd, bytes, off) {
             // On a failure, the page cache still contains the new data.
             // Write some old data back, to prevent it from being used.
@@ -251,6 +265,9 @@ impl<'env> RwTxn<'env> {
         }
         if let Some(lock) = env.lock_region() {
             lock.set_txnid(txnid);
+        }
+        if let Some(local) = local {
+            local.set_txnid(txnid);
         }
         self.wrote_meta(meta);
         Ok(())

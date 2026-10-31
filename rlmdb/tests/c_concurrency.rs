@@ -7,7 +7,7 @@ mod common;
 use std::path::Path;
 
 use common::*;
-use rlmdb::{Dbi, Environment, EnvironmentFlags, Error, MdbError, Transaction};
+use rlmdb::{Dbi, Environment, EnvironmentFlags, Error, MdbError, Transaction, WriteFlags};
 
 /// Parses `mdb_stat -r` output into (pid, txnid or None) pairs.
 fn parse_readers(text: &str) -> Vec<(i32, Option<u64>)> {
@@ -366,4 +366,79 @@ fn rust_readers_while_c_mtest_writes() {
     });
     let txn = env.begin_ro_txn().unwrap();
     assert_eq!(walk_forward(&txn, Dbi::MAIN), c.dump(&path, None));
+}
+
+/// Without a lock file, keeping other processes' transactions apart from
+/// ours is the caller's job, as in C. A handle that stays open still sees
+/// the commits another process made while it had no transaction, as C's
+/// does (it reads the newest meta page): its new read transactions read
+/// them (also after two of them, when the meta page of its last snapshot
+/// has been rewritten), a plain copy contains them, and its own writer
+/// commits on top of them.
+#[test]
+fn no_lock_handle_sees_commits_of_another_process() {
+    let c = require_c!();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("testdb");
+    std::fs::create_dir(&path).unwrap();
+    let env = Environment::builder()
+        .map_size(256 << 20)
+        .flags(EnvironmentFlags::NO_LOCK | EnvironmentFlags::NO_SYNC)
+        .open(&path)
+        .unwrap();
+    let last_txnid = |path: &Path| -> u64 {
+        parse_stat(&c.stat_text(path, &["-e"])).env["Last transaction ID"]
+            .parse()
+            .unwrap()
+    };
+    let put = |key: &[u8]| {
+        let mut txn = env.begin_rw_txn().unwrap();
+        txn.put(Dbi::MAIN, key, b"rust", WriteFlags::empty())
+            .unwrap();
+        txn.commit().unwrap();
+    };
+    put(b"r1");
+    assert_eq!(env.begin_ro_txn().unwrap().id(), 1);
+    for (round, (commits, key)) in [(1, "c1"), (1, "c2"), (2, "c3"), (2, "c4")]
+        .into_iter()
+        .enumerate()
+    {
+        // C commits while this handle has no transaction, each time adding
+        // pages at the end of the file.
+        for i in 0..commits {
+            let pairs: Vec<_> = (0..50)
+                .map(|j| (format!("{key}.{i}.{j:02}").into_bytes(), vec![b'c'; 200]))
+                .collect();
+            c.load(&path, None, &[], &pairs);
+        }
+        let newest = last_txnid(&path);
+        let read = || {
+            let txn = env.begin_ro_txn().unwrap();
+            assert_eq!(txn.id(), newest, "after {key}");
+            assert_eq!(walk_forward(&txn, Dbi::MAIN), c.dump(&path, None));
+        };
+        // A plain copy has every page of that snapshot.
+        let copy = || {
+            let copy = dir.path().join(format!("copy-{key}"));
+            std::fs::create_dir(&copy).unwrap();
+            env.copy_to_path(&copy, false).unwrap();
+            assert_eq!(last_txnid(&copy), newest, "copy after {key}");
+            assert_eq!(c.dump(&copy, None), c.dump(&path, None));
+        };
+        // (Either may be the first to find the commits.)
+        if round % 2 == 0 {
+            read();
+            copy();
+        } else {
+            copy();
+            read();
+        }
+    }
+    // Our writer builds on C's last commit, and readers see the result.
+    let before = last_txnid(&path);
+    put(b"r2");
+    let txn = env.begin_ro_txn().unwrap();
+    assert_eq!(txn.id(), before + 1);
+    assert_eq!(walk_forward(&txn, Dbi::MAIN), c.dump(&path, None));
+    assert_eq!(txn.get(Dbi::MAIN, b"r2").unwrap(), Some(&b"rust"[..]));
 }

@@ -128,7 +128,18 @@ impl Environment {
                 // NO_LOCK handle of the file shares, keeps this process's
                 // writers from rewriting a meta page while we copy them
                 // (C takes none: other processes are the caller's job).
-                let _writers = self.local_shared().map(|l| l.lock_writer());
+                // Holding it, we catch up with commits of other processes
+                // first, which the read transaction cannot do while we
+                // hold it (`RoTxn::take_snapshot`): the transaction must
+                // read the newest meta page that we copy.
+                let _writers = match self.local_shared() {
+                    Some(local) => {
+                        let writer = local.lock_writer();
+                        local.adopt_txnid(&writer, self.pick_meta()?.txnid);
+                        Some(writer)
+                    }
+                    None => None,
+                };
                 let txn = self.begin_ro_txn()?;
                 read_exact_at(self.data_file(), &mut buf.as_mut()[..2 * ps], 0)?;
                 txn

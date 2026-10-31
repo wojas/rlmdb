@@ -416,10 +416,15 @@ impl Environment {
         let max_readers = lock.as_ref().map_or(opts.max_readers, |l| l.max_readers());
         let readers = match (lock, local) {
             (Some(lock), _) => ReaderTable::Shared(lock),
-            (None, Some(local)) => ReaderTable::Local(local),
-            // No lock file without NO_LOCK (read-only on a read-only file
-            // system): the only handle of the file in the process.
-            (None, None) => ReaderTable::Local(Arc::default()),
+            (None, local) => {
+                // No lock file without NO_LOCK (read-only on a read-only
+                // file system): the only handle of the file in the process.
+                let local = local.unwrap_or_default();
+                // The last commit, from the header read above, unless an
+                // earlier handle of the file knows it already.
+                local.init_txnid(meta.txnid);
+                ReaderTable::Local(local)
+            }
         };
         let env = Environment {
             map: RwLock::new(Arc::new(map)),
