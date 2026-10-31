@@ -9,6 +9,16 @@
 #
 # RLMDB_DEFAULT_FORMAT is deliberately not set: the tests assume it is unset
 # (see scripts/check-all.sh).
+#
+# The tests' environments go to the runner's local disk (TMP and TEMP set to
+# runner.temp, on D: with the workspace) instead of the user's temp
+# directory on C:, the network-backed OS disk. C LMDB's synced writes on
+# Windows are written through (FILE_FLAG_WRITE_THROUGH), which is what the
+# time of its writers is made of (a C 1.0 fill with 256-byte pages: 2.2 s
+# synced, 0.16 s with MDB_NOSYNC, on a local SSD); with the temp directory
+# on C:, C 1.0 writers with 256-byte pages ran past the 120 s command
+# timeout of the interop scenarios. INTEROP_TIMEOUT_SECS gives slow runners
+# a margin on top.
 name: Windows
 
 on:
@@ -42,6 +52,10 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - name: test
         run: cargo test --workspace --no-fail-fast
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+          INTEROP_TIMEOUT_SECS: "300"
 
   gnu:
     name: Windows x86-64 (GNU, MinGW-w64)
@@ -75,3 +89,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - name: test
         run: cargo test --workspace --no-fail-fast
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+          INTEROP_TIMEOUT_SECS: "300"

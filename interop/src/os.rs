@@ -103,9 +103,12 @@ fn named_copy_dir(exe: &Path, name: &str) -> io::Result<std::path::PathBuf> {
     };
     if !fresh(&target) {
         std::fs::create_dir_all(&dir)?;
-        // Copied under a temporary name and renamed, for concurrent tests;
-        // a copy that is running cannot be replaced, and is the same file.
-        let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
+        // Copied under a temporary name and renamed, for concurrent tests
+        // (threads of one test binary too, hence the counter); a copy that
+        // is running cannot be replaced, and is the same file.
+        static COPIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!("{name}.{}.{n}.tmp", std::process::id()));
         std::fs::copy(&source, &tmp)?;
         if std::fs::rename(&tmp, &target).is_err() {
             let _ = std::fs::remove_file(&tmp);
