@@ -14,7 +14,6 @@
 //! (0), as 0.9 does; [`c10`] puts C 1.0's output in that form.
 
 use std::io::Write;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -76,14 +75,18 @@ fn c10_bin(tool: &str) -> &'static Path {
 /// documentation).
 fn c10(tool: &str, args: &[&str], stdin: &[u8]) -> Run {
     let mut run = c10_raw(tool, args, stdin);
-    let null = format!("  Map address: {}\n", rlmdb_tools::cfmt::pointer(0));
+    let null = rlmdb_tools::cfmt::pointer(0);
     run.stdout = run
         .stdout
         .split_inclusive('\n')
         .filter(|l| !l.starts_with("mapaddr="))
         .map(|l| match l.strip_prefix("  Map address: ") {
-            Some(_) => null.as_str(),
-            None => l,
+            // The line keeps its end ("\r\n" on Windows, text mode).
+            Some(rest) => {
+                let end = &rest[rest.trim_end_matches(['\r', '\n']).len()..];
+                format!("  Map address: {null}{end}")
+            }
+            None => l.to_owned(),
         })
         .collect();
     run
@@ -91,8 +94,8 @@ fn c10(tool: &str, args: &[&str], stdin: &[u8]) -> Run {
 
 /// C 1.0's `tool` with `args`, as `argv[0] = tool`, its output unchanged.
 fn c10_raw(tool: &str, args: &[&str], stdin: &[u8]) -> Run {
-    let mut cmd = Command::new(c10_bin(tool));
-    cmd.arg0(tool).args(args);
+    let mut cmd = interop::os::command_as(c10_bin(tool), tool);
+    cmd.args(args);
     run_cmd(cmd, stdin, None)
 }
 
@@ -350,8 +353,9 @@ fn mdb_stat_and_mdb_dump_match_c10() {
             if tool == "mdb_stat" && args.len() == 2 && args[0] == "-a" {
                 // 1.0's mdb_stat prints the page size per database and
                 // lists the named databases (their keys end with a NUL).
-                assert!(r.stdout.contains(&format!("  Page size: {ps}\n")), "{r:?}");
-                assert!(r.stdout.contains("Status of dup\n"), "{r:?}");
+                let out = r.stdout.replace("\r\n", "\n");
+                assert!(out.contains(&format!("  Page size: {ps}\n")), "{r:?}");
+                assert!(out.contains("Status of dup\n"), "{r:?}");
             }
         }
     }

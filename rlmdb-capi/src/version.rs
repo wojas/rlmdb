@@ -177,20 +177,21 @@ fn lmdb_messages() -> &'static [CString] {
 /// `mdb_strerror`: return a string describing a given error code.
 ///
 /// LMDB's codes map to static strings, LMDB 1.0's codes (`rlmdb.h`)
-/// included, where C 0.9 says "Invalid error code"; other positive values
-/// are passed to the C library's `strerror`, as C LMDB does on Unix.
+/// included, where C 0.9 says "Invalid error code" (on Windows, where C
+/// asks the system for any other code, the empty string); other positive values
+/// are passed to the C library's `strerror`, as C LMDB does on Unix (on
+/// Windows, as C does there: the C runtime's text for the `errno` values
+/// LMDB returns, the system's message for other codes).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_strerror(err: c_int) -> *mut c_char {
     let text: &CStr = if err == 0 {
         c"Successful return: 0"
     } else if (MDB_KEYEXIST..=MDB_LAST_ERRCODE_V10).contains(&err) {
         &lmdb_messages()[(err - MDB_KEYEXIST) as usize]
-    } else if err < 0 {
+    } else if err < 0 && !cfg!(windows) {
         c"Invalid error code"
     } else {
-        // SAFETY: strerror accepts any int and returns a NUL-terminated
-        // string owned by the C library.
-        return unsafe { libc::strerror(err) };
+        return crate::platform::system_strerror(err);
     };
     text.as_ptr() as *mut c_char
 }
@@ -320,9 +321,15 @@ mod tests {
             s(MDB_LAST_ERRCODE_V10),
             "MDB_ADDR_BUSY: Requested map address is unavailable"
         );
-        assert_eq!(s(MDB_LAST_ERRCODE_V10 + 1), "Invalid error code");
-        assert_eq!(s(MDB_KEYEXIST - 1), "Invalid error code");
-        assert_eq!(s(-1), "Invalid error code");
+        // C on Windows has no text for these (FormatMessage fails).
+        let invalid = if cfg!(windows) {
+            ""
+        } else {
+            "Invalid error code"
+        };
+        assert_eq!(s(MDB_LAST_ERRCODE_V10 + 1), invalid);
+        assert_eq!(s(MDB_KEYEXIST - 1), invalid);
+        assert_eq!(s(-1), invalid);
         assert_eq!(s(libc::ENOENT), "No such file or directory");
     }
 }

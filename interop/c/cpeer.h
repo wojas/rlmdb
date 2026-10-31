@@ -21,6 +21,9 @@
 #include <stdint.h>
 #include <stdio.h>
 
+/* pthreads, getpid, mkdir, pread, ... on Windows (POSIX: the system headers). */
+#include "../../tests/compat/posix_compat.h"
+
 #include "lmdb.h"
 #ifdef LMDB_RUST
 /* cpeer_capi: rlmdb's own functions (data-file formats). */

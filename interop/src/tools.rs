@@ -477,6 +477,11 @@ pub fn mdb_load(env: &TestEnv, flags: &[&str], input: &str) -> Result<Output> {
 /// For a directory environment, `dst` is created first (mdb_copy requires
 /// it to exist; the data file inside must not).
 pub fn mdb_copy(src: &TestEnv, dst: &TestEnv, compact: bool) -> Result<Output> {
+    mdb_copy_any_status(src, dst, compact)?.ok()
+}
+
+/// [`mdb_copy`], whatever its exit status.
+pub fn mdb_copy_any_status(src: &TestEnv, dst: &TestEnv, compact: bool) -> Result<Output> {
     if !dst.is_nosubdir() {
         std::fs::create_dir_all(dst.path())?;
     }
@@ -486,13 +491,14 @@ pub fn mdb_copy(src: &TestEnv, dst: &TestEnv, compact: bool) -> Result<Output> {
     }
     args.push(src.path().into());
     args.push(dst.path().into());
-    run_tool(tool_for(src.format(), "mdb_copy"), &args, None, None)
+    run_tool_any_status(tool_for(src.format(), "mdb_copy"), &args, None, None)
 }
 
 /// The output of `layout_dump`: sizes, offsets and constants of the C build.
 #[derive(Clone, Debug, Default)]
 pub struct Layout {
-    /// `lock_mode=`: `posix_sem` (macOS, BSD) or `posix_mutex` (Linux).
+    /// `lock_mode=`: `posix_sem` (macOS, BSD), `posix_mutex` (Linux) or
+    /// `win32` (Windows: named mutexes).
     pub lock_mode: String,
     /// Every numeric `name=value` line, e.g. `sizeof(MDB_meta)` or
     /// `offsetof(MDB_txninfo.mti_readers)`.

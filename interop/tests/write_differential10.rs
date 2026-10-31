@@ -64,7 +64,14 @@ fn run(prog: &Path, args: &[&str]) -> String {
         prog.display(),
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    // On Windows the C tools end lines with "\r\n" (the C runtime's text
+    // mode).
+    if cfg!(windows) {
+        text.replace("\r\n", "\n")
+    } else {
+        text
+    }
 }
 
 impl Oracle for C10 {

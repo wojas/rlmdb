@@ -400,6 +400,7 @@ fn check_freelist_rejects_a_page_used_twice() -> interop::Result<()> {
 
 /// Database names are bytes, not necessarily UTF-8: a DB that C creates
 /// with a non-UTF-8 name dumps and stats in rpeer exactly as in C.
+#[cfg(unix)]
 #[test]
 fn non_utf8_db_names_match_c() -> interop::Result<()> {
     use std::os::unix::ffi::OsStrExt;

@@ -8,7 +8,9 @@
 //! rename publishes the result).
 //! They are built as the upstream `Makefile` (not vendored) builds them:
 //! its `CFLAGS` (`C_FLAGS`), `liblmdb.a` from `mdb.o` and `midl.o`, and
-//! one executable per program linked against it.
+//! one executable per program linked against it. On Windows the same
+//! happens with MinGW's `gcc` and `ar`, or with MSVC's `cl` and `lib`
+//! (found by the `cc` crate) for the MSVC toolchain; see [`toolchain`].
 //! If the build fails, C-dependent tests print a message and return early.
 
 #![allow(dead_code)]
@@ -69,6 +71,10 @@ macro_rules! require_c {
 }
 
 pub fn os_page_size() -> usize {
+    if cfg!(windows) {
+        // GetSystemInfo's dwPageSize on x86-64 Windows.
+        return 4096;
+    }
     let out = Command::new("getconf").arg("PAGESIZE").output();
     out.ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -98,6 +104,9 @@ fn run_ok(cmd: &mut Command) -> Result<(), String> {
 /// The upstream `Makefile`'s `CFLAGS`, `$(THREADS) $(OPT) $(W)`, used for
 /// every C file built here.
 const C_FLAGS: &[&str] = &[
+    // mdb.c uses no pthreads on Windows (and MinGW would then need its
+    // libwinpthread DLL at run time).
+    #[cfg(not(windows))]
     "-pthread",
     "-O2",
     "-g",
@@ -137,6 +146,16 @@ fn build_c_tools() -> Result<PathBuf, String> {
         fnv(&mut h, f.file_name().unwrap().to_string_lossy().as_bytes());
         fnv(&mut h, &fs::read(f).map_err(|e| e.to_string())?);
     }
+    // The Windows shims are used from their directory, not copied: a
+    // `unistd.h` next to the sources would hide the system's.
+    if cfg!(windows) {
+        for f in ["posix_compat.h", "msvc/unistd.h"] {
+            fnv(
+                &mut h,
+                &fs::read(compat_dir().join(f)).map_err(|e| format!("{f}: {e}"))?,
+            );
+        }
+    }
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     build_shared(&base, &format!("clmdb-{h:016x}"), |tmp| {
         compile_c_tools(tmp, &files)
@@ -163,52 +182,25 @@ fn compile_c_tools(tmp: &Path, files: &[PathBuf]) -> Result<(), String> {
            return buf; }\n",
     )
     .map_err(|e| e.to_string())?;
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_owned());
-    let ar = std::env::var("AR").unwrap_or_else(|_| "ar".to_owned());
+    let t = toolchain::Toolchain::new(tmp)?;
     for obj in ["mdb", "midl"] {
-        run_ok(
-            Command::new(&cc)
-                .current_dir(tmp)
-                .args(C_FLAGS)
-                .args(["-c", &format!("{obj}.c")]),
-        )?;
+        run_ok(&mut t.compile(&format!("{obj}.c")))?;
     }
-    run_ok(
-        Command::new(&ar)
-            .current_dir(tmp)
-            .args(["rs", "liblmdb.a", "mdb.o", "midl.o"]),
-    )?;
+    run_ok(&mut t.archive(&["mdb", "midl"]))?;
     for prog in C_PROGRAMS {
-        run_ok(Command::new(&cc).current_dir(tmp).args(C_FLAGS).args([
-            "-o",
-            prog,
-            &format!("{prog}.c"),
-            "liblmdb.a",
-        ]))?;
+        run_ok(&mut t.program(prog, &[&format!("{prog}.c")], &[]))?;
     }
-    run_ok(Command::new(&cc).current_dir(tmp).args([
-        "-pthread",
-        "-O2",
-        "-g",
-        "-include",
-        "dkey_shim.h",
-        "-o",
+    run_ok(&mut t.program(
         "mtest6",
-        "mtest6.c",
-        "dkey_shim.c",
-        "liblmdb.a",
-    ]))?;
+        &["mtest6.c", "dkey_shim.c"],
+        &[toolchain::Opt::ForceInclude("dkey_shim.h")],
+    ))?;
     for helper in ["holder", "cursorops", "writeops"] {
-        run_ok(Command::new(&cc).current_dir(tmp).args([
-            "-pthread",
-            "-O2",
-            "-g",
-            "-I.",
-            "-o",
+        run_ok(&mut t.program(
             helper,
-            &format!("{helper}.c"),
-            "liblmdb.a",
-        ]))?;
+            &[&format!("{helper}.c")],
+            &[toolchain::Opt::Include("."), toolchain::Opt::TestProgram],
+        ))?;
     }
     Ok(())
 }
@@ -294,6 +286,206 @@ fn lock_exclusive(_file: &fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+/// How the C sources are compiled: with a GCC-style driver (`$CC`, else
+/// `cc`; MinGW's `gcc` on Windows) and `ar`, or with MSVC's `cl` and `lib`
+/// for the MSVC toolchain. Every command runs in the build directory.
+pub mod toolchain {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    /// An extra option of one program.
+    pub enum Opt<'a> {
+        /// An include directory (`-I`).
+        Include(&'a str),
+        /// A header included before the source (`-include`, `/FI`).
+        ForceInclude(&'a str),
+        /// One of our test programs (not an upstream one): on Windows it
+        /// gets `tests/compat` on its include path and, with MinGW, C99
+        /// `printf` (`%zu`). Upstream programs keep the C runtime's
+        /// `printf`, as on any Windows system.
+        TestProgram,
+    }
+
+    /// The static C library's file name.
+    pub const LIB_FILE: &str = if cfg!(target_env = "msvc") {
+        "lmdb.lib"
+    } else {
+        "liblmdb.a"
+    };
+
+    /// The compilers of this build.
+    pub struct Toolchain {
+        dir: PathBuf,
+        #[cfg(target_env = "msvc")]
+        cl: cc::Tool,
+        #[cfg(target_env = "msvc")]
+        lib: cc::Tool,
+    }
+
+    #[cfg(not(target_env = "msvc"))]
+    impl Toolchain {
+        /// The tools for building in `dir`.
+        pub fn new(dir: &Path) -> Result<Toolchain, String> {
+            Ok(Toolchain {
+                dir: dir.to_path_buf(),
+            })
+        }
+
+        fn cc(&self) -> Command {
+            let default = if cfg!(windows) { "gcc" } else { "cc" };
+            let mut cmd = Command::new(std::env::var("CC").unwrap_or_else(|_| default.to_owned()));
+            cmd.current_dir(&self.dir).args(super::C_FLAGS);
+            cmd
+        }
+
+        /// `cc -c <src>`.
+        pub fn compile(&self, src: &str) -> Command {
+            let mut cmd = self.cc();
+            cmd.args(["-c", src]);
+            cmd
+        }
+
+        /// `$AR rs liblmdb.a <objs>.o` (`ar` without `$AR`).
+        pub fn archive(&self, objs: &[&str]) -> Command {
+            let ar = std::env::var("AR").unwrap_or_else(|_| "ar".to_owned());
+            let mut cmd = Command::new(ar);
+            cmd.current_dir(&self.dir).args(["rs", LIB_FILE]);
+            cmd.args(objs.iter().map(|o| format!("{o}.o")));
+            cmd
+        }
+
+        /// Program `name` from `sources`, linked against this build's
+        /// library.
+        pub fn program(&self, name: &str, sources: &[&str], opts: &[Opt<'_>]) -> Command {
+            self.program_with_lib(name, sources, opts, LIB_FILE)
+        }
+
+        /// Program `name` from `sources`, linked against `lib`.
+        pub fn program_with_lib(
+            &self,
+            name: &str,
+            sources: &[&str],
+            opts: &[Opt<'_>],
+            lib: &str,
+        ) -> Command {
+            let mut cmd = self.cc();
+            for o in opts {
+                match o {
+                    Opt::Include(d) => cmd.arg(format!("-I{d}")),
+                    Opt::ForceInclude(h) => cmd.args(["-include", h]),
+                    // MinGW's printf is msvcrt's unless this asks for the
+                    // C99 one.
+                    Opt::TestProgram if cfg!(windows) => cmd
+                        .arg(format!("-I{}", super::compat_dir().display()))
+                        .arg("-D__USE_MINGW_ANSI_STDIO=1"),
+                    Opt::TestProgram => &mut cmd,
+                };
+            }
+            cmd.arg("-o").arg(name).args(sources).arg(lib);
+            cmd
+        }
+    }
+
+    #[cfg(target_env = "msvc")]
+    impl Toolchain {
+        /// The tools for building in `dir`: `cl.exe` and `lib.exe` of the
+        /// installed Visual Studio, as the `cc` crate finds them.
+        pub fn new(dir: &Path) -> Result<Toolchain, String> {
+            let target = "x86_64-pc-windows-msvc";
+            let find = |tool: &str| {
+                cc::windows_registry::find_tool(target, tool)
+                    .ok_or_else(|| format!("{tool} not found (Visual Studio C++ tools)"))
+            };
+            Ok(Toolchain {
+                dir: dir.to_path_buf(),
+                cl: find("cl.exe")?,
+                lib: find("lib.exe")?,
+            })
+        }
+
+        fn cl(&self) -> Command {
+            let mut cmd = self.cl.to_command();
+            cmd.current_dir(&self.dir)
+                .args(["-nologo", "-O2", "-Z7", "-W3"])
+                // The upstream tools include <unistd.h> for getopt.
+                .arg(format!("-I{}", super::compat_dir().join("msvc").display()));
+            cmd
+        }
+
+        /// `cl -c <src>`.
+        pub fn compile(&self, src: &str) -> Command {
+            let mut cmd = self.cl();
+            cmd.args(["-c", src]);
+            cmd
+        }
+
+        /// `lib -out:lmdb.lib <objs>.obj`.
+        pub fn archive(&self, objs: &[&str]) -> Command {
+            let mut cmd = self.lib.to_command();
+            cmd.current_dir(&self.dir)
+                .args(["-nologo", &format!("-out:{LIB_FILE}")]);
+            cmd.args(objs.iter().map(|o| format!("{o}.obj")));
+            cmd
+        }
+
+        /// Program `name` from `sources`, linked against this build's
+        /// library.
+        pub fn program(&self, name: &str, sources: &[&str], opts: &[Opt<'_>]) -> Command {
+            self.program_with_lib(name, sources, opts, LIB_FILE)
+        }
+
+        /// Program `name` from `sources`, linked against `lib` (and
+        /// `advapi32.lib`, which C LMDB uses for the mutexes' security
+        /// descriptor).
+        pub fn program_with_lib(
+            &self,
+            name: &str,
+            sources: &[&str],
+            opts: &[Opt<'_>],
+            lib: &str,
+        ) -> Command {
+            let mut cmd = self.cl();
+            for o in opts {
+                match o {
+                    Opt::Include(d) => cmd.arg(format!("-I{d}")),
+                    Opt::ForceInclude(h) => cmd.arg(format!("-FI{h}")),
+                    Opt::TestProgram => cmd.arg(format!("-I{}", super::compat_dir().display())),
+                };
+            }
+            // (The objects go to the build directory under the sources'
+            // names, which differ.)
+            cmd.arg(format!("-Fe{name}.exe"))
+                .args(sources)
+                .arg(lib)
+                .arg("advapi32.lib");
+            cmd
+        }
+    }
+}
+
+/// The op arguments of a `cursorops` run: as they are; on Windows, where a
+/// command line has at most 32767 characters, one `@<file>` argument for a
+/// file with the ops, one per line, that lives as long as the returned
+/// guard.
+pub fn cursorops_ops(ops: &[String]) -> (Vec<String>, Option<tempfile::NamedTempFile>) {
+    if !cfg!(windows) {
+        return (ops.to_vec(), None);
+    }
+    let mut file = tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    for op in ops {
+        writeln!(file, "{op}").unwrap();
+    }
+    file.flush().unwrap();
+    let arg = format!("@{}", file.path().display());
+    (vec![arg], Some(file))
+}
+
+/// `tests/compat`: the shims that let the C test programs build on Windows
+/// (`posix_compat.h`; `msvc/unistd.h` for MSVC).
+pub fn compat_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/compat")
+}
+
 /// Builds the interop C peer (`interop/c/cpeer*.c`, see
 /// `interop/README.md`) against the C library of `tools`, once per
 /// version of its sources. Built here rather than through the `interop`
@@ -320,21 +512,55 @@ fn build_cpeer(tools: &CTools) -> Result<PathBuf, String> {
         );
     }
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let sources: Vec<String> = names
+        .iter()
+        .filter(|n| n.ends_with(".c"))
+        .map(|n| src.join(n).to_string_lossy().into_owned())
+        .collect();
+    let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+    let include = tools.dir.to_string_lossy().into_owned();
+    let lib = tools
+        .dir
+        .join(toolchain::LIB_FILE)
+        .to_string_lossy()
+        .into_owned();
     let dir = build_shared(&base, &format!("cpeer-{h:016x}"), |tmp| {
-        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_owned());
-        let mut cmd = Command::new(&cc);
-        cmd.current_dir(tmp)
-            .args(["-pthread", "-O2", "-g", "-I"])
-            .arg(&tools.dir)
-            .arg("-o")
-            .arg(tmp.join("cpeer"));
-        for n in names.iter().filter(|n| n.ends_with(".c")) {
-            cmd.arg(src.join(n));
-        }
-        cmd.arg(tools.dir.join("liblmdb.a"));
-        run_ok(&mut cmd)
+        let t = toolchain::Toolchain::new(tmp)?;
+        run_ok(&mut t.program_with_lib(
+            "cpeer",
+            &sources,
+            &[
+                toolchain::Opt::Include(&include),
+                toolchain::Opt::TestProgram,
+            ],
+            &lib,
+        ))
     })?;
     Ok(dir.join("cpeer"))
+}
+
+/// `pwrite` of all of `buf` at `offset` of `file`: `FileExt::write_all_at`
+/// on Unix, `seek_write` until done on Windows.
+pub fn write_all_at(file: &fs::File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::write_all_at(file, buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        let mut done = 0;
+        while done < buf.len() {
+            match std::os::windows::fs::FileExt::seek_write(
+                file,
+                &buf[done..],
+                offset + done as u64,
+            )? {
+                0 => return Err(std::io::ErrorKind::WriteZero.into()),
+                n => done += n,
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Output of a `cpeer` command: exit code, stdout, stderr.
@@ -1064,7 +1290,8 @@ pub fn differential(
             env_path.to_str().unwrap().to_owned(),
             name.unwrap_or("-").to_owned(),
         ];
-        args.extend(ops.iter().cloned());
+        let (op_args, _ops_file) = cursorops_ops(&ops);
+        args.extend(op_args);
         let out = Command::new(c.bin("cursorops"))
             .args(&args)
             .output()
@@ -1106,6 +1333,17 @@ pub fn differential(
                 eprintln!(
                     "NOTE: known C bug (unchecked NODEPTR in mdb_cursor_next) at op {i}: {cl}"
                 );
+                c_bugs += 1;
+                break;
+            }
+            // KNOWN_C_BUGS.md #6: the uninitialised sub-cursor of a malloc'ed
+            // C cursor. A read transaction's cursor cannot fail with
+            // MDB_BAD_DBI; C does when it steps a sub-cursor it never set up
+            // and finds garbage in its database fields (seen on Windows,
+            // whose heap hands out used memory where Unix's gives zeros).
+            // Stop comparing.
+            if cl != rl && cl.contains(" rc=-30780 ") {
+                eprintln!("NOTE: known C bug #6 (uninitialised sub-cursor) at op {i}: {cl}");
                 c_bugs += 1;
                 break;
             }

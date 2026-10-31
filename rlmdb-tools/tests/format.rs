@@ -67,7 +67,12 @@ fn records(env: &Path) -> Vec<(Option<Vec<u8>>, Records)> {
 fn without_pagesize_warnings(stderr: &[u8]) -> Vec<u8> {
     stderr
         .split_inclusive(|&b| b == b'\n')
-        .filter(|l| !l.ends_with(b"unrecognized keyword ignored: db_pagesize\n"))
+        .filter(|l| {
+            let l = l.strip_suffix(b"\n").unwrap_or(l);
+            // "\r\n" on Windows (text mode).
+            let l = l.strip_suffix(b"\r").unwrap_or(l);
+            !l.ends_with(b"unrecognized keyword ignored: db_pagesize")
+        })
         .flatten()
         .copied()
         .collect()
@@ -155,7 +160,7 @@ fn load_into_an_existing_environment_keeps_its_format() {
     let r = run(Impl::Rust, "mdb_load", &argv, &input, dir.path());
     assert_eq!(r.code, 1);
     assert_eq!(
-        r.stderr_str(),
+        r.stderr_text(),
         "mdb_env_open failed, error -30794 MDB_VERSION_MISMATCH: Database environment \
          version mismatch\n"
     );
@@ -218,7 +223,7 @@ fn load_page_size_from_the_header() {
     let input = "VERSION=3\ndb_pagesize=x\nHEADER=END\nDATA=END\n";
     let r = rust_load(dir.path(), "bad", &["-F", "1.0"], None, input.as_bytes());
     assert_eq!(r.code, 1);
-    assert_eq!(r.stderr_str(), "mdb_load: line 2: invalid pagesize x\n");
+    assert_eq!(r.stderr_text(), "mdb_load: line 2: invalid pagesize x\n");
 }
 
 #[test]
@@ -229,7 +234,7 @@ fn load_empty_keys_in_1_0() {
     let r = rust_load(dir.path(), "ten", &["-F", "1.0"], None, input);
     assert_eq!(r.code, 0);
     assert_eq!(
-        r.stderr_str(),
+        r.stderr_text(),
         "mdb_load: line 8: zero-length key(ignored)\n"
     );
     let recs = records(&dir.path().join("ten"));
@@ -260,7 +265,7 @@ fn load_format_option_errors() {
         let r = run(Impl::Rust, "mdb_load", &argv, b"", dir.path());
         assert_eq!(r.code, 1, "{bad:?}");
         assert_eq!(
-            r.stderr_str(),
+            r.stderr_text(),
             format!("mdb_load: {bad}: unknown format, use 0.9 or 1.0\n"),
             "{bad:?}"
         );
@@ -268,7 +273,11 @@ fn load_format_option_errors() {
     // A missing argument: getopt's message, then the usage line with -F.
     let r = run(Impl::Rust, "mdb_load", &args(&["-F"]), b"", dir.path());
     assert_eq!(r.code, 1);
-    let usage = [b"usage: mdb_load ".as_slice(), LOAD_USAGE_RUST].concat();
+    let usage = [
+        b"usage: mdb_load ".as_slice(),
+        &platform_lines(LOAD_USAGE_RUST),
+    ]
+    .concat();
     assert!(r.stderr.ends_with(&usage), "{}", r.stderr_str());
     // getopt's wording: "-- F" (macOS), "-- 'F'" (glibc).
     assert!(

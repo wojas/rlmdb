@@ -107,6 +107,7 @@ dependencies = [
  "cc",
  "libc",
  "rlmdb",
+ "windows-sys",
 ]
 
 [[package]]

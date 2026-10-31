@@ -24,7 +24,6 @@ mod lock_lines;
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -180,9 +179,7 @@ impl Attached {
     fn header(&self) -> TxnInfoSnapshot {
         let layout = LockLayout::of(self.env.format());
         let mut buf = vec![0; layout.readers];
-        self.lock
-            .read_exact_at(&mut buf, 0)
-            .expect("read lock file");
+        interop::os::read_exact_at(&self.lock, &mut buf, 0).expect("read lock file");
         TxnInfoSnapshot::read(&buf, layout).expect("lock file header")
     }
 }
@@ -450,10 +447,19 @@ fn lock_versions_refuse_each_other() {
         .expect("cpeer create");
     let env10 = TestEnv::new().unwrap().with_format(Format::V10);
     new_env10(&env10);
-    for (env, other, c, lock) in [
-        (&env09, &env10, Peer::C, &LOCK_V09),
-        (&env10, &env09, Peer::C10, &LOCK_V10),
-    ] {
+    // Windows does not let a data file be replaced while a process has it
+    // open (C and rlmdb open it without FILE_SHARE_DELETE), so the held table
+    // of the other version cannot arise there.
+    let swaps: &[_] = if cfg!(windows) {
+        interop::skipped("lock_versions_refuse_each_other: the data file of an open environment cannot be replaced on Windows");
+        &[]
+    } else {
+        &[
+            (&env09, &env10, Peer::C, &LOCK_V09),
+            (&env10, &env09, Peer::C10, &LOCK_V10),
+        ]
+    };
+    for &(env, other, c, lock) in swaps {
         // A copy of `env` that the C peer of its release holds open.
         let held = env.derived("held");
         c.on("copy", env).arg(held.path()).run().expect("copy");

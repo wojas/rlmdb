@@ -12,13 +12,12 @@
  * Prints "capi_read: N checks, F failures" and exits 1 on failures.
  */
 #include <errno.h>
-#include <fcntl.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include <fcntl.h>
+/* pthreads, mkdir, unistd.h, dlopen; their Windows forms (tests/compat). */
+#include "../../../tests/compat/posix_compat.h"
 #include "lmdb.h"
 #include "cmpfuncs.h"
 
@@ -126,12 +125,20 @@ static void test_version(void)
 	 * (MDB_PROBLEM .. MDB_ADDR_BUSY, declared in rlmdb.h). */
 	CHECK(!strcmp(mdb_strerror(MDB_LAST_ERRCODE + 1),
 		"MDB_PROBLEM: Unexpected problem - txn should abort"));
+#elif defined(_WIN32)
+	/* No system message for it: FormatMessage leaves C's buffer empty. */
+	CHECK(!strcmp(mdb_strerror(MDB_LAST_ERRCODE + 1), ""));
 #else
 	CHECK(!strcmp(mdb_strerror(MDB_LAST_ERRCODE + 1), "Invalid error code"));
 #endif
 	/* After MDB_ADDR_BUSY, LMDB 1.0's last code. */
+#ifdef _WIN32
+	CHECK(!strcmp(mdb_strerror(MDB_LAST_ERRCODE + 12), ""));
+	CHECK(!strcmp(mdb_strerror(-1), ""));
+#else
 	CHECK(!strcmp(mdb_strerror(MDB_LAST_ERRCODE + 12), "Invalid error code"));
 	CHECK(!strcmp(mdb_strerror(-1), "Invalid error code"));
+#endif
 	snprintf(e, sizeof(e), "%s", strerror(ENOENT));
 	CHECK(!strcmp(mdb_strerror(ENOENT), e));
 }
@@ -141,7 +148,8 @@ static void test_unopened_env(const char *scratch)
 	MDB_env *env;
 	unsigned int flags = 99, r = 0;
 	const char *p = "x";
-	int fd = 0, x = 0, dead = 5;
+	mdb_filehandle_t fd = 0;
+	int x = 0, dead = 5;
 	struct buf b;
 	char path[1024];
 
@@ -162,7 +170,7 @@ static void test_unopened_env(const char *scratch)
 	RC(mdb_env_get_path(NULL, &p), EINVAL);
 	RC(mdb_env_get_path(env, NULL), EINVAL);
 	OK(mdb_env_get_fd(env, &fd));
-	CHECK(fd == -1);
+	CHECK(fd == COMPAT_NO_FILEHANDLE);
 	RC(mdb_env_get_fd(env, NULL), EINVAL);
 	OK(mdb_env_get_maxreaders(env, &r));
 	CHECK(r == 126);
@@ -199,10 +207,10 @@ static void test_unopened_env(const char *scratch)
 	mdb_env_close(env);
 	snprintf(path, sizeof(path), "%s/does-not-exist", scratch);
 	OK(mdb_env_create(&env));
-	RC(mdb_env_open(env, path, MDB_RDONLY, 0664), ENOENT);
+	RC(mdb_env_open(env, path, MDB_RDONLY, 0664), COMPAT_ENOENT_DIR);
 	mdb_env_close(env);
 	OK(mdb_env_create(&env));
-	RC(mdb_env_open(env, path, 0, 0664), ENOENT);
+	RC(mdb_env_open(env, path, 0, 0664), COMPAT_ENOENT_DIR);
 	mdb_env_close(env);
 	snprintf(path, sizeof(path), "%s/empty", scratch);
 	mkdir(path, 0775);
@@ -250,9 +258,9 @@ static void test_reads(MDB_env *env, const char *path)
 	const char *p;
 	char expect[128];
 	size_t cnt, n, i, ik, ik2, first_page, items, txnid;
-	int fd, rc, sorted;
+	mdb_filehandle_t fd;
+	int rc, sorted;
 	unsigned last, sentinel;
-	struct stat sb;
 	struct buf b;
 	struct thread_arg ta;
 	pthread_t th;
@@ -266,7 +274,7 @@ static void test_reads(MDB_env *env, const char *path)
 	OK(mdb_env_get_path(env, &p));
 	CHECK(p && !strcmp(p, path));
 	OK(mdb_env_get_fd(env, &fd));
-	CHECK(fd >= 0 && fstat(fd, &sb) == 0 && sb.st_size > 0);
+	CHECK(fd != COMPAT_NO_FILEHANDLE && compat_filehandle_size(fd) > 0);
 	OK(mdb_env_get_maxreaders(env, &flags));
 	CHECK(flags == 200);
 	CHECK(mdb_env_get_maxkeysize(env) == 511);
@@ -794,11 +802,11 @@ static void test_writable_env(const char *path, const char *scratch)
 	rc = mdb_env_copy2(env, dir, MDB_CP_COMPACT);
 	RC(rc, 0);
 	snprintf(dir, sizeof(dir), "%s/copy.mdb", scratch);
-	fd = open(dir, O_WRONLY | O_CREAT | O_TRUNC, 0664);
+	fd = open(dir, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0664);
 	CHECK(fd >= 0);
-	rc = mdb_env_copyfd(env, fd);
+	rc = mdb_env_copyfd(env, COMPAT_FILEHANDLE(fd));
 	RC(rc, 0);
-	rc = mdb_env_copyfd2(env, fd, 0);
+	rc = mdb_env_copyfd2(env, COMPAT_FILEHANDLE(fd), 0);
 	RC(rc, 0);
 	close(fd);
 	mdb_env_close(env);

@@ -15,8 +15,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
+/* pthreads, mkdir, unistd.h, dlopen; their Windows forms (tests/compat). */
+#include "../../../tests/compat/posix_compat.h"
 #include "rlmdb.h"
 
 static int checks, failures;
@@ -127,7 +127,12 @@ static void test_constants(void)
 		CHECK(errs[i].code == MDB_PROBLEM + (int)i);
 		CHECK(!strcmp(mdb_strerror(errs[i].code), errs[i].text));
 	}
+#ifdef _WIN32
+	/* No system message for it: the text is empty, as C's (capi_read.c). */
+	CHECK(!strcmp(mdb_strerror(MDB_ADDR_BUSY + 1), ""));
+#else
 	CHECK(!strcmp(mdb_strerror(MDB_ADDR_BUSY + 1), "Invalid error code"));
+#endif
 	CHECK(rlmdb_has_capability("default-format-env") == 1);
 	CHECK(rlmdb_has_capability("format-1.0") == 1);
 }

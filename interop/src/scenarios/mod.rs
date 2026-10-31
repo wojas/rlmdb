@@ -234,12 +234,14 @@ pub fn loop_secs() -> f64 {
 
 /// Whether the shared writer mutex recovers from a killed owner: robust
 /// process-shared mutexes on Linux, unless `$INTEROP_NO_ROBUST_MUTEX` is
-/// set. QEMU user emulation (`scripts/linux-test.sh` with
+/// set, and Windows' named mutexes, which the kernel abandons when their
+/// owner dies. QEMU user emulation (`scripts/linux-test.sh` with
 /// `LINUX_TEST_TARGET`, which sets it) does not pass the robust futex list
 /// to the kernel, so a mutex whose owner died is never marked
 /// `EOWNERDEAD`: as with macOS semaphores, the next locker waits.
 pub fn robust_mutexes() -> bool {
-    cfg!(target_os = "linux") && std::env::var_os("INTEROP_NO_ROBUST_MUTEX").is_none()
+    (cfg!(target_os = "linux") && std::env::var_os("INTEROP_NO_ROBUST_MUTEX").is_none())
+        || cfg!(windows)
 }
 
 const MIB: u64 = 1 << 20;
@@ -583,10 +585,16 @@ pub fn create_stat(pair: Pair) -> Result<()> {
     ensure!(c.maxkeysize == maxkeysize, "maxkeysize {}", c.maxkeysize);
     ensure!(c.mapsize == 64 * MIB, "mapsize {}", c.mapsize);
 
-    // A new data file is exactly the two meta pages.
+    // A new data file is exactly the two meta pages; a 0.9 file on Windows
+    // is as long as its map (C 0.9 and rlmdb extend it to the map size there).
     let data_len = std::fs::metadata(env.data_file())?.len();
+    let want = if cfg!(windows) && pair.format == Format::V09 {
+        64 * MIB
+    } else {
+        2 * u64::from(c.psize)
+    };
     ensure!(
-        data_len == 2 * u64::from(c.psize),
+        data_len == want,
         "new data file is {data_len} bytes, psize {}",
         c.psize
     );
@@ -919,15 +927,50 @@ pub fn copy_or_skip(
     scenario: &str,
 ) -> Result<Option<Output>> {
     let small_pages = pair.page_size.is_some_and(|ps| ps < 4096);
-    if cfg!(target_os = "linux")
-        && copier == Peer::C10
+    // On Windows C opens every copy target with FILE_FLAG_NO_BUFFERING, and
+    // writes of pages below the sector size fail (ERROR_INVALID_PARAMETER).
+    let unbuffered_failure = if cfg!(windows) {
+        out.stderr.contains("failed: 87") || out.stderr.contains("parameter is incorrect")
+    } else {
+        cfg!(target_os = "linux")
+            && (out.stderr.contains("Invalid argument") || out.stderr.contains("failed: 22"))
+    };
+    if copier == Peer::C10
         && small_pages
         && !out.success()
         && out.stderr.contains("mdb_env_copy2")
-        && (out.stderr.contains("Invalid argument") || out.stderr.contains("failed: 22"))
+        && unbuffered_failure
+    {
+        let how = if cfg!(windows) {
+            "unbuffered"
+        } else {
+            "with O_DIRECT"
+        };
+        skipped(format_args!(
+            "{scenario}: C 1.0 cannot copy {}-byte pages {how} (KNOWN_C_BUGS.md #34): {}",
+            pair.page_size.unwrap_or(0),
+            out.label
+        ));
+        return Ok(None);
+    }
+    out.ok().map(Some)
+}
+
+/// [`copy_or_skip`] for C's `mdb_copy` tool: on Windows C opens every
+/// copy target with `FILE_FLAG_NO_BUFFERING` (`MDB_O_COPY`), so copies of
+/// 1.0 environments whose pages are smaller than the disk's sectors fail
+/// with `ERROR_INVALID_PARAMETER` (87), the tool's too (`KNOWN_C_BUGS.md`
+/// #34). `None`, with a SKIPPED note, for exactly that failure.
+pub fn tool_copy_or_skip(pair: &Pair, out: Output, scenario: &str) -> Result<Option<Output>> {
+    if cfg!(windows)
+        && pair.format == Format::V10
+        && pair.page_size.is_some_and(|ps| ps < 4096)
+        && !out.success()
+        && out.stderr.contains("copying failed, error 87 ")
     {
         skipped(format_args!(
-            "{scenario}: C 1.0 cannot copy {}-byte pages with O_DIRECT (KNOWN_C_BUGS.md #34): {}",
+            "{scenario}: C 1.0's mdb_copy cannot write {}-byte pages unbuffered \
+             (KNOWN_C_BUGS.md #34): {}",
             pair.page_size.unwrap_or(0),
             out.label
         ));
@@ -970,11 +1013,15 @@ pub fn copy_dump_equal(pair: Pair) -> Result<()> {
         targets.push((&compact, true));
     }
     let tcopy = env.derived("tcopy");
-    tools::mdb_copy(&env, &tcopy, false)?;
+    let out = tools::mdb_copy_any_status(&env, &tcopy, false)?;
+    if tool_copy_or_skip(&pair, out, "copy_dump_equal")?.is_some() {
+        targets.push((&tcopy, false));
+    }
     let tcompact = env.derived("tcompact");
-    tools::mdb_copy(&env, &tcompact, true)?;
-    targets.push((&tcopy, false));
-    targets.push((&tcompact, true));
+    let out = tools::mdb_copy_any_status(&env, &tcompact, true)?;
+    if tool_copy_or_skip(&pair, out, "copy_dump_equal")?.is_some() {
+        targets.push((&tcompact, true));
+    }
 
     for (target, compacted) in targets {
         let what = target.path().display();

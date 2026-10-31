@@ -7,8 +7,10 @@
 mod common;
 
 use std::fs;
+#[cfg(unix)]
 use std::os::fd::AsFd;
-use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::io::AsHandle as _;
 use std::path::Path;
 
 use common::CTools;
@@ -69,13 +71,18 @@ fn check_copies(c: &CTools, src: &Path, dbs: &[Option<&str>]) {
             env.copy_to_path(dst.path(), compact).unwrap();
             // The target must not exist.
             let e = env.copy_to_path(dst.path(), compact).unwrap_err();
-            assert_eq!(e.to_err_code(), libc::EEXIST, "{e:?}");
+            // EEXIST; ERROR_FILE_EXISTS from CreateFile(CREATE_NEW) on Windows.
+            let exists = if cfg!(windows) { 80 } else { libc::EEXIST };
+            assert_eq!(e.to_err_code(), exists, "{e:?}");
         }
         let rust = fs::read(dst.path().join("data.mdb")).unwrap();
         let via_fd = {
             let env = open_ro(src);
             let mut file = tempfile::tempfile().unwrap();
+            #[cfg(unix)]
             env.copy_to_fd(file.as_fd(), compact).unwrap();
+            #[cfg(windows)]
+            env.copy_to_fd(file.as_handle(), compact).unwrap();
             std::io::Seek::rewind(&mut file).unwrap();
             let mut v = Vec::new();
             std::io::Read::read_to_end(&mut file, &mut v).unwrap();
@@ -371,7 +378,7 @@ fn plain_copy_never_emits_a_meta_newer_than_its_snapshot() {
         let mut bytes = [0u8; META_SIZE];
         newer.write(&mut bytes);
         let f = fs::OpenOptions::new().write(true).open(&data).unwrap();
-        f.write_all_at(&bytes, meta_at(other) as u64).unwrap();
+        common::write_all_at(&f, &bytes, meta_at(other) as u64).unwrap();
         drop(f);
         assert_eq!(env.info().unwrap().last_txnid as u64, txnid + 1);
         assert_eq!(env.begin_ro_txn().unwrap().id(), txnid);

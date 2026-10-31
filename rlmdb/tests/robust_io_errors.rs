@@ -24,21 +24,49 @@
 //! page write that worked is injected with
 //! `Environment::fail_next_meta_sync`, and on macOS also made real: a
 //! write-only `/dev/null` takes the write and refuses the `F_FULLFSYNC`.
+//!
+//! Unix only: Windows has no `dup2` over a handle another part of the
+//! process holds, so the environment's writes cannot be made to fail from
+//! outside (and the injected failed sync checks that the commit grew the
+//! data file, which a 0.9 environment there is preallocated to its map
+//! size); `not_on_windows` says so in the test output there.
 
+/// Prints why this file has no tests on Windows (on stderr directly, which
+/// libtest does not capture).
+#[cfg(windows)]
+#[test]
+fn not_on_windows() {
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "NOTE: robust_io_errors skipped on Windows: the write errors are made with dup2() on \
+         the environment's POSIX descriptors"
+    );
+}
+
+#[cfg(unix)]
 mod common;
 
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 
+#[cfg(unix)]
 use rlmdb::{Dbi, Environment, EnvironmentFlags, Format, MdbError, Transaction, WriteFlags};
 
 /// Every test runs on an LMDB 0.9 environment and on an LMDB 1.0 one with
 /// 1 KiB pages.
+#[cfg(unix)]
 const FORMATS: [Format; 2] = [Format::V09, Format::V10];
 
+#[cfg(unix)]
 fn open(path: &Path, flags: EnvironmentFlags, format: Format) -> Environment {
     let mut b = Environment::builder();
     b.map_size(64 << 20).flags(flags).format(format);
@@ -48,6 +76,7 @@ fn open(path: &Path, flags: EnvironmentFlags, format: Format) -> Environment {
     b.open(path).unwrap()
 }
 
+#[cfg(unix)]
 fn fill(env: &Environment, from: u32, n: u32) {
     let mut txn = env.begin_rw_txn().unwrap();
     for i in from..from + n {
@@ -62,6 +91,7 @@ fn fill(env: &Environment, from: u32, n: u32) {
     txn.commit().unwrap();
 }
 
+#[cfg(unix)]
 fn count(env: &Environment) -> usize {
     let txn = env.begin_ro_txn().unwrap();
     let mut c = txn.cursor(Dbi::MAIN).unwrap();
@@ -72,6 +102,7 @@ fn count(env: &Environment) -> usize {
     n
 }
 
+#[cfg(unix)]
 fn mdb(e: rlmdb::Error) -> Option<MdbError> {
     match e {
         rlmdb::Error::Mdb(m) => Some(m),
@@ -81,11 +112,13 @@ fn mdb(e: rlmdb::Error) -> Option<MdbError> {
 
 /// Replaces descriptor `fd` with a read-only descriptor of `/dev/null` (or
 /// another file) until dropped, then puts the original back.
+#[cfg(unix)]
 struct BrokenFd {
     fd: i32,
     saved: i32,
 }
 
+#[cfg(unix)]
 impl BrokenFd {
     fn new(fd: i32) -> BrokenFd {
         BrokenFd::with(fd, &File::open("/dev/null").unwrap())
@@ -105,6 +138,7 @@ impl BrokenFd {
     }
 }
 
+#[cfg(unix)]
 impl Drop for BrokenFd {
     fn drop(&mut self) {
         // SAFETY: as in `new`; `saved` is ours and closed exactly once.
@@ -117,6 +151,7 @@ impl Drop for BrokenFd {
 
 /// The descriptor the environment writes meta pages through (`me_mfd`): the
 /// one of this process that is open write-only on the data file.
+#[cfg(unix)]
 fn meta_fd(data: &Path) -> i32 {
     let md = std::fs::metadata(data).unwrap();
     let mut found = Vec::new();
@@ -145,12 +180,14 @@ fn meta_fd(data: &Path) -> i32 {
     found[0]
 }
 
+#[cfg(unix)]
 fn meta_bytes(dir: &Path, ps: usize) -> Vec<u8> {
     std::fs::read(dir.join("data.mdb")).unwrap()[..2 * ps].to_vec()
 }
 
 /// `mm_txnid` of meta pages 0 and 1 in the data file (as the file holds
 /// them, not as this process's map shows them).
+#[cfg(unix)]
 fn file_txnids(dir: &Path, format: Format, ps: usize) -> [u64; 2] {
     let metas = meta_bytes(dir, ps);
     [0, 1].map(|i| {
@@ -162,6 +199,7 @@ fn file_txnids(dir: &Path, format: Format, ps: usize) -> [u64; 2] {
 
 /// Checks that the newest snapshot holds the keys `keys` (numbers, in
 /// order) of [`fill`], with their values, and no others.
+#[cfg(unix)]
 fn assert_keys(env: &Environment, keys: impl IntoIterator<Item = u32>) {
     let txn = env.begin_ro_txn().unwrap();
     let mut c = txn.cursor(Dbi::MAIN).unwrap();
@@ -175,6 +213,7 @@ fn assert_keys(env: &Environment, keys: impl IntoIterator<Item = u32>) {
 
 /// The C page audit; only for 0.9 environments here (the 1.0 one is
 /// `cpeer10` in `interop`).
+#[cfg(unix)]
 fn audit(dir: &Path, format: Format) {
     if format != Format::V09 {
         return;
@@ -185,6 +224,7 @@ fn audit(dir: &Path, format: Format) {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn robust_failed_page_flush_aborts_the_commit() {
     for format in FORMATS {
@@ -224,6 +264,7 @@ fn robust_failed_page_flush_aborts_the_commit() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn robust_failed_meta_write_is_fatal() {
     for format in FORMATS {
@@ -261,13 +302,17 @@ fn robust_failed_meta_write_is_fatal() {
 
 /// The environment variables that give [`copy_process`] its job: the
 /// environment, its format and the directory to copy it to.
+#[cfg(unix)]
 const COPY_SRC: &str = "RLMDB_TEST_COPY_SRC";
+#[cfg(unix)]
 const COPY_FORMAT: &str = "RLMDB_TEST_COPY_FORMAT";
+#[cfg(unix)]
 const COPY_DST: &str = "RLMDB_TEST_COPY_DST";
 
 /// Run by [`copy_in_another_process`] as a second process: a plain copy of
 /// an environment that the test keeps open (with a lock file, a process
 /// may open an environment only once).
+#[cfg(unix)]
 #[test]
 #[ignore = "helper process of the other tests in this file"]
 fn copy_process() {
@@ -283,6 +328,7 @@ fn copy_process() {
     env.copy_to_path(dst, false).unwrap();
 }
 
+#[cfg(unix)]
 fn copy_in_another_process(src: &Path, format: Format, dst: &Path) {
     let tag = if format == Format::V10 { "1.0" } else { "0.9" };
     let out = Command::new(std::env::current_exe().unwrap())
@@ -315,6 +361,7 @@ fn copy_in_another_process(src: &Path, format: Format, dst: &Path) {
 /// and kept the newer meta page, which named pages the copy lacks.)
 /// Without a lock file, the txnid the file's handles share stays where it
 /// was, and another handle goes on reading, copying and writing.
+#[cfg(unix)]
 #[test]
 fn robust_failed_meta_sync_is_fatal() {
     for format in FORMATS {
@@ -324,6 +371,7 @@ fn robust_failed_meta_sync_is_fatal() {
     }
 }
 
+#[cfg(unix)]
 fn failed_meta_sync(format: Format, flags: EnvironmentFlags) {
     let what = format!("{format:?} {flags:?}");
     let dir = tempfile::tempdir().unwrap();
@@ -424,6 +472,7 @@ fn failed_meta_sync(format: Format, flags: EnvironmentFlags) {
 /// write and refuses the sync (`ENODEV`). (So the new page goes nowhere
 /// and the file holds the old txnid either way; the injected failure
 /// above covers the state.)
+#[cfg(unix)]
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[test]
 fn robust_failed_full_fsync_is_fatal() {
@@ -461,6 +510,7 @@ fn robust_failed_full_fsync_is_fatal() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn robust_failed_spill_fails_the_transaction() {
     for format in FORMATS {
@@ -499,6 +549,7 @@ fn robust_failed_spill_fails_the_transaction() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn robust_failed_copy_changes_nothing() {
     for format in FORMATS {

@@ -17,14 +17,15 @@
 //! call". The Rust tool reproduces the `SIGPIPE` case (a closed pipe on
 //! standard output), which is the common one; the other signals terminate
 //! it immediately (installing handlers would need `unsafe`). Write errors
-//! other than a closed pipe, which C ignores, are reported.
+//! other than a closed pipe, which C ignores, are reported. Windows has no
+//! `SIGPIPE`: there C writes on to a closed pipe, its writes failing, and
+//! exits as if the dump had succeeded; so does the Rust tool.
 
 use std::fs::OpenOptions;
-use std::os::unix::fs::OpenOptionsExt;
 
 use rlmdb::{DatabaseFlags, Dbi, Environment, EnvironmentFlags, RoTxn, Transaction};
 
-use crate::cfmt::{err_code, io_errno, pointer, strerror};
+use crate::cfmt::{crt_errno, err_code, io_errno, pointer, strerror};
 use crate::common::{
     db_name_of, dbi_open_name, open_db, path_of, report_failed, Tool, EXIT_FAILURE,
 };
@@ -80,16 +81,14 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
             }
             Opt::Arg(b'f', path) => {
                 // freopen(optarg, "w", stdout)
-                match OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o666)
-                    .open(path_of(&path))
-                {
+                let mut opts = OpenOptions::new();
+                opts.write(true).create(true).truncate(true);
+                #[cfg(unix)]
+                std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o666);
+                match opts.open(path_of(&path)) {
                     Ok(file) => tool.out = Output::file(file),
                     Err(e) => {
-                        let text = strerror(io_errno(&e));
+                        let text = strerror(crt_errno(&e));
                         tool.eprint_prog(&[&path, b": reopen: ", text.as_bytes(), b"\n"]);
                         return EXIT_FAILURE;
                     }
@@ -290,11 +289,14 @@ fn dump_db_inner(
             Ok(None) => break NOTFOUND,
             Err(e) => break err_code(&e),
         };
-        // C checks its signal flag here; a closed pipe raised SIGPIPE.
+        // C checks its signal flag here; a closed pipe raised SIGPIPE
+        // (not on Windows, see the module documentation).
         if let Some(e) = out.error() {
-            let errno = io_errno(e);
-            out.set_reported();
-            break if errno == EPIPE { EINTR } else { errno };
+            if !(cfg!(windows) && e.kind() == std::io::ErrorKind::BrokenPipe) {
+                let errno = io_errno(e);
+                out.set_reported();
+                break if errno == EPIPE { EINTR } else { errno };
+            }
         }
         line.clear();
         encode_line(&mut line, key, print);

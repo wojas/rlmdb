@@ -205,7 +205,12 @@ fn drops_named() {
         dir.path(),
     )
     .stdout;
-    for db in names.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+    // (One per line; `\r\n` from C's text mode on Windows.)
+    for db in names
+        .split(|&b| b == b'\n')
+        .map(|l| l.strip_suffix(b"\r").unwrap_or(l))
+        .filter(|l| !l.is_empty())
+    {
         drop_case("named", &[b"-s", db]);
         drop_case("named", &[b"-d", b"-s", db]);
     }
@@ -255,8 +260,7 @@ fn drop_usage() {
 #[test]
 fn copy_to_closed_pipe() {
     use std::io::Read;
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let dir = tempdir();
     // Larger than any pipe buffer.
     let src = dir.path().join("big");
@@ -268,8 +272,7 @@ fn copy_to_closed_pipe() {
     assert!(fs::metadata(src.join("data.mdb")).unwrap().len() > 1 << 20);
     let mut results = Vec::new();
     for imp in [Impl::C, Impl::Rust] {
-        let mut child = Command::new(bin(imp, "mdb_copy"))
-            .arg0("mdb_copy")
+        let mut child = command_as(&bin(imp, "mdb_copy"), "mdb_copy")
             .arg(&src)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -285,6 +288,23 @@ fn copy_to_closed_pipe() {
             String::from_utf8_lossy(&out.stderr).into_owned(),
             out.status.code(),
         ));
+    }
+    if cfg!(windows) {
+        // Windows fails a write that was waiting when the reader closed the
+        // pipe with ERROR_BROKEN_PIPE (109), one issued after that with
+        // ERROR_NO_DATA (232): which a tool gets depends on timing, for C
+        // and Rust alike.
+        assert_eq!((&results[0].0, results[0].2), (&results[1].0, results[1].2));
+        for r in &results {
+            assert!(
+                ["109", "232"].iter().any(|e| r
+                    .1
+                    .starts_with(&format!("mdb_copy: copying failed, error {e} ("))),
+                "{}",
+                r.1
+            );
+        }
+        return;
     }
     assert_eq!(results[0], results[1]);
     assert_eq!(

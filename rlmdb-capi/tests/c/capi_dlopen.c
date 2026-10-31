@@ -19,11 +19,11 @@
  * may differ. Prints "capi_dlopen: N checks, F failures" and exits 1 on
  * failures.
  */
-#include <dlfcn.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* pthreads, mkdir, unistd.h, dlopen; their Windows forms (tests/compat). */
+#include "../../../tests/compat/posix_compat.h"
 #include "lmdb.h"
 
 static int checks, failures;
@@ -121,7 +121,7 @@ static struct barrier reading = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIA
 struct result {
 	void *lib;
 	size_t entries;
-	unsigned long sum;
+	unsigned long long sum;
 	unsigned numreaders;
 	char list[64];
 };
@@ -138,16 +138,16 @@ static void scan(struct lmdb *l, MDB_txn *txn, struct result *r)
 	MDB_dbi dbi;
 	MDB_cursor *c;
 	MDB_val k, d;
-	unsigned long h = 14695981039346656037UL;
+	unsigned long long h = 14695981039346656037ULL;
 	size_t i;
 	CHECK(l->dbi_open(txn, NULL, 0, &dbi) == 0);
 	CHECK(l->cursor_open(txn, dbi, &c) == 0);
 	r->entries = 0;
 	while (l->cursor_get(c, &k, &d, MDB_NEXT) == 0) {
 		for (i = 0; i < k.mv_size; i++)
-			h = (h ^ ((unsigned char *)k.mv_data)[i]) * 1099511628211UL;
+			h = (h ^ ((unsigned char *)k.mv_data)[i]) * 1099511628211ULL;
 		for (i = 0; i < d.mv_size; i++)
-			h = (h ^ ((unsigned char *)d.mv_data)[i]) * 1099511628211UL;
+			h = (h ^ ((unsigned char *)d.mv_data)[i]) * 1099511628211ULL;
 		r->entries++;
 	}
 	l->cursor_close(c);
@@ -223,7 +223,7 @@ static void run_threads(const char *name, struct result *first)
 		CHECK(r->lib == jobs[0].r.lib);
 		CHECK(r->entries == jobs[0].r.entries && r->sum == jobs[0].r.sum);
 		CHECK(r->numreaders == 0 && !strcmp(r->list, "(no reader locks)"));
-		T("%s thread %d: entries %zu sum %lx numreaders %u list %s", name, i,
+		T("%s thread %d: entries %zu sum %llx numreaders %u list %s", name, i,
 			r->entries, r->sum, r->numreaders, r->list);
 	}
 	*first = jobs[0].r;
@@ -256,7 +256,7 @@ int main(int argc, char **argv)
 		/* Strings the library builds on first use stay valid. */
 		CHECK(l.version(&major, &minor, &patch) != NULL);
 		CHECK(major == 0 && minor == 9);
-		T("reload %d: entries %zu sum %lx; %s", i, r.entries, r.sum,
+		T("reload %d: entries %zu sum %llx; %s", i, r.entries, r.sum,
 			l.strerror(MDB_NOTFOUND));
 		CHECK(dlclose(l.lib) == 0);
 		report_loaded("a reload");

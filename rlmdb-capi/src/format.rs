@@ -12,9 +12,8 @@
 //! format, and asking for the other one makes `mdb_env_open` fail with
 //! `MDB_VERSION_MISMATCH`.
 
-use std::ffi::{CStr, OsStr};
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_uint};
-use std::os::unix::ffi::OsStrExt;
 
 use rlmdb::consts::MDB_NOSUBDIR;
 use rlmdb::{EnvironmentFlags, Format};
@@ -116,7 +115,7 @@ pub unsafe extern "C" fn rlmdb_sniff_format(
         return EINVAL;
     }
     // SAFETY: path is a NUL-terminated string (rlmdb.h).
-    let path = OsStr::from_bytes(unsafe { CStr::from_ptr(path) }.to_bytes());
+    let path = crate::platform::path_from_c(unsafe { CStr::from_ptr(path) });
     let flags = EnvironmentFlags::from_bits_retain(flags & MDB_NOSUBDIR);
     match rlmdb::sniff_format(path, flags) {
         Ok(found) => {
@@ -172,10 +171,8 @@ pub unsafe extern "C" fn rlmdb_env_set_pagesize(env: *mut MDB_env, size: c_uint)
 /// by [`rlmdb_env_set_pagesize`]: that size, or the OS page size (C 1.0's
 /// `me_os_psize`), capped at the format's `MAX_PAGESIZE`.
 pub(crate) fn new_page_size(format: Format, page_size: Option<usize>) -> usize {
-    // SAFETY: sysconf has no preconditions; _SC_PAGESIZE is always valid.
-    let os = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     page_size
-        .unwrap_or(usize::try_from(os).unwrap_or(4096))
+        .unwrap_or_else(crate::platform::os_page_size)
         .min(format.layout().max_pagesize)
 }
 

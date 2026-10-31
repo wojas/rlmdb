@@ -12,6 +12,11 @@
 //!   `"<argv[0]>: illegal option -- x"` and
 //!   `"<argv[0]>: option requires an argument -- x"` (`getprogname()`
 //!   returns `argv[0]` as given).
+//! * **MinGW-w64** (Windows) parses as BSD does, with the messages
+//!   `"<argv[0]>: unknown option -- x"` and
+//!   `"<argv[0]>: option requires an argument -- x"`. MSVC has no `getopt`;
+//!   C tools built with it here get `tests/compat/msvc/unistd.h`, which
+//!   behaves the same.
 //!
 //! Common to both: `--` ends the options, a lone `-` is an operand, options
 //! can be clustered (`-ff`), and an option argument is either the rest of
@@ -28,6 +33,8 @@ pub enum Flavor {
     },
     /// The BSD `getopt` of macOS.
     Bsd,
+    /// MinGW-w64's `getopt` (Windows): BSD's parsing, its own messages.
+    Mingw,
 }
 
 impl Flavor {
@@ -37,6 +44,8 @@ impl Flavor {
             Flavor::Gnu {
                 permute: std::env::var_os("POSIXLY_CORRECT").is_none(),
             }
+        } else if cfg!(windows) {
+            Flavor::Mingw
         } else {
             Flavor::Bsd
         }
@@ -117,11 +126,11 @@ impl<'a> GetOpt<'a> {
                 m.push(c);
                 m.extend_from_slice(b"'\n");
             }
-            Flavor::Bsd => {
-                let what = if what == "invalid option" {
-                    "illegal option"
-                } else {
-                    what
+            Flavor::Bsd | Flavor::Mingw => {
+                let what = match (self.flavor, what) {
+                    (Flavor::Bsd, "invalid option") => "illegal option",
+                    (_, "invalid option") => "unknown option",
+                    _ => what,
                 };
                 m.extend_from_slice(format!(": {what} -- ").as_bytes());
                 m.push(c);
@@ -242,7 +251,7 @@ mod tests {
 
     #[test]
     fn clusters_and_arguments() {
-        for flavor in [GNU, Flavor::Bsd] {
+        for flavor in [GNU, Flavor::Bsd, Flavor::Mingw] {
             let (opts, ops) = parse(&["p", "-ef", "-sname", "-s", "-x", "db"], flavor);
             assert_eq!(
                 opts,
@@ -272,7 +281,7 @@ mod tests {
 
     #[test]
     fn double_dash_and_lone_dash() {
-        for flavor in [GNU, Flavor::Bsd] {
+        for flavor in [GNU, Flavor::Bsd, Flavor::Mingw] {
             let (opts, ops) = parse(&["p", "-e", "--", "-f"], flavor);
             assert_eq!(opts, vec![Opt::Flag(b'e')]);
             assert_eq!(ops, argv(&["-f"]));
@@ -295,6 +304,20 @@ mod tests {
         assert_eq!(
             opts[1],
             Opt::Invalid(b"/x/mdb_stat: illegal option -- x\n".to_vec())
+        );
+        // As MinGW-w64's getopt prints it (measured on Windows 10).
+        let (opts, ops) = parse(&["mdb_stat", "db", "-x"], Flavor::Mingw);
+        assert!(opts.is_empty());
+        assert_eq!(ops, argv(&["db", "-x"]));
+        let (opts, _) = parse(&["mdb_stat", "-ex"], Flavor::Mingw);
+        assert_eq!(
+            opts[1],
+            Opt::Invalid(b"mdb_stat: unknown option -- x\n".to_vec())
+        );
+        let (opts, _) = parse(&["mdb_stat", "-s"], Flavor::Mingw);
+        assert_eq!(
+            opts[0],
+            Opt::Invalid(b"mdb_stat: option requires an argument -- s\n".to_vec())
         );
         let (opts, _) = parse(&["p", "-s"], GNU);
         assert_eq!(

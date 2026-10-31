@@ -113,10 +113,21 @@ fn unparseable_values_are_ignored() {
         assert_eq!(default_format(), Format::V09, "{value:?}");
         assert_eq!(create(tmp().path()), Format::V09, "{value:?}");
     }
-    // Not UTF-8.
+    // Not UTF-8 (on Windows not UTF-16 either: an unpaired surrogate).
+    #[cfg(unix)]
     std::env::set_var(
         DEFAULT_FORMAT_ENV,
         <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"1.0\xff"),
+    );
+    #[cfg(windows)]
+    std::env::set_var(
+        DEFAULT_FORMAT_ENV,
+        <std::ffi::OsString as std::os::windows::ffi::OsStringExt>::from_wide(&[
+            u16::from(b'1'),
+            u16::from(b'.'),
+            u16::from(b'0'),
+            0xd800,
+        ]),
     );
     assert_eq!(default_format(), Format::V09);
 }

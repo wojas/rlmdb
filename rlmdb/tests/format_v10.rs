@@ -86,7 +86,11 @@ fn default_page_size_is_the_os_page_size() {
         .open(dir.path())
         .unwrap();
     // SAFETY: sysconf has no preconditions.
+    #[cfg(unix)]
     let os = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    // GetSystemInfo's dwPageSize on x86-64 Windows.
+    #[cfg(windows)]
+    let os = 4096;
     assert_eq!(env.page_size(), os.min(65536));
     assert_eq!(env.max_key_size(), max_key(env.page_size()));
 }

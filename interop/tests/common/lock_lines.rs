@@ -9,8 +9,8 @@
 
 use interop::tools::Layout;
 use rlmdb::format::lockfile::{
-    LockLayout, LockObjects, READER_PID, READER_SIZE, READER_TID, READER_TXNID, TXNINFO_FORMAT,
-    TXNINFO_MAGIC,
+    LockLayout, LockObjects, READER_PID, READER_SIZE, READER_TID, READER_TID_SIZE, READER_TXNID,
+    TXNINFO_FORMAT, TXNINFO_MAGIC,
 };
 
 /// `MDB_LOCK_VERSION_BITS` of LMDB 1.0: `mti_format` holds the version in
@@ -74,7 +74,7 @@ pub fn lock_mode(layout: &LockLayout) -> &'static str {
     match layout.objects {
         LockObjects::PthreadMutexes => "posix_mutex",
         LockObjects::SemaphoreNames | LockObjects::SemaphoreHash => "posix_sem",
-        LockObjects::MutexNames | LockObjects::MutexHash => "win32_mutex",
+        LockObjects::MutexNames | LockObjects::MutexHash => "win32",
         LockObjects::SysVSemaphores => "sysv_sem",
     }
 }
@@ -88,7 +88,7 @@ pub fn rust_lock_lines(layout: &LockLayout) -> Vec<(String, u64)> {
         ("MDB_LOCK_VERSION".into(), layout.version as usize),
         ("MDB_LOCK_FORMAT".into(), layout.lock_format as usize),
         // MDB_rxbody / MDB_reader
-        ("sizeof(MDB_rxbody)".into(), READER_TID + 8),
+        ("sizeof(MDB_rxbody)".into(), READER_TID + READER_TID_SIZE),
         ("sizeof(MDB_reader)".into(), READER_SIZE),
         // MDB_txbody
         ("sizeof(MDB_txbody)".into(), layout.txbody_size),
@@ -143,7 +143,7 @@ pub fn rust_lock_lines(layout: &LockLayout) -> Vec<(String, u64)> {
         for (field, off, size) in [
             ("mrb_txnid", READER_TXNID, 8),
             ("mrb_pid", READER_PID, 4),
-            ("mrb_tid", READER_TID, 8),
+            ("mrb_tid", READER_TID, READER_TID_SIZE),
         ] {
             v.push((format!("offsetof({prefix}.{field})"), off));
             v.push((format!("sizeof({prefix}.{field})"), size));

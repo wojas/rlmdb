@@ -40,14 +40,14 @@
 //!   databases after it cannot be found in the main DB).
 
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead};
 
 use rlmdb::{
     CursorId, CursorOp, DatabaseFlags, Dbi, Environment, EnvironmentFlags, Format, RwTxn,
     Transaction, WriteFlags,
 };
 
-use crate::cfmt::{atoi, cstr, err_code, io_errno, scan_unsigned, strerror};
+use crate::cfmt::{atoi, crt_errno, cstr, err_code, scan_unsigned, strerror};
 use crate::common::{create_db, path_of, report_failed, Tool, EXIT_FAILURE};
 use crate::dump::DB_FLAG_NAMES;
 use crate::dumpfmt::decode_line_into;
@@ -318,7 +318,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
                 // freopen(optarg, "r", stdin)
                 Ok(f) => o.input = Some(f),
                 Err(e) => {
-                    let text = strerror(io_errno(&e));
+                    let text = strerror(crt_errno(&e));
                     tool.eprint_prog(&[&path, b": reopen: ", text.as_bytes(), b"\n"]);
                     return EXIT_FAILURE;
                 }
@@ -349,9 +349,10 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     }
     let envname = &operands[0];
 
+    // As C reads it: in text mode on Windows (`output::text_input`).
     let reader: Box<dyn BufRead> = match o.input.take() {
-        Some(f) => Box::new(BufReader::with_capacity(64 * 1024, f)),
-        None => Box::new(BufReader::with_capacity(64 * 1024, io::stdin())),
+        Some(f) => crate::output::text_input(Box::new(f)),
+        None => crate::output::text_input(Box::new(io::stdin())),
     };
     // The format the environment will have: -F, else an existing file's,
     // else the default. (A file that cannot be sniffed fails at the open.)

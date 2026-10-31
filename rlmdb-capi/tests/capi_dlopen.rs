@@ -46,11 +46,16 @@ fn threads_dlopen_the_library_and_open_one_environment() {
     assert!(lines(&rust, "T ").len() > 2 * 4);
     // C's library is unloaded by its last dlclose; ours never is (`-z
     // nodelete` on Linux, a dyld rule on macOS; see build.rs), so later
-    // dlopens get the loaded copy with its process-wide state.
+    // dlopens get the loaded copy with its process-wide state. On Windows
+    // both DLLs are unloaded by their last FreeLibrary and loaded afresh.
     let unloads = lines(&rust, "U ");
     assert_eq!(unloads.len(), 5);
-    assert!(
-        unloads.iter().all(|l| l.starts_with("U loaded ")),
-        "{unloads:?}"
-    );
+    if cfg!(windows) {
+        assert_eq!(unloads, lines(&c, "U "));
+    } else {
+        assert!(
+            unloads.iter().all(|l| l.starts_with("U loaded ")),
+            "{unloads:?}"
+        );
+    }
 }

@@ -182,7 +182,25 @@ pub fn lmdb10_src() -> &'static Path {
 /// `rlmdb-capi/README.md` lists them; on macOS the compiler driver adds
 /// them).
 fn rust_native_libs() -> &'static [&'static str] {
-    if cfg!(target_os = "linux") {
+    if cfg!(all(windows, target_env = "msvc")) {
+        &[
+            "legacy_stdio_definitions.lib",
+            "kernel32.lib",
+            "advapi32.lib",
+            "ntdll.lib",
+            "userenv.lib",
+            "ws2_32.lib",
+            "dbghelp.lib",
+        ]
+    } else if cfg!(windows) {
+        &[
+            "-lkernel32",
+            "-lntdll",
+            "-luserenv",
+            "-lws2_32",
+            "-ldbghelp",
+        ]
+    } else if cfg!(target_os = "linux") {
         &[
             "-lgcc_s",
             "-lutil",
@@ -196,6 +214,14 @@ fn rust_native_libs() -> &'static [&'static str] {
         &[]
     }
 }
+
+/// The file name of `rlmdb-capi`'s static library: `lmdb.lib` with MSVC,
+/// `liblmdb.a` everywhere else (MinGW included).
+const STATICLIB: &str = if cfg!(target_env = "msvc") {
+    "lmdb.lib"
+} else {
+    "liblmdb.a"
+};
 
 /// The Rust `liblmdb.a` built by cargo for `rlmdb-capi` (a dev-dependency of
 /// this crate, so it is built before the tests): in `target/<profile>/deps`
@@ -211,7 +237,7 @@ pub fn rust_staticlib() -> Result<PathBuf> {
         }
     }
     dirs.iter()
-        .map(|d| d.join("liblmdb.a"))
+        .map(|d| d.join(STATICLIB))
         .find(|p| p.is_file())
         .ok_or_else(|| {
             Error::new(format!(
@@ -229,11 +255,13 @@ fn link_cpeer_capi() -> Result<PathBuf> {
     let recipe_path = env!("INTEROP_CPEER_CAPI_LINK");
     let recipe = std::fs::read_to_string(recipe_path)?;
     let (mut out, mut cc, mut args, mut objs) = (None, None, Vec::new(), Vec::new());
+    let mut envs = Vec::new();
     for line in recipe.lines() {
         match line.split_once(' ') {
             Some(("out", v)) => out = Some(PathBuf::from(v)),
             Some(("cc", v)) => cc = Some(v.to_owned()),
             Some(("arg", v)) => args.push(v.to_owned()),
+            Some(("env", v)) if v.contains('=') => envs.push(v.split_once('=').unwrap_or_default()),
             Some(("obj", v)) => objs.push(v.to_owned()),
             _ => return Err(Error::new(format!("{recipe_path}: bad line {line:?}"))),
         }
@@ -244,13 +272,19 @@ fn link_cpeer_capi() -> Result<PathBuf> {
     let lib = rust_staticlib()?;
     let tmp = out.with_extension(format!("tmp{}", std::process::id()));
     let mut cmd = Command::new(&cc);
-    cmd.args(&args)
-        .args(&objs)
-        .arg(&lib)
-        .arg("-pthread")
-        .args(rust_native_libs())
-        .arg("-o")
-        .arg(&tmp);
+    cmd.envs(envs).args(&args).args(&objs).arg(&lib);
+    if cfg!(target_env = "msvc") {
+        cmd.arg("-nologo")
+            .args(rust_native_libs())
+            .arg(format!("-Fe{}", tmp.display()));
+    } else if cfg!(windows) {
+        cmd.args(rust_native_libs()).arg("-o").arg(&tmp);
+    } else {
+        cmd.arg("-pthread")
+            .args(rust_native_libs())
+            .arg("-o")
+            .arg(&tmp);
+    }
     let res = cmd
         .output()
         .map_err(|e| Error::new(format!("running {cc}: {e}")))?;

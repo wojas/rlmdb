@@ -22,14 +22,85 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/select.h>
 #include <unistd.h>
+#endif
 
 #include "cpeer.h"
+
+/* C 1.0 on Windows maps the data file of a read-only environment as it is
+ * when mapped, but lets a snapshot begin whose pages lie past that view:
+ * reading them faults (KNOWN_C_BUGS.md, "LMDB 1.0"). The commands below
+ * that read while other processes write apply C's own remedy first:
+ * fit_view() checks a read transaction that has just begun or been
+ * renewed; if the data file is longer than what the view is known to
+ * cover, it resets the transaction, maps the file again
+ * (mdb_env_set_mapsize(env, 0), which a caller may do while no
+ * transaction is active) and renews it. The size of the file once a
+ * snapshot has begun covers every page of that snapshot. */
+#if defined(_WIN32) && MDB_VERSION_MAJOR >= 1 && !defined(LMDB_RUST)
+static long long view_size;	/* what the view covers at least */
+
+static long long
+data_file_size(MDB_env *env)
+{
+	mdb_filehandle_t fd;
+	LARGE_INTEGER size;
+
+	CHECK(mdb_env_get_fd(env, &fd));
+	if (!GetFileSizeEx(fd, &size))
+		die(EXIT_LMDB, "GetFileSizeEx failed: %lu", (unsigned long)GetLastError());
+	return size.QuadPart;
+}
+
+static void
+fit_view(MDB_env *env, MDB_txn *txn)
+{
+	unsigned int flags;
+	long long size;
+
+	/* A writable environment reserves the map size: no view to fit. */
+	CHECK(mdb_env_get_flags(env, &flags));
+	if (!(flags & MDB_RDONLY))
+		return;
+	while ((size = data_file_size(env)) > view_size) {
+		mdb_txn_reset(txn);
+		view_size = size;
+		CHECK(mdb_env_set_mapsize(env, 0));
+		CHECK(mdb_txn_renew(txn));
+	}
+}
+#else
+#define fit_view(env, txn)	((void)0)
+#endif
 
 /* ---- hold-reader -------------------------------------------------------- */
 
 /* Wait until `deadline`, or until a line or EOF arrives on stdin. */
+#ifdef _WIN32
+/* Windows cannot select() on a pipe: poll it with PeekNamedPipe. Standard
+ * input that is not a pipe (a file, NUL) counts as at its end. */
+static void
+wait_stdin(double deadline)
+{
+	HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+	char buf[256];
+
+	while (deadline - now_seconds() > 0) {
+		DWORD avail = 0, got = 0;
+		if (!PeekNamedPipe(in, NULL, 0, NULL, &avail, NULL))
+			return;
+		if (avail == 0) {
+			Sleep(10);
+			continue;
+		}
+		if (!ReadFile(in, buf, sizeof(buf), &got, NULL) || got == 0 ||
+			memchr(buf, '\n', got))
+			return;
+	}
+}
+#else
 static void
 wait_stdin(double deadline)
 {
@@ -55,6 +126,7 @@ wait_stdin(double deadline)
 		}
 	}
 }
+#endif
 
 int
 cmd_hold_reader(struct opts *o)
@@ -70,6 +142,7 @@ cmd_hold_reader(struct opts *o)
 		parse_dataset_args(o, 2);
 	env = open_env(o, MDB_RDONLY);
 	CHECK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
+	fit_view(env, txn);
 	start = now_seconds();
 	printf("READY txnid=%zu pid=%d\n", mdb_txn_id(txn), (int)getpid());
 	fflush(stdout);
@@ -379,8 +452,10 @@ cmd_writer_loop(struct opts *o)
 		put_counter(txn, w.main, "#commits", version);
 		commit_write(txn);
 		last = version;
-		if (commits++ == 0)
+		if (commits++ == 0) {
 			printf("READY\n");
+			fflush(stdout);
+		}
 	}
 	printf("commits=%llu aborts=%llu nested_commits=%llu nested_aborts=%llu last_commit=%llu\n",
 		commits, aborts, ncommits, naborts, (unsigned long long)last);
@@ -568,6 +643,7 @@ rl_meta_race(MDB_env *env, MDB_txn **txn, MDB_dbi mdbi, MDB_dbi ddbi, size_t n,
 			sleep_seconds(0.001 * (1 << (tries - 1)));
 		mdb_txn_abort(*txn);
 		CHECK(mdb_txn_begin(env, NULL, MDB_RDONLY, txn));
+		fit_view(env, *txn);
 		if ((rc = check_snapshot(*txn, mdbi, ddbi, 0, commits, buf)))
 			return rc;
 		tries++;
@@ -605,6 +681,7 @@ cmd_reader_loop(struct opts *o)
 	 * transaction stay valid after it commits. */
 	for (;;) {
 		CHECK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
+		fit_view(env, txn);
 		rc = mdb_dbi_open(txn, db, 0, &mdbi);
 		if (!rc)
 			rc = mdb_dbi_open(txn, dups_db_name(db, dname, sizeof(dname)), 0, &ddbi);
@@ -633,6 +710,7 @@ cmd_reader_loop(struct opts *o)
 				CHECK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
 			}
 		}
+		fit_view(env, txn);
 		rc = check_snapshot(txn, mdbi, ddbi, (int)(reads % 3 == 2), &commits, buf);
 		if (rc)
 			break;
@@ -645,6 +723,7 @@ cmd_reader_loop(struct opts *o)
 		if (reads++ == 0) {
 			first = commits;
 			printf("READY\n");
+			fflush(stdout);
 		}
 		last = commits;
 		last_id = mdb_txn_id(txn);

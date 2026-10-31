@@ -65,6 +65,7 @@ pub mod env;
 mod erased;
 pub mod format;
 pub mod handles;
+mod platform;
 pub mod txn;
 pub mod types;
 pub mod version;

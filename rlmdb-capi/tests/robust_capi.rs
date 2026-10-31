@@ -18,7 +18,6 @@
 
 use std::ffi::CString;
 use std::os::raw::c_int;
-use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicUsize, Ordering};
@@ -296,9 +295,23 @@ fn run_child(name: &str) -> (Option<i32>, String) {
         .output()
         .unwrap();
     (
-        out.status.signal(),
+        abort_signal(&out.status),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+/// The signal that ended the process (Unix).
+#[cfg(unix)]
+fn abort_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    std::os::unix::process::ExitStatusExt::signal(status)
+}
+
+/// `SIGABRT` if the process ended the way an aborting Rust program ends
+/// on Windows: `std::process::abort` fails fast, which exits with
+/// `STATUS_STACK_BUFFER_OVERRUN` (`0xC0000409`).
+#[cfg(windows)]
+fn abort_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    (status.code() == Some(0xC000_0409_u32 as i32)).then_some(libc::SIGABRT)
 }
 
 #[test]

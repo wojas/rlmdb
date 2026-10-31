@@ -135,6 +135,7 @@ fn log2_mod(p2: u64, n: u32) -> u64 {
 fn lock_format() {
     let l = layout10();
     let lock_type = match l.lock_mode.as_str() {
+        "win32" => get("alignof(mdb_hash_t)") / 8 % 2,
         "posix_sem" => 4 + get("alignof(mdb_hash_t)") / 8 % 2,
         "posix_mutex" => {
             10 + log2_mod(get("alignof(pthread_mutex_t)"), 5)
@@ -182,7 +183,8 @@ fn lock_file_header() {
     assert_eq!(get("sizeof(MDB_reader)"), 64);
     let readers = get("offsetof(MDB_txninfo.mti_readers)");
     match l.lock_mode.as_str() {
-        "posix_sem" => {
+        // Named semaphores (macOS) or named mutexes (Windows).
+        "posix_sem" | "win32" => {
             assert_eq!(get("offsetof(MDB_txbody.mtb_mutexid)"), 24);
             assert_eq!(get("sizeof(MDB_txbody.mtb_mutexid)"), 8);
             assert_eq!(get("sizeof(MDB_txbody)"), 32);
@@ -252,7 +254,7 @@ fn layout_dumps_line_up() {
         .collect();
     only09.sort_unstable();
     let mut expected09 = vec!["P_DIRTY"];
-    if layout10().lock_mode == "posix_sem" {
+    if matches!(layout10().lock_mode.as_str(), "posix_sem" | "win32") {
         expected09.extend([
             "offsetof(MDB_txbody.mtb_rmname)",
             "sizeof(MDB_txbody.mtb_rmname)",

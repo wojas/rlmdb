@@ -20,7 +20,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+/* pthreads, mkdir, unistd.h, dlopen; their Windows forms (tests/compat). */
+#include "../../../tests/compat/posix_compat.h"
 #include "lmdb.h"
 #include "cmpfuncs.h"
 

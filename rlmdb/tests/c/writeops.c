@@ -49,6 +49,10 @@
 #include <stdint.h>
 #include <errno.h>
 #include "lmdb.h"
+#ifdef _WIN32
+/* Binary stdio and getpid (tests/compat, on the include path there). */
+#include "posix_compat.h"
+#endif
 
 #define MAXC 8
 #define MAXDEPTH 8

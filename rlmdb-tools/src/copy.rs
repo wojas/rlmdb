@@ -16,7 +16,6 @@
 //! does), but the other signals terminate it (installing handlers would
 //! need `unsafe`).
 
-use std::os::fd::AsFd;
 use std::path::Path;
 
 use rlmdb::{Environment, EnvironmentFlags, Error};
@@ -79,6 +78,16 @@ fn copy_to_path(env: &Environment, path: &Path, compact: bool) -> Result<(), Err
 }
 
 /// `mdb_env_copyfd2(env, 1, flags)`: the copy goes to standard output.
+#[cfg(unix)]
 fn copy_to_stdout(env: &Environment, compact: bool) -> Result<(), Error> {
+    use std::os::fd::AsFd;
     env.copy_to_fd(std::io::stdout().as_fd(), compact)
+}
+
+/// `mdb_env_copyfd2(env, GetStdHandle(STD_OUTPUT_HANDLE), flags)`: the
+/// copy goes to standard output (C's `mdb_copy` on Windows).
+#[cfg(windows)]
+fn copy_to_stdout(env: &Environment, compact: bool) -> Result<(), Error> {
+    use std::os::windows::io::AsHandle;
+    env.copy_to_fd(std::io::stdout().as_handle(), compact)
 }

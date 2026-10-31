@@ -171,10 +171,10 @@ fn mtest6_integerkey_splits() {
     let env = open_ro(&path, 4);
     let pairs = check_db(c, &path, &env, Some("id6"), 6);
     assert_eq!(pairs.len(), 36);
-    // Keys are native longs in numeric order.
-    let nums: Vec<u64> = pairs
+    // Keys are native longs in numeric order (4 bytes on Windows).
+    let nums: Vec<std::ffi::c_long> = pairs
         .iter()
-        .map(|(k, _)| u64::from_ne_bytes(k[..].try_into().unwrap()))
+        .map(|(k, _)| std::ffi::c_long::from_ne_bytes(k[..].try_into().unwrap()))
         .collect();
     let mut sorted = nums.clone();
     sorted.sort();

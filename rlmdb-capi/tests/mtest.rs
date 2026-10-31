@@ -22,7 +22,6 @@
 mod common;
 
 use std::fs;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -31,8 +30,23 @@ use common::*;
 /// The seeds every `mtest*` program runs with.
 const SEEDS: [u32; 2] = [MTEST_SEED, 7];
 
-/// `0x...` (a `%p` value) replaced by `PTR`.
+/// `0x...` (a `%p` value) replaced by `PTR`; on Windows, where `%p` is 16
+/// hex digits without `0x`, words of that form.
 fn without_pointers(s: &str) -> String {
+    if cfg!(windows) {
+        return s
+            .split(' ')
+            .map(|w| {
+                let hex = w.trim_end_matches(['\r', '\n']);
+                if hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    w.replacen(hex, "PTR", 1)
+                } else {
+                    w.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find("0x") {
@@ -51,7 +65,7 @@ fn without_pointers(s: &str) -> String {
 /// stdout of `tool args env` linked against `lib`; it must succeed.
 fn tool_output(tool: &str, lib: Lib, args: &[&str], env: &Path) -> String {
     let exe = builder().tool(tool, lib);
-    let out = run_ok(Command::new(exe).arg0(tool).args(args).arg(env));
+    let out = run_ok(command_as(&exe, tool).args(args).arg(env));
     String::from_utf8(out.stdout).unwrap()
 }
 

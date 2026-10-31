@@ -43,6 +43,18 @@ impl fmt::Display for Peer {
     }
 }
 
+/// The output of a program with `\n` line ends: on Windows the C tools
+/// (and the Rust tools, which do as they do) write through the C runtime's
+/// text mode, which ends lines with `\r\n`. (`rlmdb-tools`' own tests
+/// compare the bytes.)
+fn text_lines(s: String) -> String {
+    if cfg!(windows) && s.contains("\r\n") {
+        s.replace("\r\n", "\n")
+    } else {
+        s
+    }
+}
+
 /// Report something a test did not do, or only partly did, on the test's
 /// real stderr (libtest captures `print!`/`eprint!`, not direct writes), so
 /// that it shows up in a normal `cargo test` run: `[interop] SKIPPED ...`.
@@ -94,7 +106,7 @@ fn rpeer_path() -> Result<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         // target/<profile>/deps/<test>-<hash> -> target/<profile>/rpeer
         if let Some(profile_dir) = exe.parent().and_then(|deps| deps.parent()) {
-            candidates.push(profile_dir.join("rpeer"));
+            candidates.push(profile_dir.join(format!("rpeer{}", std::env::consts::EXE_SUFFIX)));
         }
     }
     candidates.into_iter().find(|p| p.is_file()).ok_or_else(|| {
@@ -445,8 +457,8 @@ pub(crate) fn run_command(
         });
     }
     let status = wait_with_timeout(&mut child, timeout)?;
-    let stdout = out.join().unwrap_or_default();
-    let stderr = err.join().unwrap_or_default();
+    let stdout = text_lines(out.join().unwrap_or_default());
+    let stderr = text_lines(err.join().unwrap_or_default());
     match status {
         Some(status) => Ok(Output {
             label,
@@ -618,6 +630,7 @@ impl PeerProcess {
             .take()
             .map(|t| t.join().unwrap_or_default())
             .unwrap_or_default();
+        let stderr = text_lines(stderr);
         match status {
             Some(status) => Ok(Output {
                 label: self.label.clone(),

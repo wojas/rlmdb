@@ -24,10 +24,52 @@ pub fn io_errno(e: &std::io::Error) -> i32 {
     e.raw_os_error().unwrap_or(5) // EIO
 }
 
+/// The `errno` the C runtime leaves when a file function of its own
+/// (`fopen`, `freopen`) fails with `e`: the error itself on Unix; on
+/// Windows the system error mapped as the C runtime's `_dosmaperr` does
+/// (`ERROR_PATH_NOT_FOUND` is `ENOENT`, for example).
+pub fn crt_errno(e: &std::io::Error) -> i32 {
+    let code = io_errno(e);
+    if cfg!(windows) {
+        dos_errno(code)
+    } else {
+        code
+    }
+}
+
+/// `_dosmaperr`'s table: the `errno` of a Windows system error code
+/// (Windows' `errno` values), `EINVAL` for the codes it does not list.
+fn dos_errno(code: i32) -> i32 {
+    match code {
+        2 | 3 | 15 | 18 | 53 | 67 | 161 | 206 => 2, // ENOENT
+        4 => 24,                                    // EMFILE
+        5 | 16 | 19..=36 | 65 | 82 | 83 | 108 | 132 | 158 | 167 => 13, // EACCES
+        6 | 114 | 130 => 9,                         // EBADF
+        7 | 8 | 9 | 1816 => 12,                     // ENOMEM
+        10 => 7,                                    // E2BIG
+        11 | 188..=202 => 8,                        // ENOEXEC
+        17 => 18,                                   // EXDEV
+        80 | 183 => 17,                             // EEXIST
+        89 | 164 | 215 => 11,                       // EAGAIN
+        109 => 32,                                  // EPIPE
+        112 => 28,                                  // ENOSPC
+        128 | 129 => 10,                            // ECHILD
+        145 => 41,                                  // ENOTEMPTY
+        _ => 22,                                    // EINVAL
+    }
+}
+
 /// `printf("%p", addr)`: `0x` and lower-case hex; a null pointer is
-/// `(nil)` with glibc and `0x0` elsewhere.
+/// `(nil)` with glibc and `0x0` elsewhere. On Windows 16 hex digits:
+/// upper-case from MSVC's C runtime, lower-case from MinGW-w64's own
+/// `printf`, which C99 programs on msvcrt (the runtime of Rust's
+/// `x86_64-pc-windows-gnu`) get by default (`__USE_MINGW_ANSI_STDIO`).
 pub fn pointer(addr: u64) -> String {
-    if addr == 0 && cfg!(target_os = "linux") {
+    if cfg!(all(windows, target_env = "msvc")) {
+        format!("{addr:016X}")
+    } else if cfg!(windows) {
+        format!("{addr:016x}")
+    } else if addr == 0 && cfg!(target_os = "linux") {
         "(nil)".to_owned()
     } else {
         format!("{addr:#x}")
@@ -151,8 +193,23 @@ mod tests {
     }
 
     #[test]
+    fn dos_errors_as_errno() {
+        assert_eq!(
+            [2, 3, 5, 32, 80, 87, 112, 9999].map(dos_errno),
+            [2, 2, 13, 13, 17, 22, 28, 22]
+        );
+    }
+
+    #[test]
     fn pointers_and_classes() {
-        assert_eq!(pointer(0x1000), "0x1000");
+        let p = if cfg!(all(windows, target_env = "msvc")) {
+            "0000000000001ABC"
+        } else if cfg!(windows) {
+            "0000000000001abc"
+        } else {
+            "0x1abc"
+        };
+        assert_eq!(pointer(0x1abc), p);
         assert!(is_print(b' ') && is_print(b'~') && !is_print(0x7f) && !is_print(0x80));
         assert_eq!(cstr(b"ab\0cd"), b"ab");
     }

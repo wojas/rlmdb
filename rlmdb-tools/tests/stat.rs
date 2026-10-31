@@ -163,12 +163,17 @@ fn errors_and_usage() {
         assert_same("mdb_stat", &argv, b"", dir.path());
     }
     // getopt's own messages use argv[0] (glibc) or its last component
-    // (macOS): run both with a path as argv[0].
-    let c = run_with_arg0(Impl::C, "/some/dir/mdb_stat", &args(&["-x", "db"]));
-    let r = run_with_arg0(Impl::Rust, "/some/dir/mdb_stat", &args(&["-x", "db"]));
-    assert_runs_equal("mdb_stat", &args(&["-x", "db"]), &c, &r);
+    // (macOS): run both with a path as argv[0]. (Windows cannot give a
+    // program an argv[0] other than its own name.)
+    #[cfg(unix)]
+    {
+        let c = run_with_arg0(Impl::C, "/some/dir/mdb_stat", &args(&["-x", "db"]));
+        let r = run_with_arg0(Impl::Rust, "/some/dir/mdb_stat", &args(&["-x", "db"]));
+        assert_runs_equal("mdb_stat", &args(&["-x", "db"]), &c, &r);
+    }
 }
 
+#[cfg(unix)]
 fn run_with_arg0(imp: Impl, arg0: &str, argv: &[Vec<u8>]) -> Run {
     use std::os::unix::process::CommandExt;
     let out = std::process::Command::new(bin(imp, "mdb_stat"))
@@ -197,7 +202,9 @@ fn posixly_correct() {
 }
 
 /// `-r` alone: same output, but exit code 0 where C exits 1
-/// (KNOWN_C_BUGS.md #2). With `-a`/`-s`/`-f` both exit 0.
+/// (KNOWN_C_BUGS.md #2: the result of the last `fputs`, which is 0 with
+/// the Windows C runtime, so there C exits 0 too). With `-a`/`-s`/`-f` both
+/// exit 0.
 #[test]
 fn reader_table_exit_code() {
     let dir = tempdir();
@@ -208,7 +215,7 @@ fn reader_table_exit_code() {
         let (c, r) = both("mdb_stat", &argv, b"", dir.path());
         assert_eq!(c.stdout, r.stdout, "{case}");
         assert_eq!(c.stderr, r.stderr, "{case}");
-        assert_eq!((c.code, r.code), (1, 0), "{case}");
+        assert_eq!((c.code, r.code), (i32::from(!cfg!(windows)), 0), "{case}");
     }
     for case in ["-r -a", "-rr -f", "-r -s plain", "-err -ffa"] {
         let mut argv = words(case);

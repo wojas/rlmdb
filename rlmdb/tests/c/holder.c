@@ -16,6 +16,10 @@
 #include <string.h>
 #include <unistd.h>
 #include "lmdb.h"
+#ifdef _WIN32
+/* Binary stdio and getpid (tests/compat, on the include path there). */
+#include "posix_compat.h"
+#endif
 
 #define CHECK(rc, what) do { if (rc) { fprintf(stderr, "%s: %s\n", what, mdb_strerror(rc)); exit(2); } } while (0)
 
@@ -35,7 +39,14 @@ int main(int argc, char **argv)
 
 	rc = mdb_env_create(&env); CHECK(rc, "env_create");
 	rc = mdb_env_set_maxdbs(env, 8); CHECK(rc, "set_maxdbs");
+#ifdef _WIN32
+	/* C LMDB 0.9 sets the data file to its map size when it opens it on
+	 * Windows, which fails while another process maps more: stay at the
+	 * 10 MiB of the mtest programs that the tests run next to it. */
+	rc = mdb_env_set_mapsize(env, 10UL << 20); CHECK(rc, "set_mapsize");
+#else
 	rc = mdb_env_set_mapsize(env, 64UL << 20); CHECK(rc, "set_mapsize");
+#endif
 	rc = mdb_env_open(env, argv[argc - 1], flags, 0664); CHECK(rc, "env_open");
 	if (rdtxn) {
 		rc = mdb_txn_begin(env, NULL, MDB_RDONLY, &txn); CHECK(rc, "txn_begin");

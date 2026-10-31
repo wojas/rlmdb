@@ -2,9 +2,8 @@
 //! (name and output), C-style messages and exit codes, and access to
 //! databases by byte name.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
 use rlmdb::{Dbi, Environment, Error, Format, RoCursor, RwTxn, Stat, Transaction};
@@ -81,7 +80,7 @@ impl Tool {
 /// Runs a tool's `run` function on the process arguments and returns the
 /// exit code (the body of each binary's `main`).
 pub fn run_main(run: fn(&mut Tool, &[Vec<u8>]) -> i32) -> i32 {
-    let args: Vec<Vec<u8>> = std::env::args_os().map(OsString::into_vec).collect();
+    let args: Vec<Vec<u8>> = std::env::args_os().map(arg_bytes).collect();
     let mut tool = Tool::new(&args);
     let code = run(&mut tool, &args);
     tool.finish(code)
@@ -98,9 +97,30 @@ pub fn report_failed_code(what: &str, rc: i32) {
     eprint_bytes(&[format!("{what} failed, error {rc} {}\n", strerror(rc)).as_bytes()]);
 }
 
+/// The bytes of a command line argument: as given on Unix; on Windows,
+/// where arguments are UTF-16, their UTF-8 form (an unpaired surrogate
+/// becomes U+FFFD).
+#[cfg(unix)]
+fn arg_bytes(arg: OsString) -> Vec<u8> {
+    std::os::unix::ffi::OsStringExt::into_vec(arg)
+}
+
+#[cfg(windows)]
+fn arg_bytes(arg: OsString) -> Vec<u8> {
+    arg.to_string_lossy().into_owned().into_bytes()
+}
+
 /// A path from command line bytes.
+#[cfg(unix)]
 pub fn path_of(bytes: &[u8]) -> &Path {
-    Path::new(OsStr::from_bytes(bytes))
+    Path::new(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(bytes))
+}
+
+/// A path from command line bytes, which are UTF-8 on Windows
+/// ([`run_main`]); other bytes name no path that exists (U+FFFD).
+#[cfg(windows)]
+pub fn path_of(bytes: &[u8]) -> &Path {
+    Path::new(std::str::from_utf8(bytes).unwrap_or("\u{fffd}"))
 }
 
 /// A database name as `mdb_dbi_open` sees it: C names are NUL-terminated,

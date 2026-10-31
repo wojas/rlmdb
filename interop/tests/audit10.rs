@@ -303,12 +303,11 @@ impl File10 {
 
 /// Overwrite `bytes` at `offset` of the data file of `env`.
 fn patch(env: &TestEnv, offset: usize, bytes: &[u8]) {
-    use std::os::unix::fs::FileExt;
     let f = std::fs::OpenOptions::new()
         .write(true)
         .open(env.data_file())
         .expect("open data file");
-    f.write_all_at(bytes, offset as u64).expect("patch");
+    interop::os::write_all_at(&f, bytes, offset as u64).expect("patch");
 }
 
 /// A copy of `env` (its data file) to break.

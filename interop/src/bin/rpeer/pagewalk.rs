@@ -38,6 +38,7 @@
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{self, Write};
+#[cfg(unix)]
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 
@@ -318,10 +319,11 @@ impl Walker<'_> {
         let mut buf = vec![0u8; len];
         let mut got = 0;
         while got < len {
-            match self
-                .file
-                .read_at(&mut buf[got..], pgno * self.psize as u64 + got as u64)
-            {
+            match read_at(
+                &self.file,
+                &mut buf[got..],
+                pgno * self.psize as u64 + got as u64,
+            ) {
                 Ok(0) | Err(_) => break,
                 Ok(k) => got += k,
             }
@@ -733,7 +735,7 @@ fn pick_meta(
     for k in 0..2u64 {
         let mut buf = [0u8; MAX_PAGE_HDR + META_SIZE];
         let off = if k == 0 { 0 } else { *psize as u64 };
-        file.read_exact_at(&mut buf, off).map_err(|_| {
+        read_exact_at(file, &mut buf, off).map_err(|_| {
             Fail::new(
                 EXIT_LMDB,
                 format!("check-freelist: cannot read meta page {k}"),
@@ -901,6 +903,28 @@ pub fn cmd_check_freelist(o: &mut Opts) -> CmdResult {
     );
     drop(txn);
     result
+}
+
+/// `pread` (Unix `FileExt::read_at`, Windows `seek_read`).
+fn read_at(file: &File, buf: &mut [u8], off: u64) -> io::Result<usize> {
+    #[cfg(unix)]
+    return file.read_at(buf, off);
+    #[cfg(windows)]
+    return std::os::windows::fs::FileExt::seek_read(file, buf, off);
+}
+
+/// `pread` of all of `buf`.
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut off: u64) -> io::Result<()> {
+    while !buf.is_empty() {
+        match read_at(file, buf, off)? {
+            0 => return Err(io::ErrorKind::UnexpectedEof.into()),
+            n => {
+                buf = &mut buf[n..];
+                off += n as u64;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1359,7 +1383,7 @@ mod tests {
             .write(true)
             .open(env.data_file())
             .unwrap();
-        f.write_all_at(bytes, offset as u64).unwrap();
+        interop::os::write_all_at(&f, bytes, offset as u64).unwrap();
     }
 
     /// Broken 1.0 files: both audits find the same problems, and say so in

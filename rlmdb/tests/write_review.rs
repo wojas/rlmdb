@@ -197,10 +197,11 @@ fn cursor_ops_after_a_failed_set_on_dupfixed() {
     let Some(c_tools) = common::c_tools() else {
         return;
     };
+    let (op_args, _ops_file) = common::cursorops_ops(&ops);
     let out = Command::new(c_tools.bin("cursorops"))
         .arg(dir.path())
         .arg("f")
-        .args(&ops)
+        .args(&op_args)
         .output()
         .unwrap();
     assert!(
@@ -244,22 +245,33 @@ fn c_program(name: &str, source: &str) -> Option<std::path::PathBuf> {
     let hash = source.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
     });
-    let bin = dir.join(format!("{name}-{hash:016x}"));
+    let exe = std::env::consts::EXE_SUFFIX;
+    let bin = dir.join(format!("{name}-{hash:016x}{exe}"));
     if bin.exists() {
         return Some(bin);
     }
     let src = dir.join(format!("{name}-{}.c", std::process::id()));
-    let tmp = dir.join(format!("{name}-{}", std::process::id()));
+    let tmp_name = format!("{name}-{}", std::process::id());
+    let tmp = dir.join(format!("{tmp_name}{exe}"));
     std::fs::write(&src, source).unwrap();
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_owned());
-    let out = Command::new(cc)
-        .arg("-pthread")
-        .arg("-I")
-        .arg(&tools.dir)
-        .arg("-o")
-        .arg(&tmp)
-        .arg(&src)
-        .arg(tools.dir.join("liblmdb.a"))
+    let toolchain = common::toolchain::Toolchain::new(&dir).unwrap();
+    let include = tools.dir.to_string_lossy().into_owned();
+    let lib = tools
+        .dir
+        .join(common::toolchain::LIB_FILE)
+        .to_string_lossy()
+        .into_owned();
+    let src_name = src.to_string_lossy().into_owned();
+    let out = toolchain
+        .program_with_lib(
+            &tmp_name,
+            &[&src_name],
+            &[
+                common::toolchain::Opt::Include(&include),
+                common::toolchain::Opt::TestProgram,
+            ],
+            &lib,
+        )
         .output()
         .unwrap();
     assert!(
@@ -278,6 +290,9 @@ const C_SCENARIOS: &str = r#"
 #include <stdlib.h>
 #include <string.h>
 #include "lmdb.h"
+#ifdef _WIN32
+#include "posix_compat.h" /* binary stdio */
+#endif
 #define CHK(x) do { int rc_ = (x); if (rc_) { printf("%s: %s\n", #x, mdb_strerror(rc_)); exit(1); } } while (0)
 static MDB_val v(const char *s) { MDB_val x = { strlen(s), (void *)s }; return x; }
 static void show(const char *what, int rc, MDB_val *k, MDB_val *d) {

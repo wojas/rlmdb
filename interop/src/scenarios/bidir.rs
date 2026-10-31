@@ -489,6 +489,10 @@ fn writer_gets_lock(peer: Peer, env: &TestEnv, seed: u32) -> Result<()> {
 /// has the environment open, the next opener is exclusive and re-creates
 /// the semaphores, and writing works again. The same holds for the mutex
 /// under QEMU user emulation ([`robust_mutexes`](super::robust_mutexes)).
+///
+/// Windows: the writer lock is a named mutex, which the kernel abandons when
+/// its owner dies: the next writer gets `WAIT_ABANDONED` (C's
+/// `MDB_OWNERDEAD`), recovers and continues, as on Linux.
 pub fn killed_writer(pair: Pair) -> Result<()> {
     let robust = super::robust_mutexes();
     let env = new_env(&pair, 512 * MIB)?;

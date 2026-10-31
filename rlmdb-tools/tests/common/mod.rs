@@ -19,7 +19,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -48,6 +47,41 @@ impl Run {
     pub fn stderr_str(&self) -> String {
         String::from_utf8_lossy(&self.stderr).into_owned()
     }
+    /// Standard output as text with `\n` line ends ([`text`]), for
+    /// comparisons with expected text.
+    pub fn stdout_text(&self) -> String {
+        text(&self.stdout)
+    }
+    /// Standard error as text with `\n` line ends ([`text`]).
+    pub fn stderr_text(&self) -> String {
+        text(&self.stderr)
+    }
+}
+
+/// `bytes` as text with `\n` line ends: on Windows the tools end lines
+/// with `\r\n` (the C runtime's text mode, which the Rust tools emulate).
+/// For comparisons with expected text; C and Rust outputs are compared as
+/// bytes.
+pub fn text(bytes: &[u8]) -> String {
+    let s = String::from_utf8_lossy(bytes);
+    if cfg!(windows) {
+        s.replace("\r\n", "\n")
+    } else {
+        s.into_owned()
+    }
+}
+
+/// `text` with the line ends the tools write on this platform: each `\n`
+/// becomes `\r\n` on Windows.
+pub fn platform_lines(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    for &b in text {
+        if b == b'\n' && cfg!(windows) {
+            out.push(b'\r');
+        }
+        out.push(b);
+    }
+    out
 }
 
 fn manifest_dir() -> PathBuf {
@@ -64,6 +98,8 @@ fn target_triple() -> String {
     match std::env::consts::OS {
         "macos" => format!("{arch}-apple-darwin"),
         "linux" => format!("{arch}-unknown-linux-gnu"),
+        "windows" if cfg!(target_env = "msvc") => format!("{arch}-pc-windows-msvc"),
+        "windows" => format!("{arch}-pc-windows-gnu"),
         os => format!("{arch}-unknown-{os}"),
     }
 }
@@ -77,9 +113,84 @@ fn cc_build(out_dir: &Path) -> cc::Build {
         .opt_level(1)
         .debug(true)
         .out_dir(out_dir)
-        .warnings(false)
-        .flag_if_supported("-pthread");
+        .warnings(false);
+    // C LMDB uses no pthreads on Windows; the tools keep the C runtime's
+    // printf there, as on any Windows system (no __USE_MINGW_ANSI_STDIO).
+    if !cfg!(windows) {
+        b.flag_if_supported("-pthread");
+    }
     b
+}
+
+/// The file `cc::Build::try_compile(name)` writes: `lib<name>.a`, or
+/// `<name>.lib` with MSVC.
+fn static_lib(dir: &Path, name: &str) -> PathBuf {
+    if cfg!(target_env = "msvc") {
+        dir.join(format!("{name}.lib"))
+    } else {
+        dir.join(format!("lib{name}.a"))
+    }
+}
+
+/// The C compiler command that builds executable `exe` from `inputs`
+/// (sources, then libraries) with the include directory `include`: `-o`
+/// and `-lpthread` for GNU-style drivers, `-Fe` (objects into the
+/// executable's directory, `tests/compat/msvc` for `unistd.h`, and
+/// `advapi32.lib`, which C LMDB needs) for MSVC's `cl`.
+fn link_program(include: &Path, exe: &Path, inputs: &[&Path]) -> Command {
+    let dir = exe.parent().unwrap_or(Path::new("."));
+    let compiler = cc_build(dir).get_compiler();
+    let mut cmd = compiler.to_command();
+    cmd.arg("-I").arg(include);
+    if compiler.is_like_msvc() {
+        cmd.arg("-I")
+            .arg(manifest_dir().join("../tests/compat/msvc"))
+            .arg(format!("-Fe{}", exe.display()))
+            .arg(format!("-Fo{}\\", dir.display()))
+            .args(inputs)
+            .arg("advapi32.lib");
+    } else {
+        cmd.arg("-o").arg(exe).args(inputs);
+        if !cfg!(windows) {
+            cmd.arg("-lpthread");
+        }
+    }
+    cmd
+}
+
+/// A command running `exe` with `argv[0] = name`: `arg0` on Unix. On
+/// Windows, where `argv[0]` is the program as named, `exe` (whose file name
+/// must be `name.exe`) is run by its name, from its directory put first on
+/// the child's `PATH`.
+pub fn command_as(exe: &Path, name: &str) -> Command {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new(exe);
+        cmd.arg0(name);
+        cmd
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(exe.file_stem().and_then(|s| s.to_str()), Some(name));
+        let dir = exe.parent().expect("a directory");
+        let mut path = std::ffi::OsString::from(dir);
+        if let Some(old) = std::env::var_os("PATH") {
+            path.push(";");
+            path.push(old);
+        }
+        let mut cmd = Command::new(name);
+        cmd.env("PATH", path);
+        cmd
+    }
+}
+
+/// An argument from bytes: as they are on Unix, UTF-8 on Windows.
+pub fn os_arg(a: &[u8]) -> std::ffi::OsString {
+    #[cfg(unix)]
+    return <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(a).to_owned();
+    #[cfg(windows)]
+    return String::from_utf8_lossy(a).into_owned().into();
 }
 
 fn fnv(h: &mut u64, bytes: &[u8]) {
@@ -141,7 +252,7 @@ fn compile_c(tmp: &Path) -> Result<(), String> {
         .include(c_src())
         .try_compile("lmdbc")
         .map_err(|e| e.to_string())?;
-    let lib = tmp.join("liblmdbc.a");
+    let lib = static_lib(tmp, "lmdbc");
     let programs = C_TOOLS
         .iter()
         .map(|t| (*t, c_src().join(format!("{t}.c"))))
@@ -151,14 +262,7 @@ fn compile_c(tmp: &Path) -> Result<(), String> {
                 .map(|t| (*t, manifest_dir().join(format!("tests/c/{t}.c")))),
         );
     for (name, src) in programs {
-        let mut cmd = cc_build(tmp).get_compiler().to_command();
-        cmd.arg("-I")
-            .arg(c_src())
-            .arg("-o")
-            .arg(tmp.join(name))
-            .arg(&src)
-            .arg(&lib)
-            .arg("-lpthread");
+        let mut cmd = link_program(&c_src(), &tmp.join(name), &[&src, &lib]);
         let out = cmd.output().map_err(|e| format!("{cmd:?}: {e}"))?;
         if !out.status.success() {
             return Err(format!(
@@ -293,10 +397,8 @@ pub fn run_env(
     cwd: &Path,
     env: &[(&str, &str)],
 ) -> Run {
-    use std::os::unix::ffi::OsStrExt;
-    let mut cmd = Command::new(bin(imp, tool));
-    cmd.arg0(tool)
-        .args(argv.iter().map(|a| std::ffi::OsStr::from_bytes(a)))
+    let mut cmd = command_as(&bin(imp, tool), tool);
+    cmd.args(argv.iter().map(|a| os_arg(a)))
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -365,12 +467,13 @@ pub fn version_line(imp: Impl) -> Vec<u8> {
         }
         Impl::Rust => rlmdb::version_info().mdb_version_string(),
     };
-    format!("{line}\n").into_bytes()
+    platform_lines(format!("{line}\n").as_bytes())
 }
 
 /// The usage synopsis of `mdb_load` as C 0.9 prints it, and as the Rust
 /// tool does, which also has `-F 0.9|1.0` (the format of a new
-/// environment; C 0.9 knows one format only).
+/// environment; C 0.9 knows one format only). With `\n` line ends
+/// ([`platform_lines`] gives what the tools write).
 pub const LOAD_USAGE_C: &[u8] = b"[-V] [-a] [-f input] [-n] [-s name] [-N] [-T] dbpath\n";
 pub const LOAD_USAGE_RUST: &[u8] =
     b"[-V] [-a] [-f input] [-F 0.9|1.0] [-n] [-s name] [-N] [-T] dbpath\n";
@@ -387,10 +490,10 @@ fn expected_of_rust(tool: &str, c: &Run) -> Run {
     let mut stderr = c.stderr.clone();
     if tool == "mdb_load" {
         if let Some(rest) = stderr
-            .strip_suffix(LOAD_USAGE_C)
+            .strip_suffix(platform_lines(LOAD_USAGE_C).as_slice())
             .filter(|head| head.ends_with(b"usage: mdb_load "))
         {
-            stderr = [rest, LOAD_USAGE_RUST].concat();
+            stderr = [rest, &platform_lines(LOAD_USAGE_RUST)].concat();
         }
     }
     Run {
@@ -449,6 +552,10 @@ pub fn tempdir() -> tempfile::TempDir {
 
 /// The OS page size, which is LMDB's default page size.
 pub fn page_size() -> usize {
+    if cfg!(windows) {
+        // GetSystemInfo's dwPageSize on x86-64 Windows.
+        return 4096;
+    }
     let out = Command::new("getconf").arg("PAGESIZE").output().unwrap();
     String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
 }

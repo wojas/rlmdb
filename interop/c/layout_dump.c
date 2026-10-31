@@ -23,9 +23,38 @@
  */
 #include "mdb.c"
 
-#include <stdalign.h>
 #include <stdlib.h>
+#ifdef _MSC_VER
+#define alignof	__alignof
+#else
+#include <stdalign.h>
+#endif
+#ifdef _WIN32
+/* (Not tests/compat/posix_compat.h: mdb.c has its own Windows macros.) */
+#include <direct.h>
+#include <io.h>
+/* (Some MinGW versions declare a mkdtemp of their own.) */
+static char *
+compat_mkdtemp(char *tmpl)
+{
+	if (_mktemp_s(tmpl, strlen(tmpl) + 1) || _mkdir(tmpl))
+		return NULL;
+	return tmpl;
+}
+#define mkdtemp	compat_mkdtemp
+#define unlink	_unlink
+#define rmdir	_rmdir
+static long
+os_page_size(void)
+{
+	SYSTEM_INFO si;
+	GetSystemInfo(&si);
+	return (long)si.dwPageSize;
+}
+#else
 #include <unistd.h>
+#define os_page_size()	sysconf(_SC_PAGE_SIZE)
+#endif
 
 #define LMDB10	(MDB_VERSION_MAJOR >= 1)
 
@@ -91,6 +120,8 @@ int main(void)
 	printf("lock_mode=posix_mutex\n");
 #elif defined(MDB_USE_SYSV_SEM)
 	printf("lock_mode=sysv_sem\n");
+#elif defined(_WIN32)
+	printf("lock_mode=win32\n");
 #else
 	printf("lock_mode=other\n");
 #endif
@@ -130,7 +161,7 @@ int main(void)
 	P("CORE_DBS", CORE_DBS);
 	PX("P_INVALID", P_INVALID);
 	P("PGNO_TOPWORD", PGNO_TOPWORD);
-	P("os_page_size", sysconf(_SC_PAGE_SIZE));
+	P("os_page_size", os_page_size());
 
 	/* Page flags */
 	PX("P_BRANCH", P_BRANCH);
@@ -157,7 +188,14 @@ int main(void)
 	SZ(txnid_t);
 	SZ(indx_t);
 	SZ(size_t);
+#ifdef _WIN32
+	/* What mdb.c uses, MDB_PID_T (MinGW's own pid_t is 64 bits, MSVC has
+	 * none), under the name used elsewhere. */
+	P("sizeof(pid_t)", sizeof(MDB_PID_T));
+	P("alignof(pid_t)", alignof(MDB_PID_T));
+#else
 	SZ(pid_t);
+#endif
 	SZ(pthread_t);
 	SZ(pthread_mutex_t);
 	SZ(unsigned int);
@@ -276,9 +314,15 @@ int main(void)
 
 #if LMDB10
 	{
+#ifdef _WIN32
+		const char *tmp = getenv("TEMP");
+		if (!tmp || !*tmp)
+			tmp = ".";
+#else
 		const char *tmp = getenv("TMPDIR");
 		if (!tmp || !*tmp)
 			tmp = "/tmp";
+#endif
 		print_env_limits(tmp, 0);
 		print_env_limits(tmp, 4096);
 		print_env_limits(tmp, 16384);

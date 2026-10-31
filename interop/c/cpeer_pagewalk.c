@@ -33,7 +33,9 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #include "cpeer.h"
 
@@ -248,7 +250,7 @@ load(struct walker *w, uint64_t pgno, uint64_t n)
 		return NULL;
 	}
 	buf = malloc(len);
-	got = pread(w->fd, buf, len, (off_t)(pgno * w->psize));
+	got = pread(w->fd, buf, len, (long long)(pgno * w->psize));
 	if (got != (ssize_t)len) {
 		fail(w, "short read of page %llu: %zd of %zu bytes", (unsigned long long)pgno,
 			got, len);
@@ -693,7 +695,7 @@ pick_meta(int fd, uint64_t txnid, struct meta *out, unsigned int *psize)
 	int k;
 
 	for (k = 0; k < 2; k++) {
-		off_t off = k == 0 ? 0 : (off_t)*psize;
+		long long off = k == 0 ? 0 : (long long)*psize;
 		if (pread(fd, buf, sizeof(buf), off) != (ssize_t)sizeof(buf))
 			die(EXIT_LMDB, "check-freelist: cannot read meta page %d", k);
 #ifdef LMDB_RUST
@@ -733,7 +735,7 @@ cmd_check_freelist(struct opts *o)
 	CHECK(mdb_env_get_path(env, &path));
 	snprintf(fname, sizeof(fname), o->nosubdir ? "%s" : "%s/data.mdb", path);
 	memset(&w, 0, sizeof(w));
-	if ((w.fd = open(fname, O_RDONLY)) < 0)
+	if ((w.fd = open(fname, O_RDONLY | O_BINARY)) < 0)
 		die(EXIT_LMDB, "open %s: %s", fname, strerror(errno));
 	CHECK(mdb_env_stat(env, &st));
 	w.psize = st.ms_psize;

@@ -289,6 +289,19 @@ fn malformed_input() {
         format!("{hdr} 6b\n 76\nDATA=END\ntrailing=1\n"),
     ];
     for case in &cases {
+        if cfg!(windows) && case.starts_with("maxreaders=-1") {
+            // C sizes the lock file in a 32-bit off_t on Windows: for this
+            // many readers the size wraps and the open fails in another
+            // way than rlmdb's (KNOWN_C_BUGS.md #39). Both fail to open.
+            let dir = tempdir();
+            let l = load_both(dir.path(), Start::New, &[], case.as_bytes());
+            assert_eq!((l.c.code, l.r.code), (1, 1));
+            for run in [&l.c, &l.r] {
+                let err = run.stderr_text();
+                assert!(err.starts_with("mdb_env_open failed, error "), "{err}");
+            }
+            continue;
+        }
         assert_load_same(Start::New, &[], case.as_bytes());
     }
     // A NUL right after the leading space ("strlen() == 0").
@@ -409,7 +422,7 @@ fn documented_differences() {
     // A header line without '=' is fatal.
     let r = load("VERSION=3\nfoo\nHEADER=END\n");
     assert_eq!(r.code, 1);
-    assert_eq!(r.stderr_str(), "mdb_load: line 2: unexpected format\n");
+    assert_eq!(r.stderr_text(), "mdb_load: line 2: unexpected format\n");
     // format= applies per database: the second (bytevalue) database is
     // not read in print mode.
     let r = load("VERSION=3\nformat=print\nHEADER=END\n a\n b\nDATA=END\nVERSION=3\nformat=bytevalue\ndatabase=x\nHEADER=END\n 41\n 42\nDATA=END\n");
@@ -422,7 +435,7 @@ fn documented_differences() {
         dir.path(),
     );
     assert!(
-        dumped.stdout_str().contains("\n A\n B\n"),
+        dumped.stdout_text().contains("\n A\n B\n"),
         "{}",
         dumped.stdout_str()
     );

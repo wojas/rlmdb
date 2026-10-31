@@ -40,6 +40,7 @@
 
 pub mod bins;
 mod error;
+pub mod os;
 pub mod pagecmp;
 mod peer;
 pub mod report;

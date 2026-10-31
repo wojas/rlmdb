@@ -42,8 +42,11 @@ pub fn cmd_copy(o: &mut Opts) -> CmdResult {
     // The destination directory must exist (as for mdb_copy); with
     // --nosubdir `dest` is the new data file.
     if !o.nosubdir {
-        use std::os::unix::fs::DirBuilderExt;
-        match std::fs::DirBuilder::new().mode(0o775).create(&dest) {
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut dir = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o775);
+        match dir.create(&dest) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(Fail::new(EXIT_LMDB, format!("mkdir {dest}: {e}"))),

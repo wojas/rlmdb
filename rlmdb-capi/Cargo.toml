@@ -23,5 +23,9 @@ doctest = false
 rlmdb = { path = "../rlmdb" }
 libc.workspace = true
 
+# GetSystemInfo (the OS page size) on Windows.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+
 [dev-dependencies]
 cc = "1"

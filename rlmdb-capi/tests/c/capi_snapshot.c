@@ -88,7 +88,14 @@ static int stability(const char *path, const char *dumpfile)
 
 	OK(mdb_env_create(&env));
 	OK(mdb_env_set_maxdbs(env, 4));
+#ifdef _WIN32
+	/* C 0.9 sets the data file to its map size when it opens it on Windows,
+	 * which fails while another process maps more: not more than the
+	 * 10 MiB of the mtest that writes next to this reader. */
+	OK(mdb_env_set_mapsize(env, 10UL << 20));
+#else
 	OK(mdb_env_set_mapsize(env, 64UL << 20));
+#endif
 	OK(mdb_env_open(env, path, MDB_NOTLS, 0664));
 	OK(mdb_txn_begin(env, NULL, MDB_RDONLY, &t0));
 	OK(mdb_dbi_open(t0, NULL, 0, &dbi));

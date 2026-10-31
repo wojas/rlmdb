@@ -37,8 +37,10 @@ fn constants() {
     assert_eq!(get("MDB_MAGIC"), 0xBEEF_C0DE);
     assert_eq!(get("MDB_DATA_VERSION"), 1);
     assert_eq!(get("MDB_LOCK_VERSION"), 1);
-    assert_eq!(get("MDB_LOCK_FORMAT"), 0x10001);
-    assert_eq!(get("MDB_PIDLOCK"), 1);
+    // Windows readers take no pid locks (MDB_PIDLOCK 0).
+    let pidlock = u64::from(!cfg!(windows));
+    assert_eq!(get("MDB_LOCK_FORMAT"), 1 + (pidlock << 16));
+    assert_eq!(get("MDB_PIDLOCK"), pidlock);
     assert_eq!(get("MDB_DEVEL"), 0);
     assert_eq!(get("PAGEBASE"), 0);
     assert_eq!(get("MDB_MAXKEYSIZE"), 511);
@@ -163,8 +165,14 @@ fn meta() {
 #[test]
 fn reader_slot() {
     assert_eq!(get("sizeof(MDB_reader)"), 64);
-    assert_eq!(get("sizeof(MDB_rxbody)"), 24);
-    for (field, off, size) in [("mrb_txnid", 0, 8), ("mrb_pid", 8, 4), ("mrb_tid", 16, 8)] {
+    // mrb_tid: a pthread_t, a DWORD on Windows.
+    let (tid_off, tid_size) = if cfg!(windows) { (12, 4) } else { (16, 8) };
+    assert_eq!(get("sizeof(MDB_rxbody)"), tid_off + tid_size);
+    for (field, off, size) in [
+        ("mrb_txnid", 0, 8),
+        ("mrb_pid", 8, 4),
+        ("mrb_tid", tid_off, tid_size),
+    ] {
         assert_eq!(
             get(&format!("offsetof(MDB_reader.mru.mrx.{field})")),
             off,
@@ -193,7 +201,8 @@ fn lock_file_header() {
     assert_eq!(get("offsetof(MDB_txninfo.mt1)"), 0);
     // The shared-lock field: semaphore name or the mutex itself.
     let (lock_field_size, txnid_off) = match l.lock_mode.as_str() {
-        "posix_sem" => {
+        // Named semaphores (macOS) or named mutexes (Windows): their names.
+        "posix_sem" | "win32" => {
             assert_eq!(get("MNAME_LEN"), 32);
             assert_eq!(get("offsetof(MDB_txninfo.mt1.mtb.mtb_rmname)"), 8);
             assert_eq!(get("offsetof(MDB_txninfo.mt2.mt2_wmname)"), 64);
@@ -228,6 +237,34 @@ fn lock_file_header() {
         assert_eq!(l.lock_mode, "posix_mutex");
         assert_eq!(get("MDB_ROBUST_SUPPORTED"), 1);
     }
+    if cfg!(windows) {
+        // Abandoned mutexes are C's MDB_OWNERDEAD.
+        assert_eq!(l.lock_mode, "win32");
+        assert_eq!(get("MDB_ROBUST_SUPPORTED"), 1);
+        assert_eq!(get("offsetof(MDB_txninfo.mti_readers)"), 128);
+    }
+}
+
+/// Sizes and alignments of the C types the lock file's fields come from,
+/// as the Rust library is compiled against them (`libc` on Unix; on
+/// Windows mdb.c's `MDB_PID_T` is `int`, and `pthread_t`,
+/// `pthread_mutex_t` and `mdb_mutex_t` are `HANDLE`s).
+#[cfg(unix)]
+mod sys {
+    use std::mem::{align_of, size_of};
+    pub const PID_ALIGN: usize = align_of::<libc::pid_t>();
+    pub const PTHREAD_ALIGN: usize = align_of::<libc::pthread_t>();
+    pub const MUTEX_SIZE: usize = size_of::<libc::pthread_mutex_t>();
+    pub const MUTEX_ALIGN: usize = align_of::<libc::pthread_mutex_t>();
+}
+
+#[cfg(windows)]
+mod sys {
+    use std::mem::{align_of, size_of};
+    pub const PID_ALIGN: usize = align_of::<std::ffi::c_int>();
+    pub const PTHREAD_ALIGN: usize = align_of::<*mut std::ffi::c_void>();
+    pub const MUTEX_SIZE: usize = size_of::<*mut std::ffi::c_void>();
+    pub const MUTEX_ALIGN: usize = align_of::<*mut std::ffi::c_void>();
 }
 
 /// Every value `layout_dump` prints that has a counterpart in the Rust
@@ -242,12 +279,11 @@ fn rust_layout() -> Vec<(String, u64)> {
     use rlmdb::format::{lockfile, node, page, Db, Meta, PageRef};
     use std::mem::{align_of, size_of, size_of_val};
 
-    let sem = lockfile::USES_NAMED_SEMAPHORES;
-    let mutex_align = if sem {
-        1
-    } else {
-        align_of::<libc::pthread_mutex_t>()
-    };
+    // The lock file names its locks (semaphores, Windows mutexes) or holds
+    // them (pthread mutexes); only semaphores are not robust.
+    let sem = lockfile::LOCK_V09.objects.stores_names();
+    let robust = !lockfile::USES_NAMED_SEMAPHORES;
+    let mutex_align = if sem { 1 } else { sys::MUTEX_ALIGN };
     let hdr = [0u8; l::PAGE_HDR_SIZE];
     let pg = PageRef::new(&hdr).unwrap();
     let nd = rlmdb::format::NodeRef::new(&hdr).unwrap();
@@ -260,7 +296,7 @@ fn rust_layout() -> Vec<(String, u64)> {
     };
 
     let v: Vec<(String, usize)> = vec![
-        ("MDB_ROBUST_SUPPORTED".into(), usize::from(!sem)),
+        ("MDB_ROBUST_SUPPORTED".into(), usize::from(robust)),
         ("MDB_MAGIC".into(), c::MDB_MAGIC as usize),
         ("MDB_DATA_VERSION".into(), c::MDB_DATA_VERSION as usize),
         ("MDB_PIDLOCK".into(), c::MDB_PIDLOCK as usize),
@@ -297,17 +333,11 @@ fn rust_layout() -> Vec<(String, u64)> {
         ("sizeof(size_t)".into(), size_of::<usize>()),
         ("alignof(size_t)".into(), align_of::<usize>()),
         ("sizeof(pid_t)".into(), size_of_val(&reader.pid)),
-        ("alignof(pid_t)".into(), align_of::<libc::pid_t>()),
+        ("alignof(pid_t)".into(), sys::PID_ALIGN),
         ("sizeof(pthread_t)".into(), size_of_val(&reader.thread)),
-        ("alignof(pthread_t)".into(), align_of::<libc::pthread_t>()),
-        (
-            "sizeof(pthread_mutex_t)".into(),
-            size_of::<libc::pthread_mutex_t>(),
-        ),
-        (
-            "alignof(pthread_mutex_t)".into(),
-            align_of::<libc::pthread_mutex_t>(),
-        ),
+        ("alignof(pthread_t)".into(), sys::PTHREAD_ALIGN),
+        ("sizeof(pthread_mutex_t)".into(), sys::MUTEX_SIZE),
+        ("alignof(pthread_mutex_t)".into(), sys::MUTEX_ALIGN),
         ("sizeof(unsigned int)".into(), size_of::<std::ffi::c_uint>()),
         (
             "alignof(unsigned int)".into(),
@@ -480,7 +510,9 @@ const NOT_COMPARED: &[(&str, &str)] = &[
 fn rust_layout_matches_c() {
     let l = layout();
     let rust = rust_layout();
-    let expected_mode = if rlmdb::format::lockfile::USES_NAMED_SEMAPHORES {
+    let expected_mode = if cfg!(windows) {
+        "win32"
+    } else if rlmdb::format::lockfile::USES_NAMED_SEMAPHORES {
         "posix_sem"
     } else {
         "posix_mutex"

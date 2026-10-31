@@ -5,10 +5,8 @@
 //! [`Environment`] with them. Functions that need an open environment and
 //! would crash or misbehave in C before the open return `EINVAL`.
 
-use std::ffi::{CStr, CString, OsStr};
-use std::os::fd::AsRawFd;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint, c_void};
-use std::os::unix::ffi::OsStrExt;
 use std::ptr;
 use std::sync::atomic::Ordering;
 
@@ -88,7 +86,7 @@ pub unsafe extern "C" fn mdb_env_open(
     }
     // SAFETY: path is a NUL-terminated string (lmdb.h).
     let path = unsafe { CStr::from_ptr(path) };
-    // mdb_mode_t is u16 on macOS and u32 on Linux.
+    // mdb_mode_t is u16 on macOS and with MinGW, u32 on Linux, i32 with MSVC.
     #[allow(clippy::unnecessary_cast)]
     let mode = mode as u32;
     let config = *e.config();
@@ -104,7 +102,7 @@ pub unsafe extern "C" fn mdb_env_open(
     if let Some(page_size) = config.page_size {
         builder.page_size(page_size);
     }
-    match builder.open_with_permissions(OsStr::from_bytes(path.to_bytes()), mode) {
+    match builder.open_with_permissions(crate::platform::path_from_c(path), mode) {
         Ok(opened) => {
             e.set_opened(opened, path.to_owned());
             SUCCESS
@@ -260,7 +258,9 @@ pub unsafe extern "C" fn mdb_env_get_fd(env: *mut MDB_env, fd: *mut mdb_filehand
     if fd.is_null() {
         return EINVAL;
     }
-    let value = e.open_env().map_or(-1, |open| open.data_file().as_raw_fd());
+    let value = e.open_env().map_or(crate::platform::NO_HANDLE, |open| {
+        crate::platform::raw_handle(open.data_file())
+    });
     // SAFETY: fd is non-NULL and writable (lmdb.h).
     unsafe { *fd = value };
     SUCCESS

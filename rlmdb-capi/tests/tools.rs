@@ -9,7 +9,6 @@
 mod common;
 
 use std::fs;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -18,7 +17,7 @@ use common::*;
 /// (exit code, stdout, stderr) of `tool` linked against `lib`.
 fn run_tool(tool: &str, lib: Lib, args: &[&str]) -> (Option<i32>, String, String) {
     let exe = builder().tool(tool, lib);
-    let out = Command::new(exe).arg0(tool).args(args).output().unwrap();
+    let out = command_as(&exe, tool).args(args).output().unwrap();
     (
         out.status.code(),
         String::from_utf8_lossy(&out.stdout).into_owned(),

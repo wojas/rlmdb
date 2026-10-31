@@ -28,6 +28,11 @@
 //! The upstream `mtest*.c` programs seed `rand()` with `time(NULL)`; the
 //! tests build them with `tests/c/mtest_shim.h`, which makes the seed
 //! `$MTEST_SEED` (default 20261030), so their data is deterministic.
+//!
+//! On Windows the libraries are `liblmdb.a` (MinGW) or `lmdb.lib` (MSVC),
+//! `lmdb.dll` with its import library `liblmdb.dll.a` or `lmdb.dll.lib`;
+//! programs are built with MinGW's `gcc` or MSVC's `cl` ([`Compiler`]),
+//! and the test programs' POSIX calls come from `tests/compat`.
 
 #![allow(dead_code)]
 
@@ -77,30 +82,56 @@ pub fn cpeer_dir() -> PathBuf {
     crate_dir().join("../interop/c")
 }
 
+/// The file name of static library `name` (`cc`'s `try_compile(name)`,
+/// cargo's staticlib): `lib<name>.a`, `<name>.lib` with MSVC.
+pub fn static_lib_name(name: &str) -> String {
+    if cfg!(target_env = "msvc") {
+        format!("{name}.lib")
+    } else {
+        format!("lib{name}.a")
+    }
+}
+
 /// The Rust static library: next to the test executable (`deps/`), where
 /// cargo puts it when building the lib for the tests, else one level up.
 pub fn rust_staticlib() -> PathBuf {
     let exe = std::env::current_exe().expect("test executable path");
     let deps = exe.parent().expect("deps dir");
+    let name = static_lib_name("lmdb");
     for dir in [deps, deps.parent().unwrap_or(deps)] {
-        let lib = dir.join("liblmdb.a");
+        let lib = dir.join(&name);
         if lib.exists() {
             return lib;
         }
     }
     panic!(
-        "liblmdb.a not found next to {}; build with `cargo test -p rlmdb-capi`",
+        "{name} not found next to {}; build with `cargo test -p rlmdb-capi`",
         exe.display()
     );
 }
 
-/// The file name of a shared library `lib<name>` on this platform.
+/// The file name of a shared library `lib<name>` on this platform
+/// (`<name>.dll` on Windows).
 pub fn shared_lib_name(name: &str) -> String {
     if cfg!(target_os = "macos") {
         format!("lib{name}.dylib")
+    } else if cfg!(windows) {
+        format!("{name}.dll")
     } else {
         format!("lib{name}.so")
     }
+}
+
+/// The import library of the Rust DLL (Windows): `liblmdb.dll.a` (MinGW)
+/// or `lmdb.dll.lib` (MSVC), next to `lmdb.dll`.
+pub fn rust_import_lib() -> PathBuf {
+    let dll = rust_cdylib();
+    let name = if cfg!(target_env = "msvc") {
+        "lmdb.dll.lib"
+    } else {
+        "liblmdb.dll.a"
+    };
+    dll.with_file_name(name)
 }
 
 /// The Rust shared library (`liblmdb.so` / `liblmdb.dylib`), found like
@@ -125,7 +156,25 @@ pub fn rust_cdylib() -> PathBuf {
 /// (`cargo rustc -p rlmdb-capi --lib --crate-type staticlib -- --print
 /// native-static-libs`; see README.md).
 pub fn rust_native_libs() -> &'static [&'static str] {
-    if cfg!(target_os = "linux") {
+    if cfg!(all(windows, target_env = "msvc")) {
+        &[
+            "legacy_stdio_definitions.lib",
+            "kernel32.lib",
+            "advapi32.lib",
+            "ntdll.lib",
+            "userenv.lib",
+            "ws2_32.lib",
+            "dbghelp.lib",
+        ]
+    } else if cfg!(windows) {
+        &[
+            "-lkernel32",
+            "-lntdll",
+            "-luserenv",
+            "-lws2_32",
+            "-ldbghelp",
+        ]
+    } else if cfg!(target_os = "linux") {
         &[
             "-lgcc_s",
             "-lutil",
@@ -192,6 +241,8 @@ fn target_triple() -> String {
     match std::env::consts::OS {
         "macos" => format!("{arch}-apple-darwin"),
         "linux" => format!("{arch}-unknown-linux-gnu"),
+        "windows" if cfg!(target_env = "msvc") => format!("{arch}-pc-windows-msvc"),
+        "windows" => format!("{arch}-pc-windows-gnu"),
         os => format!("{arch}-unknown-{os}"),
     }
 }
@@ -205,9 +256,142 @@ fn cc_build(out_dir: &Path) -> cc::Build {
         .opt_level(1)
         .debug(true)
         .out_dir(out_dir)
-        .warnings(false)
-        .flag_if_supported("-pthread");
+        .warnings(false);
+    // C LMDB uses no pthreads on Windows.
+    if !cfg!(windows) {
+        b.flag_if_supported("-pthread");
+    }
     b
+}
+
+/// `tests/compat`: the Windows shims of the C test programs.
+pub fn compat_dir() -> PathBuf {
+    crate_dir().join("../tests/compat")
+}
+
+/// A C compiler command line, in the form the compiler takes it: a GNU
+/// driver (`cc`, `gcc`, `clang`; MinGW's on Windows) or MSVC's `cl`.
+pub struct Compiler {
+    cmd: Command,
+    msvc: bool,
+}
+
+impl Compiler {
+    /// The C (or with `cpp` the C++) compiler of `cc_build(out_dir)`;
+    /// objects `cl` writes go to `out_dir`.
+    pub fn new(out_dir: &Path, cpp: bool) -> Result<Compiler, cc::Error> {
+        let tool = cc_build(out_dir).cpp(cpp).try_get_compiler()?;
+        let msvc = tool.is_like_msvc();
+        let mut cmd = tool.to_command();
+        if msvc {
+            cmd.arg("-nologo")
+                .arg(format!("-Fo{}\\", out_dir.display()))
+                // The upstream tools include <unistd.h> for getopt.
+                .arg("-I")
+                .arg(compat_dir().join("msvc"));
+        }
+        Ok(Compiler { cmd, msvc })
+    }
+
+    /// `true` for MSVC's `cl`.
+    pub fn is_msvc(&self) -> bool {
+        self.msvc
+    }
+
+    /// An include directory.
+    pub fn include(&mut self, dir: &Path) -> &mut Self {
+        self.cmd.arg("-I").arg(dir);
+        self
+    }
+
+    /// A header included before the source (`-include`, `/FI`).
+    pub fn force_include(&mut self, header: &Path) -> &mut Self {
+        if self.msvc {
+            self.cmd.arg(format!("-FI{}", header.display()));
+        } else {
+            self.cmd.arg("-include").arg(header);
+        }
+        self
+    }
+
+    /// Other arguments, as they are.
+    pub fn args<I: IntoIterator<Item = S>, S: AsRef<std::ffi::OsStr>>(
+        &mut self,
+        args: I,
+    ) -> &mut Self {
+        self.cmd.args(args);
+        self
+    }
+
+    /// The executable to write (`-o`, `/Fe`).
+    pub fn output(&mut self, exe: &Path) -> &mut Self {
+        if self.msvc {
+            self.cmd.arg(format!("-Fe{}", exe.display()));
+        } else {
+            self.cmd.arg("-o").arg(exe);
+        }
+        self
+    }
+
+    /// The thread library a test program links (`-lpthread`; nothing on
+    /// Windows, where `tests/compat` uses Windows threads).
+    pub fn pthread(&mut self) -> &mut Self {
+        if !cfg!(windows) {
+            self.cmd.arg("-lpthread");
+        }
+        self
+    }
+
+    /// C99 `printf` (`%zu`) for one of our test programs with MinGW, whose
+    /// default is msvcrt's; the upstream programs keep that, as on any
+    /// Windows system.
+    pub fn test_program(&mut self) -> &mut Self {
+        if cfg!(windows) && !self.msvc {
+            self.cmd.arg("-D__USE_MINGW_ANSI_STDIO=1");
+        }
+        self
+    }
+
+    /// Libraries C LMDB itself needs: `advapi32.lib` with MSVC (MinGW's
+    /// driver links it by default).
+    pub fn lmdb_system_libs(&mut self) -> &mut Self {
+        if self.msvc {
+            self.cmd.arg("advapi32.lib");
+        }
+        self
+    }
+
+    /// The command.
+    pub fn command(&mut self) -> &mut Command {
+        &mut self.cmd
+    }
+}
+
+/// A command running `exe` with `argv[0] = name`: `arg0` on Unix. On
+/// Windows, where `argv[0]` is the program as named, `exe` (whose file name
+/// must be `name.exe`) is run by its name, from its directory put first on
+/// the child's `PATH`.
+pub fn command_as(exe: &Path, name: &str) -> Command {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new(exe);
+        cmd.arg0(name);
+        cmd
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(exe.file_stem().and_then(|s| s.to_str()), Some(name));
+        let dir = exe.parent().expect("a directory");
+        let mut path = std::ffi::OsString::from(dir);
+        if let Some(old) = std::env::var_os("PATH") {
+            path.push(";");
+            path.push(old);
+        }
+        let mut cmd = Command::new(name);
+        cmd.env("PATH", path);
+        cmd
+    }
 }
 
 /// The build directory and the programs built so far.
@@ -273,7 +457,7 @@ impl Builder {
                 .include(c_src())
                 .try_compile("lmdbc")
                 .unwrap_or_else(|e| panic!("building the C library: {e}"));
-            out.join("liblmdbc.a")
+            out.join(static_lib_name("lmdbc"))
         })
     }
 
@@ -304,17 +488,31 @@ impl Builder {
             Lib::C => (c_src(), self.c_lib().to_path_buf()),
             Lib::Rust => (crate_dir().join("include"), rust_staticlib()),
         };
-        let mut cmd = cc_build(&out_dir).get_compiler().to_command();
-        cmd.arg("-I").arg(&include).arg("-I").arg(test_c_dir());
-        if lib == Lib::Rust {
-            cmd.arg("-DLMDB_RUST");
+        // Where `cl` puts the objects (one directory per program, as
+        // programs share source names).
+        let obj_dir = out_dir.join(format!("{name}.obj"));
+        if cfg!(windows) {
+            fs::create_dir_all(&obj_dir).unwrap();
         }
-        cmd.args(extra);
-        cmd.arg("-o").arg(&exe).args(sources).arg(&archive);
-        cmd.arg("-lpthread");
-        if lib == Lib::Rust {
-            cmd.args(rust_native_libs());
+        let mut c = Compiler::new(&obj_dir, false).unwrap();
+        c.include(&include).include(&test_c_dir());
+        if !sources.iter().any(|s| s.starts_with(c_src())) {
+            c.test_program();
         }
+        if lib == Lib::Rust {
+            c.args(["-DLMDB_RUST"]);
+        }
+        c.args(extra)
+            .output(&exe)
+            .args(sources)
+            .args([&archive])
+            .pthread();
+        if lib == Lib::Rust {
+            c.args(rust_native_libs());
+        } else {
+            c.lmdb_system_libs();
+        }
+        let cmd = c.command();
         let out = cmd
             .output()
             .unwrap_or_else(|e| panic!("running the C compiler: {e}"));
@@ -350,14 +548,19 @@ impl Builder {
         let out_dir = self.dir.join("clib-shared");
         fs::create_dir_all(&out_dir).unwrap();
         let lib = out_dir.join(shared_lib_name("lmdbc"));
-        let mut cmd = cc_build(&out_dir).get_compiler().to_command();
-        cmd.args(["-shared", "-fPIC", "-o"])
-            .arg(&lib)
-            .arg(c_src().join("mdb.c"))
-            .arg(c_src().join("midl.c"))
-            .arg("-I")
-            .arg(c_src())
-            .arg("-lpthread");
+        let mut c = Compiler::new(&out_dir, false).unwrap();
+        // MinGW exports every function of a DLL without __declspec
+        // (lmdb.h has none); `cl` would need a module-definition file.
+        assert!(
+            !c.is_msvc(),
+            "the C library as a DLL is not built with MSVC (no exports in lmdb.h)"
+        );
+        c.args(["-shared", "-fPIC"])
+            .output(&lib)
+            .args([c_src().join("mdb.c"), c_src().join("midl.c")])
+            .include(&c_src())
+            .pthread();
+        let cmd = c.command();
         let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
@@ -379,16 +582,16 @@ impl Builder {
         let out_dir = self.dir.join("dl");
         fs::create_dir_all(&out_dir).unwrap();
         let exe = out_dir.join(name);
-        let mut cmd = cc_build(&out_dir).get_compiler().to_command();
-        cmd.arg("-I")
-            .arg(c_src())
-            .arg("-o")
-            .arg(&exe)
-            .arg(test_c_dir().join(format!("{name}.c")))
-            .arg("-lpthread");
+        let mut c = Compiler::new(&out_dir, false).unwrap();
+        c.include(&c_src())
+            .test_program()
+            .output(&exe)
+            .args([test_c_dir().join(format!("{name}.c"))])
+            .pthread();
         if cfg!(target_os = "linux") {
-            cmd.arg("-ldl");
+            c.args(["-ldl"]);
         }
+        let cmd = c.command();
         let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
@@ -418,7 +621,12 @@ impl Builder {
                 return None;
             }
         };
-        if let Err(e) = Command::new(compiler.path()).arg("--version").output() {
+        let probe = if compiler.is_like_msvc() {
+            "-?"
+        } else {
+            "--version"
+        };
+        if let Err(e) = compiler.to_command().arg(probe).output() {
             eprintln!(
                 "skipped: C++ compiler {} cannot be run: {e}",
                 compiler.path().display()
@@ -430,16 +638,17 @@ impl Builder {
             .arg(crate_dir().join("include"))
             .arg("-I")
             .arg(test_c_dir())
-            .args([
-                "-DLMDB_RUST",
-                "-fno-exceptions",
-                "-fno-rtti",
-                "-Wall",
-                "-Werror",
-            ])
-            .args(["-x", "c++", "-c", "-o"])
-            .arg(&obj)
-            .arg(test_c_dir().join(format!("{name}.c")));
+            .arg("-DLMDB_RUST");
+        if compiler.is_like_msvc() {
+            // C++ without exceptions or RTTI, warnings as errors.
+            cmd.args(["-nologo", "-EHs-c-", "-GR-", "-W3", "-WX", "-TP", "-c"])
+                .arg(format!("-Fo{}", obj.display()));
+        } else {
+            cmd.args(["-fno-exceptions", "-fno-rtti", "-Wall", "-Werror"])
+                .args(["-x", "c++", "-c", "-o"])
+                .arg(&obj);
+        }
+        cmd.arg(test_c_dir().join(format!("{name}.c")));
         run_ok(&mut cmd);
         Some(self.program(&format!("{name}_cxx"), &[obj], Lib::Rust))
     }
@@ -449,6 +658,13 @@ impl Builder {
     /// and the `mdb_dkey()` that `mtest6.c` needs.
     pub fn mtest(&self, name: &str, lib: Lib) -> PathBuf {
         let shim_h = test_c_dir().join("mtest_shim.h");
+        let include = if Compiler::new(&self.dir, false).is_ok_and(|c| c.is_msvc()) {
+            vec![format!("-FI{}", shim_h.display())]
+        } else {
+            vec!["-include".to_owned(), shim_h.display().to_string()]
+        };
+        let mut extra = vec!["-Dtime=mtest_time"];
+        extra.extend(include.iter().map(String::as_str));
         self.program_with(
             name,
             &[
@@ -456,7 +672,7 @@ impl Builder {
                 test_c_dir().join("mtest_shim.c"),
             ],
             lib,
-            &["-Dtime=mtest_time", "-include", shim_h.to_str().unwrap()],
+            &extra,
         )
     }
 

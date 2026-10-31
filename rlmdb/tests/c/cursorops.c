@@ -12,11 +12,16 @@
  * if the op left data untouched) and the second part is an MDB_GET_CURRENT
  * done right after it, showing where the cursor ended up. An op is
  * "<name>[:<hexkey>[:<hexdata>]]"; "count" calls mdb_cursor_count instead.
+ * An argument "@<file>" stands for the ops in <file>, one per line.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "lmdb.h"
+#ifdef _WIN32
+/* Binary stdio and getpid (tests/compat, on the include path there). */
+#include "posix_compat.h"
+#endif
 
 static const char *names[] = {
 	"first", "first_dup", "get_both", "get_both_range", "get_current",
@@ -44,6 +49,62 @@ static size_t unhex(const char *s, unsigned char *out)
 	return n;
 }
 
+/* Performs one op ("<name>[:<hexkey>[:<hexdata>]]") and prints its line;
+ * 2 for an unknown op. */
+static int do_op(MDB_cursor *cur, const char *arg)
+{
+	static unsigned char kbuf[4096], dbuf[65536];
+	char opname[64];
+	const char *p;
+	char *q;
+	MDB_val key = {0, NULL}, data = {0, NULL}, ck, cd;
+	int op, rc;
+	strncpy(opname, arg, sizeof(opname) - 1);
+	opname[sizeof(opname) - 1] = 0;
+	if ((q = strchr(opname, ':'))) *q = 0;
+	p = strchr(arg, ':');
+	if (p) {
+		const char *r = strchr(p + 1, ':');
+		key.mv_data = kbuf;
+		key.mv_size = unhex(p + 1, kbuf);
+		if (r) {
+			data.mv_data = dbuf;
+			data.mv_size = unhex(r + 1, dbuf);
+		}
+	}
+	if (!strcmp(opname, "count")) {
+		size_t n = 0;
+		rc = mdb_cursor_count(cur, &n);
+		printf("count rc=%d n=%zu", rc, rc ? (size_t)0 : n);
+	} else {
+		for (op = 0; names[op] && strcmp(names[op], opname); op++) ;
+		if (!names[op]) { fprintf(stderr, "bad op %s\n", opname); return 2; }
+		/* Inputs are only read; outputs replace the vals. Detect
+		 * "untouched" data by passing a NULL mv_data where the op
+		 * has no data input. */
+		rc = mdb_cursor_get(cur, &key, &data, (MDB_cursor_op)op);
+		printf("%s rc=%d d=", opname, rc);
+		if (rc == 0) {
+			/* For ops with a data input, an untouched value is
+			 * indistinguishable; they always return data anyway. */
+			hexout(&data);
+		} else {
+			putchar('-');
+		}
+	}
+	ck.mv_size = cd.mv_size = 0;
+	ck.mv_data = cd.mv_data = NULL;
+	rc = mdb_cursor_get(cur, &ck, &cd, MDB_GET_CURRENT);
+	printf(" | cur rc=%d k=", rc);
+	if (rc == 0) hexout(&ck); else putchar('-');
+	printf(" d=");
+	if (rc == 0) hexout(&cd); else putchar('-');
+	putchar('\n');
+	/* Flush per line: C may hit an assertion on odd sequences. */
+	fflush(stdout);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	MDB_env *env;
@@ -52,7 +113,6 @@ int main(int argc, char **argv)
 	MDB_cursor *cur;
 	unsigned int flags = MDB_RDONLY;
 	int i, rc, argi = 1;
-	static unsigned char kbuf[4096], dbuf[65536];
 
 	if (argc > 1 && !strcmp(argv[1], "-n")) { flags |= MDB_NOSUBDIR; argi++; }
 	if (argc - argi < 2) { fprintf(stderr, "usage\n"); return 2; }
@@ -65,52 +125,21 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	for (i = argi + 2; i < argc; i++) {
-		char opname[64], *p;
-		MDB_val key = {0, NULL}, data = {0, NULL}, ck, cd;
-		int op;
-		strncpy(opname, argv[i], sizeof(opname) - 1);
-		opname[sizeof(opname) - 1] = 0;
-		if ((p = strchr(opname, ':'))) *p = 0;
-		p = strchr(argv[i], ':');
-		if (p) {
-			char *q = strchr(p + 1, ':');
-			key.mv_data = kbuf;
-			key.mv_size = unhex(p + 1, kbuf);
-			if (q) {
-				data.mv_data = dbuf;
-				data.mv_size = unhex(q + 1, dbuf);
+		if (argv[i][0] == '@') {
+			/* A file of ops, one per line (Windows limits a command line
+			 * to 32767 characters). */
+			static char line[300000];
+			FILE *f = fopen(argv[i] + 1, "r");
+			if (!f) { perror(argv[i] + 1); return 2; }
+			while (fgets(line, sizeof(line), f)) {
+				line[strcspn(line, "\r\n")] = 0;
+				if (*line && do_op(cur, line))
+					return 2;
 			}
+			fclose(f);
+		} else if (do_op(cur, argv[i])) {
+			return 2;
 		}
-		if (!strcmp(opname, "count")) {
-			size_t n = 0;
-			rc = mdb_cursor_count(cur, &n);
-			printf("count rc=%d n=%zu", rc, rc ? (size_t)0 : n);
-		} else {
-			for (op = 0; names[op] && strcmp(names[op], opname); op++) ;
-			if (!names[op]) { fprintf(stderr, "bad op %s\n", opname); return 2; }
-			/* Inputs are only read; outputs replace the vals. Detect
-			 * "untouched" data by passing a NULL mv_data where the op
-			 * has no data input. */
-			rc = mdb_cursor_get(cur, &key, &data, (MDB_cursor_op)op);
-			printf("%s rc=%d d=", opname, rc);
-			if (rc == 0) {
-				/* For ops with a data input, an untouched value is
-				 * indistinguishable; they always return data anyway. */
-				hexout(&data);
-			} else {
-				putchar('-');
-			}
-		}
-		ck.mv_size = cd.mv_size = 0;
-		ck.mv_data = cd.mv_data = NULL;
-		rc = mdb_cursor_get(cur, &ck, &cd, MDB_GET_CURRENT);
-		printf(" | cur rc=%d k=", rc);
-		if (rc == 0) hexout(&ck); else putchar('-');
-		printf(" d=");
-		if (rc == 0) hexout(&cd); else putchar('-');
-		putchar('\n');
-		/* Flush per line: C may hit an assertion on odd sequences. */
-		fflush(stdout);
 	}
 	mdb_cursor_close(cur);
 	mdb_txn_abort(txn);

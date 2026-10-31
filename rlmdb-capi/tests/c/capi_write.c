@@ -17,13 +17,12 @@
  * Prints "capi_write: N checks, F failures" and exits 1 on failures.
  */
 #include <errno.h>
-#include <fcntl.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include <fcntl.h>
+/* pthreads, mkdir, unistd.h, dlopen; their Windows forms (tests/compat). */
+#include "../../../tests/compat/posix_compat.h"
 #include "lmdb.h"
 #include "cmpfuncs.h"
 
@@ -1439,23 +1438,23 @@ static void test_copy(const char *name)
 	snprintf(dst, sizeof(dst), "%s/%s-copy", scratch, name);
 	mkdir(dst, 0775);
 	OK(mdb_env_copy(env, dst));
-	RC(mdb_env_copy(env, dst), EEXIST);
+	RC(mdb_env_copy(env, dst), COMPAT_EEXIST);
 	snprintf(dst, sizeof(dst), "%s/%s-compact", scratch, name);
 	mkdir(dst, 0775);
 	OK(mdb_env_copy2(env, dst, MDB_CP_COMPACT));
 	snprintf(dst, sizeof(dst), "%s/%s-fd", scratch, name);
 	mkdir(dst, 0775);
 	snprintf(dst, sizeof(dst), "%s/%s-fd/data.mdb", scratch, name);
-	fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0664);
+	fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0664);
 	CHECK(fd >= 0);
-	OK(mdb_env_copyfd(env, fd));
+	OK(mdb_env_copyfd(env, COMPAT_FILEHANDLE(fd)));
 	close(fd);
 	snprintf(dst, sizeof(dst), "%s/%s-fd-compact", scratch, name);
 	mkdir(dst, 0775);
 	snprintf(dst, sizeof(dst), "%s/%s-fd-compact/data.mdb", scratch, name);
-	fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0664);
+	fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0664);
 	CHECK(fd >= 0);
-	OK(mdb_env_copyfd2(env, fd, MDB_CP_COMPACT));
+	OK(mdb_env_copyfd2(env, COMPAT_FILEHANDLE(fd), MDB_CP_COMPACT));
 	close(fd);
 	mdb_env_close(env);
 

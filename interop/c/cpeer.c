@@ -106,6 +106,23 @@ parse_seconds(const char *s)
 	return v;
 }
 
+#ifdef _WIN32
+double
+now_seconds(void)
+{
+	LARGE_INTEGER t, f;
+	QueryPerformanceCounter(&t);
+	QueryPerformanceFrequency(&f);
+	return (double)t.QuadPart / (double)f.QuadPart;
+}
+
+void
+sleep_seconds(double s)
+{
+	if (s > 0)
+		Sleep((DWORD)(s * 1000 + 0.5));
+}
+#else
 double
 now_seconds(void)
 {
@@ -125,6 +142,7 @@ sleep_seconds(double s)
 	while (nanosleep(&ts, &ts) && errno == EINTR)
 		;
 }
+#endif
 
 void
 hex_encode(const void *data, size_t len, char *out)
@@ -423,7 +441,9 @@ main(int argc, char **argv)
 			continue;
 		if (o.npos < c->min_pos || o.npos > c->max_pos)
 			die(EXIT_USAGE, "usage: cpeer %s", c->usage);
-		/* Line-buffered stdout so READY lines reach the harness at once. */
+		/* Line-buffered stdout so lines reach the harness at once. (The
+		 * Windows C runtime buffers fully for _IOLBF: the READY lines the
+		 * harness waits for are flushed explicitly.) */
 		setvbuf(stdout, NULL, _IOLBF, 0);
 		return c->run(&o);
 	}

@@ -534,9 +534,16 @@ fn root_split_beyond_the_cursor_stack_fails_the_txn() {
         bad_txn(txn.commit(), "cursor put");
 
         drop(env);
-        assert!(
-            std::fs::read(&data).unwrap() == file,
-            "{what}: file changed"
-        );
+        let mut after = std::fs::read(&data).unwrap();
+        if cfg!(windows) && after.len() > file.len() {
+            // Opened for writing, a 0.9 file is extended to the map size on
+            // Windows (as C 0.9 does there), and a 1.0 file by the pages a
+            // transaction took from the end of the map, even one that
+            // failed (committed in the view, as C 1.0 does): only zeros
+            // were added.
+            assert!(after[file.len()..].iter().all(|&b| b == 0), "{what}");
+            after.truncate(file.len());
+        }
+        assert!(after == file, "{what}: file changed");
     }
 }

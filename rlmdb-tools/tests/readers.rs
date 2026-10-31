@@ -2,7 +2,7 @@
 //! read transaction, a Rust read transaction in this test process, and the
 //! stale slot of a killed reader. The Rust tool prints exactly what the C
 //! tool prints; only the exit code of `-r` alone differs (C exits 1,
-//! KNOWN_C_BUGS.md #2).
+//! KNOWN_C_BUGS.md #2; not on Windows, see [`C_R_EXIT`]).
 
 mod common;
 
@@ -40,10 +40,12 @@ impl Holder {
     }
 
     /// Kills the process (SIGKILL): its reader slot stays in the table.
+    /// Dropping it closes the process handle too: Windows keeps a dead
+    /// process's object while a handle to it is open, and C's reader check
+    /// would count it as alive (`KNOWN_C_BUGS.md` #38).
     fn kill(mut self) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
-        std::mem::forget(self);
     }
 }
 
@@ -54,8 +56,13 @@ impl Drop for Holder {
     }
 }
 
+/// The exit code of C's `mdb_stat -r` without `-a`/`-s`/`-f`: that of the
+/// last `fputs` of the reader list (KNOWN_C_BUGS.md #2), which returns a
+/// positive count with glibc and macOS, 0 with the Windows C runtime.
+const C_R_EXIT: i32 = if cfg!(windows) { 0 } else { 1 };
+
 /// Runs `opts` with both tools; stdout and stderr must be identical;
-/// returns the exit codes (C, Rust).
+/// returns the exit codes (C, Rust) and Rust's output as text.
 fn compare(env: &Path, opts: &str) -> (i32, i32, String) {
     let mut argv = words(opts);
     argv.push(p(env));
@@ -65,7 +72,7 @@ fn compare(env: &Path, opts: &str) -> (i32, i32, String) {
         (r.stdout_str(), r.stderr_str()),
         "mdb_stat {opts}"
     );
-    (c.code, r.code, r.stdout_str())
+    (c.code, r.code, r.stdout_text())
 }
 
 #[test]
@@ -74,9 +81,9 @@ fn live_readers() {
     let env = env_copy("named", dir.path());
     let _holder = Holder::start(&env, true);
     let (c, r, out) = compare(&env, "-r");
-    assert_eq!((c, r), (1, 0));
+    assert_eq!((c, r), (C_R_EXIT, 0));
     assert!(out.contains("    pid     thread     txnid\n"), "{out}");
-    assert_eq!(compare(&env, "-rr").0, 1);
+    assert_eq!(compare(&env, "-rr").0, C_R_EXIT);
     for opts in ["-r -a", "-er -s plain", "-rr -f", "-e"] {
         let (c, r, _) = compare(&env, opts);
         assert_eq!((c, r), (0, 0), "{opts}");
@@ -106,6 +113,22 @@ fn live_readers() {
 /// clears it. Both tools start from the same lock file state.
 #[test]
 fn stale_reader() {
+    /// Puts the lock file back as `snapshot`. On Windows, where the file is
+    /// mapped and its byte 0 locked by the keeper, in place and from the
+    /// header's second word on (the magic does not change).
+    fn restore(lock: &std::path::Path, snapshot: &[u8]) {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileExt;
+            let f = fs::OpenOptions::new().write(true).open(lock).unwrap();
+            let mut off = 4;
+            while off < snapshot.len() {
+                off += f.seek_write(&snapshot[off..], off as u64).unwrap();
+            }
+        }
+        #[cfg(not(windows))]
+        fs::write(lock, snapshot).unwrap();
+    }
     let dir = tempdir();
     let env = env_copy("main", dir.path());
     // Keeps the environment open, so the tools are not the exclusive
@@ -116,7 +139,7 @@ fn stale_reader() {
     let snapshot = fs::read(&lock).unwrap();
     let mut outputs = Vec::new();
     for imp in [Impl::C, Impl::Rust] {
-        fs::write(&lock, &snapshot).unwrap();
+        restore(&lock, &snapshot);
         let r = run(
             imp,
             "mdb_stat",
@@ -128,8 +151,8 @@ fn stale_reader() {
     }
     assert_eq!(outputs[0].stdout_str(), outputs[1].stdout_str());
     assert_eq!(outputs[0].stderr, outputs[1].stderr);
-    assert_eq!((outputs[0].code, outputs[1].code), (1, 0));
-    let out = outputs[1].stdout_str();
+    assert_eq!((outputs[0].code, outputs[1].code), (C_R_EXIT, 0));
+    let out = outputs[1].stdout_text();
     assert!(out.contains("  1 stale readers cleared.\n"), "{out}");
     assert!(out.ends_with("(no active readers)\n"), "{out}");
 }

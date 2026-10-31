@@ -22,12 +22,11 @@
  * Prints "capi_nolock: N checks, F failures" and exits 1 on failures.
  */
 #include <errno.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
+/* pthreads, mkdir, unistd.h, dlopen; their Windows forms (tests/compat). */
+#include "../../../tests/compat/posix_compat.h"
 #include "lmdb.h"
 
 static int checks, failures;

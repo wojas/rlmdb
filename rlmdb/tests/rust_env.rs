@@ -20,11 +20,17 @@ fn new_environment_files_and_meta() {
     let psize = env.page_size();
     eprintln!("new environment page size: {psize}");
     assert_eq!(psize, common::os_page_size().min(32768));
-    // Two meta pages, nothing else.
+    // Two meta pages, nothing else (on Windows a 0.9 file is as long as its
+    // 1 MiB map, as C 0.9 makes it there).
     let data_len = std::fs::metadata(dir.path().join("data.mdb"))
         .unwrap()
         .len();
-    assert_eq!(data_len, 2 * psize as u64);
+    let want = if cfg!(windows) {
+        1 << 20
+    } else {
+        2 * psize as u64
+    };
+    assert_eq!(data_len, want);
     assert!(dir.path().join("lock.mdb").exists());
 
     let info = env.info().unwrap();

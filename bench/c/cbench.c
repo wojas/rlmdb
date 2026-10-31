@@ -16,15 +16,24 @@
  * one <ns>/<ops> pair (elapsed nanoseconds, operations) per timed rep.
  */
 #include <errno.h>
-#include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
+/* pthread.h, unistd.h, sys/stat.h; their calls on Windows. */
+#include "../../tests/compat/posix_compat.h"
+#ifdef _MSC_VER
+/* MSVC has <stdatomic.h> only with /experimental:c11atomics: the few
+ * operations used here, on Interlocked functions (sequentially consistent). */
+typedef volatile long atomic_int;
+#define memory_order_relaxed	0
+#define atomic_load(p)	InterlockedOr((p), 0)
+#define atomic_load_explicit(p, mo)	InterlockedOr((p), 0)
+#define atomic_store(p, v)	((void)InterlockedExchange((p), (v)))
+#else
+#include <stdatomic.h>
+#endif
 
 #include "lmdb.h"
 
@@ -331,12 +340,22 @@ static void datacheck(size_t n)
 
 /* ---- timing and results ------------------------------------------------ */
 
+#ifdef _WIN32
+static uint64_t now_ns(void)
+{
+	LARGE_INTEGER t, f;
+	QueryPerformanceCounter(&t);
+	QueryPerformanceFrequency(&f);
+	return (uint64_t)((double)t.QuadPart * 1e9 / (double)f.QuadPart);
+}
+#else
 static uint64_t now_ns(void)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
+#endif
 
 typedef struct {
 	int n;

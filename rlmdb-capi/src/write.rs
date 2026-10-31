@@ -28,7 +28,6 @@
 //! longer keys of 1.0 environments are copied to the heap.
 
 use std::os::raw::{c_char, c_int, c_uint};
-use std::os::unix::ffi::OsStrExt;
 
 use rlmdb::consts::{
     MDB_APPEND, MDB_APPENDDUP, MDB_CURRENT, MDB_DUPFIXED, MDB_MAXKEYSIZE, MDB_MULTIPLE,
@@ -527,7 +526,7 @@ pub unsafe extern "C" fn mdb_env_copy2(
     };
     // SAFETY: path is a NUL-terminated string (lmdb.h).
     let path = unsafe { std::ffi::CStr::from_ptr(path) };
-    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path.to_bytes()));
+    let path = crate::platform::path_from_c(path);
     crate::rc(e.copy_to_path(path, flags & MDB_CP_COMPACT != 0))
 }
 
@@ -539,13 +538,14 @@ pub unsafe extern "C" fn mdb_env_copyfd2(
     fd: mdb_filehandle_t,
     flags: c_uint,
 ) -> c_int {
+    // SAFETY: a descriptor (on Windows a handle) other than -1 is an open
+    // file of the caller (lmdb.h), which stays open for the duration of
+    // the call; it is only borrowed.
+    let fd = unsafe { crate::platform::borrow_handle(fd) };
     // SAFETY: env is NULL or a live handle (lmdb.h).
-    let e = match unsafe { open_env(env) } {
-        Ok(e) if fd >= 0 => e,
+    let (e, fd) = match (unsafe { open_env(env) }, fd) {
+        (Ok(e), Some(fd)) => (e, fd),
         _ => return EINVAL,
     };
-    // SAFETY: fd is an open file descriptor of the caller (lmdb.h), which
-    // stays open for the duration of the call; it is only borrowed.
-    let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
     crate::rc(e.copy_to_fd(fd, flags & MDB_CP_COMPACT != 0))
 }

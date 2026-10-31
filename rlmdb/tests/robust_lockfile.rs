@@ -28,6 +28,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::FileExt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -41,6 +42,44 @@ use rlmdb::format::lockfile::{
     TXNINFO_FORMAT, TXNINFO_MAGIC,
 };
 use rlmdb::{Dbi, Environment, EnvironmentFlags, Error, Format, MdbError, Transaction, WriteFlags};
+
+/// `read_exact_at`/`write_all_at` on Windows, where `FileExt` only has
+/// `seek_read`/`seek_write`. (The damage never touches byte 0, the only
+/// byte the processes lock, which Windows would refuse to write.)
+#[cfg(windows)]
+trait FileExt {
+    fn read_exact_at(&self, buf: &mut [u8], off: u64) -> std::io::Result<()>;
+    fn write_all_at(&self, buf: &[u8], off: u64) -> std::io::Result<()>;
+}
+
+#[cfg(windows)]
+impl FileExt for File {
+    fn read_exact_at(&self, mut buf: &mut [u8], mut off: u64) -> std::io::Result<()> {
+        while !buf.is_empty() {
+            match std::os::windows::fs::FileExt::seek_read(self, buf, off)? {
+                0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                n => {
+                    buf = &mut buf[n..];
+                    off += n as u64;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn write_all_at(&self, mut buf: &[u8], mut off: u64) -> std::io::Result<()> {
+        while !buf.is_empty() {
+            match std::os::windows::fs::FileExt::seek_write(self, buf, off)? {
+                0 => return Err(std::io::ErrorKind::WriteZero.into()),
+                n => {
+                    buf = &buf[n..];
+                    off += n as u64;
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Set (to `<dir>|<09|10>`) in the environment of a holder process.
 const HOLDER_VAR: &str = "ROBUST_LOCK_HOLDER";
@@ -550,12 +589,16 @@ fn robust_lockfile_header_checked() {
                 Format::V10 => LockLayout::of(Format::V09),
             };
 
-            lock.put_u32(TXNINFO_MAGIC, 0x1234_5678);
-            assert!(matches!(
-                open_env(dir, format),
-                Err(Error::Mdb(MdbError::Invalid))
-            ));
-            lock.put_u32(TXNINFO_MAGIC, rlmdb::consts::MDB_MAGIC);
+            // Byte 0, the lock byte, cannot be written on Windows while a
+            // process holds the environment (locks are mandatory there).
+            if cfg!(unix) {
+                lock.put_u32(TXNINFO_MAGIC, 0x1234_5678);
+                assert!(matches!(
+                    open_env(dir, format),
+                    Err(Error::Mdb(MdbError::Invalid))
+                ));
+                lock.put_u32(TXNINFO_MAGIC, rlmdb::consts::MDB_MAGIC);
+            }
 
             lock.put_u32(TXNINFO_FORMAT, other.lock_format);
             assert!(matches!(

@@ -26,6 +26,13 @@
 //!
 //! Executables go to `$OUT_DIR/bin/` and their paths are exported to the crate
 //! as `INTEROP_<NAME>` compile-time environment variables (see `src/bins.rs`).
+//!
+//! On Windows the same programs are built with MinGW's `gcc` (the GNU
+//! toolchain; `-D__USE_MINGW_ANSI_STDIO=1` for C99 `printf`, no `-pthread`,
+//! which C LMDB does not use there) or with MSVC's `cl` (`/W3`, the
+//! `unistd.h` shim of `tests/compat/msvc` for the tools' `getopt`, and
+//! `advapi32.lib`, which C LMDB needs for its mutexes); executables get
+//! `.exe`.
 //! The recipe for linking `cpeer_capi` (compiler, flags, objects) goes to
 //! `$OUT_DIR/cpeer_capi.link`, exported as `INTEROP_CPEER_CAPI_LINK`.
 //! Nothing is linked into the Rust crate itself: the C programs run as
@@ -121,12 +128,25 @@ fn skip_c() -> bool {
     env::var_os(SKIP_C_VAR).is_some_and(|v| !v.is_empty() && v != "0")
 }
 
+/// `path.canonicalize()`, without Windows' verbatim prefix (`\\?\C:\...`
+/// becomes `C:\...`), which MinGW's `gcc` does not understand; `path`
+/// itself if it cannot be resolved.
+fn canonical(path: PathBuf) -> PathBuf {
+    let Ok(c) = path.canonicalize() else {
+        return path;
+    };
+    match c.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => c,
+    }
+}
+
 fn main() {
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let lmdb_dir = manifest_dir.join("../tests/lmdb-c/0.9");
-    let lmdb_dir = lmdb_dir.canonicalize().unwrap_or(lmdb_dir);
+    let lmdb_dir = canonical(lmdb_dir);
     let peer_dir = manifest_dir.join("c");
     let bin_dir = out_dir.join("bin");
     std::fs::create_dir_all(&bin_dir).expect("create bin dir");
@@ -142,8 +162,9 @@ fn main() {
         );
     }
     println!("cargo:rerun-if-changed={}", peer_dir.display());
+    println!("cargo:rerun-if-changed={}", compat_dir().display());
     let writeops_src = manifest_dir.join("../rlmdb/tests/c/writeops.c");
-    let writeops_src = writeops_src.canonicalize().unwrap_or(writeops_src);
+    let writeops_src = canonical(writeops_src);
     println!("cargo:rerun-if-changed={}", writeops_src.display());
 
     // The library: mdb.o + midl.o, the equivalent of liblmdb.a.
@@ -182,7 +203,7 @@ fn main() {
     // cpeer against the Rust library's headers, linked at test time.
     // `LMDB_RUST` lets it use `rlmdb.h` (`--format`, both page layouts).
     let capi_include = manifest_dir.join("../rlmdb-capi/include");
-    let capi_include = capi_include.canonicalize().unwrap_or(capi_include);
+    let capi_include = canonical(capi_include);
     for h in ["lmdb.h", "rlmdb.h"] {
         println!("cargo:rerun-if-changed={}", capi_include.join(h).display());
     }
@@ -350,7 +371,7 @@ fn lmdb10_dir(manifest_dir: &Path) -> PathBuf {
         Some(d) if !d.is_empty() => PathBuf::from(d),
         _ => manifest_dir.join("../tests/lmdb-c/1.0"),
     };
-    let dir = dir.canonicalize().unwrap_or(dir);
+    let dir = canonical(dir);
     let files = LMDB10_LIB_FILES
         .iter()
         .map(|f| f.to_string())
@@ -369,7 +390,28 @@ fn lmdb10_dir(manifest_dir: &Path) -> PathBuf {
     dir
 }
 
-/// A `cc::Build` with the upstream Makefile's flags.
+/// `true` when building for Windows (the build script runs on the host).
+fn target_windows() -> bool {
+    env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+}
+
+/// `true` when the C compiler is MSVC's `cl` (or takes its options).
+fn target_msvc() -> bool {
+    cc::Build::new()
+        .cargo_metadata(false)
+        .get_compiler()
+        .is_like_msvc()
+}
+
+/// `tests/compat`: the Windows shims of the C test programs.
+fn compat_dir() -> PathBuf {
+    let manifest_dir =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    manifest_dir.join("../tests/compat")
+}
+
+/// A `cc::Build` with the upstream Makefile's flags (on Windows, see the
+/// module documentation).
 fn c_build(lmdb_dir: &Path) -> cc::Build {
     let mut b = cc::Build::new();
     b.include(lmdb_dir)
@@ -379,13 +421,19 @@ fn c_build(lmdb_dir: &Path) -> cc::Build {
         // cc's default `-Wall -Wextra`.
         .warnings(false)
         .extra_warnings(false)
-        .flag("-pthread")
-        .flag("-W")
+        .cargo_metadata(false);
+    if target_msvc() {
+        b.flag("-W3").include(compat_dir().join("msvc"));
+        return b;
+    }
+    if !target_windows() {
+        b.flag("-pthread");
+    }
+    b.flag("-W")
         .flag("-Wall")
         .flag("-Wno-unused-parameter")
         .flag_if_supported("-Wbad-function-cast")
-        .flag_if_supported("-Wuninitialized")
-        .cargo_metadata(false);
+        .flag_if_supported("-Wuninitialized");
     b
 }
 
@@ -411,14 +459,27 @@ fn compile_with(
     for d in defines {
         b.define(d, None);
     }
+    // Our programs (not the upstream ones) on Windows: tests/compat on the
+    // include path (writeops.c includes posix_compat.h from there), and with
+    // MinGW C99 printf (`%zu`). The upstream programs keep the C runtime's
+    // printf, as on any Windows system.
+    if target_windows() && srcs.iter().any(|s| !s.starts_with(lmdb_dir)) {
+        b.include(compat_dir());
+        if !target_msvc() {
+            b.define("__USE_MINGW_ANSI_STDIO", "1");
+        }
+    }
     b.out_dir(&obj_dir).files(srcs);
     b.compile_intermediates()
 }
 
 /// Writes the recipe for linking `cpeer_capi` at test time, one item per
 /// line: `out <executable>`, `cc <compiler>`, `arg <compiler argument>`
-/// (the flags `cc` would use, e.g. `-arch`), `obj <object file>`.
+/// (the flags `cc` would use, e.g. `-arch`), `env <name>=<value>` (the
+/// environment the compiler needs: MSVC's `PATH`, `LIB`, …), `obj <object
+/// file>`.
 fn write_link_recipe(recipe: &Path, exe: &Path, objs: &[PathBuf]) {
+    let exe = exe_path(exe);
     if skip_c() {
         std::fs::write(recipe, format!("out {}\n", exe.display())).expect("write link recipe");
         return;
@@ -427,6 +488,13 @@ fn write_link_recipe(recipe: &Path, exe: &Path, objs: &[PathBuf]) {
     let mut text = format!("out {}\ncc {}\n", exe.display(), compiler.path().display());
     for a in compiler.args() {
         text.push_str(&format!("arg {}\n", a.to_string_lossy()));
+    }
+    for (k, v) in compiler.get_envs() {
+        text.push_str(&format!(
+            "env {}={}\n",
+            k.to_string_lossy(),
+            v.to_string_lossy()
+        ));
     }
     for o in objs {
         text.push_str(&format!("obj {}\n", o.display()));
@@ -439,7 +507,21 @@ fn link(bin_dir: &Path, name: &str, objs: &[PathBuf], libs: &[PathBuf]) -> PathB
     link_with(bin_dir, name, objs, libs, &[])
 }
 
-/// [`link`] with extra linker arguments after the objects (e.g. `-ldl`).
+/// The file name of executable `path` on the target: with `.exe` on
+/// Windows.
+fn exe_path(path: &Path) -> PathBuf {
+    if target_windows() {
+        let mut name = path.as_os_str().to_owned();
+        name.push(".exe");
+        PathBuf::from(name)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// [`link`] with extra linker arguments after the objects (e.g. `-ldl`,
+/// which Windows does not need: C 1.0's module loader uses `LoadLibrary`
+/// there).
 fn link_with(
     bin_dir: &Path,
     name: &str,
@@ -447,18 +529,28 @@ fn link_with(
     libs: &[PathBuf],
     extra: &[&str],
 ) -> PathBuf {
-    let exe = bin_dir.join(name);
+    let exe = exe_path(&bin_dir.join(name));
     if skip_c() {
         return exe;
     }
     let compiler = cc::Build::new().cargo_metadata(false).get_compiler();
     let mut cmd: Command = compiler.to_command();
-    cmd.args(objs)
-        .args(libs)
-        .arg("-pthread")
-        .args(extra)
-        .arg("-o")
-        .arg(&exe);
+    if compiler.is_like_msvc() {
+        cmd.arg("-nologo")
+            .args(objs)
+            .args(libs)
+            .arg("advapi32.lib")
+            .arg(format!("-Fe{}", exe.display()));
+    } else if target_windows() {
+        cmd.args(objs).args(libs).arg("-o").arg(&exe);
+    } else {
+        cmd.args(objs)
+            .args(libs)
+            .arg("-pthread")
+            .args(extra)
+            .arg("-o")
+            .arg(&exe);
+    }
     let status = cmd
         .status()
         .unwrap_or_else(|e| panic!("running linker for {name}: {e}"));

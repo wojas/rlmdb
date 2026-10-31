@@ -20,10 +20,26 @@ use std::os::raw::{c_char, c_int, c_uint, c_void};
 use crate::handles::MDB_env;
 
 /// `mdb_mode_t`: Unix permissions for creating files (`mode_t`).
+#[cfg(unix)]
 pub type mdb_mode_t = libc::mode_t;
 
+/// `mdb_mode_t` with MSVC: `int` (`lmdb.h`, `#ifdef _MSC_VER`). Ignored on
+/// Windows, as in C.
+#[cfg(all(windows, target_env = "msvc"))]
+pub type mdb_mode_t = c_int;
+
+/// `mdb_mode_t` with MinGW: its `mode_t`, an `unsigned short`. Ignored on
+/// Windows, as in C.
+#[cfg(all(windows, not(target_env = "msvc")))]
+pub type mdb_mode_t = u16;
+
 /// `mdb_filehandle_t`: a file descriptor.
+#[cfg(unix)]
 pub type mdb_filehandle_t = c_int;
+
+/// `mdb_filehandle_t` on Windows: a `HANDLE`.
+#[cfg(windows)]
+pub type mdb_filehandle_t = *mut c_void;
 
 /// `MDB_dbi`: a handle for an individual database in the environment.
 pub type MDB_dbi = c_uint;

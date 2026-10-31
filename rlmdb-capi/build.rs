@@ -10,6 +10,9 @@
 //! BSDs, also ELF, get the same flag (untested there). macOS needs no
 //! flag: dyld never unloads an image with thread-local variables, and
 //! Rust's standard library has them. `tests/capi_dlopen.rs` checks both.
+//! Windows needs no flag either: `FreeLibrary` unloads `lmdb.dll` with its
+//! last reference, as it does a C `lmdb.dll`, and a later `LoadLibrary`
+//! initialises a fresh copy.
 
 fn main() {
     if matches!(

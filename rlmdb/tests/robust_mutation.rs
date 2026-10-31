@@ -242,7 +242,20 @@ fn base(name: &'static str) -> &'static Base {
         (_, Some(c)) => build_with_c(c, name, dir.path()),
         (_, None) => build_with_rust(name, dir.path(), None),
     };
-    let data = std::fs::read(dir.path().join("data.mdb")).unwrap();
+    let mut data = std::fs::read(dir.path().join("data.mdb")).unwrap();
+    if cfg!(windows) {
+        // A 0.9 file is as long as its map on Windows (C 0.9 and rlmdb
+        // extend it to the map size there): keep the pages in use, which is
+        // all a file has elsewhere.
+        let env = Environment::builder()
+            .max_dbs(16)
+            .flags(EnvironmentFlags::READ_ONLY)
+            .open(dir.path())
+            .unwrap();
+        let used = (env.info().unwrap().last_pgno + 1) * env.page_size();
+        drop(env);
+        data.truncate(used);
+    }
     let b: &'static Base = Box::leak(Box::new(Base { name, data, names }));
     all.push(b);
     b

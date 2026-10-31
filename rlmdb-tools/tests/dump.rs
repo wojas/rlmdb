@@ -7,7 +7,7 @@ mod common;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use common::*;
 
@@ -156,16 +156,15 @@ fn errors_and_usage() {
 
 /// A reader that closes the pipe early: C gets `SIGPIPE`, stops after the
 /// current record and reports "Interrupted system call"; Rust sees `EPIPE`
-/// and does the same.
+/// and does the same. Windows has no `SIGPIPE`: C writes on, its writes
+/// failing, and exits 0 without a word; so does Rust.
 #[test]
 fn closed_pipe() {
     let dir = tempdir();
     let env = env_copy("main", dir.path());
     let mut results = Vec::new();
     for imp in [Impl::C, Impl::Rust] {
-        use std::os::unix::process::CommandExt;
-        let mut child = Command::new(bin(imp, "mdb_dump"))
-            .arg0("mdb_dump")
+        let mut child = command_as(&bin(imp, "mdb_dump"), "mdb_dump")
             .arg(&env)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -179,6 +178,10 @@ fn closed_pipe() {
         results.push((first.to_vec(), out.stderr, out.status.code()));
     }
     assert_eq!(results[0], results[1]);
+    if cfg!(windows) {
+        assert_eq!((results[1].1.len(), results[1].2), (0, Some(0)));
+        return;
+    }
     assert_eq!(results[1].2, Some(1));
     let msg = String::from_utf8_lossy(&results[1].1);
     assert!(msg.ends_with(": Interrupted system call\n"), "{msg}");
