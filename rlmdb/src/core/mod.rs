@@ -17,7 +17,9 @@
 //!   borrows the transaction (the Rust way), a [`CursorId`] is a handle
 //!   used through [`RwTxn::cursor_get`], [`RwTxn::cursor_put`], ... and
 //!   stays valid across every change in the transaction, as C's tracked
-//!   cursors do (the C API is built on these);
+//!   cursors do (the C API is built on these); any transaction but its
+//!   own and that one's nested ones, of any environment, refuses it with
+//!   `EINVAL`, as its own refuses it once closed;
 //! * a [`Dbi`] is a plain `Copy` handle, as in C; using it after
 //!   [`Environment::close_db`] yields [`MdbError::BadDbi`](crate::MdbError).
 //!

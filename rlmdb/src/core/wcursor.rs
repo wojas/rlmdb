@@ -51,7 +51,9 @@
 //! `WITH_CURSOR_TRACKING` links in during splits and rebalances. Fixup loops
 //! iterate the tracked slots of a DBI, exactly like C walks the list.
 //! [`CursorId`](crate::core::txn_rw::CursorId)s handed out for the C API
-//! carry a generation number so a stale id cannot reach a reused slot.
+//! carry the arena's identity, unique in the process, and a generation
+//! number of their slot, so that neither an id of another transaction (of
+//! any environment) nor one of a closed cursor can reach a slot.
 //!
 //! # Reading through a write cursor
 //!
@@ -68,6 +70,8 @@
 //! ([`RwTxn::seek_key`], [`RwTxn::seek_last`]): the same steps as the read
 //! path, leaving the same state, without building and storing back a read
 //! cursor, and finding each level's page through its slot.
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cmp::Comparator;
 use crate::consts::*;
@@ -258,12 +262,42 @@ impl CRef {
 /// The cursors of a write transaction. A nested transaction takes over
 /// its parent's arena while it runs (`mdb_cursor_shadow`) and gives it back
 /// when it ends (`mdb_cursors_close`).
-#[derive(Debug, Default)]
+///
+/// Every arena has an identity ([`Arena::id`]) that no other arena of the
+/// process has had: a new arena gets a fresh one, and so does an arena
+/// emptied at the end of a top-level transaction ([`Arena::clear`]), which
+/// the environment then keeps for the next write transaction. A nested
+/// transaction works in its parent's arena, identity included. So the
+/// identity names one top-level transaction and its children, and a
+/// [`CursorId`](crate::core::CursorId) that carries it cannot reach a
+/// cursor of any other transaction, of this environment or another one.
+#[derive(Debug)]
 pub(crate) struct Arena {
     slots: Vec<Slot>,
     free: Vec<usize>,
     /// Nesting depth of the transaction currently using the arena.
     depth: u32,
+    /// The arena's identity (see above).
+    id: u64,
+}
+
+impl Default for Arena {
+    /// An empty arena with a fresh identity.
+    fn default() -> Arena {
+        Arena {
+            slots: Vec::new(),
+            free: Vec::new(),
+            depth: 0,
+            id: next_arena_id(),
+        }
+    }
+}
+
+/// A fresh [`Arena`] identity: a counter of the process (64 bits do not
+/// wrap; 0 is never handed out).
+fn next_arena_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 impl XState {
@@ -353,6 +387,12 @@ impl Arena {
         self.depth
     }
 
+    /// The arena's identity, for [`CursorId`](crate::core::CursorId)
+    /// validation (see [`Arena`]).
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Hands the arena to a transaction at nesting depth `depth`.
     pub(crate) fn set_depth(&mut self, depth: u32) {
         self.depth = depth;
@@ -402,11 +442,15 @@ impl Arena {
         }
     }
 
-    /// Frees every slot (`mdb_cursors_close`).
+    /// Frees every slot (`mdb_cursors_close` at the end of a top-level
+    /// transaction) and gives the arena a fresh identity: the ids of the
+    /// transaction's cursors are void from here on, also in the next
+    /// transaction that reuses the arena.
     pub(crate) fn clear(&mut self) {
         for i in 0..self.slots.len() {
             self.release(i);
         }
+        self.id = next_arena_id();
     }
 
     /// Number of slots, live or not (bounds for fixup loops).

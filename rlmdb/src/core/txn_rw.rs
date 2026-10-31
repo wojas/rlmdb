@@ -255,8 +255,14 @@ impl std::fmt::Debug for RwTxn<'_> {
 /// A cursor handle of a write transaction for the handle-based cursor API
 /// ([`RwTxn::open_cursor`] & co., which the C API binds). Stale handles
 /// (closed, or from another transaction) are rejected with `EINVAL`.
+///
+/// A handle names the transaction's cursor arena by an identity no other
+/// transaction of the process shares (a nested transaction shares its
+/// parent's, so the parent's handles work through it), then the slot and
+/// the slot's generation, which changes when the cursor is closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CursorId {
+    arena: u64,
     slot: u32,
     gen: u32,
 }
@@ -941,6 +947,7 @@ impl<'env> RwTxn<'env> {
         let slot = self.open_slot(db.0 as usize, true);
         let gen = self.w.cursors.slot(slot).map_or(0, |s| s.gen);
         Ok(CursorId {
+            arena: self.w.cursors.id(),
             slot: slot as u32,
             gen,
         })
@@ -963,8 +970,13 @@ impl<'env> RwTxn<'env> {
     /// C (`mdb_cursor_shadow`), an ancestor's cursor then works on this
     /// transaction's data; what it does is kept when this transaction
     /// commits and undone (the cursor is put back where it was when this
-    /// transaction began) when it aborts.
+    /// transaction began) when it aborts. `EINVAL` for a handle of another
+    /// transaction (another arena), a closed cursor (another generation),
+    /// or one of a nested transaction of this one that ended.
     fn cursor_slot(&self, id: CursorId) -> Result<usize> {
+        if id.arena != self.w.cursors.id() {
+            return Err(Error::einval());
+        }
         let depth = self.w.cursors.depth();
         match self.w.cursors.slot(id.slot as usize) {
             Some(s) if s.gen == id.gen && s.tracked && s.owner <= depth => Ok(id.slot as usize),

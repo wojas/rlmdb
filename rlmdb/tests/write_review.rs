@@ -676,3 +676,129 @@ fn put_multiple_does_not_stop_at_an_existing_single_item() {
         assert_eq!(out.trim(), "multiple rc=0 written=0 count=1", "C");
     }
 }
+
+/// The items of the main DB, as `txn` sees them.
+fn main_items(txn: &rlmdb::RwTxn<'_>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut c = txn.cursor(Dbi::MAIN).unwrap();
+    let mut items = Vec::new();
+    while let Some((k, d)) = c.next().unwrap() {
+        items.push((k.to_vec(), d.to_vec()));
+    }
+    items
+}
+
+/// The error code of `r`, if it failed.
+fn errno<T>(r: rlmdb::Result<T>) -> Option<i32> {
+    r.err().map(|e| e.to_err_code())
+}
+
+/// `id` names no cursor of `txn`: every operation of the handle API on it
+/// fails with `EINVAL`, `close_cursor` does nothing, and the main DB is
+/// unchanged.
+fn assert_refused(txn: &mut rlmdb::RwTxn<'_>, id: rlmdb::CursorId, what: &str) {
+    let before = main_items(txn);
+    let none = WriteFlags::empty();
+    let codes = [
+        (
+            "get",
+            errno(txn.cursor_get(id, None, None, CursorOp::First)),
+        ),
+        ("put", errno(txn.cursor_put(id, b"x", b"foreign", none))),
+        ("reserve", errno(txn.cursor_reserve(id, b"y", 4, none))),
+        (
+            "put multiple",
+            errno(txn.cursor_put_multiple(id, b"z", b"ab", 1, none)),
+        ),
+        ("del", errno(txn.cursor_del(id, none))),
+        ("count", errno(txn.cursor_count(id))),
+        ("is initialized", errno(txn.cursor_is_initialized(id))),
+        ("has dups", errno(txn.cursor_current_has_dups(id))),
+        ("dbi", errno(txn.cursor_dbi(id))),
+        ("is db", errno(txn.cursor_is_db(id))),
+    ];
+    for (op, code) in codes {
+        assert_eq!(code, Some(libc::EINVAL), "{what}: {op}");
+    }
+    txn.close_cursor(id);
+    assert_eq!(main_items(txn), before, "{what}: data changed");
+}
+
+/// A `CursorId` named a slot of the transaction's cursor arena and the
+/// slot's generation only, and every arena numbers both from 0: the first
+/// cursor of a write transaction of another environment had the same id
+/// as the first one here, and `cursor_put` with it wrote into this
+/// environment's database (found by an external review). Ids name their
+/// arena now, which no other transaction shares.
+#[test]
+fn cursor_ids_of_another_environment_are_refused() {
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (env_a, env_b) = (env(dir_a.path()), env(dir_b.path()));
+    let mut ta = env_a.begin_rw_txn().unwrap();
+    let mut tb = env_b.begin_rw_txn().unwrap();
+    let ca = ta.open_cursor(Dbi::MAIN).unwrap();
+    let cb = tb.open_cursor(Dbi::MAIN).unwrap();
+    assert_ne!(ca, cb);
+    tb.put(Dbi::MAIN, b"b", b"1", WriteFlags::empty()).unwrap();
+    assert_refused(&mut tb, ca, "A's id in B");
+    // B's cursor in the same slot is still open, and A's id still works
+    // in A.
+    assert_eq!(get(&mut tb, cb, CursorOp::First), item("b", "1"));
+    ta.cursor_put(ca, b"a", b"2", WriteFlags::empty()).unwrap();
+    assert_refused(&mut ta, cb, "B's id in A");
+    ta.commit().unwrap();
+    tb.commit().unwrap();
+    let txn = env_b.begin_ro_txn().unwrap();
+    assert_eq!(
+        common::walk_forward(&txn, Dbi::MAIN),
+        [(b"b".to_vec(), b"1".to_vec())]
+    );
+    let txn = env_a.begin_ro_txn().unwrap();
+    assert_eq!(
+        common::walk_forward(&txn, Dbi::MAIN),
+        [(b"a".to_vec(), b"2".to_vec())]
+    );
+    assert!(std::mem::size_of::<rlmdb::CursorId>() <= 16);
+}
+
+/// An id of an ended transaction: the environment keeps the cursor arena
+/// for the next write transaction, and replaces it by a new one, whose
+/// generations start at 0 again, when it grew past 16 slots. So the first
+/// id of a transaction with 17 cursors was the id of the first cursor of
+/// the next one (found by an external review). Also an id of a nested
+/// transaction that ended, in its parent.
+#[test]
+fn cursor_ids_of_an_ended_transaction_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    for (n, end) in [(17, "commit"), (1, "commit"), (17, "abort"), (1, "abort")] {
+        let what = format!("{n} cursors, {end}");
+        let mut txn = env.begin_rw_txn().unwrap();
+        let old: Vec<_> = (0..n)
+            .map(|_| txn.open_cursor(Dbi::MAIN).unwrap())
+            .collect();
+        if end == "commit" {
+            txn.commit().unwrap();
+        } else {
+            txn.abort();
+        }
+        // The new cursor first: a put's temporary cursor would take (and
+        // free) the first slot before it.
+        let mut txn = env.begin_rw_txn().unwrap();
+        let c = txn.open_cursor(Dbi::MAIN).unwrap();
+        assert!(!old.contains(&c), "{what}");
+        txn.put(Dbi::MAIN, b"k", what.as_bytes(), WriteFlags::empty())
+            .unwrap();
+        assert_refused(&mut txn, old[0], &what);
+        assert_eq!(get(&mut txn, c, CursorOp::First), item("k", &what));
+
+        // A nested transaction's own cursor ends with it; the parent's
+        // works through it.
+        let mut child = txn.begin_nested_txn().unwrap();
+        let own = child.open_cursor(Dbi::MAIN).unwrap();
+        assert_eq!(get(&mut child, own, CursorOp::Last), item("k", &what));
+        assert_eq!(get(&mut child, c, CursorOp::Last), item("k", &what));
+        child.commit().unwrap();
+        assert_refused(&mut txn, own, &format!("{what}: child's id"));
+        txn.commit().unwrap();
+    }
+}
