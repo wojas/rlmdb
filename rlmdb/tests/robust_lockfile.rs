@@ -272,16 +272,21 @@ impl LockFile {
         }
     }
 
+    /// Writes `v` at `off` through the descriptor, as another process
+    /// would, with the maps of the file flushed before and invalidated
+    /// after where that is needed (OpenBSD).
     fn put_u32(&self, off: usize, v: u32) {
-        self.file
-            .write_all_at(&v.to_ne_bytes(), off as u64)
-            .unwrap();
+        self.put(off, &v.to_ne_bytes());
     }
 
     fn put_u64(&self, off: usize, v: u64) {
-        self.file
-            .write_all_at(&v.to_ne_bytes(), off as u64)
-            .unwrap();
+        self.put(off, &v.to_ne_bytes());
+    }
+
+    fn put(&self, off: usize, bytes: &[u8]) {
+        rlmdb::flush_file_maps(&self.file).unwrap();
+        self.file.write_all_at(bytes, off as u64).unwrap();
+        rlmdb::invalidate_file(&self.file, off as u64, bytes.len()).unwrap();
     }
 
     fn get_u64(&self, off: usize) -> u64 {
@@ -593,10 +598,12 @@ fn robust_lockfile_header_checked() {
             // process holds the environment (locks are mandatory there).
             if cfg!(unix) {
                 lock.put_u32(TXNINFO_MAGIC, 0x1234_5678);
-                assert!(matches!(
-                    open_env(dir, format),
-                    Err(Error::Mdb(MdbError::Invalid))
-                ));
+                let r = open_env(dir, format).map(drop);
+                assert!(
+                    matches!(r, Err(Error::Mdb(MdbError::Invalid))),
+                    "{format:?}: bad magic: {r:?}; header now {:#x}",
+                    lock.get_u64(TXNINFO_MAGIC)
+                );
                 lock.put_u32(TXNINFO_MAGIC, rlmdb::consts::MDB_MAGIC);
             }
 

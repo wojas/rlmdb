@@ -534,9 +534,20 @@ fn build_cpeer(tools: &CTools) -> Result<PathBuf, String> {
     Ok(dir.join("cpeer"))
 }
 
-/// `pwrite` of all of `buf` at `offset` of `file`: `FileExt::write_all_at`
-/// on Unix, `seek_write` until done on Windows.
+/// `pwrite` of all of `buf` at `offset` of `file`, as another process
+/// writing the file would: `FileExt::write_all_at` on Unix, `seek_write`
+/// until done on Windows, and on OpenBSD, whose maps and files go out of
+/// step, the maps' dirty pages written out first and the written range
+/// invalidated after, as an LMDB process does after its writes (without
+/// that a map of the file keeps its stale copy, or writes it back over
+/// the write). `file` must be open for reading too.
 pub fn write_all_at(file: &fs::File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+    rlmdb::flush_file_maps(file)?;
+    write_all_at_raw(file, buf, offset)?;
+    rlmdb::invalidate_file(file, offset, buf.len())
+}
+
+fn write_all_at_raw(file: &fs::File, buf: &[u8], offset: u64) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         std::os::unix::fs::FileExt::write_all_at(file, buf, offset)

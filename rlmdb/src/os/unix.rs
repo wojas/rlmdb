@@ -805,6 +805,43 @@ pub fn pid_alive(file: &File, pid: i32) -> bool {
     probe_lock(file, pid as u64).unwrap_or(true)
 }
 
+/// For tests on OpenBSD ([`flush_file_maps`](super::flush_file_maps),
+/// [`invalidate_file`](super::invalidate_file)): `msync(flags)` over a
+/// temporary read-only map of the whole of `file`, through the caller's
+/// descriptor. No second descriptor: closing one would release every
+/// `fcntl` lock the process holds on the file (the environment's shared
+/// lock on a lock file among them).
+#[cfg(target_os = "openbsd")]
+pub fn msync_file(file: &File, flags: libc::c_int) -> io::Result<()> {
+    let len =
+        usize::try_from(file_size(file)?).map_err(|_| io::Error::from_raw_os_error(libc::EFBIG))?;
+    if len == 0 {
+        return Ok(());
+    }
+    // SAFETY: a fresh read-only shared mapping of a valid descriptor,
+    // unmapped below; msync changes no file contents.
+    unsafe {
+        let ptr = libc::mmap(
+            ptr::null_mut(),
+            len,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        );
+        if ptr == libc::MAP_FAILED {
+            return Err(last_error());
+        }
+        let rc = libc::msync(ptr, len, flags);
+        let err = last_error();
+        libc::munmap(ptr, len);
+        if rc != 0 {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,9 +910,15 @@ mod tests {
         assert_eq!(m.load_i32(72), -5);
         m.write_bytes(8, b"/MDBr");
         assert_eq!(m.read_bytes(8, 5), b"/MDBr");
-        let mut back = [0u8; 8];
-        read_at(&f, &mut back, 64).unwrap();
-        assert_eq!(u64::from_ne_bytes(back), 0x1122_3344_5566_7788);
+        // The stores reach the file. Not on OpenBSD, whose page cache is
+        // not the buffer cache: a store through the map shows in `read`
+        // only after an `msync`, and the library never reads the lock
+        // file through its descriptor (C does not either).
+        if !cfg!(target_os = "openbsd") {
+            let mut back = [0u8; 8];
+            read_at(&f, &mut back, 64).unwrap();
+            assert_eq!(u64::from_ne_bytes(back), 0x1122_3344_5566_7788);
+        }
     }
 
     #[test]

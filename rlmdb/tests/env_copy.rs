@@ -377,7 +377,11 @@ fn plain_copy_never_emits_a_meta_newer_than_its_snapshot() {
         newer.dbs[1].root = meta.last_pgno + 20;
         let mut bytes = [0u8; META_SIZE];
         newer.write(&mut bytes);
-        let f = fs::OpenOptions::new().write(true).open(&data).unwrap();
+        let f = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&data)
+            .unwrap();
         common::write_all_at(&f, &bytes, meta_at(other) as u64).unwrap();
         drop(f);
         assert_eq!(env.info().unwrap().last_txnid as u64, txnid + 1);

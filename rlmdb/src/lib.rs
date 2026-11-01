@@ -180,6 +180,8 @@ pub mod version;
 pub use crate::core::*;
 pub use crate::error::{strerror, BoxedError};
 pub use crate::format::Format;
+#[doc(hidden)]
+pub use crate::os::{flush_file_maps, invalidate_file};
 pub use crate::version::{version_info, VersionInfo};
 
 /// What `mdb_version` reports, `(major, minor, patch)`: `(0, 9, 85)`, the

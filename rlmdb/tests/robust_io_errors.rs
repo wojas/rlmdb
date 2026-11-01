@@ -59,7 +59,7 @@ use std::fs::File;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
@@ -461,11 +461,29 @@ fn failed_meta_sync(format: Format, flags: EnvironmentFlags) {
         assert_keys(&copied, 0..300);
     }
     // So is C's, byte for byte (C 0.9's; the C 1.0 tools are `interop`'s).
-    if format == Format::V09 && flags.is_empty() {
+    // Not on OpenBSD: the failed write and the write that put the old
+    // data back were not invalidated (C does not either), so what a map
+    // shows of that meta page there is stale, and C's copy, taken from
+    // its map, differs from ours in that page.
+    if format == Format::V09 && flags.is_empty() && !cfg!(target_os = "openbsd") {
         if let Some(c) = common::c_tools() {
             let src = dir.path().to_str().unwrap();
             let theirs = c.run("mdb_copy", &[src], None).stdout;
-            assert!(theirs == std::fs::read(copy.path().join("data.mdb")).unwrap());
+            let ours = std::fs::read(copy.path().join("data.mdb")).unwrap();
+            fn page(f: &[u8], at: usize, ps: usize) -> Option<&[u8]> {
+                f.get(at..(at + ps).min(f.len()))
+            }
+            let differ: Vec<usize> = (0..theirs.len().max(ours.len()))
+                .step_by(ps)
+                .filter(|&at| page(&theirs, at, ps) != page(&ours, at, ps))
+                .map(|at| at / ps)
+                .collect();
+            assert!(
+                differ.is_empty(),
+                "{what}: pages {differ:?} differ from C's copy ({} vs {} bytes)",
+                theirs.len(),
+                ours.len()
+            );
         }
     }
 
@@ -596,18 +614,25 @@ fn robust_read_only_reader_skips_unpublished_first_commit() {
         let in_flight_meta = rlmdb::format::Meta::read_page_with_layout(&in_flight, layout);
         assert_eq!(in_flight_meta.unwrap().txnid, 1, "{what}: not in flight");
         assert_eq!(rust, published, "{what}: commit in flight");
+        // Not on OpenBSD: there C's map still holds the meta page as it
+        // was before the write (the writer invalidates it only after the
+        // sync, `MDB_Invalidate`), so C's fallback reads the published
+        // snapshot too.
         if let Some(c_saw_it) = c_saw_it {
-            assert!(c_saw_it, "C's read-only fallback no longer reads it");
+            if !cfg!(target_os = "openbsd") {
+                assert!(c_saw_it, "C's read-only fallback no longer reads it");
+            }
         }
         assert_eq!(file_txnids(&src, format, ps), [0, 0], "{what}");
 
         // C's leftover of such a failure: the commit's meta page.
-        std::fs::OpenOptions::new()
+        let data = std::fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .open(src.join("data.mdb"))
-            .unwrap()
-            .write_all_at(&in_flight, ps as u64)
             .unwrap();
+        common::write_all_at(&data, &in_flight, ps as u64).unwrap();
+        drop(data);
         assert_eq!(file_txnids(&src, format, ps), [0, 1], "{what}");
         assert_eq!(read_in_another_process(&src, format), published, "{what}");
         if let Some(c) = c {

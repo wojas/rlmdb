@@ -834,7 +834,11 @@ fn snapshots_without_their_meta_pages_are_refused() {
         env.begin_rw_txn().unwrap().abort();
         // Meta page 1 holds the newest snapshot (txnid 1).
         set_last(&mut file, 1, u64::MAX);
-        let out = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+        let out = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&data)
+            .unwrap();
         write_all_at(&out, &file[PS..2 * PS], PS as u64).unwrap();
         refused(&env, "last page u64::MAX");
         drop(env);
