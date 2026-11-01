@@ -18,7 +18,7 @@ table below), 64-bit.
 | Linux, glibc, s390x (big-endian) | as above, 40-byte mutex; slots at 128 | tested under QEMU user emulation (`LINUX_TEST_TARGET=s390x-unknown-linux-gnu scripts/linux-test.sh`, nightly CI); see *Byte order* |
 | Android | robust pthread mutex layout | compiles in principle; untested |
 | FreeBSD 13+ (64-bit) | as Linux: process-shared robust `pthread_mutex_t` in the lock file, 8 bytes there (a pointer to a kernel object keyed by its address); slots at 128 in both lock-file versions; `fdatasync`; meta fd `O_DSYNC` | `rlmdb` and `rlmdb-capi` tests pass in a FreeBSD 15 VM (`bsd.yml`: weekly and on demand, experimental); `rlmdb-tools` and `interop` do not run there yet; compiles and lints in CI (`Check BSD targets`) |
-| OpenBSD (64-bit) | LMDB 0.9 lock file: POSIX named semaphores as on macOS (names in the lock file; slots at 128). LMDB 1.0 lock file: a SysV semaphore set, `semget(ftok(lockfile, 'M'))`, its id `mtb_semid` at 20, `mtb_rlocked` at 24, `mt2_wlocked` at 64, slots at 128. `fsync` for `MDB_FDATASYNC`; meta fd `O_DSYNC`; after every write to the data file `msync(MS_INVALIDATE)` of the map (no unified buffer cache); no `O_DIRECT` for copies | untested; compiles and lints with nightly `-Zbuild-std` (tier 3), not in CI |
+| OpenBSD (64-bit) | LMDB 0.9 lock file: POSIX named semaphores as on macOS (names in the lock file; slots at 128). LMDB 1.0 lock file: a SysV semaphore set, `semget(ftok(lockfile, 'M'))`, its id `mtb_semid` at 20, `mtb_rlocked` at 24, `mt2_wlocked` at 64, slots at 128. `fsync` for `MDB_FDATASYNC`; meta fd `O_DSYNC`; after every write to the data file `msync(MS_INVALIDATE)` of the map (no unified buffer cache); no `O_DIRECT` for copies | tested by hand in an OpenBSD 7.9 arm64 VM (2 vCPUs, 2 GB): the workspace suite passes (`cargo test --workspace`), the interop matrix with C 0.9.36 and 1.0 built by the base clang included, and `layout_dump` there confirms the lock-file layouts and `MDB_LOCK_FORMAT`; not in CI (tier 3: compiles and lints with nightly `-Zbuild-std`). Maps and descriptor I/O go out of step there, so the tests that write or read an environment's files behind an open environment flush and invalidate through `rlmdb::flush_file_maps` and `rlmdb::invalidate_file` (hidden test hooks); one lock-file test cannot (`robust_lockfile_header_checked`). C 1.0's `mtest_remap` (`MDB_REMAP_CHUNKS`) fails its own assertions there and is left out of the oracle tests |
 | NetBSD (64-bit) | as OpenBSD, but semaphore names of 14 characters (C's `MDB_SHORT_SEMNAMES`) and no invalidation | untested; compiles and lints in CI (`Check BSD targets`) |
 | DragonFly (64-bit) | as OpenBSD, but no invalidation and meta fd `O_SYNC` (there is no `O_DSYNC`) | untested; compiles and lints with nightly `-Zbuild-std` (tier 3), not in CI |
 | Windows x86-64, MinGW-w64 (`x86_64-pc-windows-gnu`) | named mutexes `Global\MDBr…`, `Global\MDBw…` (names in the lock file, version 2: their hash); `LockFileEx` on byte 0; no pid locks; slots at 128 (version 1), 64 (version 2) | tested on Windows 10 with Rust stable and MinGW-w64 gcc (MSYS2): the workspace suite passes as on macOS (`cargo test --workspace`, through `scripts/windows-test.sh`), the interop matrix with C 0.9.36 and 1.0 built by gcc included; the upstream `mtest*.c` and tools and the `rlmdb-capi` test programs linked against `lmdb.dll` and `liblmdb.a` agree with C; the GNU job of `.github/workflows/windows.yml` runs the same in CI |
@@ -41,8 +41,9 @@ is `fsync` there (FreeBSD 11.1+ keeps `fdatasync`), and OpenBSD alone
 defines `MDB_Invalidate`. C uses `MAP_NOSYNC` with `MDB_NOSYNC` where it
 exists (FreeBSD, DragonFly); rlmdb's map is read-only, so no page is ever
 dirtied through it and the flag would change nothing. The layouts and
-`MDB_LOCK_FORMAT` values of the BSDs are computed from the C declarations,
-not yet measured with `layout_dump` on a BSD.
+`MDB_LOCK_FORMAT` values of the BSDs are computed from the C declarations;
+OpenBSD's are measured with `layout_dump` there (`interop/tests/oracle10.rs`:
+lock mode `sysv_sem`, `MDB_LOCK_FORMAT` `0x2889a002`), the others not yet.
 
 **Byte order.** LMDB files are host-endian: C never byte-swaps, so a C
 build on a big-endian machine writes big-endian data and lock files, and
@@ -91,10 +92,10 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
   lock cache line, so the reader slots start at 64. Windows does the same
   with its mutexes (`Global\MDB` names), `mti_format` `0x08138002`. On Linux the mutexes
   are at 24 and 128 (64 on x86-64), the slots at 192 (128). rlmdb creates
-  and attaches to it as C 1.0 does. On the BSDs (computed, not measured):
-  FreeBSD `0x2986c002`, mutexes at 24 and 64, slots at 128; OpenBSD,
-  NetBSD and DragonFly `0x2889a002` (`MDB_LOCK_TYPE` 8, SysV semaphores),
-  layout in the platform table.
+  and attaches to it as C 1.0 does. On the BSDs (OpenBSD measured, the
+  others computed): FreeBSD `0x2986c002`, mutexes at 24 and 64, slots at
+  128; OpenBSD, NetBSD and DragonFly `0x2889a002` (`MDB_LOCK_TYPE` 8, SysV
+  semaphores), layout in the platform table.
 * **Lock files of the other version** are refused with
   `MDB_VERSION_MISMATCH` while another process holds them, and
   re-initialised in the opener's version by an exclusive opener, by C and
@@ -163,7 +164,8 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
   leaves the lock taken until an exclusive opener re-creates the
   semaphores, as in C); the SysV semaphores of a 1.0 lock file are
   (`SEM_UNDO` frees the semaphore, the flag the dead holder left set makes
-  the next holder recover, as C 1.0's `mdb_sem_wait`).
+  the next holder recover, as C 1.0's `mdb_sem_wait`; the `killed_writer`
+  scenario checks both on OpenBSD).
 * Reader slots of dead processes stay until `mdb_reader_check` (C or Rust,
   `mdb_stat -rr` of either) or an exclusive re-open clears them, as in C.
 * When a writer of either side grows the data file beyond another
