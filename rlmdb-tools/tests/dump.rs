@@ -372,12 +372,12 @@ fn walks_over_shared_children_stop() {
         assert!(r.stderr_str().contains("MDB_CORRUPTED"), "{what}: {r:?}");
         // One copy per leaf step; the walk stops at the file's page count
         // (24 pages).
-        let copies = r.stdout_str().matches("\n 6b6579\n").count();
+        let copies = r.stdout_text().matches("\n 6b6579\n").count();
         assert!((2..=25).contains(&copies), "{what}: {copies} copies");
         let r = run_bounded("mdb_stat", &["-f"], &free);
         assert_eq!(r.code, 0, "{what}: {r:?}");
         assert!(
-            r.stdout_str().contains("  Free pages: 0\n"),
+            r.stdout_text().contains("  Free pages: 0\n"),
             "{what}: {r:?}"
         );
     }
