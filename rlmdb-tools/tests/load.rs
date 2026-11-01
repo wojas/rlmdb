@@ -193,6 +193,29 @@ fn plain_text() {
     assert_load_same(Start::New, &["-T"], b"");
 }
 
+/// `-N` commits after every 100 records it stores; records it skips (the
+/// key exists) do not count, as in C. When the input then breaks off, the
+/// same records are committed and the same rolled back.
+#[test]
+fn no_overwrite_batches_count_stored_records() {
+    // Two stored records and 98 skipped ones: no commit before the error.
+    let mut few = b"exists\nold\nnew\nvalue\n".to_vec();
+    for _ in 0..98 {
+        few.extend_from_slice(b"exists\nskip\n");
+    }
+    // 151 stored records, each new one followed by a skipped one: one
+    // commit, after the 100th stored.
+    let mut many = b"exists\nold\n".to_vec();
+    for i in 0..150 {
+        many.extend_from_slice(format!("new{i:03}\nvalue\nexists\nskip\n").as_bytes());
+    }
+    for mut input in [few, many] {
+        input.extend_from_slice(b"no value\n");
+        let l = assert_load_same(Start::New, &["-T", "-N"], &input);
+        assert_eq!(l.c.code, 1, "{}", l.c.stderr_text());
+    }
+}
+
 /// `-a`: records stored in input order without comparisons, including
 /// input that is not sorted and more than one batch of 100.
 #[test]

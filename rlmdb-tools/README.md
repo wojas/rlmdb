@@ -193,9 +193,10 @@ sub-pages and sub-databases, a `MDB_NOSUBDIR` environment.
   prints its version line for `-V`, the Rust tool must print its own
   (`version_line` and `assert_runs_equal` in `tests/common/mod.rs`).
 * `load.rs`: crafted dumps in both encodings, loads into existing
-  environments, `-T`, `-N`, `-a` (sorted and unsorted input, several
-  batches), malformed input (header errors, truncated lines, bad
-  escapes, oversized keys, a full map): identical messages and exit codes,
+  environments, `-T`, `-N` (the records it skips do not count toward a
+  batch), `-a` (sorted and unsorted input, several batches), malformed
+  input (header errors, truncated lines, bad escapes, oversized keys, a
+  full map): identical messages and exit codes,
   and identical environments afterwards as the C tools see them (dumps,
   `mdb_stat -efa`, free list). Round trips: Rust `mdb_dump` → C `mdb_load`
   → C `mdb_dump`, and C `mdb_dump` → Rust `mdb_load` → C `mdb_dump`, both

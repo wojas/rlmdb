@@ -59,7 +59,8 @@ const SYNOPSIS: &str = "[-V] [-a] [-f input] [-F 0.9|1.0] [-n] [-s name] [-N] [-
 /// The page sizes `mdb_env_set_pagesize` (LMDB 1.0) accepts.
 const SET_PAGESIZE: std::ops::RangeInclusive<u32> = 256..=65536;
 
-/// Records per write transaction (C commits every 100 puts).
+/// Records per write transaction (C commits after every 100 records it
+/// stores; records `-N` skips do not count).
 const BATCH: usize = 100;
 
 /// What a dump header says (the parts of `mdb_load.c`'s globals that
@@ -520,7 +521,10 @@ impl<'env> Loader<'env> {
             }
             match batch.txn.cursor_put(batch.cursor, &key, &data, flags) {
                 Ok(()) => {}
+                // As C: a record that -N skips (its key, or for DUPSORT
+                // the pair, exists) does not count toward the batch.
                 Err(rlmdb::Error::Mdb(rlmdb::MdbError::KeyExist)) if !self.put_flags.is_empty() => {
+                    continue;
                 }
                 Err(e) => {
                     let rc = err_code(&e);

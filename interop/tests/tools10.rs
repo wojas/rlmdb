@@ -303,6 +303,39 @@ fn mdb_load_skips_empty_keys_like_mdb_load10() {
     assert_same_files(&c_env, &r_env, "empty key");
 }
 
+/// `mdb_load -N` commits after every 100 records it stores, not counting
+/// the ones it skips (the key exists), as `mdb_load10` (and C 0.9's, in
+/// `rlmdb-tools/tests/load.rs`): when the input breaks off, the same
+/// records are committed and the same rolled back.
+#[test]
+fn mdb_load_n_batches_like_mdb_load10() {
+    let dir = tmp();
+    // No commit before the error; one, after the 100th stored record.
+    let mut few = b"exists\nold\nnew\nvalue\n".to_vec();
+    for _ in 0..98 {
+        few.extend_from_slice(b"exists\nskip\n");
+    }
+    let mut many = b"exists\nold\n".to_vec();
+    for i in 0..150 {
+        many.extend_from_slice(format!("new{i:03}\nvalue\nexists\nskip\n").as_bytes());
+    }
+    for (name, mut input) in [("few", few), ("many", many)] {
+        input.extend_from_slice(b"no value\n");
+        let c_env = new_env(dir.path(), &format!("c-{name}"));
+        let r_env = new_env(dir.path(), &format!("r-{name}"));
+        let c = c10("mdb_load", &["-T", "-N", s(&c_env)], &input);
+        let r = rust("mdb_load", &["-F", "1.0", "-T", "-N", s(&r_env)], &input);
+        assert_eq!(r, c, "{name}");
+        assert_eq!(c.code, 1, "{name}: {c:?}");
+        assert_eq!(
+            c10("mdb_dump", &["-p", s(&r_env)], b""),
+            c10("mdb_dump", &["-p", s(&c_env)], b""),
+            "{name}"
+        );
+        assert_same_files(&c_env, &r_env, name);
+    }
+}
+
 /// A 1.0 environment of `ps`-byte pages for the read-only tools: the
 /// [`dump_input`] data, loaded by C 1.0, with one database dropped by C
 /// 1.0, so that the free list is not empty.
