@@ -34,6 +34,11 @@ environment and checking what each sees.
   from the vendored 1.0 sources in `../tests/lmdb-c/1.0` (see "The LMDB
   1.0 oracle" below).
 
+* An external peer (`Peer::External`), any program that speaks the
+  protocol, is not built here: the tests with it run when `INTEROP_PEER`
+  names its executable (see "External peers" below) and are skipped
+  otherwise.
+
 * `rtools` (`src/bin/rtools.rs`) is the Rust tools of `../rlmdb-tools` in
   one executable (`rtools mdb_stat -a env` runs `mdb_stat` with `argv[0]`
   `mdb_stat`): cargo builds a package's binaries for its own tests only,
@@ -66,6 +71,8 @@ cargo test -p rlmdb-interop --test oracle10       # the LMDB 1.0 oracle: version
 cargo test -p rlmdb-interop --test c_vs_c -- --nocapture mvcc   # one scenario, with its log
 INTEROP_LOOP_SECS=20 cargo test -p rlmdb-interop --no-fail-fast  # stress: 20 s loops (~20 min)
 scripts/linux-test.sh test -p rlmdb-interop       # the same on Linux (Docker)
+INTEROP_PEER=/path/to/peer cargo test -p rlmdb-interop \
+    --test external_peer --test external_pairs --test external_pairs10   # see "External peers"
 ```
 
 | test file | what |
@@ -95,6 +102,9 @@ scripts/linux-test.sh test -p rlmdb-interop       # the same on Linux (Docker)
 | `tests/capi10.rs` | the C API with 1.0 environments against C 1.0: `cpeer_capi` creates one with `RLMDB_DEFAULT_FORMAT=1.0` (and a 0.9 one without), fills 1.0 files of 1 KiB and 64 KiB pages that `mdb_load10` created (opened without a format request; inline values of 20000 bytes on 64 KiB pages), and `cpeer10 verify`, the C 1.0 page audit, `mdb_dump10` and `mdb_stat10` agree; the reverse with `cpeer10` writing and `cpeer_capi verify`/`dump` reading, keys over 511 bytes from `mdb_load10` included |
 | `tests/tools10.rs` | the Rust tools (`rtools`) on 1.0 files against `mdb_load10` (`-F 1.0` and `RLMDB_DEFAULT_FORMAT=1.0`: same messages, same pages; empty keys), `mdb_stat10` and `mdb_dump10` (every option both have, on `mdb_load10` files at 1, 4, 64 KiB pages and on `mtest*10` environments), `mdb_drop10` (same files, also emptying the main DB), `mdb_copy10` (byte-identical copies); C 1.0's process map address is normalised (`KNOWN_C_BUGS.md`, "LMDB 1.0") |
 | `tests/format10.rs` | rlmdb reading C 1.0's files (`mdb_load10` at 512 B to 64 KiB pages, `mtest*10`) against `mdb_dump10`/`mdb_stat10`; rlmdb loading what `mdb_load10` loads (same pages); copies byte-identical to `mdb_copy10 [-c]`; C 1.0 and rlmdb writing one environment in turns; a C 1.0 reader pinning pages against an rlmdb writer and the reverse, both writing an environment both keep open |
+| `tests/external_pairs.rs` | every scenario with the external peer on 0.9 environments: `external_writes_c_reads`, `c_writes_external_reads`, `external_writes_rust_reads`, `rust_writes_external_reads`, `external_vs_external` (test names `<pair>::<scenario>`); skipped without `INTEROP_PEER` |
+| `tests/external_pairs10.rs` | the same on 1.0 environments with C 1.0, Rust and COnRust both ways and the external peer on both sides; skipped if the external peer does not open 1.0 |
+| `tests/external_peer.rs` | the external peer knows the protocol's commands, its `gen` and its `verify`/`dump --all`/`stat`/`check-freelist` on a C environment equal the C peer's; `four_writers` (`four_writers10`): writer and reader loops of C (C 1.0), Rust, COnRust and the external peer at once (`scenarios::all_peers::writers`) |
 | `tests/lockfile10.rs` | the lock-file descriptors of both versions against `layout_dump` and `layout_dump10`; an rlmdb `Environment` attaching to C 1.0's version 2 table and C 1.0 attaching to rlmdb's (header, readers both ways, writer lock both ways, dead readers cleared); held tables of the other version refused by rlmdb, C 0.9 and C 1.0, stale ones re-initialised by both |
 
 A scenario step that needs something a peer lacks (none at the moment)
@@ -115,6 +125,9 @@ placeholders); or a peer completes a command but prints a
 | `INTEROP_RPEER` | path of the Rust peer (else found via `CARGO_BIN_EXE_rpeer` or next to the test binary) |
 | `INTEROP_KEEP` | keep the temporary directories (`interop-*`) of the environments, to look at the files after a failure |
 | `INTEROP_NO_ROBUST_MUTEX` | the writer mutex does not recover from a killed owner (QEMU user emulation, which `scripts/linux-test.sh` sets for `LINUX_TEST_TARGET` runs): `killed_writer` expects the next writer to wait, as on macOS |
+| `INTEROP_PEER` | path of the external peer (`Peer::External`); unset or empty: the tests with it are skipped |
+| `INTEROP_PEER_ARGS` | arguments appended to every command of the external peer, split at whitespace (no quoting), e.g. `--impl port` |
+| `INTEROP_PEER_NAME` | the external peer's name in test output (ASCII letters, digits, `-`, `_`; default `External`) |
 
 The tests print the page size of each environment they create (`--nocapture`):
 16384 on Apple Silicon macOS, 4096 on Linux x86-64.
@@ -269,7 +282,7 @@ Neither version opens the other's environment (`versions_refuse_each_other`):
 
 ## Rust harness
 
-* `Peer::{C, Rust, COnRust, C10}`: `peer.on("fill", &env).args([...]).run()`
+* `Peer::{C, Rust, COnRust, C10, External}`: `peer.on("fill", &env).args([...]).run()`
   runs a command and requires exit 0 (exit 4, or exit 3 with `ENOSYS`,
   gives an error that `is_not_implemented()`); `.output()` returns any
   status; `.spawn()`
@@ -277,8 +290,12 @@ Neither version opens the other's environment (`versions_refuse_each_other`):
   `release()`, `finish()`, `kill()` for a SIGKILL; dropping it kills the
   process). `peer.supports(command)` tells whether the peer implements a
   command.
-* `Peer::all(format)` (the three peers of a format), `Peer::reference(format)`
-  (`C` or `C10`), `peer.handles(format)`.
+* `Peer::all(format)` (the three peers of a format; `External` is not one
+  of them), `Peer::reference(format)` (`C` or `C10`), `peer.handles(format)`,
+  `peer.unavailable(format)` (why a peer cannot run here: the external
+  peer without `INTEROP_PEER`, or one that refuses the format, which it
+  finds out with `<peer> commands --format <f>`; `Pair::unavailable()`
+  for both peers of a pair, and `scenario_tests!` skips such tests).
 * `TestEnv`: an environment in a temp dir (`new()`, `new_nosubdir()`,
   `with_name()`, `derived(name)` for copy targets).
 * `TestEnv::with_format(Format::V10)` and `with_page_size(Some(1024))`: a
@@ -346,6 +363,24 @@ verified by the writer, the reader and C. Many scenarios also run commands
 on both peers (two concurrent writer loops, one per peer, with reader loops
 of all three peers; `readers` both ways), and the scenarios of
 `scenarios::bidir` have both peers write in turns.
+
+### External peers
+
+`Peer::External` is a peer built outside this crate: any program that
+speaks the protocol below joins the pair matrix (`tests/external_pairs.rs`,
+`tests/external_pairs10.rs`) and the checks of `tests/external_peer.rs`.
+Like `cpeer`, it lists every command in `commands` (`implemented=0` and
+exit 4 for those it lacks) and fails `commands --format <f>` (status 2)
+for a format it does not open, whose tests are then skipped. It is
+configured with `INTEROP_PEER`, `INTEROP_PEER_ARGS` and
+`INTEROP_PEER_NAME` (table above). On Linux, `../scripts/linux-test.sh`
+sees only this checkout and passes no environment: put a Linux build
+under `interop/external/` (git-ignored) and pass the variables with
+cargo's `--config 'env.INTEROP_PEER="/work/interop/external/<peer>"'`.
+
+The protocol is this crate's internal test protocol, not a stable
+interface: it changes with rlmdb and is versioned only by rlmdb's
+commits.
 
 ## The peer command protocol
 
