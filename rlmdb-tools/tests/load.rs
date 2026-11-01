@@ -317,17 +317,27 @@ fn malformed_input() {
             // bits on Windows, and what follows depends on the compiler
             // (KNOWN_C_BUGS.md #43): the MinGW-w64 build fails to map the
             // lock file (error 5), the cl build opens it at the wrapped
-            // size. rlmdb refuses the lock file's real size.
+            // size. Only C runs: rlmdb makes the lock file its real size,
+            // 256 GiB, which Windows backs in full when it is mapped (a
+            // volume without sparse files, exFAT, writes it out at
+            // `set_len` already), so the outcome is the scratch volume's
+            // (a disk-full error, or an environment that opens after a
+            // very long time).
             let dir = tempdir();
-            let l = load_both(dir.path(), Start::New, &[], case.as_bytes());
-            let err = l.r.stderr_text();
-            assert_eq!(l.r.code, 1, "{err}");
-            assert!(err.starts_with("mdb_env_open failed, error "), "{err}");
-            let err = l.c.stderr_text();
+            let env = dir.path().join("env");
+            fs::create_dir_all(&env).unwrap();
+            let c = run(
+                Impl::C,
+                "mdb_load",
+                &args(&[p(&env)]),
+                case.as_bytes(),
+                dir.path(),
+            );
+            let err = c.stderr_text();
             if cfg!(target_env = "msvc") {
-                assert_eq!(l.c.code, 0, "{err}");
+                assert_eq!(c.code, 0, "{err}");
             } else {
-                assert_eq!(l.c.code, 1, "{err}");
+                assert_eq!(c.code, 1, "{err}");
                 assert!(err.starts_with("mdb_env_open failed, error 5 "), "{err}");
             }
             continue;
