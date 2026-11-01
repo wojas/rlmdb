@@ -374,7 +374,8 @@ Both versions:
   set `pid`, `tid`, bump `numreaders` if needed, unlock; then write the
   snapshot `txnid` into the slot (line 2758). Readers start from
   `metas[mti_txnid & 1]`, not "the newer meta"; only with `mti_txnid == 0`
-  in a read-only env does C fall back to the newer meta (line 2833).
+  in a read-only env does C fall back to the newer meta (line 2825), which
+  rlmdb does not (`KNOWN_C_BUGS.md` #45).
   `mdb_env_read_header` (line 3804) reads 152 bytes per meta page at offset 0
   and at the first meta's page size. Writers lock `wmutex` for the
   whole write transaction and commit sets `mti_txnid`.

@@ -13,6 +13,12 @@
 //!   keeps the page, `KNOWN_C_BUGS.md` #41): the old txnid is written back
 //!   over the page, so a plain copy that another handle or process takes
 //!   before the re-open shows the last good snapshot too.
+//! * A read-only handle of another process that begins a read transaction
+//!   while the first commit of an environment is in flight (its meta page
+//!   in the file, `mti_txnid` still 0), or after that commit failed and
+//!   left its meta page, reads the published snapshot, txnid 0. C's
+//!   read-only handles take the newest meta page while `mti_txnid` is 0,
+//!   that commit's (`KNOWN_C_BUGS.md` #45).
 //! * A failed spill write fails the operation; the transaction can only be
 //!   aborted (`MDB_BAD_TXN`).
 //! * `copy_to_fd` into a broken pipe (or `/dev/full` on Linux) reports the
@@ -24,6 +30,7 @@
 //! page write that worked is injected with
 //! `Environment::fail_next_meta_sync`, and on macOS also made real: a
 //! write-only `/dev/null` takes the write and refuses the `F_FULLFSYNC`.
+//! `Environment::after_next_meta_write` stops a commit at that point.
 //!
 //! Unix only: Windows has no `dup2` over a handle another part of the
 //! process holds, so the environment's writes cannot be made to fail from
@@ -52,7 +59,7 @@ use std::fs::File;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
@@ -300,6 +307,26 @@ fn robust_failed_meta_write_is_fatal() {
     }
 }
 
+/// How a helper process is told the format of the environment.
+#[cfg(unix)]
+fn format_tag(format: Format) -> &'static str {
+    if format == Format::V10 {
+        "1.0"
+    } else {
+        "0.9"
+    }
+}
+
+/// The format [`format_tag`] gave `tag`.
+#[cfg(unix)]
+fn tag_format(tag: &str) -> Format {
+    if tag == "1.0" {
+        Format::V10
+    } else {
+        Format::V09
+    }
+}
+
 /// The environment variables that give [`copy_process`] its job: the
 /// environment, its format and the directory to copy it to.
 #[cfg(unix)]
@@ -319,10 +346,7 @@ fn copy_process() {
     let Ok(src) = std::env::var(COPY_SRC) else {
         return;
     };
-    let format = match std::env::var(COPY_FORMAT).unwrap().as_str() {
-        "1.0" => Format::V10,
-        _ => Format::V09,
-    };
+    let format = tag_format(&std::env::var(COPY_FORMAT).unwrap());
     let dst = PathBuf::from(std::env::var(COPY_DST).unwrap());
     let env = open(Path::new(&src), EnvironmentFlags::empty(), format);
     env.copy_to_path(dst, false).unwrap();
@@ -330,7 +354,6 @@ fn copy_process() {
 
 #[cfg(unix)]
 fn copy_in_another_process(src: &Path, format: Format, dst: &Path) {
-    let tag = if format == Format::V10 { "1.0" } else { "0.9" };
     let out = Command::new(std::env::current_exe().unwrap())
         .args([
             "copy_process",
@@ -340,7 +363,7 @@ fn copy_in_another_process(src: &Path, format: Format, dst: &Path) {
             "--nocapture",
         ])
         .env(COPY_SRC, src)
-        .env(COPY_FORMAT, tag)
+        .env(COPY_FORMAT, format_tag(format))
         .env(COPY_DST, dst)
         .output()
         .unwrap();
@@ -465,6 +488,132 @@ fn failed_meta_sync(format: Format, flags: EnvironmentFlags) {
     fill(&env, 6000, 10);
     keys.extend(6000..6010);
     assert_keys(&env, keys);
+}
+
+/// The environment variables that give [`read_process`] its job: the
+/// environment and its format.
+#[cfg(unix)]
+const READ_SRC: &str = "RLMDB_TEST_READ_SRC";
+#[cfg(unix)]
+const READ_FORMAT: &str = "RLMDB_TEST_READ_FORMAT";
+
+/// Run by [`read_in_another_process`] as a second process: a read
+/// transaction of a read-only handle; prints its txnid and the value of
+/// `key`.
+#[cfg(unix)]
+#[test]
+#[ignore = "helper process of the other tests in this file"]
+fn read_process() {
+    let Ok(src) = std::env::var(READ_SRC) else {
+        return;
+    };
+    let format = tag_format(&std::env::var(READ_FORMAT).unwrap());
+    let env = open(Path::new(&src), EnvironmentFlags::READ_ONLY, format);
+    let txn = env.begin_ro_txn().unwrap();
+    let value = txn.get(Dbi::MAIN, b"key").unwrap().map(<[u8]>::to_vec);
+    println!("read_process: txnid={} value={value:?}", txn.id());
+}
+
+/// What a read transaction of a read-only handle in another process sees
+/// in `src`, as [`read_process`] prints it.
+#[cfg(unix)]
+fn read_in_another_process(src: &Path, format: Format) -> String {
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "read_process",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env(READ_SRC, src)
+        .env(READ_FORMAT, format_tag(format))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "read process failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout
+        .lines()
+        .find_map(|l| l.split_once("read_process: ").map(|(_, r)| r.to_owned()))
+        .unwrap_or_else(|| panic!("no result from the read process:\n{stdout}"))
+}
+
+/// Whether C 0.9's `mdb_dump` (a read transaction of a read-only handle)
+/// of `src` shows `value`.
+#[cfg(unix)]
+fn c_dump_shows(c: &common::CTools, src: &Path, value: &[u8]) -> bool {
+    let out = c.run("mdb_dump", &[src.to_str().unwrap()], None);
+    let hex: String = value.iter().map(|b| format!("{b:02x}")).collect();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|l| l.trim() == hex)
+}
+
+/// The first commit of an environment, stopped after its meta page reached
+/// the file: `mti_txnid` is still 0. A read-only handle of another process
+/// reads the published snapshot (txnid 0, no data), not the newest meta
+/// page, which is the in-flight commit's; C 0.9's reads that one
+/// (`KNOWN_C_BUGS.md` #45). The commit then fails (its sync), and the old
+/// txnid goes back into the page. With the commit's meta page put back, as
+/// C leaves it after a failed `F_FULLFSYNC` (#41), the writer lock is free
+/// and still no reader of ours takes the page.
+#[cfg(unix)]
+#[test]
+fn robust_read_only_reader_skips_unpublished_first_commit() {
+    for format in FORMATS {
+        let what = format!("{format:?}");
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().to_path_buf();
+        let env = open(&src, EnvironmentFlags::empty(), format);
+        let ps = env.page_size();
+        assert_eq!(env.info().unwrap().last_txnid, 0, "{what}");
+        let c = if format == Format::V09 {
+            common::c_tools()
+        } else {
+            None
+        };
+        let published = "txnid=0 value=None";
+
+        let mut txn = env.begin_rw_txn().unwrap();
+        txn.put(Dbi::MAIN, b"key", b"uncommitted", WriteFlags::empty())
+            .unwrap();
+        let (sent, seen) = std::sync::mpsc::channel();
+        let path = src.clone();
+        env.after_next_meta_write(move || {
+            let page = meta_bytes(&path, ps)[ps..].to_vec();
+            let rust = read_in_another_process(&path, format);
+            let c = c.map(|c| c_dump_shows(c, &path, b"uncommitted"));
+            sent.send((page, rust, c)).unwrap();
+        });
+        env.fail_next_meta_sync(libc::EIO);
+        assert!(txn.commit().is_err(), "{what}");
+        let (in_flight, rust, c_saw_it) = seen.recv().unwrap();
+        let layout = format.layout();
+        let in_flight_meta = rlmdb::format::Meta::read_page_with_layout(&in_flight, layout);
+        assert_eq!(in_flight_meta.unwrap().txnid, 1, "{what}: not in flight");
+        assert_eq!(rust, published, "{what}: commit in flight");
+        if let Some(c_saw_it) = c_saw_it {
+            assert!(c_saw_it, "C's read-only fallback no longer reads it");
+        }
+        assert_eq!(file_txnids(&src, format, ps), [0, 0], "{what}");
+
+        // C's leftover of such a failure: the commit's meta page.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(src.join("data.mdb"))
+            .unwrap()
+            .write_all_at(&in_flight, ps as u64)
+            .unwrap();
+        assert_eq!(file_txnids(&src, format, ps), [0, 1], "{what}");
+        assert_eq!(read_in_another_process(&src, format), published, "{what}");
+        if let Some(c) = c {
+            assert!(c_dump_shows(c, &src, b"uncommitted"));
+        }
+    }
 }
 
 /// The real `F_FULLFSYNC` after the meta page write fails: the meta

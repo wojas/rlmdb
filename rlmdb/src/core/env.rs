@@ -217,6 +217,9 @@ pub struct Environment {
     /// The `errno` the sync after the next meta page write is to fail with
     /// (0: none), for tests ([`Environment::fail_next_meta_sync`]).
     meta_sync_fault: AtomicI32,
+    /// What to run once the next meta page write of this handle reached the
+    /// file, for tests ([`Environment::after_next_meta_write`]).
+    meta_write_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Writer state that lives in `MDB_env` in C (`me_pgoldest`). Its mutex
     /// also serialises write transactions within this process (the shared
     /// writer mutex does that across processes; without a lock file it is
@@ -427,6 +430,7 @@ impl Environment {
             flags: AtomicU32::new(flags),
             fatal: AtomicBool::new(false),
             meta_sync_fault: AtomicI32::new(0),
+            meta_write_hook: Mutex::new(None),
             writer: Mutex::new(WriterState {
                 pbuf_pad: 0,
                 pg_oldest: 0,
@@ -590,8 +594,33 @@ impl Environment {
         self.meta_sync_fault.store(errno, Ordering::Relaxed);
     }
 
-    /// The failure [`Environment::fail_next_meta_sync`] asked for, once.
+    /// Runs `hook` on the committing thread once the next meta page write
+    /// of this handle has reached the file (and, on macOS, its sync is
+    /// done), before the commit is published or fails as
+    /// [`Environment::fail_next_meta_sync`] asks: a commit stopped in
+    /// flight, holding the writer lock, for tests of what other processes
+    /// see meanwhile. Not part of the API: for this crate's tests
+    /// (including the integration tests).
+    #[doc(hidden)]
+    pub fn after_next_meta_write(&self, hook: impl FnOnce() + Send + 'static) {
+        *self
+            .meta_write_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Box::new(hook));
+    }
+
+    /// Runs the hook of [`Environment::after_next_meta_write`], then returns
+    /// the failure [`Environment::fail_next_meta_sync`] asked for; each
+    /// once.
     pub(crate) fn injected_meta_sync_error(&self) -> std::io::Result<()> {
+        let hook = self
+            .meta_write_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
         if self.meta_sync_fault.load(Ordering::Relaxed) == 0 {
             return Ok(());
         }

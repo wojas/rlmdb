@@ -10,7 +10,9 @@
 //!    until stable. From then on writers will not reuse pages this snapshot
 //!    needs.
 //! 3. Read the meta page of that txnid (`txnid & 1`) and take the free/main
-//!    DB records and `last_pgno` from it.
+//!    DB records and `last_pgno` from it. C's read-only handles take the
+//!    newest meta page instead while `mti_txnid` is 0; we do not
+//!    (`KNOWN_C_BUGS.md` #45).
 //!
 //! Step 3 races with writers: a writer committing txn `N+2` rewrites the
 //! meta page our txn `N` uses. C accepts that (very unlikely) torn read.
@@ -620,12 +622,12 @@ impl<'env> RoTxn<'env> {
         let mut torn = TornCopies::default();
         let (txnid, meta) = match &self.slot {
             ReaderSlot::Shared { lock, index } => loop {
+                // The snapshot `mti_txnid` names, also while it is 0, where
+                // C's read-only handles take the newest meta page instead:
+                // that can be the first commit's, written but not yet
+                // published, or failed, and writers build on `mti_txnid`
+                // (`KNOWN_C_BUGS.md` #45).
                 let txnid = lock.publish_current_txnid(*index);
-                if txnid == 0 && env.is_read_only() {
-                    let meta = env.pick_meta()?;
-                    lock.set_slot_txnid(*index, meta.txnid);
-                    break (meta.txnid, meta);
-                }
                 let copy = copy_meta(env, (txnid & 1) as usize);
                 let Some(meta) = torn.check(copy, || lock.txnid() != txnid)? else {
                     continue;

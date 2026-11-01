@@ -152,7 +152,9 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
   reader that races a commit in `mdb_txn_renew0` can see a snapshot newer
   than the txnid it pins, and its next snapshot is then older
   (`KNOWN_C_BUGS.md` #31); readers on `rlmdb` re-check the meta page and
-  never go back.
+  never go back. A read transaction of a C read-only handle can read the
+  first commit of an environment while it is in flight, or after it
+  failed (#45); readers on `rlmdb` pin the published snapshot.
 * A process that dies holding the writer lock: on Linux the robust mutex
   lets the next writer (C or Rust) recover, as between C processes. On
   macOS semaphores are not robust; C has the same limitation. FreeBSD
@@ -296,6 +298,7 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 | Nested transactions | `rlmdb/tests/nested_txn.rs` (written by one side, checked by the other), `interop` `nested_txns`, `reader_loop_during_nested`, `rlmdb-capi/tests/c/capi_write.c` |
 | Copies byte-identical to `mdb_copy [-c]` | `rlmdb/tests/env_copy.rs`, `rlmdb-tools/tests/copy_drop.rs`, `interop` `copy_dump_equal` |
 | A plain copy of a file with a meta page newer than the snapshot it pins gets the snapshot's meta there (readable, where `mdb_copy`'s copy is not); a failed sync after the meta page write is fatal and writes the old txnid back, so a copy taken before the re-open, by another process or `NO_LOCK` handle, shows the last good snapshot (both formats) | `rlmdb/tests/env_copy.rs` (`plain_copy_never_emits_a_meta_newer_than_its_snapshot`), `rlmdb/tests/robust_io_errors.rs` (`robust_failed_meta_sync_is_fatal`, and on macOS `robust_failed_full_fsync_is_fatal`) |
+| A read transaction of a read-only handle pins the snapshot `mti_txnid` names also while it is 0, so it never reads the first commit of an environment while that commit is in flight or after it failed, where C's read-only handles take the newest meta page (`KNOWN_C_BUGS.md` #45; both formats; C 0.9's `mdb_dump` as the oracle) | `rlmdb/tests/robust_io_errors.rs` (`robust_read_only_reader_skips_unpublished_first_commit`) |
 | The C API behaves as C (return codes, outputs, traces) | `rlmdb-capi/tests/c/capi_read.c`, `capi_write.c` (run against both libraries; traces must be identical; `DIFFERS()`/`DEVIATION()` mark the documented deviations), `rlmdb-capi/tests/tools.rs` (upstream `mdb_stat.c`/`mdb_dump.c` linked against both print the same) |
 | The tools behave as C's | `rlmdb-tools/tests/*.rs` (every option on every environment: same stdout, stderr, exit code; loaded environments identical as C sees them; `-V` prints rlmdb's version line where C prints its own) |
 | `mdb_version` reports 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)`; major and minor equal `lmdb.h`'s | `rlmdb-capi/tests/c/capi_read.c` (`MDB_VERSION_STRING` and 0.9.36 for C, 0.9.85 for Rust), `capi_version.c`, unit tests in `rlmdb/src/version.rs`, `rlmdb-capi/src/version.rs`, `rlmdb-tools/src/common.rs` |
