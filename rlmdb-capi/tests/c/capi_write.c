@@ -1218,6 +1218,11 @@ static void test_errors(void)
 	bad = bv((void *)1, 1);	/* ignored without DUPSORT, never read */
 	RC(mdb_del(txn, db, &k, &bad), MDB_BAD_TXN);
 	RC(mdb_cursor_get(c, &k, &d, MDB_FIRST), MDB_BAD_TXN);
+	/* before the operation and its arguments are looked at */
+	RC(mdb_cursor_get(c, &k, &d, (MDB_cursor_op)999), MDB_BAD_TXN);
+	RC(mdb_cursor_get(c, &k, NULL, MDB_GET_BOTH), MDB_BAD_TXN);
+	RC(mdb_cursor_get(c, NULL, &d, MDB_SET), MDB_BAD_TXN);
+	RC(mdb_cursor_get(c, &k, NULL, MDB_GET_MULTIPLE), MDB_BAD_TXN);
 	RC(mdb_cursor_put(c, &k, &d, 0), MDB_BAD_TXN);
 	RC(mdb_cursor_del(c, 0), MDB_BAD_TXN);
 	RC(mdb_stat(txn, db, &st), MDB_BAD_TXN);

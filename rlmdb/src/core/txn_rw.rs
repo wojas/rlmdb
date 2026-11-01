@@ -543,11 +543,16 @@ impl<'env> RwTxn<'env> {
         }
     }
 
-    /// `MDB_TXN_BLOCKED` → `MDB_BAD_TXN`: the state check of every
-    /// operation, and of the commit, nested or not. `TXN_HAS_CHILD` can only
-    /// be set here if a nested transaction was leaked with `mem::forget`
-    /// (a live one borrows this transaction); its pages went with it.
-    pub(crate) fn check_usable(&self) -> Result<()> {
+    /// `MDB_TXN_BLOCKED` → `MdbError::BadTxn`: the state check of every
+    /// operation, and of the commit, nested or not. Set when an operation
+    /// failed half-way (`MapFull`, `TxnFull`, an I/O error, ...) and may
+    /// have left a tree half changed, so the transaction can only be
+    /// aborted. `TXN_HAS_CHILD` can only be set here if a nested
+    /// transaction was leaked with `mem::forget` (a live one borrows this
+    /// transaction); its pages went with it. Public for a caller whose own
+    /// argument checks come after it in C (the C API's `mdb_cursor_get`
+    /// checks its operation after it).
+    pub fn check_usable(&self) -> Result<()> {
         if self.w.flags & TXN_BLOCKED != 0 {
             return Err(MdbError::BadTxn.into());
         }

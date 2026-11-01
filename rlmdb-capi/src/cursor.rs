@@ -225,7 +225,8 @@ fn raw_entry(e: Option<(&[u8], &[u8])>) -> Option<(MDB_val, MDB_val)> {
 /// `MDB_SET`, `MDB_SET_KEY`, `MDB_SET_RANGE`, `MDB_GET_BOTH` and
 /// `MDB_GET_BOTH_RANGE` read `key` (and the `GET_BOTH` ones `data`); every
 /// operation stores its results in the non-NULL arguments. `MDB_BAD_TXN`
-/// if the transaction was reset; `EINVAL` if it ended.
+/// if the transaction was reset, has an active child or failed (checked
+/// before the operation, as in C); `EINVAL` if it ended.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_cursor_get(
     cursor: *mut MDB_cursor,
@@ -238,6 +239,12 @@ pub unsafe extern "C" fn mdb_cursor_get(
         return EINVAL;
     };
     let result = c.with_cursor(|access| {
+        // C checks MDB_TXN_BLOCKED before the operation and its arguments.
+        // with_cursor has checked for a reset read transaction and an
+        // active child; a failed write transaction is the core's to say.
+        if let CursorAccess::Write(w, _) = &access {
+            w.check_usable().map_err(|e| e.to_err_code())?;
+        }
         let op = CursorOp::from_raw(op).ok_or(EINVAL)?;
         if data.is_null() && requires_data(op) {
             return Err(EINVAL);
