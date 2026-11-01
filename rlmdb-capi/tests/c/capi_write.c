@@ -474,6 +474,19 @@ static void test_put_get_del(void)
 	d = sv("ignored");
 	OK(mdb_del(txn, db, &k, &d));	/* data is ignored without DUPSORT */
 	RC(mdb_del(txn, db, &k, NULL), MDB_NOTFOUND);
+	/* so much so that it is not read: neither its NULL nor its unmapped
+	 * address matters (C drops it after checking the handle) */
+	k = sv("del-ignores-data");
+	d = sv("v");
+	OK(mdb_put(txn, db, &k, &d, 0));
+	d = bv(NULL, 1);
+	OK(mdb_del(txn, db, &k, &d));
+	d = sv("v");
+	OK(mdb_put(txn, db, &k, &d, 0));
+	d = bv((void *)1, 1);
+	RC(mdb_del(txn, 99, &k, &d), EINVAL);
+	OK(mdb_del(txn, db, &k, &d));
+	RC(mdb_del(txn, db, &k, &d), MDB_NOTFOUND);
 	k = sv("dk");
 	d = sv("d3");
 	OK(mdb_del(txn, dups, &k, &d));
@@ -1031,7 +1044,7 @@ static void test_errors(void)
 	MDB_txn *txn;
 	MDB_dbi db;
 	MDB_cursor *c;
-	MDB_val k, d;
+	MDB_val k, d, bad;
 	MDB_stat st;
 	char buf[2000];
 	int i, rc = 0;
@@ -1054,6 +1067,8 @@ static void test_errors(void)
 	RC(mdb_put(txn, db, &k, &d, 0), MDB_BAD_TXN);
 	RC(mdb_get(txn, db, &k, &d), MDB_BAD_TXN);
 	RC(mdb_del(txn, db, &k, NULL), MDB_BAD_TXN);
+	bad = bv((void *)1, 1);	/* ignored without DUPSORT, never read */
+	RC(mdb_del(txn, db, &k, &bad), MDB_BAD_TXN);
 	RC(mdb_cursor_get(c, &k, &d, MDB_FIRST), MDB_BAD_TXN);
 	RC(mdb_cursor_put(c, &k, &d, 0), MDB_BAD_TXN);
 	RC(mdb_cursor_del(c, 0), MDB_BAD_TXN);

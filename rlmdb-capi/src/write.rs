@@ -30,8 +30,8 @@
 use std::os::raw::{c_char, c_int, c_uint};
 
 use rlmdb::consts::{
-    MDB_APPEND, MDB_APPENDDUP, MDB_CURRENT, MDB_DUPFIXED, MDB_MAXKEYSIZE, MDB_MULTIPLE,
-    MDB_NODUPDATA, MDB_NOOVERWRITE, MDB_RESERVE,
+    MDB_APPEND, MDB_APPENDDUP, MDB_CURRENT, MDB_DUPFIXED, MDB_DUPSORT, MDB_MAXKEYSIZE,
+    MDB_MULTIPLE, MDB_NODUPDATA, MDB_NOOVERWRITE, MDB_RESERVE,
 };
 use rlmdb::{Dbi, MdbError, RwTxn, Transaction, WriteFlags};
 
@@ -272,6 +272,9 @@ pub unsafe extern "C" fn mdb_put(
 /// database without `MDB_DUPSORT`) all items of `key`; else only the
 /// matching data item. `MDB_NOTFOUND` if there is nothing to delete,
 /// `EACCES` in a read-only transaction.
+///
+/// As in C, `data` is not looked at unless the database has `MDB_DUPSORT`
+/// (`lmdb.h`: it is ignored), so it may be anything for other databases.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_del(
     txn: *mut MDB_txn,
@@ -291,22 +294,33 @@ pub unsafe extern "C" fn mdb_del(
             EINVAL
         };
     }
-    // SAFETY: key points to a valid value, data is NULL or one (lmdb.h).
-    let (key_in, data_in) = match unsafe { (key_input(key), input(data)) } {
-        (Ok(k), Ok(d)) => (k, d),
-        (Err(code), _) | (_, Err(code)) => return code,
+    // SAFETY: key points to a valid value (lmdb.h).
+    let key_in = match unsafe { key_input(key) } {
+        Ok(k) => k,
+        Err(code) => return code,
     };
     let limits = CopyLimits::of(t.env());
     let key_copy = KeyCopy::new(key_in, limits.key);
-    let data_copy = data_in.and_then(|d| limits.copy_data(d));
-    let data_in = data_copy.as_deref().or(data_in);
-    code(t.with_write(
-        |w| match w.del(Dbi::from_raw(dbi), key_copy.get(key_in), data_in) {
+    let db = Dbi::from_raw(dbi);
+    code(t.with_write(|w| {
+        // Without MDB_DUPSORT, C drops `data` unread (after its handle and
+        // transaction checks). A handle that fails the checks needs no
+        // data either: the delete fails on them.
+        let dupsort = w.db_flags(db).is_ok_and(|f| f.bits() & MDB_DUPSORT != 0);
+        let data_in = if dupsort {
+            // SAFETY: data is NULL or a valid value (lmdb.h: it is used
+            // with MDB_DUPSORT).
+            unsafe { input(data) }?
+        } else {
+            None
+        };
+        let data_copy = data_in.and_then(|d| limits.copy_data(d));
+        match w.del(db, key_copy.get(key_in), data_copy.as_deref().or(data_in)) {
             Ok(true) => Ok(()),
             Ok(false) => Err(MdbError::NotFound.to_err_code()),
             Err(e) => Err(e.to_err_code()),
-        },
-    ))
+        }
+    }))
 }
 
 /// `mdb_cursor_put`: store by cursor, leaving the cursor on the new item.
