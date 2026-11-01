@@ -373,6 +373,10 @@ impl DataMap {
         if len == 0 {
             return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
+        // Before the mmap: from it until the `DataMap` that unmaps on drop
+        // exists, nothing may fail (an early return would leak the map).
+        // A file that grows meanwhile is seen by `refresh_size`.
+        let size = file_size(&file)?;
         // SAFETY: a fresh mapping (addr = NULL) of a valid fd; the kernel
         // validates length and offset.
         let ptr = unsafe {
@@ -395,7 +399,6 @@ impl DataMap {
                 libc::madvise(ptr, len, libc::MADV_RANDOM);
             }
         }
-        let size = file_size(&file)?;
         Ok(DataMap {
             ptr: ptr as *mut u8,
             len,
