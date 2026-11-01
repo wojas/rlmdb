@@ -34,6 +34,8 @@
 //!   `semget(ftok(lockfile, 'M'), 2, mode | IPC_CREAT)`, sets both values
 //!   to 1 and stores its id in `mtb_semid`; the others check it with
 //!   `IPC_STAT` and `IPC_SET` (mdb10.c lines 6096-6110 and 6165-6173).
+//!   Unlike C, the exclusive opener refuses an existing set of the key
+//!   that is not ours to reset (`KNOWN_C_BUGS.md` #46).
 //!   Every `semop` uses `SEM_UNDO`, so the kernel releases the semaphore
 //!   of a process that dies holding it, and the flag in the lock file
 //!   (`mti_rlocked`, `mti_wlocked`) that the dead holder left set makes
@@ -677,10 +679,10 @@ mod sysv {
     use std::sync::atomic::{AtomicI32, Ordering};
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    use libc::{sembuf, semctl, semget, semop, SEM_UNDO, SETALL};
+    use libc::{sembuf, semctl, semget, semop, GETVAL, SEM_UNDO, SETALL};
 
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    use ffi::{sembuf, semctl, semget, semop, SEM_UNDO, SETALL};
+    use ffi::{sembuf, semctl, semget, semop, GETVAL, SEM_UNDO, SETALL};
 
     /// The SysV semaphore calls, which the `libc` crate does not bind for
     /// these BSDs. Prototypes and values from their `<sys/sem.h>` (the
@@ -700,6 +702,8 @@ mod sysv {
 
         /// `SEM_UNDO`: undo the operation when the process exits.
         pub const SEM_UNDO: c_int = 0o10000;
+        /// `GETVAL`: the value of one semaphore.
+        pub const GETVAL: c_int = 5;
         /// `SETALL`: set every value from `arg.array`.
         pub const SETALL: c_int = 9;
 
@@ -840,10 +844,60 @@ mod sysv {
         )
     }
 
+    /// `IPC_STAT` of set `semid` into `buf`, then `IPC_SET` of it, which
+    /// changes nothing but fails unless we are the set's owner or creator
+    /// or root: C's check that an opener may read and change the set
+    /// (mdb10.c lines 6168-6173).
+    fn check_access(semid: c_int, buf: &mut SemidDs) -> io::Result<()> {
+        for cmd in [libc::IPC_STAT, libc::IPC_SET] {
+            // SAFETY: IPC_STAT writes and IPC_SET reads one struct
+            // semid_ds through `arg.buf`, passed as the pointer (see
+            // `create`); `buf` is larger than that struct and aligned.
+            if unsafe { semctl(semid, 0, cmd, buf.0.as_mut_ptr()) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks that set `semid`, which `semget` returned for the lock
+    /// file's key, is one [`create`] may reset. C 1.0 resets whatever set
+    /// it gets (`KNOWN_C_BUGS.md` #46); the key is `ftok`'s, which keeps 8
+    /// bits of the device and 16 of the inode, so another program's set
+    /// can have it.
+    ///
+    /// * We pass [`check_access`], which every other opener must pass too
+    ///   ([`attach`]). If we do not, the set is another user's: its error
+    ///   (`EACCES`, `EPERM`).
+    /// * The set has exactly two semaphores, else `EEXIST`. `semget` with
+    ///   `nsems` 2 returns an existing set only if it has at least two,
+    ///   and semaphore number 2 exists only in a larger one: `GETVAL` of
+    ///   it fails with `EINVAL` in a set of two (POSIX). (`sem_nsems` would
+    ///   say so too, but the `libc` crate has no `struct semid_ds` for
+    ///   these BSDs.) `SETALL` of a larger set would read one value per
+    ///   semaphore from our two-element array and overwrite the other
+    ///   program's semaphores.
+    ///
+    /// A refused set is left as it is.
+    fn check_reusable(semid: c_int) -> io::Result<()> {
+        check_access(semid, &mut SemidDs([0; 512]))?;
+        // SAFETY: GETVAL takes no further argument.
+        if unsafe { semctl(semid, 2, GETVAL) } >= 0 {
+            return Err(io::Error::from_raw_os_error(libc::EEXIST));
+        }
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::EINVAL) {
+            Ok(())
+        } else {
+            Err(e)
+        }
+    }
+
     /// Creates (or reuses) the set for a lock file that we hold
     /// exclusively and whose metadata is `md`, sets both semaphores to 1,
     /// and stores its id at `rlock` (`mti_semid`) and cleared flags
-    /// (`mdb_env_setup_locks`, `*excl > 0`).
+    /// (`mdb_env_setup_locks`, `*excl > 0`). An existing set of the key
+    /// that is not ours to reset is refused ([`check_reusable`]).
     pub fn create(
         map: &LockMap,
         md: &Metadata,
@@ -856,10 +910,15 @@ mod sysv {
         if semid < 0 {
             return Err(io::Error::last_os_error());
         }
+        check_reusable(semid)?;
         let mut vals: [c_ushort; 2] = [1, 1];
-        // SAFETY: SETALL reads one value per semaphore (2) from
-        // `arg.array`. The `union semun` argument is passed as the pointer
-        // it holds: the C ABIs pass a pointer-sized union like a pointer.
+        // SAFETY: SETALL reads one value per semaphore of the set from
+        // `arg.array`, and `check_reusable` found two, as many as `vals`
+        // holds. A set never changes size, and its id names no other set
+        // before the kernel has reused its slot as many times as the id's
+        // sequence number has values. The `union semun` argument is passed
+        // as the pointer it holds: the C ABIs pass a pointer-sized union
+        // like a pointer.
         if unsafe { semctl(semid, 0, SETALL, vals.as_mut_ptr()) } < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -870,23 +929,15 @@ mod sysv {
     }
 
     /// Uses the set whose id another process stored at `rlock`, after
-    /// checking, as C does, that we may read it (`IPC_STAT`) and change it
-    /// (`IPC_SET`, which only its owner, its creator and root pass).
+    /// checking, as C does, that we may read and change it
+    /// ([`check_access`]).
     pub fn attach(
         map: &LockMap,
         rlock: usize,
         wlock: usize,
     ) -> io::Result<(SysVSemaphore, SysVSemaphore)> {
         let semid = map.load_i32(rlock);
-        let mut buf = SemidDs([0; 512]);
-        for cmd in [libc::IPC_STAT, libc::IPC_SET] {
-            // SAFETY: IPC_STAT writes and IPC_SET reads one struct
-            // semid_ds through `arg.buf`, passed as the pointer (see
-            // `create`); `buf` is larger than that struct and aligned.
-            if unsafe { semctl(semid, 0, cmd, buf.0.as_mut_ptr()) } < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
+        check_access(semid, &mut SemidDs([0; 512]))?;
         Ok(pair(map, semid, rlock, wlock))
     }
 
@@ -894,10 +945,8 @@ mod sysv {
     mod tests {
         use super::*;
         use std::ffi::CString;
+        use std::fs::File;
         use std::os::unix::ffi::OsStrExt;
-
-        /// `semctl(GETVAL)` (5 on every BSD and macOS), for the tests.
-        const GETVAL: c_int = 5;
 
         /// Where the tests put the set: `mtb_semid` at 20, `mt2_wlocked`
         /// at 64, as in the version 2 layout of these BSDs.
@@ -919,6 +968,79 @@ mod sysv {
         fn value(semid: c_int, semnum: c_ushort) -> c_int {
             // SAFETY: GETVAL takes no further argument.
             unsafe { semctl(semid, c_int::from(semnum), GETVAL) }
+        }
+
+        /// A lock file whose `ftok` key had no set, and a set of `nsems`
+        /// semaphores that we then create at that key, as another program
+        /// whose key collides with the lock file's would.
+        fn file_with_set(nsems: c_int) -> (File, c_int) {
+            // Files whose key is taken stay open, so that the next one
+            // gets another inode.
+            let mut taken = Vec::new();
+            for _ in 0..64 {
+                let f = tempfile::tempfile().unwrap();
+                f.set_len(4096).unwrap();
+                let key = ftok_key(&f.metadata().unwrap());
+                // SAFETY: semget takes plain integers.
+                let id = unsafe { semget(key, nsems, libc::IPC_CREAT | libc::IPC_EXCL | 0o600) };
+                if id >= 0 {
+                    return (f, id);
+                }
+                assert_eq!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EEXIST)
+                );
+                taken.push(f);
+            }
+            panic!("no free SysV key for {} files", taken.len());
+        }
+
+        fn set_all(semid: c_int, vals: &mut [c_ushort]) {
+            // SAFETY: SETALL reads one value per semaphore from `vals`,
+            // which the callers make as long as the set.
+            assert_eq!(unsafe { semctl(semid, 0, SETALL, vals.as_mut_ptr()) }, 0);
+        }
+
+        /// Another program's set at the lock file's key with more
+        /// semaphores than ours: `create` refuses it and changes nothing
+        /// (C 1.0's `SETALL` would read three values from its two-element
+        /// array).
+        #[test]
+        fn create_refuses_larger_set() {
+            let (f, id) = file_with_set(3);
+            let _remove = Remove(id);
+            set_all(id, &mut [11, 12, 13]);
+            let map = LockMap::map(&f, 4096).unwrap();
+            let err = create(&map, &f.metadata().unwrap(), 0o600, RLOCK, WLOCK)
+                .err()
+                .unwrap();
+            assert_eq!(err.raw_os_error(), Some(libc::EEXIST));
+            assert_eq!([value(id, 0), value(id, 1), value(id, 2)], [11, 12, 13]);
+            assert_eq!(map.load_i32(RLOCK), 0);
+        }
+
+        /// A set of two at the key (as a process that died with the
+        /// environment open leaves it) is ours: `create` takes it over and
+        /// resets both semaphores.
+        #[test]
+        fn create_reuses_set_of_two() {
+            let (f, id) = file_with_set(2);
+            let _remove = Remove(id);
+            set_all(id, &mut [0, 0]);
+            let map = LockMap::map(&f, 4096).unwrap();
+            let (r, w) = create(&map, &f.metadata().unwrap(), 0o600, RLOCK, WLOCK).unwrap();
+            assert_eq!((r.semid, w.semid, map.load_i32(RLOCK)), (id, id, id));
+            assert_eq!((value(id, READER), value(id, WRITER)), (1, 1));
+            // The size `check_reusable` probed for is the one IPC_STAT
+            // reports.
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            {
+                // SAFETY: semid_ds is a plain C struct; all-zero is valid.
+                let mut ds: libc::semid_ds = unsafe { std::mem::zeroed() };
+                // SAFETY: IPC_STAT writes one semid_ds through `arg.buf`.
+                assert_eq!(unsafe { semctl(id, 0, libc::IPC_STAT, &mut ds) }, 0);
+                assert_eq!({ ds.sem_nsems }, 2);
+            }
         }
 
         #[test]
