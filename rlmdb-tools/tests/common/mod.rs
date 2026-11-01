@@ -228,8 +228,11 @@ fn build_c() -> Result<PathBuf, String> {
     );
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     // The compiler flags are set in this file (`cc_build`, `compile_c`) and
-    // taken from the environment by `cc`.
+    // taken from the environment by `cc`. The toolchain is part of the
+    // name: the MSVC and MinGW builds of one Windows checkout share
+    // `CARGO_TARGET_TMPDIR`, and their C runtimes format differently.
     fnv(&mut h, include_bytes!("mod.rs"));
+    fnv(&mut h, target_triple().as_bytes());
     for var in ["CC", "CFLAGS"] {
         fnv(&mut h, std::env::var(var).unwrap_or_default().as_bytes());
     }

@@ -142,6 +142,18 @@ fn build_c_tools() -> Result<PathBuf, String> {
     for t in C_FLAGS.iter().chain(C_PROGRAMS) {
         fnv(&mut h, t.as_bytes());
     }
+    // The toolchain too: the MSVC and MinGW builds of one Windows checkout
+    // share `CARGO_TARGET_TMPDIR`, and their C runtimes differ.
+    fnv(&mut h, std::env::consts::ARCH.as_bytes());
+    fnv(&mut h, std::env::consts::OS.as_bytes());
+    fnv(
+        &mut h,
+        if cfg!(target_env = "msvc") {
+            b"msvc"
+        } else {
+            b""
+        },
+    );
     for f in &files {
         fnv(&mut h, f.file_name().unwrap().to_string_lossy().as_bytes());
         fnv(&mut h, &fs::read(f).map_err(|e| e.to_string())?);
