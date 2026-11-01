@@ -290,15 +290,22 @@ fn malformed_input() {
     ];
     for case in &cases {
         if cfg!(windows) && case.starts_with("maxreaders=-1") {
-            // C sizes the lock file in a 32-bit off_t on Windows: for this
-            // many readers the size wraps and the open fails in another
-            // way than rlmdb's (KNOWN_C_BUGS.md #43). Both fail to open.
+            // C passes the lock-file size for this many readers through 32
+            // bits on Windows, and what follows depends on the compiler
+            // (KNOWN_C_BUGS.md #43): the MinGW-w64 build fails to map the
+            // lock file (error 5), the cl build opens it at the wrapped
+            // size. rlmdb refuses the lock file's real size.
             let dir = tempdir();
             let l = load_both(dir.path(), Start::New, &[], case.as_bytes());
-            assert_eq!((l.c.code, l.r.code), (1, 1));
-            for run in [&l.c, &l.r] {
-                let err = run.stderr_text();
-                assert!(err.starts_with("mdb_env_open failed, error "), "{err}");
+            let err = l.r.stderr_text();
+            assert_eq!(l.r.code, 1, "{err}");
+            assert!(err.starts_with("mdb_env_open failed, error "), "{err}");
+            let err = l.c.stderr_text();
+            if cfg!(target_env = "msvc") {
+                assert_eq!(l.c.code, 0, "{err}");
+            } else {
+                assert_eq!(l.c.code, 1, "{err}");
+                assert!(err.starts_with("mdb_env_open failed, error 5 "), "{err}");
             }
             continue;
         }
