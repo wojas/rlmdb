@@ -220,8 +220,11 @@ enum CurStep {
 pub(crate) fn leaf_size(l: &Layout, nodemax: usize, ksize: usize, dsize: usize) -> usize {
     let mut sz = l.leaf_size(ksize, dsize);
     if sz > nodemax {
-        // put on overflow page
-        sz -= dsize - l.ovpage_size;
+        // put on overflow page: C's `sz -= data->mv_size - sizeof(pgno_t)`,
+        // which wraps (in `size_t`, to the right value) when a long key
+        // makes the node too big for data shorter than the reference. In
+        // this order nothing wraps: `sz` includes the data.
+        sz = sz - dsize + l.ovpage_size;
     }
     even(sz + 2)
 }
@@ -1535,6 +1538,11 @@ mod tests {
         // Data too big for the node: only a page number is stored inline.
         assert_eq!(leaf_size(l, nodemax, 3, 5000), even(8 + 3 + 8 + 2));
         assert_eq!(branch_size(l, 5), 15);
+        // A key that alone fills the node, with data shorter than the
+        // overflow reference (`nodemax` of 256-byte pages; such pages are
+        // not opened in 0.9 any more, but the size must not wrap).
+        let nodemax = l.node_max(256);
+        assert_eq!(leaf_size(l, nodemax, 200, 5), even(8 + 200 + 8 + 2));
     }
 
     #[test]
