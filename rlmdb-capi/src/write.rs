@@ -485,8 +485,9 @@ pub unsafe extern "C" fn mdb_drop(txn: *mut MDB_txn, dbi: MDB_dbi, del: c_int) -
         }
         .map_err(|e| e.to_err_code())
     });
-    // With del = 1 the core closes the handle (C: mdb_dbi_close), and its
-    // C comparators go with the handle's generation.
+    // With del = 1 the core closes the handle (C: mdb_dbi_close) and
+    // forgets its comparators (until a nested transaction's abort reopens
+    // it).
     code(result)
 }
 

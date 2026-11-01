@@ -47,7 +47,7 @@ use rlmdb::consts::DEFAULT_READERS;
 use rlmdb::{CursorId, Dbi, Environment, Format, RwTxn, Transaction};
 
 use crate::erased::{ErasedInactiveTxn, ErasedRoCursor, ErasedRoTxn, ErasedRwTxn};
-use crate::types::{MDB_assert_func, MDB_cmp_func, MDB_dbi};
+use crate::types::{MDB_assert_func, MDB_dbi};
 
 // ---------------------------------------------------------------------------
 // MDB_env
@@ -70,24 +70,6 @@ pub(crate) struct EnvConfig {
     pub(crate) page_size: Option<usize>,
 }
 
-/// The C comparison functions installed on one DBI slot, remembered for
-/// `mdb_cmp` / `mdb_dcmp` (the core has them only as trampolines, see
-/// `crate::cmp`).
-///
-/// They belong to one generation of the slot
-/// ([`Environment::handle_generation`]): the core forgets its comparators
-/// whenever it closes a handle, also when the transaction that created the
-/// database aborts (a nested one included), and a database that gets the
-/// slot next starts with the default order, as C's `mdb_dbi_open` resets
-/// `md_cmp` (`mdb_default_cmp`). A record of an older generation is stale.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct CComparators {
-    pub(crate) key: Option<MDB_cmp_func>,
-    pub(crate) dup: Option<MDB_cmp_func>,
-    /// The generation of the slot the functions were installed in.
-    generation: u32,
-}
-
 /// `MDB_env`: an LMDB environment handle (opaque to C).
 pub struct MDB_env {
     config: Mutex<EnvConfig>,
@@ -99,8 +81,6 @@ pub struct MDB_env {
     /// `mdb_env_set_assert`. Stored only: the Rust implementation reports
     /// errors instead of asserting, so it is never called.
     pub(crate) assert_func: Mutex<Option<MDB_assert_func>>,
-    /// C comparators per DBI (`mdb_set_compare`, `mdb_set_dupsort`).
-    comparators: Mutex<Vec<CComparators>>,
 }
 
 impl MDB_env {
@@ -119,7 +99,6 @@ impl MDB_env {
             path: OnceLock::new(),
             userctx: AtomicPtr::new(ptr::null_mut()),
             assert_func: Mutex::new(None),
-            comparators: Mutex::new(Vec::new()),
         }
     }
 
@@ -153,41 +132,6 @@ impl MDB_env {
     /// `me_path`: the path given to `mdb_env_open`, if open.
     pub(crate) fn path(&self) -> Option<&CString> {
         self.path.get()
-    }
-
-    /// The C comparators installed on `dbi` in its current generation.
-    pub(crate) fn c_comparators(&self, dbi: MDB_dbi) -> CComparators {
-        let Some(env) = self.open_env() else {
-            return CComparators::default();
-        };
-        let generation = env.handle_generation(Dbi::from_raw(dbi));
-        lock(&self.comparators)
-            .get(dbi as usize)
-            .copied()
-            .filter(|c| c.generation == generation)
-            .unwrap_or_default()
-    }
-
-    /// Updates the C comparators remembered for `dbi`, a valid handle of
-    /// the open environment, after the core installed them; a record of an
-    /// older generation of the slot is dropped first.
-    pub(crate) fn update_c_comparators(&self, dbi: MDB_dbi, f: impl FnOnce(&mut CComparators)) {
-        let Some(env) = self.open_env() else {
-            return;
-        };
-        let generation = env.handle_generation(Dbi::from_raw(dbi));
-        let mut all = lock(&self.comparators);
-        let i = dbi as usize;
-        if all.len() <= i {
-            all.resize(i + 1, CComparators::default());
-        }
-        if all[i].generation != generation {
-            all[i] = CComparators {
-                generation,
-                ..CComparators::default()
-            };
-        }
-        f(&mut all[i]);
     }
 }
 

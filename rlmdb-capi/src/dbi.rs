@@ -17,7 +17,7 @@ use std::os::raw::{c_char, c_int, c_uint, c_void};
 use rlmdb::consts::{FREE_DBI, MDB_CREATE, MDB_DUPSORT, MDB_INTEGERKEY, VALID_FLAGS};
 use rlmdb::{Comparator, DatabaseFlags, Dbi, Transaction};
 
-use crate::cmp::trampoline_for;
+use crate::cmp::{c_function_of, trampoline_for};
 use crate::handles::{bad_txn, MDB_env, MDB_txn};
 use crate::types::*;
 use crate::write::KeyCopy;
@@ -178,7 +178,7 @@ pub unsafe extern "C" fn mdb_dbi_close(env: *mut MDB_env, dbi: MDB_dbi) {
         return;
     };
     if let Some(open) = e.open_env() {
-        // (Its C comparators go with the handle's generation.)
+        // (The core forgets the comparators installed on it.)
         open.close_db(Dbi::from_raw(dbi));
     }
 }
@@ -201,7 +201,7 @@ unsafe fn set_comparator(
         Ok(t) => t,
         Err(code) => return code,
     };
-    let result = t.with_txn(EINVAL, |rt| {
+    code(t.with_txn(EINVAL, |rt| {
         let rust_cmp = match cmp {
             Some(f) => Some(trampoline_for(f).ok_or(libc::ENOMEM)?),
             None => None,
@@ -213,17 +213,7 @@ unsafe fn set_comparator(
             rt.set_compare(db, rust_cmp)
         };
         set.map_err(|e| e.to_err_code())
-    });
-    if result.is_ok() {
-        t.env().update_c_comparators(dbi, |c| {
-            if dup {
-                c.dup = cmp;
-            } else {
-                c.key = cmp;
-            }
-        });
-    }
-    code(result)
+    }))
 }
 
 /// `mdb_set_compare`: set a custom key comparison function for a database.
@@ -343,6 +333,10 @@ fn default_comparator(t: &MDB_txn, dbi: MDB_dbi, dup: bool, a_len: usize) -> Opt
 /// comparator of `dbi`: the C function installed for it, else the
 /// built-in one.
 ///
+/// The installed functions are the core's (C's `me_dbxs`), which keeps
+/// them with the handle: they go when it is closed and come back when the
+/// abort of a nested transaction that dropped the database reopens it.
+///
 /// # Safety
 ///
 /// `txn` is NULL or a live handle; `a` and `b` are NULL or valid values.
@@ -361,11 +355,17 @@ unsafe fn compare(
     let (Ok(Some(sa)), Ok(Some(sb))) = (unsafe { input(a) }, unsafe { input(b) }) else {
         return 0;
     };
-    let installed = t.env().c_comparators(dbi);
-    if let Some(f) = if dup { installed.dup } else { installed.key } {
-        // SAFETY: f is the comparator the program installed; a and b are
-        // valid values (checked above).
-        return unsafe { f(a, b) };
+    let (key, dcmp) = t.env().open_env().map_or((None, None), |e| {
+        e.installed_comparators(Dbi::from_raw(dbi))
+    });
+    if let Some(cmp) = if dup { dcmp } else { key } {
+        return match c_function_of(cmp) {
+            // SAFETY: f is the comparator the program installed; a and b
+            // are valid values (checked above).
+            Some(f) => unsafe { f(a, b) },
+            // Not one of ours (installed through the Rust API).
+            None => sign(cmp(sa, sb)),
+        };
     }
     default_comparator(t, dbi, dup, sa.len()).map_or(0, |c| sign(c.compare(sa, sb)))
 }

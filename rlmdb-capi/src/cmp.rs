@@ -14,7 +14,9 @@
 //! never needs to be freed (code addresses stay valid). No thread-local
 //! state is involved, so comparisons work on any thread. More than
 //! [`SLOTS`] distinct functions in one process make `mdb_set_compare` fail
-//! with `ENOMEM`.
+//! with `ENOMEM`. A trampoline leads back to its C function
+//! ([`c_function_of`]), so the core's comparators are the one record of
+//! which C function orders a database (`mdb_cmp`, `mdb_dcmp`).
 
 use std::cmp::Ordering;
 use std::sync::OnceLock;
@@ -79,6 +81,15 @@ pub(crate) fn trampoline_for(f: MDB_cmp_func) -> Option<CmpFn> {
     None
 }
 
+/// The C function a comparator of the core calls, if it is one of the
+/// trampolines (installed by `mdb_set_compare` / `mdb_set_dupsort`).
+pub(crate) fn c_function_of(cmp: CmpFn) -> Option<MDB_cmp_func> {
+    let slot = TRAMPOLINES
+        .iter()
+        .position(|&t| t as usize == cmp as usize)?;
+    C_FUNCTIONS[slot].get().copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +113,12 @@ mod tests {
             t as usize,
             "slot reused"
         );
+        // And the trampoline leads back to it.
+        let back = c_function_of(t).unwrap();
+        assert_eq!(back as *const () as usize, by_length as *const () as usize);
+        fn rust_order(a: &[u8], b: &[u8]) -> Ordering {
+            a.cmp(b)
+        }
+        assert!(c_function_of(rust_order).is_none());
     }
 }

@@ -1109,6 +1109,70 @@ static void comparator_reuse(int dup, int nested)
 	mdb_env_close(env);
 }
 
+#ifdef LMDB_RUST
+/* KNOWN_C_BUGS.md #20: the abort of a child that deleted a database with
+ * mdb_drop(del = 1) reopens the handle for the parent, and with it the
+ * comparison function installed on it (mdb_set_compare, dup 0, or
+ * mdb_set_dupsort, dup 1): mdb_cmp/mdb_dcmp and what the parent reads and
+ * writes keep the database's order, also after the commit. (C closes the
+ * handle for good.) Returns 0, or the step that failed; it has no checks
+ * of its own, as DEVIATION() counts one. */
+static int nested_drop_keeps_comparator(int dup)
+{
+	MDB_env *env;
+	MDB_txn *txn, *child;
+	MDB_dbi dbi;
+	MDB_cursor *c;
+	MDB_val k, d, a = sv("a"), b = sv("b");
+	int (*cmp)(MDB_txn *, MDB_dbi, const MDB_val *, const MDB_val *) =
+		dup ? mdb_dcmp : mdb_cmp;
+	char path[1200], x[2] = "a";
+	int step = 0;
+
+	snprintf(path, sizeof(path), "%s/dropabort-%d", scratch, dup);
+	mkdir(path, 0775);
+	if (mdb_env_create(&env) || mdb_env_set_maxdbs(env, 2) ||
+		mdb_env_open(env, path, MDB_NOTLS, 0664))
+		return 1;
+	if (mdb_txn_begin(env, NULL, 0, &txn) ||
+		mdb_dbi_open(txn, "db", MDB_CREATE | (dup ? MDB_DUPSORT : 0), &dbi) ||
+		(dup ? mdb_set_dupsort : mdb_set_compare)(txn, dbi, revcmp))
+		return 1;
+	for (x[0] = 'a'; x[0] <= 'e'; x[0]++) {
+		k = dup ? sv("k") : sv(x);
+		d = sv(x);
+		if (mdb_put(txn, dbi, &k, &d, 0))
+			return 2;
+	}
+	if (mdb_txn_commit(txn) || mdb_txn_begin(env, NULL, 0, &txn))
+		return 3;
+	k = dup ? sv("k") : a;
+	if (mdb_get(txn, dbi, &k, &d) || cmp(txn, dbi, &a, &b) <= 0)
+		return 4;
+	if (mdb_txn_begin(env, txn, 0, &child) || mdb_drop(child, dbi, 1))
+		return 5;
+	mdb_txn_abort(child);
+	if (cmp(txn, dbi, &a, &b) <= 0)
+		return 6;
+	if (mdb_cursor_open(txn, dbi, &c) || mdb_cursor_get(c, &k, &d, MDB_FIRST) ||
+		!veq(dup ? d : k, "e"))
+		return 7;
+	k = dup ? sv("k") : sv("f");
+	d = sv("f");
+	if (mdb_put(txn, dbi, &k, &d, 0) || mdb_txn_commit(txn))
+		return 8;
+	if (mdb_txn_begin(env, NULL, MDB_RDONLY, &txn) || cmp(txn, dbi, &a, &b) <= 0)
+		return 9;
+	if (mdb_cursor_open(txn, dbi, &c) || mdb_cursor_get(c, &k, &d, MDB_FIRST) ||
+		!veq(dup ? d : k, "f"))
+		step = 10;
+	mdb_cursor_close(c);
+	mdb_txn_abort(txn);
+	mdb_env_close(env);
+	return step;
+}
+#endif
+
 static void test_comparator_reuse(void)
 {
 	int dup, nested;
@@ -1116,6 +1180,8 @@ static void test_comparator_reuse(void)
 	for (dup = 0; dup < 2; dup++)
 		for (nested = 0; nested < 2; nested++)
 			comparator_reuse(dup, nested);
+	DEVIATION(RC(nested_drop_keeps_comparator(0), 0));
+	DEVIATION(RC(nested_drop_keeps_comparator(1), 0));
 }
 
 /* ---------------------------------------------------------------------- */

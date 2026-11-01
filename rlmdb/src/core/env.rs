@@ -736,16 +736,22 @@ impl Environment {
         self.dbis.close(db)
     }
 
-    /// The generation of handle `db` (`me_dbiseqs[db]`). It changes when
-    /// the handle is closed (by [`Environment::close_db`], by dropping its
-    /// database, or by the abort of the transaction that created it) and
-    /// when its slot is given to a database again, so a layer that keeps
-    /// state per handle can tell whether a handle value still names the
-    /// database the state was made for. Not part of the API: the C API
-    /// (`rlmdb-capi`) keeps the C functions of `mdb_set_compare` this way.
+    /// The comparison functions installed on handle `db` (by
+    /// [`Self::set_compare`] / [`Self::set_dupsort`] or their
+    /// [`Transaction`] forms), key order first; `None` for an order that is
+    /// the default: C's `me_dbxs[db].md_cmp` and `md_dcmp` where the
+    /// program set them. They belong to the handle: closing it (also by
+    /// dropping its database, or by the abort of the transaction that
+    /// created it) forgets them, and the abort of a nested transaction
+    /// that dropped the database brings them back with the handle. Not
+    /// part of the API: the C API (`rlmdb-capi`) answers `mdb_cmp` and
+    /// `mdb_dcmp` with them.
     #[doc(hidden)]
-    pub fn handle_generation(&self, db: Dbi) -> u32 {
-        self.dbis.seq_of(db.0 as usize)
+    pub fn installed_comparators(&self, db: Dbi) -> (Option<CmpFn>, Option<CmpFn>) {
+        self.dbis
+            .read()
+            .get(db.0 as usize)
+            .map_or((None, None), |s| (s.custom_cmp, s.custom_dcmp))
     }
 
     /// `mdb_txn_begin(MDB_RDONLY)`: start a read transaction on the latest

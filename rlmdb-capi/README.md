@@ -460,6 +460,9 @@ C library and against the Rust `liblmdb.a`:
 * C comparison functions are adapted through a table of 64 trampolines keyed
   by the C function pointer (`src/cmp.rs`): the core takes plain
   `fn(&[u8], &[u8]) -> Ordering` comparators that cannot carry a pointer.
+  `mdb_cmp`/`mdb_dcmp` call the C function behind the trampoline the core
+  keeps for the handle, so they follow the handle as the core does (gone
+  when it is closed, back when a nested transaction's abort reopens it).
 
 ## Tests
 
@@ -523,7 +526,8 @@ environments.
   (in read and write transactions), and gone with the handle when its
   creation aborts (also in a nested transaction: the database that reuses
   the handle has the default order in `mdb_cmp`/`mdb_dcmp` and in what it
-  stores),
+  stores) and kept with it when a child's `mdb_drop` is undone by its abort
+  (`KNOWN_C_BUGS.md` #20, Rust build only),
   `MDB_MAP_FULL` and the `MDB_BAD_TXN` state,
   threads waiting for the writer lock, `mdb_drop`, nested transactions
   (commit, abort, two levels, failing children, parents committed or
