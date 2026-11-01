@@ -698,9 +698,13 @@ impl<'env> RwTxn<'env> {
         let depth = self.db_of(cdst).depth;
         self.cur_mut(cdst).pop();
         let rc = self.rebalance(cdst);
-        // Did the tree height change?
+        // Did the tree height change? C adds `md_depth - depth` (as `int`)
+        // and stores the sum in the 16-bit `mc_snum`, which is adding the
+        // difference modulo 2^16: done so here, as a signed 16-bit change
+        // (a file's `md_depth` is not checked, and may be 0x8000).
         let new_depth = self.db_of(cdst).depth;
-        let snum = (snum as isize + isize::from(new_depth as i16 - depth as i16)) as usize;
+        let change = new_depth.wrapping_sub(depth) as i16;
+        let snum = (snum as isize + isize::from(change)) as usize;
         let w = self.cur_mut(cdst);
         w.snum = snum;
         w.top = snum.saturating_sub(1);

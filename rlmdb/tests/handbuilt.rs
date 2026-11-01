@@ -677,3 +677,80 @@ fn small_09_pages_are_refused() {
         assert_eq!(got, sorted, "{ps}");
     }
 }
+
+/// A leaf of `layout` holding `keys`, each with the value `v`.
+fn leaf_of(layout: &'static Layout, ps: usize, pgno: u64, keys: &[&[u8]]) -> Vec<u8> {
+    let mut buf = vec![0u8; ps];
+    let mut p = PageMut::with_layout(&mut buf, layout);
+    p.init(pgno, P_LEAF);
+    for (i, k) in keys.iter().enumerate() {
+        p.add_node(i, k, NodeData::Inline(b"v"), 0).unwrap();
+    }
+    buf
+}
+
+/// A branch page of `layout` with the given (separator, child) nodes, the
+/// first separator being the implicit empty key.
+fn branch_of(layout: &'static Layout, ps: usize, pgno: u64, nodes: &[(&[u8], u64)]) -> Vec<u8> {
+    let mut buf = vec![0u8; ps];
+    let mut p = PageMut::with_layout(&mut buf, layout);
+    p.init(pgno, P_BRANCH);
+    for (i, (k, child)) in nodes.iter().enumerate() {
+        p.add_node(i, k, NodeData::Child(*child), 0).unwrap();
+    }
+    buf
+}
+
+/// A main DB record whose `md_depth` lies: 0x8000 over a sound tree of a
+/// branch root and two leaves. Nothing checks `md_depth` (C does not); a
+/// delete that merges the leaves collapses the root and makes it 0x7fff,
+/// and `mdb_page_merge` then adds the change to the cursor's height in 16
+/// bits. The port computed it as `0x7fff_i16 - 0x8000 as i16`, which
+/// overflowed (a panic in debug builds). The delete must commit, leaving
+/// the depth C leaves.
+#[test]
+fn merge_with_a_lying_depth_commits() {
+    for layout in [&V09, &V10] {
+        let (a, b): (Vec<Vec<u8>>, Vec<Vec<u8>>) = (0..5)
+            .map(|i| (format!("a{i}").into_bytes(), format!("b{i}").into_bytes()))
+            .unzip();
+        let a_keys: Vec<&[u8]> = a.iter().map(|k| &k[..]).collect();
+        let b_keys: Vec<&[u8]> = b.iter().map(|k| &k[..]).collect();
+        let pages = vec![
+            branch_of(layout, PS, 2, &[(b"", 3), (b"b0", 4)]),
+            leaf_of(layout, PS, 3, &a_keys),
+            leaf_of(layout, PS, 4, &b_keys),
+        ];
+        let main = Db {
+            depth: 0x8000,
+            branch_pages: 1,
+            leaf_pages: 2,
+            entries: 10,
+            root: 2,
+            ..Db::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("data.mdb"),
+            file_with(layout, PS, &pages, main),
+        )
+        .unwrap();
+        let env = open_rw(dir.path(), 2);
+        let what = format!("{:?}", env.format());
+        let mut txn = env.begin_rw_txn().unwrap();
+        txn.del(Dbi::MAIN, b"b0", None).unwrap();
+        txn.commit().unwrap();
+        let txn = env.begin_ro_txn().unwrap();
+        let st = txn.stat(Dbi::MAIN).unwrap();
+        assert_eq!(
+            (st.depth, st.branch_pages, st.leaf_pages),
+            (0x7fff, 0, 1),
+            "{what}"
+        );
+        let keys: Vec<Vec<u8>> = walk_forward(&txn, Dbi::MAIN)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(keys, [&a[..], &b[1..]].concat(), "{what}");
+    }
+}
