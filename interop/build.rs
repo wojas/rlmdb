@@ -283,7 +283,7 @@ fn build_lmdb10(
 ) -> Vec<(String, PathBuf)> {
     let src = |f: &str| lmdb10_dir.join(f);
     // 1.0's liblmdb.a: mdb.o, midl.o, module.o; programs link `-ldl` for
-    // module.o's dlopen().
+    // module.o's dlopen() where that is a library of its own (`dl_libs`).
     let midl_obj = compile(out_dir, "lmdb10_midl", lmdb10_dir, &[src("midl.c")]);
     let module_obj = compile(out_dir, "lmdb10_module", lmdb10_dir, &[src("module.c")]);
     let mdb_obj = compile(out_dir, "lmdb10_mdb", lmdb10_dir, &[src("mdb.c")]);
@@ -306,14 +306,14 @@ fn build_lmdb10(
         if CHACHA8_PROGRAMS.contains(prog) {
             objs.extend(chacha8_obj.iter().cloned());
         }
-        let exe = link_with(bin_dir, &name, &objs, &lib_objs, &["-ldl"]);
+        let exe = link_with(bin_dir, &name, &objs, &lib_objs, dl_libs());
         exported.push((name, exe));
     }
 
     // The C peer against the 1.0 API (a superset of 0.9's).
     let objs = compile(out_dir, "lmdb10_cpeer", lmdb10_dir, peer_srcs);
     let name = name10("cpeer");
-    let exe = link_with(bin_dir, &name, &objs, &lib_objs, &["-ldl"]);
+    let exe = link_with(bin_dir, &name, &objs, &lib_objs, dl_libs());
     exported.push((name, exe));
 
     // writeops against 1.0 (it sets the page size with 1.0's
@@ -325,7 +325,7 @@ fn build_lmdb10(
         &[writeops_src.to_path_buf()],
     );
     let name = name10("writeops");
-    let exe = link_with(bin_dir, &name, &objs, &lib_objs, &["-ldl"]);
+    let exe = link_with(bin_dir, &name, &objs, &lib_objs, dl_libs());
     exported.push((name, exe));
 
     // The same against a 1.0 library built with -DNDEBUG, for scripts that
@@ -347,7 +347,7 @@ fn build_lmdb10(
         .cloned()
         .collect();
     let name = "writeops10_ndebug".to_string();
-    let exe = link_with(bin_dir, &name, &objs, &ndebug_lib_objs, &["-ldl"]);
+    let exe = link_with(bin_dir, &name, &objs, &ndebug_lib_objs, dl_libs());
     exported.push((name, exe));
 
     // layout_dump includes 1.0's mdb.c, so it only needs midl.o.
@@ -394,6 +394,17 @@ fn lmdb10_dir(manifest_dir: &Path) -> PathBuf {
 /// `true` when building for Windows (the build script runs on the host).
 fn target_windows() -> bool {
     env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+}
+
+/// The linker arguments that give C 1.0's `module.c` its `dlopen`: `-ldl`
+/// where `dlopen` lives in a library of its own (Linux, macOS, FreeBSD,
+/// DragonFly), nothing on OpenBSD and NetBSD, which have no libdl (`dlopen`
+/// is in libc and `-ldl` fails the link).
+fn dl_libs() -> &'static [&'static str] {
+    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("openbsd") | Ok("netbsd") => &[],
+        _ => &["-ldl"],
+    }
 }
 
 /// `true` when the C compiler is MSVC's `cl` (or takes its options).
