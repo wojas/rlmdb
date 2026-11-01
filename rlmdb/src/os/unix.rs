@@ -783,6 +783,22 @@ pub fn map_data(
     DataMap::map_readonly(file, len, random)
 }
 
+/// `false`: a map may reach past the end of the file here (C 0.9 does not
+/// extend the data file on Unix, without `MDB_WRITEMAP`).
+pub fn map_needs_file_length(_format: crate::format::layout::Format) -> bool {
+    false
+}
+
+/// Extends `file` to `len` bytes if it is shorter, never shortening it.
+/// Only Windows needs it before mapping ([`map_needs_file_length`]); the
+/// same everywhere, so the caller's ordering can be tested on any system.
+pub fn extend_file(file: &File, len: u64) -> io::Result<()> {
+    if file_size(file)? >= len {
+        return Ok(());
+    }
+    file.set_len(len)
+}
+
 /// `mdb_env_share_locks`: turns our exclusive lock on byte 0 of the lock
 /// file into a shared one (an `F_SETLK` converts it).
 pub fn downgrade_lock(file: &File) -> io::Result<()> {

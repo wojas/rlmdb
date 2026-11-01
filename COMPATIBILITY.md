@@ -112,7 +112,10 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
   section; a writer commits the pages it adds in its view, as C 1.0 does,
   which is what makes them visible to the other processes). rlmdb never shrinks a 0.9 file when the map size shrinks; C
   0.9 tries, and fails (`ERROR_USER_MAPPED_FILE`) while another process
-  maps more, for C and Rust peers alike. A read-only 1.0 environment maps
+  maps more, for C and Rust peers alike, and otherwise cuts the file, also
+  pages another process committed past its size meanwhile. rlmdb reads the
+  size again and extends the file holding the writer mutex
+  (`KNOWN_C_BUGS.md` row 57). A read-only 1.0 environment maps
   the file as it is and maps it again when a snapshot needs more (C 1.0's
   faults instead, `KNOWN_C_BUGS.md`, "LMDB 1.0"). An existing environment
   is always opened with the page size recorded in it.

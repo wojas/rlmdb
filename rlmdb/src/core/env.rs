@@ -451,6 +451,12 @@ impl Environment {
         }
         drop(setup);
 
+        if !read_only {
+            extend_for_map(&data_file, map_size, layout.format, lock.as_ref(), || {
+                let newest = read_header(&data_file, layout)?.ok_or(MdbError::Invalid)?;
+                Ok(newest.0.txnid)
+            })?;
+        }
         let random = flags & MDB_NORDAHEAD != 0;
         let map = os::map_data(data_file.try_clone()?, map_size, random, layout.format)?
             .with_meta_pages(NUM_METAS * page_size);
@@ -926,6 +932,15 @@ impl Environment {
             .and_then(|n| n.checked_mul(self.page_size))
             .ok_or(MdbError::Invalid)?;
         size = size.max(min_size);
+        if !self.is_read_only() {
+            extend_for_map(
+                &self.data_file,
+                size,
+                self.layout.format,
+                self.lock_region(),
+                || self.pick_meta().map(|m| m.txnid),
+            )?;
+        }
         let random = self.raw_flags() & MDB_NORDAHEAD != 0;
         let map = os::map_data(
             self.data_file.try_clone()?,
@@ -1187,4 +1202,152 @@ fn read_header(file: &File, layout: &Layout) -> Result<Option<(Meta, Meta)>> {
         off += u64::from(best.map_or(0, |b| b.page_size()));
     }
     Ok(best.zip(first))
+}
+
+/// Makes the data file as long as a writable map of `len` bytes needs
+/// before it is mapped ([`os::map_needs_file_length`]: LMDB 0.9 on
+/// Windows, where `mdb_env_map` sets it with `SetEndOfFile`). The file is
+/// only extended, never shortened, and with a lock file the size is read
+/// again and the file extended holding the writer mutex: pages are
+/// committed under it, so none can land past the end just read before the
+/// extension. C sets the length outright, from a meta page read earlier,
+/// which also shortens a longer file and cuts such pages
+/// (`KNOWN_C_BUGS.md` row 57). An opener that holds the lock file exclusively
+/// has the environment to itself; without a lock file other processes are
+/// the caller's job, as in C. `newest_txnid` is for [`LockRegion::lock_writer`].
+fn extend_for_map(
+    file: &File,
+    len: usize,
+    format: Format,
+    lock: Option<&LockRegion>,
+    newest_txnid: impl FnOnce() -> Result<u64>,
+) -> Result<()> {
+    if !os::map_needs_file_length(format) {
+        return Ok(());
+    }
+    extend_under(file, len as u64, || {
+        Ok(match lock.filter(|l| !l.is_exclusive()) {
+            Some(lock) => {
+                lock.lock_writer(newest_txnid)?;
+                Some(WriterMutex(lock))
+            }
+            None => None,
+        })
+    })
+}
+
+/// [`os::extend_file`] to `len`, holding what `lock` returns: it must keep
+/// others from committing pages past the end of the file until it is
+/// dropped. The size read before taking it only spares taking it; the
+/// extension reads the size again.
+fn extend_under<G>(file: &File, len: u64, lock: impl FnOnce() -> Result<G>) -> Result<()> {
+    if os::file_size(file)? >= len {
+        return Ok(());
+    }
+    let _held = lock()?;
+    os::extend_file(file, len)?;
+    Ok(())
+}
+
+/// The lock file's writer mutex, held until dropped.
+struct WriterMutex<'a>(&'a LockRegion);
+
+impl Drop for WriterMutex<'_> {
+    fn drop(&mut self) {
+        self.0.unlock_writer();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_rw(path: &Path) -> File {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .unwrap()
+    }
+
+    /// The race of an opener that extends the data file from a stale size:
+    /// while it waits for the writer mutex, another process with a larger
+    /// map grows the file and commits a page at its end. Under the mutex
+    /// the size is read again, and the file is left as it is.
+    #[test]
+    fn extending_reads_the_size_again_under_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.mdb");
+        let f = open_rw(&path);
+        f.set_len(4096).unwrap();
+        let other = open_rw(&path);
+        extend_under(&f, 1 << 20, || {
+            other.set_len(3 << 20).unwrap();
+            os::write_all_at(&other, &[9u8; 4096], (3 << 20) - 4096).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(f.metadata().unwrap().len(), 3 << 20);
+        let mut last = [0u8; 1];
+        os::read_at(&f, &mut last, (3 << 20) - 1).unwrap();
+        assert_eq!(last[0], 9);
+        // A long file: not even the lock is taken.
+        extend_under(&f, 1 << 20, || -> Result<()> { panic!("locked") }).unwrap();
+        // A short one is extended.
+        let short = open_rw(&dir.path().join("short.mdb"));
+        extend_under(&short, 1 << 20, || Ok(())).unwrap();
+        assert_eq!(short.metadata().unwrap().len(), 1 << 20);
+    }
+
+    /// Two threads for two processes, many times: one grows the file past
+    /// the other's map size without the lock (an opener with a larger
+    /// map) and commits a page at its new end under the lock; the other
+    /// extends the file to its smaller map size. No commit may be lost.
+    /// Without the lock one is lost only now and then (the window is a few
+    /// instructions wide); the test above catches that every time.
+    #[test]
+    fn extending_under_the_lock_never_cuts_a_commit() {
+        use std::sync::atomic::AtomicBool;
+        const MAP: u64 = 1 << 20;
+        const ROUNDS: u64 = 1_000;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.mdb");
+        let f = open_rw(&path);
+        f.set_len(4096).unwrap();
+        let writer = Mutex::new(());
+        let done = AtomicBool::new(false);
+        let lost = std::thread::scope(|s| {
+            let other = s.spawn(|| {
+                let g = open_rw(&path);
+                let (mut lost, mut last) = (0, None);
+                for i in 1..=ROUNDS {
+                    let held = writer.lock().unwrap();
+                    if let Some(end) = last {
+                        let mut got = [0u8; 8];
+                        let n = os::read_at(&g, &mut got, end - 8).unwrap();
+                        if n < 8 || got != (i - 1).to_ne_bytes() {
+                            lost += 1;
+                        }
+                    }
+                    // Short again, so that the extension has work to do.
+                    g.set_len(4096).unwrap();
+                    drop(held);
+                    let end = MAP + (i % 64 + 1) * 4096;
+                    g.set_len(end).unwrap();
+                    let _held = writer.lock().unwrap();
+                    os::write_all_at(&g, &i.to_ne_bytes(), end - 8).unwrap();
+                    last = Some(end);
+                }
+                done.store(true, Ordering::Relaxed);
+                lost
+            });
+            while !done.load(Ordering::Relaxed) {
+                extend_under(&f, MAP, || Ok(writer.lock().unwrap())).unwrap();
+            }
+            other.join().unwrap()
+        });
+        assert_eq!(lost, 0, "{lost} of {ROUNDS} commits cut");
+    }
 }

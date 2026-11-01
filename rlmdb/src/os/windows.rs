@@ -20,11 +20,15 @@
 //!   maps at most the length of the file, so C 0.9 sets the data file of a
 //!   writable environment to the map size before mapping it
 //!   (`SetEndOfFile`): on Windows a 0.9 data file is as long as its map, not
-//!   as its used pages. [`DataMap::map_readonly`] does the same when the
-//!   handle is writable. This matters for interoperation, not only for
+//!   as its used pages. This matters for interoperation, not only for
 //!   sizes: a C 0.9 process with a read-only environment maps the file as
 //!   it is and reads pages past its view unchecked, so the file must
-//!   already have them.
+//!   already have them. The environment extends a shorter file the same
+//!   way before [`DataMap::map_readonly`] maps it ([`extend_file`]), but
+//!   never shortens a longer one, and it reads the size and extends the
+//!   file holding the writer mutex: C's `SetEndOfFile` also shortens a
+//!   longer file, by a size decided from a meta page read before, and so
+//!   cuts pages another process committed since (`KNOWN_C_BUGS.md` row 57).
 //! * **LMDB 1.0** (mdb10.c line 5076): a section created with `SEC_RESERVE`
 //!   over the file as it is (`NtCreateSection`) and a view that reserves the
 //!   map size (`NtMapViewOfSection` with `MEM_RESERVE`). The file grows with
@@ -52,10 +56,12 @@
 //!   (an error, not a fault), and when a snapshot needs them the
 //!   environment maps the file again (`Environment::renew_short_map`,
 //!   which on Unix never applies: there the map is always the map size).
-//! * A 0.9 file is only ever grown. C 0.9 also shrinks it when the map size
-//!   shrinks, which fails (`ERROR_USER_MAPPED_FILE`) while another process,
-//!   or here a read transaction of this one holding an older map, still
-//!   maps more; the pages past the new map size are unused either way.
+//! * A 0.9 file is only ever grown (see the first item). C 0.9 also
+//!   shrinks it when the map size shrinks, which fails
+//!   (`ERROR_USER_MAPPED_FILE`) while another process, or here a read
+//!   transaction of this one holding an older map, still maps more; when
+//!   none does, it can cut pages committed past its size since it read its
+//!   meta page (`KNOWN_C_BUGS.md` row 57).
 //! * `MDB_NORDAHEAD` has no effect (C ignores it on Windows too).
 //!
 //! # The lock file
@@ -645,6 +651,30 @@ pub fn map_data(file: File, len: usize, random: bool, format: Format) -> io::Res
     }
 }
 
+/// Whether a writable map of a `format` data file needs the file to be as
+/// long as the map before it is mapped: LMDB 0.9 (`mdb_env_map` sets it
+/// with `SetEndOfFile`, as Windows maps at most the length of the file).
+/// 1.0's reserved views follow the file as it grows.
+pub fn map_needs_file_length(format: Format) -> bool {
+    format == Format::V09
+}
+
+/// Extends `file` to `len` bytes if it is shorter, never shortening it
+/// (`SetEndOfFile`, which C 0.9 uses either way, `KNOWN_C_BUGS.md` row 57).
+/// Through a read-only handle nothing changes: the map then covers the
+/// file as it is, as C's does for `MDB_RDONLY`. The size is read here, so
+/// the caller must keep other processes from committing past it until
+/// this returns (`extend_for_map` in `core/env.rs` holds the writer mutex).
+pub fn extend_file(file: &File, len: u64) -> io::Result<()> {
+    if file_size(file)? >= len {
+        return Ok(());
+    }
+    match file.set_len(len) {
+        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => Ok(()),
+        r => r,
+    }
+}
+
 /// `false`: Windows keeps a file's views and its `ReadFile`/`WriteFile`
 /// data coherent (one cache manager), so no map needs invalidating after
 /// a write (C's `MDB_Invalidate` is a no-op there).
@@ -750,9 +780,9 @@ impl DataMap {
         })
     }
 
-    /// Maps `len` bytes of `file` read-only (`mdb_env_map`). If the file is
-    /// shorter and `file` is writable, it is extended to `len` first;
-    /// through a read-only handle the map covers the file as it is.
+    /// Maps `len` bytes of `file` read-only (`mdb_env_map`), or the whole
+    /// file if it is shorter: the data file of a writable environment is
+    /// extended first ([`extend_file`]), a read-only one is mapped as it is.
     /// `random` (`MDB_NORDAHEAD`) has no effect on Windows. `file` is a
     /// duplicate of the data file handle, kept to refresh the file size.
     pub fn map_readonly(file: File, len: usize, random: bool) -> io::Result<DataMap> {
@@ -760,15 +790,7 @@ impl DataMap {
         if len == 0 {
             return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
-        let mut size = file_size(&file)?;
-        if size < len as u64 {
-            match file.set_len(len as u64) {
-                Ok(()) => size = len as u64,
-                // A read-only handle: map what exists.
-                Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {}
-                Err(e) => return Err(e),
-            }
-        }
+        let size = file_size(&file)?;
         let map_len = usize::try_from(size).map_or(len, |s| s.min(len));
         if map_len == 0 {
             // Windows cannot map an empty file (C fails the same way).
@@ -1404,7 +1426,8 @@ mod tests {
     fn data_map_bounds() {
         let mut f = tempfile::tempfile().unwrap();
         f.write_all(&[7u8; 8192]).unwrap();
-        // A writable handle: the file grows to the map size.
+        // A writable environment's file is extended to the map size first.
+        extend_file(&f, 1 << 20).unwrap();
         let m = DataMap::map_readonly(f.try_clone().unwrap(), 1 << 20, true)
             .unwrap()
             .with_meta_pages(2048);
@@ -1566,6 +1589,35 @@ mod tests {
         // An empty file cannot be mapped.
         std::fs::write(&path, []).unwrap();
         assert!(DataMap::map_readonly(File::open(&path).unwrap(), 4096, false).is_err());
+    }
+
+    #[test]
+    fn extend_file_never_shortens_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.mdb");
+        std::fs::write(&path, [5u8; 8192]).unwrap();
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // The map covers what the file has; extending it is the caller's.
+        let m = DataMap::map_readonly(f.try_clone().unwrap(), 1 << 20, false).unwrap();
+        assert_eq!((m.len(), f.metadata().unwrap().len()), (8192, 8192));
+        drop(m);
+        extend_file(&f, 1 << 20).unwrap();
+        assert_eq!(f.metadata().unwrap().len(), 1 << 20);
+        // Longer (another process's larger map, a page committed at its
+        // end): left as it is, where C's SetEndOfFile cuts it.
+        write_all_at(&f, &[9u8; 4096], (3 << 20) - 4096).unwrap();
+        extend_file(&f, 1 << 20).unwrap();
+        assert_eq!(f.metadata().unwrap().len(), 3 << 20);
+        let mut last = [0u8; 1];
+        read_at(&f, &mut last, (3 << 20) - 1).unwrap();
+        assert_eq!(last[0], 9);
+        // Through a read-only handle nothing changes.
+        extend_file(&File::open(&path).unwrap(), 8 << 20).unwrap();
+        assert_eq!(f.metadata().unwrap().len(), 3 << 20);
     }
 
     #[test]

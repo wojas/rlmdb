@@ -349,7 +349,9 @@ module documentation lists every Windows decision):
   with the writes; a writer commits the pages it takes from the end of the
   map in its view (`VirtualAlloc`, as C 1.0's `mdb_page_alloc` does), which
   is what makes them visible in other processes' views. A 0.9 file is never shrunk when the map size shrinks (C
-  would try, and fails while another process maps more).
+  would try, and fails while another process maps more), and it is
+  extended holding the writer mutex, after reading its size again, so that
+  no commit lands past the size it read (`KNOWN_C_BUGS.md` row 57).
 
 Both versions:
 
