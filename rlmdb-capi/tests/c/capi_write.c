@@ -61,6 +61,14 @@ static int checks, failures;
 #define FREE_DBI 0
 #define MAIN_DBI 1
 
+/* What mdb_env_copyfd returns for COMPAT_NO_FILEHANDLE: the error of C's
+ * first write to it. */
+#ifdef _WIN32
+#define NO_FILE_ERROR 6	/* ERROR_INVALID_HANDLE, from WriteFile */
+#else
+#define NO_FILE_ERROR EBADF
+#endif
+
 /* A trace line, compared between the C and Rust builds. */
 #define T(...) do { printf("T "); printf(__VA_ARGS__); printf("\n"); } while (0)
 
@@ -1646,6 +1654,8 @@ static void test_copy(const char *name)
 	mkdir(dst, 0775);
 	OK(mdb_env_copy(env, dst));
 	RC(mdb_env_copy(env, dst), COMPAT_EEXIST);
+	RC(mdb_env_copyfd(env, COMPAT_NO_FILEHANDLE), NO_FILE_ERROR);
+	RC(mdb_env_copyfd2(env, COMPAT_NO_FILEHANDLE, MDB_CP_COMPACT), NO_FILE_ERROR);
 	snprintf(dst, sizeof(dst), "%s/%s-compact", scratch, name);
 	mkdir(dst, 0775);
 	OK(mdb_env_copy2(env, dst, MDB_CP_COMPACT));

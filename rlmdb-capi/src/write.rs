@@ -546,21 +546,26 @@ pub unsafe extern "C" fn mdb_env_copy2(
 }
 
 /// `mdb_env_copyfd2`: copy an environment to the specified file
-/// descriptor, with options (see [`mdb_env_copy2`]).
+/// descriptor, with options (see [`mdb_env_copy2`]). A descriptor that
+/// cannot be one (-1; on Windows NULL or `INVALID_HANDLE_VALUE`) gives the
+/// error C's first write gets, `EBADF` (Windows: `ERROR_INVALID_HANDLE`);
+/// `EINVAL` is for the environment handle.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_env_copyfd2(
     env: *mut MDB_env,
     fd: mdb_filehandle_t,
     flags: c_uint,
 ) -> c_int {
+    // SAFETY: env is NULL or a live handle (lmdb.h).
+    let e = match unsafe { open_env(env) } {
+        Ok(e) => e,
+        Err(code) => return code,
+    };
     // SAFETY: a descriptor (on Windows a handle) other than -1 is an open
     // file of the caller (lmdb.h), which stays open for the duration of
     // the call; it is only borrowed.
-    let fd = unsafe { crate::platform::borrow_handle(fd) };
-    // SAFETY: env is NULL or a live handle (lmdb.h).
-    let (e, fd) = match (unsafe { open_env(env) }, fd) {
-        (Ok(e), Some(fd)) => (e, fd),
-        _ => return EINVAL,
+    let Some(fd) = (unsafe { crate::platform::borrow_handle(fd) }) else {
+        return crate::platform::BAD_HANDLE;
     };
     crate::rc(e.copy_to_fd(fd, flags & MDB_CP_COMPACT != 0))
 }

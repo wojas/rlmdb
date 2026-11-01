@@ -64,6 +64,17 @@ pub(crate) const NO_HANDLE: mdb_filehandle_t = -1;
 #[cfg(windows)]
 pub(crate) const NO_HANDLE: mdb_filehandle_t = -1isize as mdb_filehandle_t;
 
+/// What C's `mdb_env_copyfd` returns for a descriptor that cannot be one
+/// (negative): the error of its first `write`, `EBADF`.
+#[cfg(unix)]
+pub(crate) const BAD_HANDLE: std::os::raw::c_int = libc::EBADF;
+
+/// What C's `mdb_env_copyfd` returns for a handle that cannot name a file
+/// (NULL, `INVALID_HANDLE_VALUE`): the error of its first `WriteFile`,
+/// `ERROR_INVALID_HANDLE`.
+#[cfg(windows)]
+pub(crate) const BAD_HANDLE: std::os::raw::c_int = 6;
+
 /// The `mdb_filehandle_t` of an open file (borrowed: the file keeps it).
 #[cfg(unix)]
 pub(crate) fn raw_handle(file: &File) -> mdb_filehandle_t {
