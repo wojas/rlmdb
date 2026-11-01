@@ -8,14 +8,17 @@
  *   seeded with srand_deterministic(), and mtest4 never seeds it;
  * - mtest6.c calls mdb_dkey(), which liblmdb only defines with MDB_DEBUG.
  *
- * <time.h> comes first and the macro after it: MSVC's C runtime (the UCRT)
- * defines time() in <time.h> as an inline function, which a -Dtime=...
- * on the command line would rename into a second definition of
- * mtest_time(). The programs' own #include <time.h> then adds nothing.
+ * <time.h> and <stdlib.h> come first and the macros after them: MSVC's C
+ * runtime (the UCRT) defines time() in <time.h> as an inline function,
+ * which a -Dtime=... on the command line would rename into a second
+ * definition of mtest_time(), and declares rand() and srand() as imports,
+ * which the macros would turn into imports of our functions. The
+ * programs' own #include of these headers then adds nothing.
  */
 #ifndef MTEST_SHIM_H
 #define MTEST_SHIM_H
 
+#include <stdlib.h>
 #include <time.h>
 #include "lmdb.h"
 

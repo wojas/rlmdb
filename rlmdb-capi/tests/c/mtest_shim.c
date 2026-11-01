@@ -14,12 +14,9 @@ time_t mtest_time(time_t *t)
 	return v;
 }
 
-/* The header is force-included before <stdlib.h>, whose declarations
- * of rand() and srand() the macros renamed: the libc's are these. */
+/* The libc's rand() and srand(), declared by the header's <stdlib.h>. */
 #undef srand
 #undef rand
-void srand(unsigned seed);
-int rand(void);
 
 static int seeded;
 
