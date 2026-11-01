@@ -351,7 +351,7 @@ fn run_bounded(tool: &str, argv: &[&str], env: &Path) -> Run {
 /// Trees whose branch pages share their children: C's `mdb_dump` prints
 /// the main DB's record 4^20 times and `mdb_stat -f` reads the free DB's
 /// as often, hours for a 24-page file. The library stops a walk that steps
-/// onto more leaves than the map has pages (`KNOWN_C_BUGS.md` #50), so
+/// onto more leaves than the file has pages (`KNOWN_C_BUGS.md` #50), so
 /// `mdb_dump` fails with `MDB_CORRUPTED` after a few copies of the record
 /// and `mdb_stat -f`, which ends its walk at an error as C does, reports
 /// what it read.
@@ -370,20 +370,10 @@ fn walks_over_shared_children_stop() {
         let r = run_bounded("mdb_dump", &[], &main);
         assert_eq!(r.code, 1, "{what}: {r:?}");
         assert!(r.stderr_str().contains("MDB_CORRUPTED"), "{what}: {r:?}");
-        // One copy per leaf step; the walk stops at the map's page count
-        // (the dump header says how large the map is; 4 KiB pages).
-        let out = r.stdout_str();
-        let map_pages: usize = out
-            .lines()
-            .find_map(|l| l.strip_prefix("mapsize="))
-            .and_then(|v| v.parse::<usize>().ok())
-            .map(|m| m / 4096)
-            .unwrap_or_else(|| panic!("{what}: no mapsize in {out:?}"));
-        let copies = out.matches("\n 6b6579\n").count();
-        assert!(
-            (2..=map_pages + 1).contains(&copies),
-            "{what}: {copies} copies, map {map_pages} pages"
-        );
+        // One copy per leaf step; the walk stops at the file's page count
+        // (24 pages).
+        let copies = r.stdout_str().matches("\n 6b6579\n").count();
+        assert!((2..=25).contains(&copies), "{what}: {copies} copies");
         let r = run_bounded("mdb_stat", &["-f"], &free);
         assert_eq!(r.code, 0, "{what}: {r:?}");
         assert!(

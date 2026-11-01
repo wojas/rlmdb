@@ -977,7 +977,7 @@ fn walks_of_a_free_db_with_shared_children_stop() {
 /// fan-out 4 over a leaf of three keys): a cursor walk returns the three
 /// keys over and over, 4^20 times in C, and so do `mdb_dump` and every
 /// other walk of the tree. A walk stops with `MDB_CORRUPTED` once it has
-/// stepped onto more leaves than the map has pages (`Walk`,
+/// stepped onto more leaves than the snapshot has pages (`Walk`,
 /// `KNOWN_C_BUGS.md` #50), forward and backward, in read and in write
 /// transactions, having returned each key at most that many times.
 #[test]
@@ -992,12 +992,13 @@ fn cursor_walks_over_shared_children_stop() {
         std::fs::write(dir.path().join("data.mdb"), &file).unwrap();
         let path = dir.path().to_path_buf();
         let w = what.clone();
+        let pages_in_file = (file.len() / PS) as u64;
         bounded(&what, move || {
             let env = open_rw(&path, 2);
-            // The walk stops at the map's page count (`TxnCore::walk_limit`):
-            // at most one leaf per step, three items on each.
-            let map_pages = env.info().unwrap().map_size as u64 / PS as u64;
-            let most = 3 * (map_pages + 1);
+            // The walk stops at the snapshot's page count
+            // (`TxnCore::walk_limit`): at most one leaf per step, three
+            // items on each.
+            let most = 3 * (pages_in_file + 1);
             for op in [CursorOp::Next, CursorOp::Prev] {
                 let txn = env.begin_ro_txn().unwrap();
                 let mut c = txn.cursor(Dbi::MAIN).unwrap();

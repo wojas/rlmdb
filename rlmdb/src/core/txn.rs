@@ -247,18 +247,16 @@ impl<'env> TxnCore<'env> {
     }
 
     /// How many leaf pages a cursor may step onto in one direction before
-    /// its walk counts as one over a damaged tree ([`Walk`]): the pages the
-    /// map holds, plus the allocations of a write transaction, each of
+    /// its walk counts as one over a damaged tree ([`Walk`]): the pages of
+    /// the snapshot, plus the allocations of a write transaction, each of
     /// which may put a leaf ahead of a walking cursor again. No sound tree
-    /// has more leaves than the map has pages; the map's count rather than
-    /// the snapshot's keeps the bound independent of how the snapshot's
-    /// end is tracked. A damaged tree overshoots it by powers of the
-    /// fan-out.
+    /// has more leaves than the snapshot has pages; a damaged tree
+    /// overshoots it by powers of the fan-out.
     ///
     /// [`Walk`]: crate::core::cursor::Walk
     #[inline]
     pub(crate) fn walk_limit(&self) -> u64 {
-        self.max_pgno().saturating_add(self.allocations)
+        self.next_pgno.saturating_add(self.allocations)
     }
 
     /// `me_maxpg` for this transaction's map: the number of pages it holds.

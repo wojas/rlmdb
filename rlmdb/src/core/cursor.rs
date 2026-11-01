@@ -118,7 +118,7 @@ pub(crate) struct Kv<'t> {
 /// once. Changes to the tree (in a write transaction) can put a leaf ahead
 /// of the cursor again only by allocating it: a split's new page, the copy
 /// of a page touched, a freed page reused. So a walk makes fewer steps than
-/// [`TxnCore::walk_limit`], the pages the map holds plus those the write
+/// [`TxnCore::walk_limit`], the pages of the snapshot plus those the write
 /// transaction allocated. In a tree whose branch pages share a child (two
 /// branches, or two slots of one, naming one page) a walk reaches that
 /// child once per path to it: exponentially often with sharing at several
