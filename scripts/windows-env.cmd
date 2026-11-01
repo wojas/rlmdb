@@ -14,7 +14,9 @@ rem                     C reference library and the GNU target
 rem   target\           cargo's build directory and the tests' scratch
 rem                     (CARGO_TARGET_TMPDIR); test environments there are
 rem                     full map-size files on Windows, so delete it between
-rem                     sessions
+rem                     sessions, or point CARGO_TARGET_DIR, TEMP and TMP
+rem                     at a drive with room (the tests' temporary
+rem                     directories follow TEMP)
 rem   src\              the checkout, sent by windows-test.sh
 rem
 rem MSVC needs the Visual Studio Build Tools (C++ workload) on the machine;
