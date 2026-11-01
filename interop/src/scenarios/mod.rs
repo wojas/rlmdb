@@ -232,6 +232,16 @@ pub fn loop_secs() -> f64 {
         .unwrap_or(1.5)
 }
 
+/// The deadline in seconds of the `hold-*` peers that the scenarios start
+/// with `--until-stdin`. The scenario releases them; the deadline only ends
+/// the hold of a harness that is gone. It must outlast the slowest
+/// scenario: C 1.0 writing 256-byte pages on a CI runner takes minutes, and
+/// a `hold-env` keeper that left early would let the next opener reset the
+/// reader table.
+pub fn hold_secs() -> String {
+    (600.0 + loop_secs()).to_string()
+}
+
 /// Whether the shared writer mutex recovers from a killed owner: robust
 /// process-shared mutexes on Linux, unless `$INTEROP_NO_ROBUST_MUTEX` is
 /// set, and Windows' named mutexes, which the kernel abandons when their
@@ -1076,7 +1086,7 @@ pub fn mvcc_hold_reader(pair: Pair) -> Result<()> {
     let mut holder = pair
         .reader
         .on("hold-reader", &env)
-        .args(["60", "--until-stdin"])
+        .args([hold_secs().as_str(), "--until-stdin"])
         .args(old.args())
         .spawn()?;
     let ready = HoldReady::parse(&holder.wait_ready()?)?;

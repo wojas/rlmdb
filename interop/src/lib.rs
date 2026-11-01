@@ -49,7 +49,9 @@ mod testenv;
 pub mod tools;
 
 pub use error::{Error, Result};
-pub use peer::{register_rpeer, skipped, Output, Peer, PeerCmd, PeerProcess, EXIT_NOT_IMPLEMENTED};
+pub use peer::{
+    register_rpeer, skipped, DeadProcess, Output, Peer, PeerCmd, PeerProcess, EXIT_NOT_IMPLEMENTED,
+};
 /// The data-file format of an environment (`rlmdb::Format`): LMDB 0.9 or 1.0.
 pub use rlmdb::Format;
 pub use testenv::TestEnv;

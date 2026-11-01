@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use super::{
-    audit, copy_or_skip, create, drop_db, dump_all, log, new_env, stat, verify_by, DataSet, Pair,
-    MIB,
+    audit, copy_or_skip, create, drop_db, dump_all, hold_secs, log, new_env, stat, verify_by,
+    DataSet, Pair, MIB,
 };
 use crate::report::{HoldReady, WriterLoopReport};
 use crate::{bail, ensure, Output, Peer, Result, TestEnv};
@@ -508,7 +508,7 @@ pub fn killed_writer(pair: Pair) -> Result<()> {
     let mut keeper = pair
         .reference()
         .on("hold-env", &env)
-        .args(["120", "--until-stdin"])
+        .args([hold_secs().as_str(), "--until-stdin"])
         .spawn()?;
     keeper.wait_ready()?;
     let mut keeper = Some(keeper);
@@ -516,7 +516,7 @@ pub fn killed_writer(pair: Pair) -> Result<()> {
     let mut holder = pair
         .capable(pair.writer, "hold-writer")
         .on("hold-writer", &env)
-        .args(["120", "--until-stdin"])
+        .args([hold_secs().as_str(), "--until-stdin"])
         .spawn()?;
     let ready = HoldReady::parse(&holder.wait_ready()?)?;
     holder.kill()?;

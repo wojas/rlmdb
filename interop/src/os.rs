@@ -1,5 +1,6 @@
-//! What the tests do differently on Unix and Windows: positional file I/O
-//! and running a program under another `argv[0]`.
+//! What the tests do differently on Unix and Windows: positional file I/O,
+//! running a program under another `argv[0]`, and naming the process that
+//! has a process id.
 
 use std::fs::File;
 use std::io;
@@ -118,4 +119,23 @@ fn named_copy_dir(exe: &Path, name: &str) -> io::Result<std::path::PathBuf> {
         }
     }
     Ok(dir)
+}
+
+/// The program running as process `pid` now (`ps`; `tasklist` on
+/// Windows), `None` if there is none: for messages about a reader slot
+/// whose process should be gone, as Windows recycles process ids quickly.
+pub fn process_name(pid: u32) -> Option<String> {
+    #[cfg(windows)]
+    let out = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+    #[cfg(not(windows))]
+    let out = Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    // tasklist prints a line starting with "INFO:" (not CSV) for no match.
+    (!text.is_empty() && !text.starts_with("INFO:")).then_some(text)
 }

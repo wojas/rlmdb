@@ -6,8 +6,8 @@
 use std::fmt;
 
 use super::{
-    audit, finish_reader_loop, log, loop_secs, new_env, reader_check, readers, stat, DataSet, Pair,
-    MIB,
+    audit, finish_reader_loop, hold_secs, log, loop_secs, new_env, reader_check, readers, stat,
+    DataSet, Pair, MIB,
 };
 use crate::report::{HoldReady, WriterLoopReport};
 use crate::{ensure, tools, Error, Peer, Result, TestEnv};
@@ -27,7 +27,7 @@ pub fn readers_list(pair: Pair) -> Result<()> {
     let mut holder = pair
         .reader
         .on("hold-reader", &env)
-        .args(["60", "--until-stdin"])
+        .args([hold_secs().as_str(), "--until-stdin"])
         .spawn()?;
     let ready = HoldReady::parse(&holder.wait_ready()?)?;
     ds.fill(pair.writer, &env, &[])?;
@@ -59,7 +59,7 @@ fn expect_holder_visible(
 ) -> Result<()> {
     let mut holder = holder_peer
         .on("hold-reader", env)
-        .args(["60", "--until-stdin"])
+        .args([hold_secs().as_str(), "--until-stdin"])
         .args(ds.map(DataSet::args).unwrap_or_default())
         .spawn()?;
     let ready = HoldReady::parse(&holder.wait_ready()?)?;
@@ -133,6 +133,14 @@ impl Clearer {
                 .ok_or_else(|| Error::new("mdb_stat -rr printed no stale reader count")),
         }
     }
+
+    /// Whether the check counts a process as alive while a handle to it is
+    /// open: C's `mdb_reader_check` on Windows (`KNOWN_C_BUGS.md` #42), in
+    /// the C peers and C's `mdb_stat`. rlmdb's check (the Rust peer, the C
+    /// peer on rlmdb) sees that the process has exited.
+    fn needs_handles_closed(self) -> bool {
+        cfg!(windows) && matches!(self, Clearer::MdbStat | Clearer::Peer(Peer::C | Peer::C10))
+    }
 }
 
 /// Delete `old` entirely and fill `new` (the writer); returns how many pages
@@ -148,6 +156,12 @@ fn rewrite(pair: &Pair, env: &TestEnv, old: &DataSet, new: &DataSet) -> Result<u
 /// rewriting the data cannot reuse freed pages and the file grows. A reader
 /// check from another process must leave live readers alone, clear the dead
 /// one, and then the writer reuses the free pages again.
+///
+/// On Windows the harness keeps a handle to the dead reader until the check
+/// ([`PeerProcess::kill_keeping_pid`](crate::PeerProcess::kill_keeping_pid)),
+/// so that no new process gets its id. C's check sees it as alive while
+/// that handle is open (`KNOWN_C_BUGS.md` #42), and clears it once the
+/// handle is closed; rlmdb's clears it at once.
 fn stale_reader(pair: &Pair, holder: Peer, clearer: Clearer) -> Result<()> {
     let env = new_env(pair, 512 * MIB)?;
     let sets: Vec<DataSet> = (0..3)
@@ -165,13 +179,13 @@ fn stale_reader(pair: &Pair, holder: Peer, clearer: Clearer) -> Result<()> {
     };
     let mut keeper = keeper_peer
         .on("hold-env", &env)
-        .args(["60", "--until-stdin"])
+        .args([hold_secs().as_str(), "--until-stdin"])
         .spawn()?;
     keeper.wait_ready()?;
 
     let mut h = holder
         .on("hold-reader", &env)
-        .args(["60", "--until-stdin"])
+        .args([hold_secs().as_str(), "--until-stdin"])
         .spawn()?;
     let ready = HoldReady::parse(&h.wait_ready()?)?;
     let pid = h.pid();
@@ -180,7 +194,7 @@ fn stale_reader(pair: &Pair, holder: Peer, clearer: Clearer) -> Result<()> {
         cleared == 0,
         "{clearer} cleared {cleared} slots while {holder}'s reader {pid} was alive"
     );
-    h.kill()?;
+    let dead = h.kill_keeping_pid()?;
     for peer in pair.peers() {
         let table = readers(peer, &env)?;
         ensure!(
@@ -194,10 +208,30 @@ fn stale_reader(pair: &Pair, holder: Peer, clearer: Clearer) -> Result<()> {
     }
 
     let grown_pinned = rewrite(pair, &env, &sets[0], &sets[1])?;
-    let cleared = clearer.clear(&env)?;
+    ensure!(
+        keeper.running()?,
+        "{keeper_peer} hold-env exited before the reader check: the next opener \
+         was exclusive and reset the reader table"
+    );
+    let cleared = if clearer.needs_handles_closed() {
+        let cleared = clearer.clear(&env)?;
+        ensure!(
+            cleared == 0,
+            "{clearer} cleared {cleared} slots while a handle to the dead {holder} \
+             reader {pid} was open (C counts that as alive, KNOWN_C_BUGS.md #42)"
+        );
+        dead.close();
+        clearer.clear(&env)?
+    } else {
+        let cleared = clearer.clear(&env)?;
+        dead.close();
+        cleared
+    };
     ensure!(
         cleared == 1,
-        "{clearer} cleared {cleared} slots, expected the dead {holder} reader {pid}"
+        "{clearer} cleared {cleared} slots, expected the dead {holder} reader {pid} \
+         (process {pid} now: {:?})",
+        crate::os::process_name(pid)
     );
     for peer in pair.peers() {
         let table = readers(peer, &env)?;
@@ -253,7 +287,7 @@ pub fn reader_creates_lock_file(pair: Pair) -> Result<()> {
     let mut holder = pair
         .reader
         .on("hold-reader", &env)
-        .args(["60", "--until-stdin"])
+        .args([hold_secs().as_str(), "--until-stdin"])
         .args(ds.args())
         .spawn()?;
     let ready = HoldReady::parse(&holder.wait_ready()?)?;
@@ -380,7 +414,7 @@ pub fn notls_readers(pair: Pair) -> Result<()> {
     let mut holder = pair
         .reader
         .on("hold-reader", &env)
-        .args(["60", "--until-stdin", "--notls"])
+        .args([hold_secs().as_str(), "--until-stdin", "--notls"])
         .args(ds.args())
         .spawn()?;
     let ready = HoldReady::parse(&holder.wait_ready()?)?;

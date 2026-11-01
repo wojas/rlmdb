@@ -604,6 +604,28 @@ impl PeerProcess {
         Ok(())
     }
 
+    /// [`kill`](Self::kill), but on Windows keep a handle to the dead
+    /// process until the returned value is dropped (see [`DeadProcess`]).
+    pub fn kill_keeping_pid(self) -> Result<DeadProcess> {
+        #[cfg(windows)]
+        let handle = {
+            use std::os::windows::io::AsHandle;
+            self.child.as_handle().try_clone_to_owned()?
+        };
+        let pid = self.pid();
+        self.kill()?;
+        Ok(DeadProcess {
+            pid,
+            #[cfg(windows)]
+            _handle: handle,
+        })
+    }
+
+    /// Whether the process is still running.
+    pub fn running(&mut self) -> Result<bool> {
+        Ok(self.child.try_wait()?.is_none())
+    }
+
     /// Close stdin, wait for the process to exit (killing it after the
     /// command's timeout) and return its output, whatever the exit status.
     pub fn finish(mut self) -> Result<Output> {
@@ -656,4 +678,26 @@ impl Drop for PeerProcess {
             let _ = self.child.wait();
         }
     }
+}
+
+/// A peer killed by [`PeerProcess::kill_keeping_pid`]. On Windows it holds a
+/// handle to the dead process: the process id stays taken until the handle
+/// is closed (Windows gives ids to new processes soon after), and C's
+/// reader check counts the process as alive meanwhile (`KNOWN_C_BUGS.md`
+/// #42). Elsewhere the process is reaped and only its id is kept.
+pub struct DeadProcess {
+    pid: u32,
+    #[cfg(windows)]
+    _handle: std::os::windows::io::OwnedHandle,
+}
+
+impl DeadProcess {
+    /// The process id the dead process had.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// Close the handle (as dropping the value does): the process id is
+    /// free for new processes, and C's reader check sees the process gone.
+    pub fn close(self) {}
 }
