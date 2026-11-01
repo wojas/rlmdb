@@ -42,7 +42,8 @@ impl C09 {
 
     /// C 0.9 on environments of `ps`-byte pages. 0.9 creates environments
     /// with the OS page size only, but opens a file of any page size
-    /// (`mdb_env_open2` takes `mm_psize`), and so does rlmdb.
+    /// (`mdb_env_open2` takes `mm_psize`), and so does rlmdb from 2 KiB on
+    /// (`Layout::min_pagesize`).
     fn with_page_size(tools: &'static CTools, ps: usize) -> C09 {
         C09 {
             file_page_size: Some(ps),

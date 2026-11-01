@@ -172,7 +172,7 @@ through the environment's `format::Layout`. What differs on disk:
 | `F_BIGDATA` node data | the 8-byte pgno | `MDB_ovpage {pgno, txnid, pages}`, 24 bytes |
 | sub-page (`P_SUBP`) | flags `0x52`, 16-byte header | flags `0x42` (no `P_DIRTY`), 24-byte header whose `mp_txnid` is the txnid of the transaction that built it |
 | meta | at 16 | at 24; `mm_flags` may carry `MDB_ENCRYPT`, page 0's last two bytes a checksum size (both refused: `MDB_ENV_ENCRYPTION`, `MDB_BAD_CHECKSUM`) |
-| page size | the OS page size, at most 32 KiB | any power of two from 256 to 64 KiB (`EnvironmentBuilder::page_size`, `mdb_env_set_pagesize`; 1.0's `mtest` uses 1 KiB) |
+| page size | the OS page size, at most 32 KiB; files of 2 KiB pages and up open (`KNOWN_C_BUGS.md` #48) | any power of two from 256 to 64 KiB (`EnvironmentBuilder::page_size`, `mdb_env_set_pagesize`; 1.0's `mtest` uses 1 KiB) |
 | maximum key size | 511 | `me_nodemax - 56`: 442 on 1 KiB pages, 1978 on 4 KiB, 8122 on 16 KiB, 32698 on 64 KiB |
 | named database keys | the name | the name with its terminating NUL |
 

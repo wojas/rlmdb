@@ -77,10 +77,6 @@ use crate::format::meta::{self, pick_newest, Meta, SNIFF_LEN};
 use crate::idl::Idl;
 use crate::os::{self, DataMap};
 
-/// Smallest page size we accept in an existing file. C does not check; a
-/// page must at least hold a header and a meta.
-const MIN_PAGESIZE: usize = 256;
-
 /// Default file mode for [`EnvironmentBuilder::open`].
 const DEFAULT_MODE: u32 = 0o644;
 
@@ -406,7 +402,7 @@ impl Environment {
             }
             _ => None,
         };
-        let max_pagesize = layout.max_pagesize;
+        let (min_pagesize, max_pagesize) = (layout.min_pagesize, layout.max_pagesize);
         let (page_size, mut meta, new_env, meta0_flags) = match header? {
             Some((meta, meta0)) => (meta.page_size() as usize, meta, false, meta0.env_flags()),
             None => {
@@ -422,7 +418,10 @@ impl Environment {
                 )
             }
         };
-        if !page_size.is_power_of_two() || !(MIN_PAGESIZE..=max_pagesize).contains(&page_size) {
+        // C does not check the page size of an existing file. The range is
+        // the format's (`Layout::min_pagesize`): smaller 0.9 pages cannot
+        // hold its largest keys (`KNOWN_C_BUGS.md` #48).
+        if !page_size.is_power_of_two() || !(min_pagesize..=max_pagesize).contains(&page_size) {
             return Err(MdbError::Invalid.into());
         }
         if layout.format == Format::V10 && !new_env {
@@ -1128,7 +1127,7 @@ fn env_default_format() -> Option<Format> {
 /// The checks of 1.0's `mdb_env_set_pagesize`: a power of two from 256 to
 /// `MAX_PAGESIZE`.
 fn valid_set_pagesize(size: usize, layout: &Layout) -> bool {
-    size.is_power_of_two() && (MIN_PAGESIZE..=layout.max_pagesize).contains(&size)
+    size.is_power_of_two() && (layout.min_pagesize..=layout.max_pagesize).contains(&size)
 }
 
 /// Refuses an existing 1.0 environment that uses what this crate does not

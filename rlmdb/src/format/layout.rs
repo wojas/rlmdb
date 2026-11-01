@@ -218,6 +218,15 @@ pub struct Layout {
     pub subpage_flags: u16,
     /// `MAX_PAGESIZE`: the largest page size of the format.
     pub max_pagesize: usize,
+    /// The smallest page size of an environment of the format that is
+    /// opened. 1.0: that of `mdb_env_set_pagesize`, which scales the
+    /// largest key with the page. 0.9 creates environments with the OS page
+    /// size only (4 KiB or more everywhere) but opens any page size, and its
+    /// largest key is the constant `MDB_MAXKEYSIZE` (511): below 2 KiB a
+    /// node with such a key no longer fits `me_nodemax` and a `P_LEAF2`
+    /// page holds a single such item, so C writes past its pages
+    /// (`KNOWN_C_BUGS.md` #48). Smaller 0.9 pages are refused.
+    pub min_pagesize: usize,
     /// Whether the key of a named database in the main DB includes the
     /// name's terminating NUL (1.0's `mdb_dbi_open` stores `strlen(name) +
     /// 1` bytes, 0.9's `strlen(name)`), so 0.9 and 1.0 see different keys
@@ -236,6 +245,7 @@ pub static V09: Layout = Layout {
     // P_LEAF | P_DIRTY | P_SUBP (mdb.c line 6920).
     subpage_flags: 0x52,
     max_pagesize: 0x8000,
+    min_pagesize: 0x800,
     db_name_nul: false,
 };
 
@@ -250,6 +260,7 @@ pub static V10: Layout = Layout {
     // P_LEAF | P_SUBP (mdb.c 1.0, line 8806): no P_DIRTY in 1.0.
     subpage_flags: 0x42,
     max_pagesize: 0x10000,
+    min_pagesize: 0x100,
     db_name_nul: true,
 };
 
@@ -569,6 +580,7 @@ mod tests {
         assert_eq!(l.subpage_flags, 0x52);
         assert_eq!(l.subpage_flags, P_LEAF | P_DIRTY | P_SUBP);
         assert_eq!(l.max_pagesize, 0x8000);
+        assert_eq!(l.min_pagesize, 0x800);
         assert!(!l.db_name_nul);
         assert!(!l.loosens_rebalanced_root());
         assert_eq!(Format::V09.layout(), l);
@@ -583,6 +595,14 @@ mod tests {
         assert_eq!(l.meta_offset(), META_OFFSET_IN_PAGE);
         assert_eq!(l.txnid_offset(), None);
         assert_eq!(l.max_key_size(4096), crate::consts::MDB_MAXKEYSIZE);
+        // The smallest page size is the smallest power of two that holds a
+        // node with the largest key and an overflow reference, and two
+        // such `P_LEAF2` items.
+        let fits = |ps: usize| {
+            let key = l.max_key_size(ps);
+            l.node_max(ps) >= NODE_SIZE + key + l.ovpage_size && l.page_hdr + 2 * key <= ps
+        };
+        assert!(fits(l.min_pagesize) && !fits(l.min_pagesize / 2));
         assert_eq!(l.max_pagesize, crate::consts::MAX_PAGESIZE);
         assert_eq!(l.data_version, crate::consts::MDB_DATA_VERSION);
     }
@@ -599,6 +619,7 @@ mod tests {
         assert_eq!(l.subpage_flags, 0x42);
         assert_eq!(l.subpage_flags, P_LEAF | P_SUBP);
         assert_eq!(l.max_pagesize, 0x10000);
+        assert_eq!(l.min_pagesize, 0x100);
         assert!(l.db_name_nul);
         assert!(l.loosens_rebalanced_root());
         assert_eq!(Format::V10.layout(), l);

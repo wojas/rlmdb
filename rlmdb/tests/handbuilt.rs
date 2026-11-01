@@ -456,19 +456,20 @@ fn deep_trees_and_short_get_stacks() {
 /// aborts a C caller). It must fail the put with `MDB_CURSOR_FULL`, which
 /// fails the transaction, and leave the file as it was.
 ///
-/// Pages of 256 bytes, in both formats: pages 2..=32 are branch pages of
-/// the implicit first child and three 58-byte separators, every child
-/// being the next page; page 33 is a leaf of three 58-byte keys with
-/// 1-byte values. The put goes through `mdb_put` and through a cursor
-/// handle (the C API's `mdb_cursor_put`), with another cursor on the leaf.
+/// The smallest pages of each format with keys that fill them: 256 bytes
+/// and 58-byte keys in 1.0, 2 KiB and 500-byte keys in 0.9
+/// (`Layout::min_pagesize`). Pages 2..=32 are branch pages of the implicit
+/// first child and three separators, every child being the next page;
+/// page 33 is a leaf of three keys with 1-byte values. The put goes
+/// through `mdb_put` and through a cursor handle (the C API's
+/// `mdb_cursor_put`), with another cursor on the leaf.
 #[test]
 fn root_split_beyond_the_cursor_stack_fails_the_txn() {
-    const PS256: usize = 256;
-    let key = |c: u8| vec![c; 58];
-    for layout in [&V09, &V10] {
+    for (layout, ps, klen) in [(&V09, 2048, 500), (&V10, 256, 58)] {
+        let key = |c: u8| vec![c; klen];
         let mut pages = Vec::new();
         for pgno in 2..=32 {
-            let mut buf = vec![0u8; PS256];
+            let mut buf = vec![0u8; ps];
             let mut p = PageMut::with_layout(&mut buf, layout);
             p.init(pgno, P_BRANCH);
             p.add_node(0, b"", NodeData::Child(pgno + 1), 0).unwrap();
@@ -479,7 +480,7 @@ fn root_split_beyond_the_cursor_stack_fails_the_txn() {
             assert!(p.add_node(4, &key(b'e'), NodeData::Child(2), 0).is_err());
             pages.push(buf);
         }
-        let mut buf = vec![0u8; PS256];
+        let mut buf = vec![0u8; ps];
         let mut p = PageMut::with_layout(&mut buf, layout);
         p.init(33, P_LEAF);
         for (i, c) in (b'd'..=b'f').enumerate() {
@@ -497,13 +498,13 @@ fn root_split_beyond_the_cursor_stack_fails_the_txn() {
             root: 2,
             ..Db::default()
         };
-        let file = file_with(layout, PS256, &pages, main);
+        let file = file_with(layout, ps, &pages, main);
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data.mdb");
         std::fs::write(&data, &file).unwrap();
         let env = open_rw(dir.path(), 2);
         let what = format!("{:?}", env.format());
-        assert_eq!((env.format(), env.page_size()), (layout.format, PS256));
+        assert_eq!((env.format(), env.page_size()), (layout.format, ps));
         {
             let txn = env.begin_ro_txn().unwrap();
             assert_eq!(txn.get(Dbi::MAIN, &key(b'e')).unwrap(), Some(&b"e"[..]));
@@ -614,5 +615,65 @@ fn compacting_copy_of_shared_pages_stops_at_the_source_size() {
             file,
             "{what}"
         );
+    }
+}
+
+/// A 0.9 data file of `ps`-byte pages holding only its meta pages.
+fn empty_file(layout: &Layout, ps: usize) -> Vec<u8> {
+    let main = Db {
+        root: P_INVALID,
+        ..Db::default()
+    };
+    file_with(layout, ps, &[], main)
+}
+
+/// 0.9 files of pages below 2 KiB (`Layout::min_pagesize`): C 0.9 creates
+/// none (it uses the OS page size) but opens them, and its largest key and
+/// `MDB_DUPSORT` item (511 bytes) no longer fits their nodes, a `P_LEAF2`
+/// page holding a single such item: C writes past its pages
+/// (`KNOWN_C_BUGS.md` #48). rlmdb opened them and panicked splitting a
+/// `MDB_DUPFIXED` page of 512 bytes (the first put of a 511-byte item).
+/// They are refused with `MDB_INVALID`, read-write and read-only; at 2 KiB
+/// pages of items of the largest size split as at any other size.
+#[test]
+fn small_09_pages_are_refused() {
+    use rlmdb::{DatabaseFlags, Environment, EnvironmentFlags};
+    for ps in [256, 512, 1024, 2048] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data.mdb"), empty_file(&V09, ps)).unwrap();
+        let open = |flags| {
+            Environment::builder()
+                .max_dbs(2)
+                .flags(flags)
+                .open(dir.path())
+        };
+        if ps < V09.min_pagesize {
+            for flags in [EnvironmentFlags::empty(), EnvironmentFlags::READ_ONLY] {
+                match open(flags) {
+                    Err(Error::Mdb(MdbError::Invalid)) => {}
+                    r => panic!("{ps}: {flags:?}: expected MDB_INVALID, got {:?}", r.err()),
+                }
+            }
+            continue;
+        }
+        let env = open(EnvironmentFlags::empty()).unwrap();
+        assert_eq!((env.page_size(), env.max_key_size()), (ps, 511));
+        let flags = DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED | DatabaseFlags::CREATE;
+        // Three to a page: the sub-DB of "k" splits three times.
+        let items: Vec<Vec<u8>> = (0..12usize)
+            .map(|i| vec![(i * 5 % 12) as u8; 511])
+            .collect();
+        let mut txn = env.begin_rw_txn().unwrap();
+        let db = txn.create_db(Some("d"), flags).unwrap();
+        for item in &items {
+            txn.put(db, b"k", item, WriteFlags::empty()).unwrap();
+        }
+        txn.commit().unwrap();
+        let txn = env.begin_ro_txn().unwrap();
+        let db = txn.open_db(Some("d")).unwrap();
+        let mut sorted = items.clone();
+        sorted.sort();
+        let got: Vec<Vec<u8>> = walk_forward(&txn, db).into_iter().map(|(_, v)| v).collect();
+        assert_eq!(got, sorted, "{ps}");
     }
 }
