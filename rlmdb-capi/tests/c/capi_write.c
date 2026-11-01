@@ -1350,6 +1350,19 @@ static void test_nested(void)
 	trace_stat("db committed", r, db);
 	mdb_txn_abort(r);
 
+	/* at any depth: the child commits its active grandchild first */
+	OK(mdb_txn_begin(env, NULL, 0, &parent));
+	OK(mdb_txn_begin(env, parent, 0, &child));
+	OK(mdb_txn_begin(env, child, 0, &grand));
+	k = sv("e2");
+	d = sv("from the grandchild");
+	OK(mdb_put(grand, db, &k, &d, 0));
+	OK(mdb_txn_commit(parent));
+	OK(mdb_txn_begin(env, NULL, MDB_RDONLY, &r));
+	OK(mdb_get(r, db, &k, &d));
+	CHECK(veq(d, "from the grandchild"));
+	mdb_txn_abort(r);
+
 	/* aborting the parent aborts its child */
 	OK(mdb_txn_begin(env, NULL, 0, &parent));
 	OK(mdb_txn_begin(env, parent, 0, &child));
@@ -1381,6 +1394,32 @@ static void test_nested(void)
 	RC(mdb_txn_commit(child), MDB_BAD_TXN);
 	RC(mdb_put(parent, db, &k, &d, 0), MDB_BAD_TXN);
 	RC(mdb_txn_commit(parent), MDB_BAD_TXN);
+
+	/* also when it is still active, deeper down: committing the parent
+	 * commits it first, which fails, and everything is aborted */
+	OK(mdb_txn_begin(small_env, NULL, 0, &parent));
+	k = sv("parent");
+	d = sv("lost");
+	OK(mdb_put(parent, db, &k, &d, 0));
+	OK(mdb_txn_begin(small_env, parent, 0, &child));
+	OK(mdb_txn_begin(small_env, child, 0, &grand));
+	{
+		char big[3000];
+		memset(big, 'y', sizeof(big));
+		for (i = 0; i < 100000; i++) {
+			snprintf(key, sizeof(key), "%08d", i);
+			k = sv(key);
+			d = bv(big, sizeof(big));
+			if ((rc = mdb_put(grand, db, &k, &d, 0)) != 0)
+				break;
+		}
+	}
+	RC(rc, MDB_MAP_FULL);
+	RC(mdb_txn_commit(parent), MDB_BAD_TXN);
+	OK(mdb_txn_begin(small_env, NULL, MDB_RDONLY, &r));
+	k = sv("parent");
+	RC(mdb_get(r, db, &k, &d), MDB_NOTFOUND);
+	mdb_txn_abort(r);
 	mdb_env_close(small_env);
 }
 

@@ -7,7 +7,7 @@ mod common;
 
 use common::CTools;
 use rlmdb::{
-    CursorOp, DatabaseFlags, Dbi, Environment, EnvironmentFlags, Error, MdbError, RwTxn,
+    CursorOp, DatabaseFlags, Dbi, Environment, EnvironmentFlags, Error, Format, MdbError, RwTxn,
     Transaction, WriteFlags,
 };
 
@@ -511,4 +511,137 @@ fn leaked_child_blocks_the_parent() {
     assert!(matches!(e, Error::Mdb(MdbError::BadTxn)), "{e:?}");
     let txn = env.begin_ro_txn().unwrap();
     assert_eq!(txn.get(Dbi::MAIN, b"a").unwrap(), None);
+}
+
+fn open_format(path: &std::path::Path, format: Format) -> Environment {
+    Environment::builder()
+        .format(format)
+        .map_size(64 << 20)
+        .max_dbs(16)
+        .flags(EnvironmentFlags::NO_SYNC)
+        .open(path)
+        .unwrap()
+}
+
+fn assert_bad_txn<T: std::fmt::Debug>(r: rlmdb::Result<T>, at: &str) {
+    match r {
+        Err(Error::Mdb(MdbError::BadTxn)) => {}
+        other => panic!("{at}: {other:?}, expected BadTxn"),
+    }
+}
+
+/// A transaction whose state went with a leaked nested transaction
+/// refuses everything.
+fn assert_blocked(t: &mut RwTxn<'_>, at: &str) {
+    assert_bad_txn(t.put(Dbi::MAIN, b"key", b"x", WriteFlags::empty()), at);
+    assert_bad_txn(t.get(Dbi::MAIN, b"key"), at);
+    assert_bad_txn(t.del(Dbi::MAIN, b"key", None), at);
+    assert_bad_txn(t.cursor(Dbi::MAIN).map(|_| ()), at);
+    assert_bad_txn(t.open_cursor(Dbi::MAIN), at);
+    assert_bad_txn(t.create_db(Some("late"), DatabaseFlags::CREATE), at);
+    assert_bad_txn(t.begin_nested_txn().map(|_| ()), at);
+}
+
+/// Begins `ends.len() + 1` transactions below `t` (at `level`), each
+/// nested in the one before, each writing `key` and creating a database
+/// `made at <level>`. The innermost is leaked; then the others, innermost
+/// first, must refuse everything and are committed (`true`, which must
+/// fail) or aborted (`false`) as `ends` says.
+fn leak_innermost(t: &mut RwTxn<'_>, level: usize, ends: &[bool]) {
+    let mut c = t.begin_nested_txn().unwrap();
+    let value = format!("level {level}");
+    c.put(Dbi::MAIN, b"key", value.as_bytes(), WriteFlags::empty())
+        .unwrap();
+    c.create_db(Some(&format!("made at {level}")), DatabaseFlags::CREATE)
+        .unwrap();
+    let Some((&commit, rest)) = ends.split_first() else {
+        std::mem::forget(c);
+        return;
+    };
+    leak_innermost(&mut c, level + 1, rest);
+    let at = format!("{ends:?} at level {level}");
+    assert_blocked(&mut c, &at);
+    if commit {
+        assert_bad_txn(c.commit(), &at);
+    } else {
+        c.abort();
+    }
+}
+
+/// A nested transaction leaked at any depth blocks every ancestor, as a
+/// leaked child blocks its parent: committing one of them fails, aborting
+/// one is safe, the top-level transaction cannot commit (none of the
+/// changes reach the file) and the environment works on.
+#[test]
+fn leaked_descendant_blocks_every_ancestor() {
+    let cases: [&[bool]; 6] = [
+        // The child is leaked.
+        &[],
+        // The grandchild is leaked, the child committed or aborted.
+        &[true],
+        &[false],
+        // Deeper chains.
+        &[true, true, true],
+        &[true, false, true],
+        &[false, true, false],
+    ];
+    for format in [Format::V09, Format::V10] {
+        for ends in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let env = open_format(dir.path(), format);
+            let mut t = env.begin_rw_txn().unwrap();
+            t.put(Dbi::MAIN, b"key", b"original", WriteFlags::empty())
+                .unwrap();
+            t.commit().unwrap();
+
+            let mut t = env.begin_rw_txn().unwrap();
+            t.put(Dbi::MAIN, b"key", b"level 0", WriteFlags::empty())
+                .unwrap();
+            t.create_db(Some("made at 0"), DatabaseFlags::CREATE)
+                .unwrap();
+            leak_innermost(&mut t, 1, ends);
+            let at = format!("{format:?} {ends:?} at level 0");
+            assert_blocked(&mut t, &at);
+            assert_bad_txn(t.commit(), &at);
+
+            let names: Vec<String> = (0..=ends.len() + 1)
+                .map(|l| format!("made at {l}"))
+                .collect();
+            {
+                let r = env.begin_ro_txn().unwrap();
+                assert_eq!(r.get(Dbi::MAIN, b"key").unwrap(), Some(&b"original"[..]));
+                assert_eq!(r.stat(Dbi::MAIN).unwrap().entries, 1, "{at}");
+                for name in &names {
+                    let e = r.open_db(Some(name)).unwrap_err();
+                    assert!(matches!(e, Error::Mdb(MdbError::NotFound)), "{at}: {e:?}");
+                }
+            }
+
+            let mut t = env.begin_rw_txn().unwrap();
+            t.put(Dbi::MAIN, b"key", b"after", WriteFlags::empty())
+                .unwrap();
+            let mut c = t.begin_nested_txn().unwrap();
+            for name in &names {
+                let db = c.create_db(Some(name), DatabaseFlags::CREATE).unwrap();
+                c.put(db, b"k", name.as_bytes(), WriteFlags::empty())
+                    .unwrap();
+            }
+            c.commit().unwrap();
+            t.commit().unwrap();
+            {
+                let r = env.begin_ro_txn().unwrap();
+                assert_eq!(r.get(Dbi::MAIN, b"key").unwrap(), Some(&b"after"[..]));
+                for name in &names {
+                    let db = r.open_db(Some(name)).unwrap();
+                    assert_eq!(r.get(db, b"k").unwrap(), Some(name.as_bytes()), "{at}");
+                }
+            }
+            drop(env);
+            if format == Format::V09 {
+                if let Some(c) = common::c_tools() {
+                    c.peer_ok(&["check-freelist", dir.path().to_str().unwrap()]);
+                }
+            }
+        }
+    }
 }

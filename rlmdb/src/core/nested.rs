@@ -37,6 +37,12 @@
 //! state replace the parent's (keeping the parent's `DB_NEW` marks). An
 //! abort restores the parent's cursors and closes the handles of databases
 //! the child created (`mdb_dbis_update`).
+//!
+//! A child leaked with `mem::forget` never gives the state back. Its
+//! parent keeps `TXN_HAS_CHILD`, so it refuses every operation and cannot
+//! commit; ending the parent (if it is nested itself) passes that on to
+//! its own parent, up to the top-level transaction, which can then only
+//! abort.
 
 use std::sync::Arc;
 
@@ -122,6 +128,12 @@ impl<'env> RwTxn<'env> {
     ///
     /// Children can be nested further. `MdbError::BadTxn` if this
     /// transaction has failed.
+    ///
+    /// The child takes this transaction's state (and that of its
+    /// ancestors) until it ends. If it is leaked with `mem::forget`
+    /// instead, that state is lost: this transaction and every ancestor
+    /// then fail every operation and their commit with `MdbError::BadTxn`
+    /// and can only be aborted, so none of their changes are written.
     pub fn begin_nested_txn(&mut self) -> Result<RwTxn<'_>> {
         self.check_usable()?;
         let depth = self.w.cursors.depth() + 1;
@@ -196,6 +208,18 @@ impl<'env> RwTxn<'env> {
         let Some(nested) = self.nested.take() else {
             return;
         };
+        if self.w.flags & TXN_HAS_CHILD != 0 {
+            // A nested transaction of this one was leaked (`mem::forget`).
+            // It took this transaction's pages and cursors, and with the
+            // layers those of every ancestor, so nothing can be merged into
+            // the parent or given back to it, whether this is a commit or
+            // an abort. The parent keeps `TXN_HAS_CHILD`: it stays blocked
+            // and passes this on when it ends, up to the top-level
+            // transaction, which can only abort (and closes the handles of
+            // the databases created below it, `RwTxn::end`).
+            self.w.flags = TXN_FINISHED;
+            return;
+        }
         let Nested {
             parent,
             cursor_backup,

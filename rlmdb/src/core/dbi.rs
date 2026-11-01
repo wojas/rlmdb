@@ -187,6 +187,23 @@ impl DbiRegistry {
         }
     }
 
+    /// Closes every slot still reserved for a database a write transaction
+    /// created ([`DbiSlot::valid`] unset), as [`DbiRegistry::finish_new`]
+    /// closes one at an abort. For the end of a top-level write transaction
+    /// that does not know them all: one whose nested transaction was
+    /// leaked with `mem::forget` and took the table of the databases it
+    /// created along. (There is one write transaction per environment, so
+    /// every such slot is one of its tree's.)
+    pub(crate) fn close_unpublished(&self) {
+        let mut slots = self.write();
+        for (i, slot) in slots.iter_mut().enumerate().skip(CORE_DBS as usize) {
+            if slot.name.is_some() && !slot.valid {
+                *slot = DbiSlot::default();
+                self.bump_seq(i);
+            }
+        }
+    }
+
     /// Reopens a handle closed by `drop_db` in a nested transaction that
     /// aborted, in its old slot, if that is still free. Returns the slot's
     /// new sequence number.

@@ -377,6 +377,11 @@ impl<'env> RwTxn<'env> {
             self.end_nested(if keep { End::Commit } else { End::Abort });
             return;
         }
+        // A nested transaction leaked with `mem::forget` (at any depth) took
+        // the dirty list with the environment's page pool, and the tables of
+        // the databases created below this transaction. (It cannot have
+        // committed, so `keep` is false.)
+        let leaked_child = self.w.flags & TXN_HAS_CHILD != 0;
         let registry = &self.core.env.dbis;
         for (i, e) in self
             .core
@@ -389,6 +394,9 @@ impl<'env> RwTxn<'env> {
             if e.state & DB_NEW != 0 {
                 registry.finish_new(i, keep, e.db.flags);
             }
+        }
+        if leaked_child {
+            registry.close_unpublished();
         }
         self.w.cursors.clear();
         self.core.dirty.clear();
@@ -406,7 +414,11 @@ impl<'env> RwTxn<'env> {
         if let Some(mut lock) = self.lock.take() {
             lock.state.pg_oldest = self.w.pg_oldest;
             lock.state.pbuf_pad = self.w.pbuf_pad;
-            lock.state.spare = Some(self.spare());
+            // The dirty list left after a leak keeps no buffers: the next
+            // transaction had better start afresh.
+            if !leaked_child {
+                lock.state.spare = Some(self.spare());
+            }
         }
     }
 
@@ -497,11 +509,15 @@ impl<'env> RwTxn<'env> {
     /// For a nested transaction: make its changes part of the parent
     /// (nothing is written). If it failed earlier (`MdbError::BadTxn`), it
     /// is aborted instead and the parent is marked failed too, as in C.
+    ///
+    /// A transaction whose nested transaction was leaked with `mem::forget`
+    /// fails with `MdbError::BadTxn` at any depth, and so do its ancestors
+    /// (see [`RwTxn::begin_nested_txn`]).
     pub fn commit(mut self) -> Result<()> {
         if self.nested.is_some() {
-            if self.w.flags & (TXN_FINISHED | TXN_ERROR) != 0 {
+            if let Err(e) = self.check_usable() {
                 self.end_nested(End::Failed);
-                return Err(MdbError::BadTxn.into());
+                return Err(e);
             }
             self.end_nested(End::Commit);
             return Ok(());
@@ -527,7 +543,10 @@ impl<'env> RwTxn<'env> {
         }
     }
 
-    /// `MDB_TXN_BLOCKED` → `MDB_BAD_TXN`.
+    /// `MDB_TXN_BLOCKED` → `MDB_BAD_TXN`: the state check of every
+    /// operation, and of the commit, nested or not. `TXN_HAS_CHILD` can only
+    /// be set here if a nested transaction was leaked with `mem::forget`
+    /// (a live one borrows this transaction); its pages went with it.
     pub(crate) fn check_usable(&self) -> Result<()> {
         if self.w.flags & TXN_BLOCKED != 0 {
             return Err(MdbError::BadTxn.into());

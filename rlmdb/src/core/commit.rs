@@ -26,7 +26,7 @@ use crate::core::cursor_put::PutData;
 use crate::core::dbi::DB_DIRTY;
 use crate::core::dirty::PageSlot;
 use crate::core::page_ops;
-use crate::core::txn_rw::{RwTxn, TXN_DIRTY, TXN_ERROR, TXN_FINISHED, TXN_HAS_CHILD, TXN_SPILLS};
+use crate::core::txn_rw::{RwTxn, TXN_DIRTY, TXN_SPILLS};
 use crate::core::wcursor::CRef;
 use crate::error::{MdbError, Result};
 use crate::format::layout::{Layout, META_MAPSIZE, META_SIZE};
@@ -46,12 +46,10 @@ impl<'env> RwTxn<'env> {
     /// `_mdb_txn_commit` for a top-level transaction, up to (not including)
     /// `mdb_txn_end`.
     pub(crate) fn commit0(&mut self) -> Result<()> {
-        // (TXN_HAS_CHILD is still set if a nested transaction was leaked with
-        // `mem::forget`: its pages are with the child, so nothing may be
-        // written.)
-        if self.w.flags & (TXN_FINISHED | TXN_ERROR | TXN_HAS_CHILD) != 0 {
-            return Err(MdbError::BadTxn.into());
-        }
+        // (TXN_HAS_CHILD is still set if a nested transaction was leaked
+        // with `mem::forget`: its pages are with the child, so nothing may
+        // be written.)
+        self.check_usable()?;
         // mdb_cursors_close: no user cursor can be alive (they borrow the
         // transaction), but handle-based ones may be.
         self.w.cursors.clear();
