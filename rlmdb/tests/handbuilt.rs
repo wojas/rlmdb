@@ -754,3 +754,66 @@ fn merge_with_a_lying_depth_commits() {
         assert_eq!(keys, [&a[..], &b[1..]].concat(), "{what}");
     }
 }
+
+/// Meta pages whose last page is below the meta pages (or `u64::MAX`): a
+/// writer takes `mm_last_pg + 1` as its next new page, so with 0 the
+/// first put of a transaction built its root leaf on page 1 and the commit
+/// wrote it over meta page 1, after which the environment no longer
+/// opened; C does the same (`KNOWN_C_BUGS.md` #49). Every transaction on
+/// such a snapshot fails to begin with `MDB_CORRUPTED` and the file stays
+/// as it was: for 0 recorded when the environment is opened, and for
+/// `u64::MAX` (which the open refuses) written into the newest meta page
+/// after the open, as another process could.
+#[test]
+fn snapshots_without_their_meta_pages_are_refused() {
+    use rlmdb::format::layout::META_LAST_PGNO;
+    for layout in [&V09, &V10] {
+        let what = format!("{:?}", layout.format);
+        let set_last = |f: &mut [u8], meta: usize, last: u64| {
+            let at = meta * PS + layout.meta_offset() + META_LAST_PGNO;
+            f[at..at + 8].copy_from_slice(&last.to_ne_bytes());
+        };
+        let refused = |env: &rlmdb::Environment, how: &str| {
+            for (kind, r) in [
+                ("read", env.begin_ro_txn().map(drop)),
+                ("write", env.begin_rw_txn().map(drop)),
+            ] {
+                match r {
+                    Err(Error::Mdb(MdbError::Corrupted)) => {}
+                    r => panic!("{what}: {how}: {kind}: expected MDB_CORRUPTED, got {r:?}"),
+                }
+            }
+        };
+        let unchanged = |data: &std::path::Path, file: &[u8]| {
+            let after = std::fs::read(data).unwrap();
+            // Windows extends a 0.9 file opened for writing to the map size.
+            assert!(after[..file.len()] == *file, "{what}: file changed");
+            assert!(after[file.len()..].iter().all(|&b| b == 0), "{what}");
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data.mdb");
+        let mut file = empty_file(layout, PS);
+        set_last(&mut file, 0, 0);
+        set_last(&mut file, 1, 0);
+        std::fs::write(&data, &file).unwrap();
+        let env = open_rw(dir.path(), 2);
+        refused(&env, "last page 0");
+        drop(env);
+        unchanged(&data, &file);
+
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data.mdb");
+        let mut file = empty_file(layout, PS);
+        std::fs::write(&data, &file).unwrap();
+        let env = open_rw(dir.path(), 2);
+        env.begin_rw_txn().unwrap().abort();
+        // Meta page 1 holds the newest snapshot (txnid 1).
+        set_last(&mut file, 1, u64::MAX);
+        let out = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+        write_all_at(&out, &file[PS..2 * PS], PS as u64).unwrap();
+        refused(&env, "last page u64::MAX");
+        drop(env);
+        unchanged(&data, &file);
+    }
+}

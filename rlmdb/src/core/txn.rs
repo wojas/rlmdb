@@ -256,6 +256,14 @@ impl<'env> TxnCore<'env> {
         if self.env.has_fatal_error() {
             return Err(MdbError::Panic.into());
         }
+        // C takes `mm_last_pg + 1` as it is. Every snapshot holds the meta
+        // pages: a smaller last page would make a writer hand out meta page
+        // 1 as a new page and overwrite it at commit, `u64::MAX` page 0.
+        // The open checks the meta page it reads, but a transaction may
+        // take one written since (`KNOWN_C_BUGS.md` #49).
+        if meta.last_pgno < NUM_METAS as u64 - 1 || meta.last_pgno == u64::MAX {
+            return Err(MdbError::Corrupted.into());
+        }
         let mut max_pgno = self.max_pgno();
         if max_pgno < self.next_pgno {
             // A map shorter than the map size covers the file as it was when
