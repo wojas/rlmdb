@@ -22,14 +22,10 @@
 # deleted here are deleted there. No git is needed on Windows, and no
 # credentials go there.
 #
-# <workdir>\<WINDOWS_ENV> is run (`call`) before the command, from <workdir>.
-# It is not part of this repository: it names the machine's toolchain, for
-# example (with rustup and MSYS2 installed under the work directory):
-#
-#   set RUSTUP_HOME=%CD%\rustup
-#   set CARGO_HOME=%CD%\cargo
-#   set CARGO_TARGET_DIR=%CD%\target
-#   set PATH=%CD%\cargo\bin;%CD%\msys64\mingw64\bin;%PATH%
+# <workdir>\<WINDOWS_ENV> is run (`call`) before the command, from <workdir>;
+# it sets up the machine's toolchain. `scripts/windows-env.cmd` is that file
+# for a work directory that holds its own rustup, cargo and MSYS2 (its
+# comments say how to set them up): copy it there as env.cmd.
 #
 # The command then runs in <workdir>\src, under cmd.exe.
 set -eu
