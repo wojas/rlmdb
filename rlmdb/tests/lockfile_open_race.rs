@@ -1,10 +1,12 @@
 //! Opening an environment while its last user closes it, on the platforms
-//! whose lock objects the last user removes: POSIX named semaphores (macOS;
-//! OpenBSD, NetBSD and DragonFly with 0.9 lock files) and SysV semaphore
-//! sets (those three BSDs with 1.0 lock files).
+//! whose lock objects go away with the last user: POSIX named semaphores
+//! (macOS; OpenBSD, NetBSD and DragonFly with 0.9 lock files) and SysV
+//! semaphore sets (those three BSDs with 1.0 lock files), which it removes,
+//! and Windows' named mutexes, which the kernel destroys with its handles.
 //!
-//! The last user takes byte 0 of the lock file exclusively and removes the
-//! objects (`mdb_env_close0`). An opener whose exclusive probe failed
+//! The last user removes the objects holding byte 0 of the lock file
+//! exclusively, or on Windows closes its mutex handles, before it releases
+//! the lock file (`mdb_env_close0`). An opener whose exclusive probe failed
 //! because that process still held its lock waits for a shared lock, gets
 //! it once the closer has gone, and finds the lock file naming objects that
 //! no longer exist. C fails the open there (`KNOWN_C_BUGS.md` row 47); rlmdb
@@ -19,7 +21,8 @@
 //! must end at the number of increments: if two processes ever used two
 //! different sets of semaphores, their write transactions could overlap
 //! and lose increments. (Without the second probe, every worker failed
-//! with `ENOENT` within a few dozen opens on macOS.)
+//! with `ENOENT` within a few dozen opens on macOS, and three of four with
+//! `ERROR_FILE_NOT_FOUND` within their first few on Windows.)
 //!
 //! Knob: `OPEN_RACE_ITERATIONS=N` opens per worker (default 1000).
 
@@ -28,7 +31,8 @@
     target_os = "ios",
     target_os = "openbsd",
     target_os = "netbsd",
-    target_os = "dragonfly"
+    target_os = "dragonfly",
+    windows
 ))]
 
 use std::path::{Path, PathBuf};

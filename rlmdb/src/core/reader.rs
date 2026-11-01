@@ -174,7 +174,10 @@ impl LockRegion {
     /// (semaphores, [`LockObjects::removed_by_last_user`]), it does so
     /// holding byte 0 exclusively, and an opener that failed its exclusive
     /// probe while that process still held the environment open gets its
-    /// shared lock only after they are gone. C fails the open then
+    /// shared lock only after they are gone. (On Windows nobody removes the
+    /// named mutexes, but the kernel destroys them with the last user's
+    /// handles, which it closes before it releases the lock file: the
+    /// same.) C fails the open then
     /// (`KNOWN_C_BUGS.md` row 47); we close the lock file, which releases the
     /// shared lock, and start again with the exclusive probe, which then
     /// either succeeds (we create the locks) or waits for the process that

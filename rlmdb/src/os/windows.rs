@@ -172,8 +172,8 @@ use windows_sys::Wdk::Foundation::NtClose;
 use windows_sys::Wdk::Storage::FileSystem::NtCreateSection;
 use windows_sys::Wdk::System::Memory::{NtMapViewOfSection, ViewUnmap};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_WRITE_PROTECT,
-    HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0,
+    CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER,
+    ERROR_WRITE_PROTECT, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Foundation::{RtlNtStatusToDosError, STATUS_ACCESS_DENIED};
 use windows_sys::Win32::Security::{
@@ -1339,9 +1339,13 @@ impl SharedLocks {
 
     /// Opens the mutexes another process created: named in the lock file
     /// (version 1), or named after the hash stored in it (version 2).
-    /// Always `Some` (Unix answers `None` for semaphores the last user
-    /// removed): nobody removes a named mutex here, the kernel destroys it
-    /// with its last handle, and a failed `OpenMutexA` is an error.
+    /// `None` if one does not exist (`ERROR_FILE_NOT_FOUND`): nobody
+    /// removes a named mutex, but the kernel destroys it with its last
+    /// handle, and the last user of the environment closes its handles
+    /// before it releases its lock on the lock file (as C's
+    /// `mdb_env_close0` does). An opener that waited for its shared lock
+    /// meanwhile finds them gone; `LockRegion::open` then probes again,
+    /// where C fails the open (`KNOWN_C_BUGS.md` row 47).
     pub fn attach(map: &LockMap, layout: &LockLayout) -> io::Result<Option<SharedLocks>> {
         let (rname, wname) = match (layout.objects, layout.wlock) {
             (LockObjects::MutexNames, Some(wlock)) => (
@@ -1357,8 +1361,14 @@ impl SharedLocks {
             }
             _ => return Err(einval()),
         };
-        let rmutex = SharedMutex::open(&rname)?;
-        let wmutex = SharedMutex::open(&wname)?;
+        let open = |name: &CStr| match SharedMutex::open(name) {
+            Ok(m) => Ok(Some(m)),
+            Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => Ok(None),
+            Err(e) => Err(e),
+        };
+        let (Some(rmutex), Some(wmutex)) = (open(&rname)?, open(&wname)?) else {
+            return Ok(None);
+        };
         Ok(Some(SharedLocks { rmutex, wmutex }))
     }
 
