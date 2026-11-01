@@ -262,7 +262,9 @@ same return codes:
   it aborts. Names are arbitrary bytes (not necessarily UTF-8).
 * `mdb_set_compare`/`mdb_set_dupsort` take effect at once, also in the
   calling transaction (C's usual `mdb_dbi_open` -> `mdb_set_compare` ->
-  `mdb_put` in one transaction).
+  `mdb_put` in one transaction) and for its cursors opened before, except
+  that such a cursor keeps the order of a key's duplicates it was opened
+  with, as in C.
 * An operation that fails half-way (`MDB_MAP_FULL`, `MDB_TXN_FULL`,
   `MDB_PAGE_FULL`, I/O errors) leaves the transaction unusable: later
   operations return `MDB_BAD_TXN`, and `mdb_txn_commit` returns
@@ -517,9 +519,11 @@ environments.
   keys that point into the transaction's own pages, cursor puts and
   deletes while other cursors are positioned, `MDB_CURRENT`, `DUPSORT`
   sub-page to sub-DB promotion and back, custom comparators used in the
-  creating transaction (and gone with the handle when its creation aborts,
-  also in a nested transaction: the database that reuses the handle has
-  the default order in `mdb_cmp`/`mdb_dcmp` and in what it stores),
+  creating transaction, installed after cursors were opened on the handle
+  (in read and write transactions), and gone with the handle when its
+  creation aborts (also in a nested transaction: the database that reuses
+  the handle has the default order in `mdb_cmp`/`mdb_dcmp` and in what it
+  stores),
   `MDB_MAP_FULL` and the `MDB_BAD_TXN` state,
   threads waiting for the writer lock, `mdb_drop`, nested transactions
   (commit, abort, two levels, failing children, parents committed or

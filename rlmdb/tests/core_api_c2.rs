@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 
 use rlmdb::{
-    Comparator, CursorOp, DatabaseFlags, Dbi, Environment, EnvironmentFlags, Transaction,
+    Comparator, CursorOp, DatabaseFlags, Dbi, Environment, EnvironmentFlags, Format, Transaction,
     WriteFlags,
 };
 
@@ -71,6 +71,80 @@ fn comparators_set_through_a_transaction_apply_at_once() {
             .to_err_code(),
         libc::EINVAL
     );
+}
+
+/// ASCII case-insensitive order.
+fn fold(a: &[u8], b: &[u8]) -> Ordering {
+    let lower = |s: &[u8]| s.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>();
+    lower(a).cmp(&lower(b))
+}
+
+/// A read cursor opened before `set_compare` / `set_dupsort` searches with
+/// the new key order and the new order of a key's single data item, as
+/// C's, which reaches both through the handle; for a key's duplicates it
+/// keeps the order it was opened with, as C's sub-cursor does
+/// (`mdb_xcursor_init0`). Both formats.
+#[test]
+fn comparators_set_after_a_read_cursor_opened() {
+    for format in [Format::V09, Format::V10] {
+        let dir = tempfile::tempdir().unwrap();
+        let open_format = || {
+            Environment::builder()
+                .map_size(16 << 20)
+                .max_dbs(4)
+                .format(format)
+                .flags(EnvironmentFlags::NO_SYNC)
+                .open(dir.path())
+                .unwrap()
+        };
+        let env = open_format();
+        let mut txn = env.begin_rw_txn().unwrap();
+        let db = txn.create_db(Some("r"), DatabaseFlags::CREATE).unwrap();
+        let dups = txn
+            .create_db(Some("d"), DatabaseFlags::CREATE | DatabaseFlags::DUP_SORT)
+            .unwrap();
+        txn.put(Dbi::MAIN, b"A", b"value", WriteFlags::empty())
+            .unwrap();
+        txn.put(dups, b"single", b"A", WriteFlags::empty()).unwrap();
+        // Stored in reverse order.
+        txn.set_compare(db, Some(reverse)).unwrap();
+        txn.set_dupsort(dups, Some(reverse)).unwrap();
+        for k in [b"a", b"b", b"c", b"d", b"e"] {
+            txn.put(db, k, k, WriteFlags::empty()).unwrap();
+            txn.put(dups, b"many", k, WriteFlags::empty()).unwrap();
+        }
+        txn.put(dups, b"one", b"c", WriteFlags::empty()).unwrap();
+        txn.commit().unwrap();
+        drop(env);
+        // A new environment: the handles start with the default orders.
+        let env = open_format();
+        assert_eq!(env.format(), format);
+        let txn = env.begin_ro_txn().unwrap();
+        let mut main = txn.cursor(Dbi::MAIN).unwrap();
+        assert_eq!(txn.open_db(Some("r")).unwrap(), db);
+        assert_eq!(txn.open_db(Some("d")).unwrap(), dups);
+        let mut c = txn.cursor(db).unwrap();
+        let mut dc = txn.cursor(dups).unwrap();
+        txn.set_compare(Dbi::MAIN, Some(fold)).unwrap();
+        txn.set_compare(db, Some(reverse)).unwrap();
+        txn.set_dupsort(dups, Some(fold)).unwrap();
+        // The key order.
+        assert_eq!(main.set_key(b"a").unwrap().unwrap().0, b"A");
+        assert_eq!(c.set(b"a").unwrap(), Some((&b"a"[..], &b"a"[..])));
+        assert_eq!(c.set_range(b"bb").unwrap().unwrap().0, b"b");
+        assert_eq!(c.next().unwrap().unwrap().0, b"a");
+        // A key's single item: "a" is "A" now, and sorts before "c".
+        assert_eq!(dc.get_both(b"single", b"a").unwrap().unwrap().1, b"A");
+        assert_eq!(dc.get_both_range(b"one", b"D").unwrap(), None);
+        assert_eq!(dc.get_both_range(b"one", b"B").unwrap().unwrap().1, b"c");
+        // A key's duplicates are searched in the order the cursor was
+        // opened with (the default), which they are not stored in (C:
+        // MDB_NOTFOUND too); a new cursor uses the new order.
+        txn.set_dupsort(dups, Some(reverse)).unwrap();
+        assert_eq!(dc.get_both(b"many", b"b").unwrap(), None);
+        let mut dc = txn.cursor(dups).unwrap();
+        assert_eq!(dc.get_both(b"many", b"b").unwrap().unwrap().1, b"b");
+    }
 }
 
 #[test]

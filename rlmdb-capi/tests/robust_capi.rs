@@ -254,7 +254,7 @@ fn child_scenario(name: &str) {
             }
             "read_cursor_close" => {
                 let txn = f.begin(MDB_RDONLY);
-                // Cursors keep the order they were opened with: set it first.
+                // (A cursor opened before would use it as well, as in C.)
                 assert_eq!(mdb_set_compare(txn, f.dbi, Some(cmp_closes_cursor)), 0);
                 let mut c = ptr::null_mut();
                 assert_eq!(mdb_cursor_open(txn, f.dbi, &mut c), 0);

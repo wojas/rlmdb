@@ -85,15 +85,17 @@ pub trait Transaction {
     /// `mdb_set_compare(txn, db, cmp)`: order the keys of `db` with `cmp`
     /// (`None` = the default order again). As in C the setting belongs to
     /// the environment's handle; unlike [`Environment::set_compare`] it
-    /// also takes effect in this transaction at once. Use it before
-    /// anything is read or written with the handle, and use the same order
-    /// in every process (`lmdb.h`). `EINVAL` for the free DB or an invalid
-    /// handle.
+    /// also takes effect in this transaction at once, also for its cursors
+    /// opened before. Use it before anything is read or written with the
+    /// handle, and use the same order in every process (`lmdb.h`).
+    /// `EINVAL` for the free DB or an invalid handle.
     fn set_compare(&self, db: Dbi, cmp: Option<CmpFn>) -> Result<()>;
 
     /// `mdb_set_dupsort(txn, db, cmp)`: as [`Transaction::set_compare`] for
-    /// the order of duplicate data items (`DUP_SORT` databases). Cursors
-    /// opened earlier keep the order they started with, as in C.
+    /// the order of duplicate data items (`DUP_SORT` databases). As in C, a
+    /// cursor opened earlier uses it for a key's single data item but
+    /// keeps the order it started with for a key's duplicates (C copies
+    /// that order into the cursor when it opens it).
     fn set_dupsort(&self, db: Dbi, cmp: Option<CmpFn>) -> Result<()>;
 
     /// The comparators this transaction uses for `db`: the key order and,

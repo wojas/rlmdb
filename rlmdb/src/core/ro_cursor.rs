@@ -19,7 +19,7 @@ use crate::core::cursor::{
     cursor_prev, cursor_prev_any, cursor_set, new_xcursor, next_in_page, node_read, not_found,
     prev_in_page, Cursor, Kv, C_DEL, C_EOF, C_INITIALIZED,
 };
-use crate::core::dbi::{Dbi, TxnDb};
+use crate::core::dbi::{Dbi, TxnDb, DB_VALID};
 use crate::core::txn::TxnCore;
 use crate::error::{Error, MdbError, Result};
 
@@ -248,6 +248,26 @@ impl<'txn> RoCursor<'txn> {
         self.mc.current_node()?.key().ok_or_else(corrupted)
     }
 
+    /// Takes the key order and the order of a key's single data item from
+    /// the transaction before a search: C's cursor reaches them through
+    /// `mc_dbx`, the handle's entry in the environment's `me_dbxs`, so an
+    /// `mdb_set_compare` / `mdb_set_dupsort` after the cursor was opened
+    /// applies to its next search. The order of the sub-cursor (a key's
+    /// duplicates) is copied when the cursor is opened
+    /// (`mdb_xcursor_init0`) and stays, as in C. Only searches compare, so
+    /// moves skip this.
+    fn refresh_orders(&mut self) {
+        let dbs = self.txn.dbs.borrow();
+        if let Some(e) = dbs.get(self.dbi.0 as usize) {
+            // An entry the transaction forgot (a closed handle) is not
+            // this database's; keep what the cursor has.
+            if e.state & DB_VALID != 0 {
+                self.mc.cmp = e.key_cmp;
+                self.dcmp = e.dup_cmp;
+            }
+        }
+    }
+
     fn get_inner(
         &mut self,
         key: Option<&[u8]>,
@@ -264,6 +284,7 @@ impl<'txn> RoCursor<'txn> {
                     return Err(MdbError::Incompatible.into());
                 }
                 let key = key.ok_or_else(Error::einval)?;
+                self.refresh_orders();
                 let (kv, _) = cursor_set(
                     txn,
                     &mut self.mc,
@@ -278,6 +299,7 @@ impl<'txn> RoCursor<'txn> {
             }
             Set | SetKey | SetRange => {
                 let key = key.ok_or_else(Error::einval)?;
+                self.refresh_orders();
                 let (kv, _) = cursor_set(
                     txn,
                     &mut self.mc,

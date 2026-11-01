@@ -229,11 +229,11 @@ unsafe fn set_comparator(
 /// `mdb_set_compare`: set a custom key comparison function for a database.
 ///
 /// As in C, the function belongs to the environment's handle: it takes
-/// effect at once in `txn` and in every transaction that uses the handle
-/// later (cursors opened before keep the order they started with). Call it
-/// before anything is read or written with the handle, in every process
-/// that uses the database (`lmdb.h`). A NULL function restores the default
-/// order (C would crash on the next comparison).
+/// effect at once in `txn` (also for its cursors opened before) and in
+/// every transaction that uses the handle later. Call it before anything
+/// is read or written with the handle, in every process that uses the
+/// database (`lmdb.h`). A NULL function restores the default order (C
+/// would crash on the next comparison).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_set_compare(
     txn: *mut MDB_txn,
@@ -245,7 +245,9 @@ pub unsafe extern "C" fn mdb_set_compare(
 }
 
 /// `mdb_set_dupsort`: set a custom data comparison function for an
-/// `MDB_DUPSORT` database. Same rules as [`mdb_set_compare`].
+/// `MDB_DUPSORT` database. Same rules as [`mdb_set_compare`], except that a
+/// cursor opened before keeps the order it started with for a key's
+/// duplicates, as in C (`mdb_xcursor_init0` copies it into the cursor).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_set_dupsort(
     txn: *mut MDB_txn,

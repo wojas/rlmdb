@@ -969,6 +969,88 @@ static void test_comparators(void)
 	mdb_env_close(env);
 }
 
+/* mdb_set_compare and mdb_set_dupsort after cursors were opened on the
+ * handles, in a read and in a write transaction of a freshly opened
+ * environment (so the handles start with the default orders). C's cursor
+ * finds the key order and the order of a key's single data item through
+ * the handle and uses the new ones at once; the order of a key's
+ * duplicates is copied into the cursor when it is opened
+ * (mdb_xcursor_init0) and stays. */
+static void test_comparator_after_cursor_open(void)
+{
+	MDB_env *env;
+	MDB_txn *txn;
+	MDB_dbi keys, dups;
+	MDB_cursor *c, *dc;
+	MDB_val k, d;
+	char x[2] = "a";
+	int rdonly, rc;
+
+	env = new_env("cmplate", 1UL << 22, 4, 0);
+	OK(mdb_txn_begin(env, NULL, 0, &txn));
+	OK(mdb_dbi_open(txn, "keys", MDB_CREATE, &keys));
+	OK(mdb_set_compare(txn, keys, revcmp));
+	OK(mdb_dbi_open(txn, "dups", MDB_CREATE | MDB_DUPSORT, &dups));
+	OK(mdb_set_dupsort(txn, dups, revcmp));
+	for (x[0] = 'a'; x[0] <= 'e'; x[0]++) {
+		k = sv(x);
+		OK(mdb_put(txn, keys, &k, &k, 0));
+		d = k;
+		k = sv("many");
+		OK(mdb_put(txn, dups, &k, &d, 0));
+	}
+	k = sv("one");
+	d = sv("c");
+	OK(mdb_put(txn, dups, &k, &d, 0));
+	OK(mdb_txn_commit(txn));
+	mdb_env_close(env);
+
+	for (rdonly = 0; rdonly < 2; rdonly++) {
+		env = new_env("cmplate", 1UL << 22, 4, 0);
+		OK(mdb_txn_begin(env, NULL, rdonly ? MDB_RDONLY : 0, &txn));
+		OK(mdb_dbi_open(txn, "keys", 0, &keys));
+		OK(mdb_dbi_open(txn, "dups", 0, &dups));
+		OK(mdb_cursor_open(txn, keys, &c));
+		OK(mdb_cursor_open(txn, dups, &dc));
+		OK(mdb_set_compare(txn, keys, revcmp));
+		OK(mdb_set_dupsort(txn, dups, revcmp));
+		k = sv("a");
+		OK(mdb_get(txn, keys, &k, &d));
+		OK(mdb_cursor_get(c, &k, &d, MDB_SET));
+		CHECK(veq(d, "a"));
+		k = sv("b");
+		OK(mdb_cursor_get(c, &k, &d, MDB_SET_KEY));
+		OK(mdb_cursor_get(c, &k, &d, MDB_NEXT));
+		CHECK(veq(k, "a"));
+		k = sv("bb");	/* between "c" and "b" in reverse order */
+		OK(mdb_cursor_get(c, &k, &d, MDB_SET_RANGE));
+		CHECK(veq(k, "b"));
+		/* A key's single item: "a" sorts after "c" now. */
+		k = sv("one");
+		d = sv("a");
+		RC(mdb_cursor_get(dc, &k, &d, MDB_GET_BOTH_RANGE), MDB_NOTFOUND);
+		d = sv("d");
+		OK(mdb_cursor_get(dc, &k, &d, MDB_GET_BOTH_RANGE));
+		CHECK(veq(d, "c"));
+		/* A key's duplicates: the cursor still searches them in the
+		 * default order, which they are not stored in. */
+		k = sv("many");
+		d = sv("b");
+		rc = mdb_cursor_get(dc, &k, &d, MDB_GET_BOTH);
+		T("cmplate (%s): duplicate b through the earlier cursor: %d",
+			rdonly ? "read" : "write", rc);
+		mdb_cursor_close(dc);
+		OK(mdb_cursor_open(txn, dups, &dc));
+		d = sv("b");
+		OK(mdb_cursor_get(dc, &k, &d, MDB_GET_BOTH));
+		CHECK(veq(d, "b"));
+		mdb_cursor_close(dc);
+		mdb_cursor_close(c);
+		mdb_txn_abort(txn);
+		mdb_env_close(env);
+	}
+}
+
 /* mdb_set_compare (dup 0) or mdb_set_dupsort (dup 1) on the handle of a
  * database whose creation is then aborted, by the creating transaction or
  * (nested 1) by the child that created it. The database created next gets
@@ -1538,6 +1620,7 @@ int main(int argc, char **argv)
 	test_put_get_del();
 	test_cursors();
 	test_comparators();
+	test_comparator_after_cursor_open();
 	test_comparator_reuse();
 	test_errors();
 	test_threads();
