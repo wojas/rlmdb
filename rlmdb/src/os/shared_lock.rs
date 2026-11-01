@@ -210,13 +210,14 @@ mod imp {
             })
         }
 
-        /// Uses the mutexes another process initialised.
-        pub fn attach(map: &LockMap, layout: &LockLayout) -> io::Result<SharedLocks> {
+        /// Uses the mutexes another process initialised. Always `Some`:
+        /// the mutexes live in the lock file, nobody removes them.
+        pub fn attach(map: &LockMap, layout: &LockLayout) -> io::Result<Option<SharedLocks>> {
             let (r, w) = mutexes(map, layout)?;
-            Ok(SharedLocks {
+            Ok(Some(SharedLocks {
                 rmutex: SharedMutex { mutex: r },
                 wmutex: SharedMutex { mutex: w },
-            })
+            }))
         }
 
         /// Releases our handles. Process-shared mutexes need no cleanup
@@ -337,6 +338,16 @@ mod imp {
                 return Err(io::Error::last_os_error());
             }
             Ok(NamedSemaphore { sem, name })
+        }
+
+        /// `sem_open(name, 0)` of a semaphore another process created;
+        /// `None` if there is none of that name (`ENOENT`).
+        fn open_existing(name: CString) -> io::Result<Option<NamedSemaphore>> {
+            match NamedSemaphore::open(name, None) {
+                Ok(sem) => Ok(Some(sem)),
+                Err(e) if e.raw_os_error() == Some(libc::ENOENT) => Ok(None),
+                Err(e) => Err(e),
+            }
         }
 
         fn unlink(name: &CString) {
@@ -517,7 +528,14 @@ mod imp {
         /// lock file (version 1), named after the hash stored in it
         /// (version 2, macOS), or the SysV set whose id is stored in it
         /// (version 2, the other BSDs).
-        pub fn attach(map: &LockMap, layout: &LockLayout) -> io::Result<SharedLocks> {
+        ///
+        /// `None` if they do not exist (any more): `sem_open` fails with
+        /// `ENOENT`, or the SysV set's id is invalid. That is what an
+        /// opener finds when the last user of the environment removed them
+        /// ([`SharedLocks::close`]) between our failed exclusive probe and
+        /// our shared lock; the caller then probes again
+        /// (`LockRegion::open`, `KNOWN_C_BUGS.md` #47).
+        pub fn attach(map: &LockMap, layout: &LockLayout) -> io::Result<Option<SharedLocks>> {
             let (rname, wname) = match (layout.objects, layout.wlock) {
                 (LockObjects::SemaphoreNames, Some(wlock)) => (
                     read_name(map, layout.rlock, layout.rlock_size)?,
@@ -532,14 +550,18 @@ mod imp {
                 }
                 #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
                 (LockObjects::SysVSemaphores, Some(wlock)) if layout.rlock_size == 8 => {
-                    let (r, w) = super::sysv::attach(map, layout.rlock, wlock)?;
-                    return Ok(SharedLocks::sysv(r, w));
+                    let pair = super::sysv::attach(map, layout.rlock, wlock)?;
+                    return Ok(pair.map(|(r, w)| SharedLocks::sysv(r, w)));
                 }
                 _ => return Err(einval()),
             };
-            let rmutex = NamedSemaphore::open(rname, None)?;
-            let wmutex = NamedSemaphore::open(wname, None)?;
-            Ok(SharedLocks::named(rmutex, wmutex))
+            let Some(rmutex) = NamedSemaphore::open_existing(rname)? else {
+                return Ok(None);
+            };
+            let Some(wmutex) = NamedSemaphore::open_existing(wname)? else {
+                return Ok(None);
+            };
+            Ok(Some(SharedLocks::named(rmutex, wmutex)))
         }
 
         fn named(rmutex: NamedSemaphore, wmutex: NamedSemaphore) -> SharedLocks {
@@ -930,15 +952,21 @@ mod sysv {
 
     /// Uses the set whose id another process stored at `rlock`, after
     /// checking, as C does, that we may read and change it
-    /// ([`check_access`]).
+    /// ([`check_access`]). `None` if the id names no set (`EINVAL`; some
+    /// systems say `EIDRM` for a removed one): the last user removed it
+    /// ([`SysVSemaphore::remove`]) after our exclusive probe failed, or the
+    /// lock file holds garbage.
     pub fn attach(
         map: &LockMap,
         rlock: usize,
         wlock: usize,
-    ) -> io::Result<(SysVSemaphore, SysVSemaphore)> {
+    ) -> io::Result<Option<(SysVSemaphore, SysVSemaphore)>> {
         let semid = map.load_i32(rlock);
-        check_access(semid, &mut SemidDs([0; 512]))?;
-        Ok(pair(map, semid, rlock, wlock))
+        match check_access(semid, &mut SemidDs([0; 512])) {
+            Ok(()) => Ok(Some(pair(map, semid, rlock, wlock))),
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EINVAL | libc::EIDRM)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     #[cfg(test)]
@@ -1074,7 +1102,7 @@ mod sysv {
             assert_eq!(value(r.semid, READER), 1);
 
             // Another opener finds the set through the stored id.
-            let (_r2, w2) = attach(&map, RLOCK, WLOCK).unwrap();
+            let (_r2, w2) = attach(&map, RLOCK, WLOCK).unwrap().unwrap();
             assert_eq!(w2.semid, w.semid);
             assert_eq!(w2.lock().unwrap(), LockStatus::Acquired);
             assert_eq!(map.load_i32(WLOCK), 1);
@@ -1103,10 +1131,10 @@ mod sysv {
             assert_eq!(w.lock().unwrap(), LockStatus::Acquired);
             w.unlock().unwrap();
 
-            // The last user removes the set.
+            // The last user removes the set; a later opener finds it gone.
             r.remove();
             assert_eq!(value(r.semid, READER), -1);
-            assert!(attach(&map, RLOCK, WLOCK).is_err());
+            assert!(attach(&map, RLOCK, WLOCK).unwrap().is_none());
         }
     }
 }

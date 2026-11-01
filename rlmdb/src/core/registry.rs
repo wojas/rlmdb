@@ -363,6 +363,23 @@ impl Registration {
         self.lock = Some(id);
         Ok(lock_file)
     }
+
+    /// Gives the lock file's claim back, for an open that closed the lock
+    /// file to start again ([`LockRegion::open`] after the shared locks
+    /// were removed under it). Descriptors that refused opens parked for
+    /// it are closed if nobody else has the file.
+    ///
+    /// [`LockRegion::open`]: crate::core::reader::LockRegion::open
+    pub(crate) fn release_lock_file(&mut self) {
+        if let Some(id) = self.lock.take() {
+            let mut reg = registry();
+            let reg = &mut *reg;
+            release(&mut reg.files, &id);
+            if !reg.files.contains_key(&id) {
+                reg.parked.remove(&id);
+            }
+        }
+    }
 }
 
 impl Drop for Registration {

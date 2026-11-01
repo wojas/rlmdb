@@ -27,7 +27,9 @@
 //!   the table and the shared mutexes; otherwise we wait for a shared lock and
 //!   validate magic and format. The exclusive opener downgrades to shared at
 //!   the end of the open (`LockRegion::downgrade`, `mdb_env_share_locks`),
-//!   publishing the current txnid in `mti_txnid` first.
+//!   publishing the current txnid in `mti_txnid` first. Not kept: where the
+//!   last user removes the semaphores when it closes, an opener that finds
+//!   them gone probes again instead of failing (`KNOWN_C_BUGS.md` #47).
 //! * The lock file has the version of the environment's data format
 //!   ([`LockLayout`]: version 1 for LMDB 0.9, version 2 for LMDB 1.0,
 //!   `mdb_env_setup_locks` at mdb10.c line 5957). The protocol is the same in
@@ -51,6 +53,7 @@ use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::consts::MDB_MAGIC;
 use crate::core::registry::{LocalShared, Registration};
@@ -112,6 +115,18 @@ impl ReaderTable {
     }
 }
 
+/// How many times [`LockRegion::open`] goes back to the exclusive probe
+/// after finding the shared locks removed, before it gives up.
+const REMOVED_RETRIES: u32 = 100;
+
+/// One pass of [`LockRegion::open`].
+enum Attempt {
+    /// Done: the region, or `None` without a lock file.
+    Done(Option<LockRegion>),
+    /// The lock file names shared locks that no longer exist: probe again.
+    LocksRemoved,
+}
+
 /// The open lock file: its mapping, the shared mutexes and our bookkeeping
 /// (`me_lfd`, `me_txns`, `me_rmutex`/`me_wmutex`, `me_live_reader`,
 /// `me_close_readers`).
@@ -154,6 +169,22 @@ impl LockRegion {
     /// magic is `MDB_INVALID`, a `mti_format` other than
     /// [`LockLayout::lock_format`] (the other version, or the same version
     /// built for another platform) is `MDB_VERSION_MISMATCH`.
+    ///
+    /// Where the last user of the environment removes the shared locks
+    /// (semaphores, [`LockObjects::removed_by_last_user`]), it does so
+    /// holding byte 0 exclusively, and an opener that failed its exclusive
+    /// probe while that process still held the environment open gets its
+    /// shared lock only after they are gone. C fails the open then
+    /// (`KNOWN_C_BUGS.md` #47); we close the lock file, which releases the
+    /// shared lock, and start again with the exclusive probe, which then
+    /// either succeeds (we create the locks) or waits for the process that
+    /// does create them to downgrade. Locks are only ever created under the
+    /// exclusive lock, so every process that attaches uses the same ones.
+    /// After [`REMOVED_RETRIES`] tries (a lock file that names locks which
+    /// do not exist while other processes hold it open: damage), the open
+    /// fails with `ENOENT`.
+    ///
+    /// [`LockObjects::removed_by_last_user`]: crate::format::lockfile::LockObjects::removed_by_last_user
     pub(crate) fn open(
         path: &Path,
         mode: u32,
@@ -162,6 +193,32 @@ impl LockRegion {
         layout: &'static LockLayout,
         registration: &mut Registration,
     ) -> Result<Option<LockRegion>> {
+        let mut retries = 0;
+        loop {
+            match Self::open_once(path, mode, max_readers, read_only, layout, registration)? {
+                Attempt::Done(region) => return Ok(region),
+                Attempt::LocksRemoved if retries < REMOVED_RETRIES => {
+                    retries += 1;
+                    // Openers that raced the same closer start again at
+                    // the same time; a pause lets the first one's probe
+                    // find the others gone.
+                    std::thread::sleep(Duration::from_micros(200 * u64::from(retries.min(10))));
+                }
+                Attempt::LocksRemoved => return Err(Error::errno(libc::ENOENT)),
+            }
+        }
+    }
+
+    /// One pass of [`LockRegion::open`]: probe, map, then create or
+    /// attach the shared locks.
+    fn open_once(
+        path: &Path,
+        mode: u32,
+        max_readers: u32,
+        read_only: bool,
+        layout: &'static LockLayout,
+        registration: &mut Registration,
+    ) -> Result<Attempt> {
         let file = match os::env_file_options(
             OpenOptions::new().read(true).write(true).create(true),
             mode,
@@ -169,7 +226,7 @@ impl LockRegion {
         .open(path)
         {
             Ok(f) => registration.claim_lock_file(f)?,
-            Err(e) if read_only && os::is_read_only_fs(&e) => return Ok(None),
+            Err(e) if read_only && os::is_read_only_fs(&e) => return Ok(Attempt::Done(None)),
             Err(e) => return Err(e.into()),
         };
 
@@ -212,10 +269,20 @@ impl LockRegion {
             if map.load_u32(TXNINFO_FORMAT) != layout.lock_format {
                 return Err(MdbError::VersionMismatch.into());
             }
-            SharedLocks::attach(&map, layout)?
+            match SharedLocks::attach(&map, layout)? {
+                Some(locks) => locks,
+                None => {
+                    // Dropping `map` and `file` releases our shared lock;
+                    // the next attempt claims the file again.
+                    drop(map);
+                    drop(file);
+                    registration.release_lock_file();
+                    return Ok(Attempt::LocksRemoved);
+                }
+            }
         };
 
-        Ok(Some(LockRegion {
+        Ok(Attempt::Done(Some(LockRegion {
             locks: Some(locks),
             map,
             file,
@@ -225,7 +292,7 @@ impl LockRegion {
             exclusive: Mutex::new(exclusive),
             live_reader: Mutex::new(false),
             close_readers: AtomicU32::new(0),
-        }))
+        })))
     }
 
     /// `true` if we hold the exclusive lock (we initialised the table).

@@ -1317,7 +1317,10 @@ impl SharedLocks {
 
     /// Opens the mutexes another process created: named in the lock file
     /// (version 1), or named after the hash stored in it (version 2).
-    pub fn attach(map: &LockMap, layout: &LockLayout) -> io::Result<SharedLocks> {
+    /// Always `Some` (Unix answers `None` for semaphores the last user
+    /// removed): nobody removes a named mutex here, the kernel destroys it
+    /// with its last handle, and a failed `OpenMutexA` is an error.
+    pub fn attach(map: &LockMap, layout: &LockLayout) -> io::Result<Option<SharedLocks>> {
         let (rname, wname) = match (layout.objects, layout.wlock) {
             (LockObjects::MutexNames, Some(wlock)) => (
                 read_name(map, layout.rlock, layout.rlock_size)?,
@@ -1334,7 +1337,7 @@ impl SharedLocks {
         };
         let rmutex = SharedMutex::open(&rname)?;
         let wmutex = SharedMutex::open(&wname)?;
-        Ok(SharedLocks { rmutex, wmutex })
+        Ok(Some(SharedLocks { rmutex, wmutex }))
     }
 
     /// Closes both mutex handles. Nothing is unlinked: the kernel destroys
