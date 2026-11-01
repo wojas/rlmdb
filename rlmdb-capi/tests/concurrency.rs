@@ -136,7 +136,7 @@ fn snapshot_stability(lib: Lib, writers: Lib) {
     reader.step();
     let t1 = reader.expect("T1");
     let (id1, n1) = (t1[0], t1[1]);
-    assert!(id1 > 0 && n1 > 0);
+    assert!(id1 > 0 && n1 > 0, "T1 txnid {id1}, {n1} entries");
     // C sees both of the reader's slots, with their snapshots.
     let mut ours: Vec<_> = readers(&env)
         .into_iter()

@@ -3,7 +3,9 @@
  *
  * - they seed rand() with time(NULL); here `time` becomes mtest_time(),
  *   which returns $MTEST_SEED instead, so that a C-linked and a
- *   Rust-linked build do exactly the same;
+ *   Rust-linked build do exactly the same. rand() and srand() become
+ *   mtest_rand() and mtest_srand(): on OpenBSD rand() is random unless
+ *   seeded with srand_deterministic(), and mtest4 never seeds it;
  * - mtest6.c calls mdb_dkey(), which liblmdb only defines with MDB_DEBUG.
  *
  * <time.h> comes first and the macro after it: MSVC's C runtime (the UCRT)
@@ -18,8 +20,12 @@
 #include "lmdb.h"
 
 time_t mtest_time(time_t *t);
+void mtest_srand(unsigned seed);
+int mtest_rand(void);
 char *mdb_dkey(MDB_val *key, char *buf);
 
 #define time	mtest_time
+#define srand	mtest_srand
+#define rand	mtest_rand
 
 #endif

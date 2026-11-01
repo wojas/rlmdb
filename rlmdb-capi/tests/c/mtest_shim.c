@@ -14,6 +14,36 @@ time_t mtest_time(time_t *t)
 	return v;
 }
 
+/* The header is force-included before <stdlib.h>, whose declarations
+ * of rand() and srand() the macros renamed: the libc's are these. */
+#undef srand
+#undef rand
+void srand(unsigned seed);
+int rand(void);
+
+static int seeded;
+
+/* srand(): the seeding call of this libc (OpenBSD's srand() ignores its
+ * argument). */
+void mtest_srand(unsigned seed)
+{
+	seeded = 1;
+#ifdef __OpenBSD__
+	srand_deterministic(seed);
+#else
+	srand(seed);
+#endif
+}
+
+/* rand(), seeded with the test seed first if the program did not seed
+ * it (mtest4), so that every libc gives the same sequence twice. */
+int mtest_rand(void)
+{
+	if (!seeded)
+		mtest_srand((unsigned)mtest_time(NULL));
+	return rand();
+}
+
 /* The key in hex (the MDB_DEBUG version prints it similarly). */
 char *mdb_dkey(MDB_val *key, char *buf)
 {
