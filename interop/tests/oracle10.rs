@@ -137,6 +137,8 @@ fn lock_format() {
     let lock_type = match l.lock_mode.as_str() {
         "win32" => get("alignof(mdb_hash_t)") / 8 % 2,
         "posix_sem" => 4 + get("alignof(mdb_hash_t)") / 8 % 2,
+        // System V semaphores (OpenBSD, NetBSD, DragonFly).
+        "sysv_sem" => 8,
         "posix_mutex" => {
             10 + log2_mod(get("alignof(pthread_mutex_t)"), 5)
                 + get("sizeof(pthread_mutex_t)") / 4 % 22 * 5
@@ -203,6 +205,20 @@ fn lock_file_header() {
             assert_eq!(readers, mt1 + size.next_multiple_of(64));
             assert_eq!(get("MDB_ROBUST_SUPPORTED"), 1);
         }
+        // System V semaphores (OpenBSD, NetBSD, DragonFly): the set's id
+        // and the reader flag, two `int`s, follow the reader count; the
+        // writer flag has the second cache line (`COMPATIBILITY.md`,
+        // `format::lockfile::LOCK_V10`).
+        "sysv_sem" => {
+            assert_eq!(get("offsetof(MDB_txbody.mtb_semid)"), 20);
+            assert_eq!(get("sizeof(MDB_txbody.mtb_semid)"), 4);
+            assert_eq!(get("offsetof(MDB_txbody.mtb_rlocked)"), 24);
+            assert_eq!(get("sizeof(MDB_txbody.mtb_rlocked)"), 4);
+            assert_eq!(get("sizeof(MDB_txbody)"), 32);
+            assert_eq!(get("offsetof(MDB_txninfo.mt1.mtb.mtb_semid)"), 20);
+            assert_eq!(get("offsetof(MDB_txninfo.mt2.mt2_wlocked)"), 64);
+            assert_eq!(readers, 128);
+        }
         mode => panic!("unexpected lock mode {mode}"),
     }
     assert_eq!(get("offsetof(MDB_txninfo.mti_readers[1])"), readers + 64);
@@ -254,8 +270,8 @@ fn layout_dumps_line_up() {
         .collect();
     only09.sort_unstable();
     let mut expected09 = vec!["P_DIRTY"];
-    if matches!(layout10().lock_mode.as_str(), "posix_sem" | "win32") {
-        expected09.extend([
+    match layout10().lock_mode.as_str() {
+        "posix_sem" | "win32" => expected09.extend([
             "offsetof(MDB_txbody.mtb_rmname)",
             "sizeof(MDB_txbody.mtb_rmname)",
             "offsetof(MDB_txninfo.mt1.mtb.mtb_rmname)",
@@ -264,7 +280,18 @@ fn layout_dumps_line_up() {
             "sizeof(MDB_txninfo.mt2)",
             "offsetof(MDB_txninfo.mt2.mt2_wmname)",
             "sizeof(MDB_txninfo.mt2.mt2_wmname)",
-        ]);
+        ]),
+        // OpenBSD, NetBSD, DragonFly: 0.9 names its semaphores, 1.0 keeps
+        // the id of a System V set (and has `mt2`, for the writer flag).
+        "sysv_sem" => expected09.extend([
+            "offsetof(MDB_txbody.mtb_rmname)",
+            "sizeof(MDB_txbody.mtb_rmname)",
+            "offsetof(MDB_txninfo.mt1.mtb.mtb_rmname)",
+            "sizeof(MDB_txninfo.mt1.mtb.mtb_rmname)",
+            "offsetof(MDB_txninfo.mt2.mt2_wmname)",
+            "sizeof(MDB_txninfo.mt2.mt2_wmname)",
+        ]),
+        _ => {}
     }
     expected09.sort_unstable();
     assert_eq!(only09, expected09, "printed by the 0.9 layout_dump only");
@@ -280,6 +307,9 @@ fn layout_dumps_line_up() {
         "(MDB_page.mp_txnid)",
         "MDB_ovpage",
         "mtb_mutexid)",
+        "mtb_semid)",
+        "mtb_rlocked)",
+        "mt2_wlocked)",
         "me_psize(",
         "me_nodemax(",
         "mdb_env_get_maxkeysize(",
@@ -373,10 +403,17 @@ fn cpeer10_fills_and_verifies() {
 
 /// Every 1.0 `mtest*` program that is built runs to completion, and leaves
 /// an environment that the 1.0 `mdb_stat` reads (the encrypted ones need
-/// their key, which `mdb_stat` does not have).
+/// their key, which `mdb_stat` does not have). Not the `MDB_REMAP_CHUNKS`
+/// programs (`mtest_remap`; `mtest_enc*`, encryption implies the flag) on
+/// OpenBSD: for some of the sequences `rand()` gives them, C 1.0 fails its
+/// own assertions there (`mdb_page_touch`, `mdb_page_dirty`), and
+/// OpenBSD's `rand()` is random unless seeded with `srand_deterministic`,
+/// so every run differs from the fixed sequences of Linux and macOS.
 #[test]
 fn mtests10_run() {
-    for name in bins::MTESTS10 {
+    for name in bins::MTESTS10.iter().filter(|n| {
+        !(cfg!(target_os = "openbsd") && (**n == "mtest_remap" || n.starts_with("mtest_enc")))
+    }) {
         let env = TestEnv::with_name("testdb").expect("temp env");
         let bin = bins::mtest10(name).expect("built");
         let out = run_tool_any_status(bin, &[], Some(env.root()), None).expect("run mtest");

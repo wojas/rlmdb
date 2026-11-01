@@ -254,6 +254,20 @@ pub fn robust_mutexes() -> bool {
         || cfg!(windows)
 }
 
+/// Whether the writer lock of a `format` environment recovers from a
+/// killed owner: [`robust_mutexes`], and the System V semaphore set of a
+/// 1.0 lock file on OpenBSD, NetBSD and DragonFly, whose `SEM_UNDO` the
+/// kernel applies when the holder dies (C 1.0 and rlmdb both lock with
+/// it). The POSIX semaphores of 0.9 lock files there are macOS's case.
+pub fn writer_lock_recovers(format: Format) -> bool {
+    robust_mutexes()
+        || (cfg!(any(
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        )) && format == Format::V10)
+}
+
 const MIB: u64 = 1 << 20;
 
 fn log(msg: impl fmt::Display) {

@@ -493,8 +493,13 @@ fn writer_gets_lock(peer: Peer, env: &TestEnv, seed: u32) -> Result<()> {
 /// Windows: the writer lock is a named mutex, which the kernel abandons when
 /// its owner dies: the next writer gets `WAIT_ABANDONED` (C's
 /// `MDB_OWNERDEAD`), recovers and continues, as on Linux.
+///
+/// OpenBSD, NetBSD, DragonFly: 0.9 lock files use POSIX semaphores, as on
+/// macOS; the System V semaphore set of a 1.0 lock file is released by the
+/// kernel when its holder dies (`SEM_UNDO`), so the next writer gets it
+/// ([`writer_lock_recovers`](super::writer_lock_recovers)).
 pub fn killed_writer(pair: Pair) -> Result<()> {
-    let robust = super::robust_mutexes();
+    let robust = super::writer_lock_recovers(pair.format);
     let env = new_env(&pair, 512 * MIB)?;
     let ds = DataSet::new("data", 1000, 111);
     ds.fill(pair.writer, &env, &[])?;

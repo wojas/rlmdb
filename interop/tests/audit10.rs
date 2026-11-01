@@ -388,12 +388,15 @@ fn audit_passes_on_copies_of_c10_files() {
 
 /// The environments of the upstream 1.0 test programs pass (`mtest10`
 /// uses 1 KiB pages; the encrypted ones cannot be opened without their
-/// key and are left out).
+/// key and are left out, and on OpenBSD `mtest_remap`, where C 1.0's
+/// `MDB_REMAP_CHUNKS` fails its own assertions for some of the sequences
+/// its unseeded, there random, `rand()` gives it; see `mtests10_run`).
 #[test]
 fn audit_passes_on_mtest10_files() {
     for name in bins::MTESTS10
         .iter()
         .filter(|n| !n.starts_with("mtest_enc"))
+        .filter(|n| !(cfg!(target_os = "openbsd") && **n == "mtest_remap"))
     {
         let env = TestEnv::with_name("testdb").expect("temp env");
         let bin = bins::mtest10(name).expect("built");

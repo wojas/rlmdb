@@ -121,7 +121,19 @@ fn stat10(env: &TestEnv, flags: &[&str]) -> MdbStat {
 
 /// The reader table as `mdb_stat10 -r` (C's `mdb_reader_list`) prints it.
 fn c_readers(env: &TestEnv) -> Vec<ReaderEntry> {
-    stat10(env, &["-r"]).readers.expect("reader section")
+    let out = tool(bins::mdb_stat10(), env, &["-r"]);
+    assert!(
+        out.success() || (out.code() == Some(1) && out.stderr.is_empty()),
+        "{out}"
+    );
+    let readers = MdbStat::parse(&out.stdout)
+        .expect("parse mdb_stat10")
+        .readers
+        .expect("reader section");
+    if readers.is_empty() {
+        eprintln!("mdb_stat10 -r listed no reader:\n{out}");
+    }
+    readers
 }
 
 /// rlmdb's `reader_list` and C's agree: same slots, same order, same
@@ -179,6 +191,9 @@ impl Attached {
     fn header(&self) -> TxnInfoSnapshot {
         let layout = LockLayout::of(self.env.format());
         let mut buf = vec![0; layout.readers];
+        // The stores went through this process's map (OpenBSD: see
+        // `read_lock_file`).
+        rlmdb::flush_file_maps(&self.lock).expect("flush lock file maps");
         interop::os::read_exact_at(&self.lock, &mut buf, 0).expect("read lock file");
         TxnInfoSnapshot::read(&buf, layout).expect("lock file header")
     }
@@ -194,8 +209,17 @@ fn assert_version_mismatch(r: rlmdb::Result<Environment>) {
 
 /// The header as it is in the file, decoded with `layout`. Only while this
 /// process has no environment open on it (see the module documentation).
+/// The lock file's bytes as the processes mapping it left them: on OpenBSD
+/// their maps' dirty pages are written out first, since `read` would not
+/// see them otherwise.
+fn read_lock_file(path: &std::path::Path) -> Vec<u8> {
+    let f = std::fs::File::open(path).expect("open lock file");
+    rlmdb::flush_file_maps(&f).expect("flush lock file maps");
+    std::fs::read(path).expect("read lock file")
+}
+
 fn header(env: &TestEnv, layout: &LockLayout) -> TxnInfoSnapshot {
-    let bytes = std::fs::read(env.lock_file()).expect("read lock file");
+    let bytes = read_lock_file(&env.lock_file());
     TxnInfoSnapshot::read(&bytes, layout).expect("lock file header")
 }
 
@@ -502,8 +526,8 @@ fn stale_lock_files_of_the_other_version_are_reinitialised() {
     let env10 = TestEnv::new().unwrap().with_format(Format::V10);
     new_env10(&env10);
     let (v1, v2) = (
-        std::fs::read(env09.lock_file()).unwrap(),
-        std::fs::read(env10.lock_file()).unwrap(),
+        read_lock_file(&env09.lock_file()),
+        read_lock_file(&env10.lock_file()),
     );
     assert_eq!(header(&env09, &LOCK_V09).format, LOCK_V09.lock_format);
     assert_eq!(header(&env10, &LOCK_V10).format, LOCK_V10.lock_format);
