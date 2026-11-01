@@ -19,6 +19,7 @@
 //! | `Cursor::page_search` | `mdb_page_search`, `mdb_page_search_root` (line 5630) |
 //! | `Cursor::node_search`, `search_page` | `mdb_node_search` (line 5422) |
 //! | `Cursor::sibling` | `mdb_cursor_sibling` (line 5956) |
+//! | `Cursor::step` | `mdb_cursor_sibling` in a walk, counted (`Walk`) |
 //! | `cursor_first`, `cursor_last` | `mdb_cursor_first`, `mdb_cursor_last` |
 //! | `cursor_next`, `cursor_prev` | `mdb_cursor_next`, `mdb_cursor_prev` |
 //! | `cursor_set` | `mdb_cursor_set` (line 6173) |
@@ -109,6 +110,27 @@ pub(crate) struct Kv<'t> {
     pub(crate) data: &'t [u8],
 }
 
+/// The leaf pages a cursor stepped onto in one direction since it was last
+/// positioned from the root ([`Cursor::step`]): what bounds a walk over a
+/// damaged tree.
+///
+/// A walk in one direction over a sound tree reaches each of its leaves
+/// once. Changes to the tree (in a write transaction) can put a leaf ahead
+/// of the cursor again only by allocating it: a split's new page, the copy
+/// of a page touched, a freed page reused. So a walk makes fewer steps than
+/// [`TxnCore::walk_limit`], the pages the map holds plus those the write
+/// transaction allocated. In a tree whose branch pages share a child (two
+/// branches, or two slots of one, naming one page) a walk reaches that
+/// child once per path to it: exponentially often with sharing at several
+/// levels, which C walks to the end (`KNOWN_C_BUGS.md` #50).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Walk {
+    /// Steps taken.
+    steps: u64,
+    /// Their direction: `true` for steps to the left.
+    backward: bool,
+}
+
 /// `MDB_cursor` without the sub-cursor.
 ///
 /// `N` is the capacity of the page stack. Cursors that outlive a call
@@ -148,6 +170,8 @@ pub(crate) struct Cursor<'t, const N: usize = CURSOR_STACK> {
     /// re-derived from it and its numbers fold into constants (see
     /// `PageRef::l`).
     format: Format,
+    /// The walk since the cursor was last positioned from the root.
+    pub(crate) walk: Walk,
 }
 
 impl<'t> Cursor<'t> {
@@ -213,6 +237,7 @@ impl<'t, const N: usize> Cursor<'t, N> {
             cmp,
             subpage: None,
             format: layout.format,
+            walk: Walk::default(),
         }
     }
 
@@ -348,6 +373,7 @@ impl<'t, const N: usize> Cursor<'t, N> {
         key: Option<&[u8]>,
         flags: u8,
     ) -> Result<()> {
+        self.walk = Walk::default();
         let root = match self.subpage {
             Some(sp) => sp,
             None => {
@@ -466,6 +492,28 @@ impl<'t, const N: usize> Cursor<'t, N> {
         if !move_right {
             self.set_ki_top(mp.num_keys().saturating_sub(1));
         }
+        Ok(())
+    }
+
+    /// [`Cursor::sibling`] as a step of a walk (`mdb_cursor_next`,
+    /// `mdb_cursor_prev`, `MDB_PREV_MULTIPLE`), counted in the cursor's
+    /// [`Walk`]: `MDB_CORRUPTED`, with the cursor where it was, once the
+    /// walk in this direction has made [`TxnCore::walk_limit`] steps, which
+    /// no walk over a sound tree does.
+    pub(crate) fn step(&mut self, txn: &'t TxnCore<'_>, move_right: bool) -> Result<()> {
+        let steps = if self.walk.backward != move_right {
+            self.walk.steps
+        } else {
+            0
+        };
+        if steps >= txn.walk_limit() {
+            return Err(corrupted());
+        }
+        self.sibling(txn, move_right)?;
+        self.walk = Walk {
+            steps: steps + 1,
+            backward: !move_right,
+        };
         Ok(())
     }
 
@@ -622,6 +670,7 @@ pub(crate) fn xcursor_init1<'t, const N: usize>(
     node: NodeRef<'t>,
 ) -> Result<()> {
     let data = node.inline_data().ok_or_else(corrupted)?;
+    mx.walk = Walk::default();
     if node.is_subdata() {
         mx.db = Db::read(data).ok_or_else(corrupted)?;
         mx.subpage = None;
@@ -986,7 +1035,7 @@ fn cursor_next_in<'t, const N: usize>(
     if mc.flags & C_DEL != 0 {
         mc.flags ^= C_DEL;
     } else if mc.ki_top() + 1 >= mp.num_keys() {
-        if let Err(e) = mc.sibling(txn, true) {
+        if let Err(e) = mc.step(txn, true) {
             mc.flags |= C_EOF;
             return Err(e);
         }
@@ -1072,7 +1121,7 @@ fn cursor_prev_in<'t, const N: usize>(
 
     mc.flags &= !(C_EOF | C_DEL);
     if mc.ki_top() == 0 {
-        mc.sibling(txn, false)?;
+        mc.step(txn, false)?;
         let n = mc.top_page().num_keys();
         mc.set_ki_top(n.saturating_sub(1));
     } else {

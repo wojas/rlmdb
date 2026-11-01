@@ -230,3 +230,165 @@ fn write_errors() {
     let r = run(Impl::Rust, "mdb_stat", &args(&[p(&empty)]), b"", dir.path());
     assert_eq!(r.code, 0);
 }
+
+/// A data file whose main or free DB (`free`) is a damaged tree of 20
+/// branch levels over one leaf, every branch page naming the page below
+/// four times: 24 pages that a walk crosses 4^20 times.
+fn shared_children_file(layout: &'static rlmdb::format::Layout, free: bool) -> Vec<u8> {
+    use rlmdb::format::page::{NodeData, P_BRANCH, P_LEAF};
+    use rlmdb::format::{Db, Meta, PageMut};
+    const PS: usize = 4096;
+    const LEVELS: u64 = 20;
+    let key = |i: u64| -> Vec<u8> {
+        match (i, free) {
+            (0, _) => vec![],
+            (_, true) => i.to_ne_bytes().to_vec(),
+            (_, false) => vec![b'a' + i as u8],
+        }
+    };
+    let leaf = |pgno: u64, k: &[u8], v: &[u8]| {
+        let mut buf = vec![0u8; PS];
+        let mut p = PageMut::with_layout(&mut buf, layout);
+        p.init(pgno, P_LEAF);
+        p.add_node(0, k, NodeData::Inline(v), 0).unwrap();
+        buf
+    };
+    let record = (1u64.to_ne_bytes(), 0u64.to_ne_bytes());
+    let mut pages = vec![if free {
+        leaf(2, &record.0, &record.1)
+    } else {
+        leaf(2, b"key", b"value")
+    }];
+    for pgno in 3..3 + LEVELS {
+        let mut buf = vec![0u8; PS];
+        let mut p = PageMut::with_layout(&mut buf, layout);
+        p.init(pgno, P_BRANCH);
+        for i in 0..4 {
+            p.add_node(i as usize, &key(i), NodeData::Child(pgno - 1), 0)
+                .unwrap();
+        }
+        pages.push(buf);
+    }
+    let other = 3 + LEVELS;
+    pages.push(if free {
+        leaf(other, b"a", b"b")
+    } else {
+        leaf(other, &record.0, &record.1)
+    });
+    let shared = Db {
+        depth: LEVELS as u16 + 1,
+        branch_pages: LEVELS,
+        leaf_pages: 1,
+        entries: 1,
+        root: 2 + LEVELS,
+        ..Db::default()
+    };
+    let one = Db {
+        depth: 1,
+        leaf_pages: 1,
+        entries: 1,
+        root: other,
+        ..Db::default()
+    };
+    let m0 = Meta::new_env_with_layout(layout, PS as u32, 1 << 24, 0);
+    let mut m1 = m0;
+    // Snapshot 9 on meta page 1: the free record (txnid 1) is old.
+    m1.txnid = 9;
+    m1.last_pgno = 1 + pages.len() as u64;
+    let (f, m) = if free { (shared, one) } else { (one, shared) };
+    m1.dbs[0] = Db {
+        flags: m0.dbs[0].flags,
+        pad: m0.dbs[0].pad,
+        ..f
+    };
+    m1.dbs[1] = m;
+    let mut file = vec![0u8; 2 * PS];
+    m0.write_initial_pages_with_layout(&mut file, PS, layout);
+    m1.write(&mut file[PS + layout.meta_offset()..]);
+    file.extend(pages.concat());
+    file
+}
+
+/// Runs the Rust `tool` on `env`, killing it and failing if it takes more
+/// than a minute.
+fn run_bounded(tool: &str, argv: &[&str], env: &Path) -> Run {
+    let mut child = command_as(&bin(Impl::Rust, tool), tool)
+        .args(argv)
+        .arg(env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = child.stdout.take().unwrap();
+    let err = child.stderr.take().unwrap();
+    let read = |mut r: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            r.read_to_end(&mut buf).unwrap();
+            buf
+        })
+    };
+    let (out, err) = (read(Box::new(out)), read(Box::new(err)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("{tool} {argv:?}: still running after a minute");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    Run {
+        stdout: out.join().unwrap(),
+        stderr: err.join().unwrap(),
+        code: status.code().unwrap_or(-1),
+    }
+}
+
+/// Trees whose branch pages share their children: C's `mdb_dump` prints
+/// the main DB's record 4^20 times and `mdb_stat -f` reads the free DB's
+/// as often, hours for a 24-page file. The library stops a walk that steps
+/// onto more leaves than the map has pages (`KNOWN_C_BUGS.md` #50), so
+/// `mdb_dump` fails with `MDB_CORRUPTED` after a few copies of the record
+/// and `mdb_stat -f`, which ends its walk at an error as C does, reports
+/// what it read.
+#[test]
+fn walks_over_shared_children_stop() {
+    use rlmdb::format::layout::{V09, V10};
+    for layout in [&V09, &V10] {
+        let what = format!("{:?}", layout.format);
+        let dir = tempdir();
+        let main = dir.path().join("main");
+        let free = dir.path().join("free");
+        for (env, is_free) in [(&main, false), (&free, true)] {
+            fs::create_dir(env).unwrap();
+            fs::write(env.join("data.mdb"), shared_children_file(layout, is_free)).unwrap();
+        }
+        let r = run_bounded("mdb_dump", &[], &main);
+        assert_eq!(r.code, 1, "{what}: {r:?}");
+        assert!(r.stderr_str().contains("MDB_CORRUPTED"), "{what}: {r:?}");
+        // One copy per leaf step; the walk stops at the map's page count
+        // (the dump header says how large the map is; 4 KiB pages).
+        let out = r.stdout_str();
+        let map_pages: usize = out
+            .lines()
+            .find_map(|l| l.strip_prefix("mapsize="))
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|m| m / 4096)
+            .unwrap_or_else(|| panic!("{what}: no mapsize in {out:?}"));
+        let copies = out.matches("\n 6b6579\n").count();
+        assert!(
+            (2..=map_pages + 1).contains(&copies),
+            "{what}: {copies} copies, map {map_pages} pages"
+        );
+        let r = run_bounded("mdb_stat", &["-f"], &free);
+        assert_eq!(r.code, 0, "{what}: {r:?}");
+        assert!(
+            r.stdout_str().contains("  Free pages: 0\n"),
+            "{what}: {r:?}"
+        );
+    }
+}

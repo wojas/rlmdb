@@ -64,6 +64,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use crate::cmp::CmpFn;
 use crate::consts::*;
 use crate::core::dbi::{Dbi, DbiRegistry};
+use crate::core::freelist::next_txnid_key;
 use crate::core::reader::{LockRegion, ReaderInfo, ReaderTable};
 use crate::core::registry::{LocalShared, Registration};
 use crate::core::txn::{RoTxn, Transaction};
@@ -813,12 +814,15 @@ impl Environment {
     }
 
     /// Number of pages on the free list of the latest snapshot (the
-    /// "Free pages" line of `mdb_stat -f`).
+    /// "Free pages" line of `mdb_stat -f`). `MDB_CORRUPTED` if the free
+    /// DB's keys do not ascend (`KNOWN_C_BUGS.md` #50).
     pub fn freelist(&self) -> Result<usize> {
         let txn = self.begin_ro_txn()?;
         let mut cursor = txn.cursor(Dbi::FREE)?;
         let mut pages = 0usize;
-        while let Some((_, data)) = cursor.next()? {
+        let mut prev = None;
+        while let Some((key, data)) = cursor.next()? {
+            prev = Some(next_txnid_key(prev, key)?);
             let n = Idl::encoded_len(data).ok_or(MdbError::Corrupted)?;
             pages = usize::try_from(n)
                 .ok()

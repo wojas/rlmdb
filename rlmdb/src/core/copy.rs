@@ -43,6 +43,7 @@ use std::path::Path;
 use crate::consts::*;
 use crate::core::dbi::Dbi;
 use crate::core::env::Environment;
+use crate::core::freelist::next_txnid_key;
 use crate::core::page_ops;
 use crate::core::txn::{Transaction, TxnCore};
 use crate::error::{Error, MdbError, Result};
@@ -198,7 +199,10 @@ impl Environment {
             // find the new last_pg, which also becomes the new root.
             let mut freecount = 0u64;
             let mut c = txn.cursor(Dbi::FREE)?;
-            while let Some((_, data)) = c.next()? {
+            let mut prev = None;
+            while let Some((key, data)) = c.next()? {
+                // Records read twice would be counted twice (#49).
+                prev = Some(next_txnid_key(prev, key)?);
                 freecount =
                     freecount.wrapping_add(Idl::encoded_len(data).ok_or(MdbError::Corrupted)?);
             }

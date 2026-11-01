@@ -25,18 +25,19 @@
 //!   moves, splits and merges keep the parent's cursors up to date as C's
 //!   fixup loops do on the shadowed cursors; a copy of their state
 //!   (`mc_backup`) is kept to restore them if the child aborts;
-//! * the DB table, `mt_next_pgno`, `mt_dirty_room`, the flags and a copy of
-//!   the reclaimed free pages (`me_pghead`, saved in C's `MDB_ntxn`) are
-//!   copied; the child starts with an empty free list and no loose pages.
+//! * the DB table, `mt_next_pgno`, `mt_dirty_room`, the flags, the count
+//!   of allocations (`TxnCore::walk_limit`) and a copy of the reclaimed
+//!   free pages (`me_pghead`, saved in C's `MDB_ntxn`) are copied; the
+//!   child starts with an empty free list and no loose pages.
 //!
 //! When the child ends, everything goes back. A commit merges: the free
 //! list is appended to the parent's, the child's dirty pages replace the
 //! parent's (and leave the parent's spill list), pages the child spilled
 //! leave the parent's dirty list and join its spill list, loose pages are
-//! appended, the DB table, next page number, dirty room, flags and free-page
-//! state replace the parent's (keeping the parent's `DB_NEW` marks). An
-//! abort restores the parent's cursors and closes the handles of databases
-//! the child created (`mdb_dbis_update`).
+//! appended, the DB table, next page number, allocation count, dirty
+//! room, flags and free-page state replace the parent's (keeping the
+//! parent's `DB_NEW` marks). An abort restores the parent's cursors and
+//! closes the handles of databases the child created (`mdb_dbis_update`).
 //!
 //! A child leaked with `mem::forget` never gives the state back. Its
 //! parent keeps `TXN_HAS_CHILD`, so it refuses every operation and cannot
@@ -90,6 +91,7 @@ pub(crate) struct ParentParts<'a> {
     parents: &'a mut Vec<Layer>,
     dbs: &'a mut Vec<TxnDb>,
     next_pgno: &'a mut u64,
+    allocations: &'a mut u64,
     w: &'a mut WriteState,
 }
 
@@ -101,6 +103,7 @@ impl NestedParent for RwTxn<'_> {
             parents: &mut self.core.parents,
             dbs: self.core.dbs.get_mut(),
             next_pgno: &mut self.core.next_pgno,
+            allocations: &mut self.core.allocations,
             w: &mut self.w,
         }
     }
@@ -153,6 +156,7 @@ impl<'env> RwTxn<'env> {
         core.map = Arc::clone(&self.core.map);
         core.txnid = self.core.txnid;
         core.next_pgno = self.core.next_pgno;
+        core.allocations = self.core.allocations;
         let mut layer = Layer {
             dirty: std::mem::take(&mut self.core.dirty),
             spilled: std::mem::take(&mut self.core.spilled),
@@ -252,6 +256,7 @@ impl<'env> RwTxn<'env> {
             // Append our free list to parent's.
             p.w.free_pgs.append_list(&self.w.free_pgs);
             *p.next_pgno = self.core.next_pgno;
+            *p.allocations = self.core.allocations;
             p.w.flags = self.w.flags;
 
             // Update parent's DB table, preserving parent's DB_NEW status.

@@ -155,6 +155,9 @@ pub(crate) struct TxnCore<'env> {
     /// For a nested transaction: the dirty and spilled pages of its parent,
     /// grandparent, … (nearest first), consulted after its own.
     pub(crate) parents: Vec<Layer>,
+    /// Pages a write transaction (with its committed children) allocated
+    /// so far, each run counted once: part of [`TxnCore::walk_limit`].
+    pub(crate) allocations: u64,
 }
 
 /// Where `mdb_page_get` finds a page of a write transaction, and at which
@@ -183,6 +186,7 @@ impl<'env> TxnCore<'env> {
             dirty: DirtyPages::new(),
             spilled: SpillSet::new(),
             parents: Vec::new(),
+            allocations: 0,
         }
     }
 
@@ -240,6 +244,21 @@ impl<'env> TxnCore<'env> {
             PageSource::Dirty(buf, _) => Some(buf),
             _ => None,
         }
+    }
+
+    /// How many leaf pages a cursor may step onto in one direction before
+    /// its walk counts as one over a damaged tree ([`Walk`]): the pages the
+    /// map holds, plus the allocations of a write transaction, each of
+    /// which may put a leaf ahead of a walking cursor again. No sound tree
+    /// has more leaves than the map has pages; the map's count rather than
+    /// the snapshot's keeps the bound independent of how the snapshot's
+    /// end is tracked. A damaged tree overshoots it by powers of the
+    /// fan-out.
+    ///
+    /// [`Walk`]: crate::core::cursor::Walk
+    #[inline]
+    pub(crate) fn walk_limit(&self) -> u64 {
+        self.max_pgno().saturating_add(self.allocations)
     }
 
     /// `me_maxpg` for this transaction's map: the number of pages it holds.

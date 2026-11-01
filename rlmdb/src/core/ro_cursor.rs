@@ -372,7 +372,7 @@ impl<'txn> RoCursor<'txn> {
                 match self.mx.as_mut() {
                     Some(mx) if dups && mx.is_initialized() => {
                         let key = self.mc.current_node()?.key().ok_or_else(corrupted)?;
-                        mx.sibling(txn, false)?;
+                        mx.step(txn, false)?;
                         Ok(Kv {
                             key,
                             data: mx.fetch_multiple()?,

@@ -76,7 +76,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::cmp::Comparator;
 use crate::consts::*;
 use crate::core::cursor::{
-    corrupted, empty_page, node_read, search_page, Cursor, C_DEL, C_EOF, C_INITIALIZED, C_SUB,
+    corrupted, empty_page, node_read, search_page, Cursor, Walk, C_DEL, C_EOF, C_INITIALIZED, C_SUB,
 };
 use crate::core::dbi::{DB_DIRTY, DB_DUPDATA, DB_USRVALID, DB_VALID};
 use crate::core::dirty::PageSlot;
@@ -126,6 +126,9 @@ pub(crate) struct WCursor {
     pub(crate) flags: u8,
     /// The tree is a `P_SUBP` sub-page (sub-cursors only).
     pub(crate) subp: bool,
+    /// The walk of the read cursor this one is loaded into
+    /// ([`Cursor::walk`]), kept from one read operation to the next.
+    pub(crate) walk: Walk,
 }
 
 impl WCursor {
@@ -141,6 +144,7 @@ impl WCursor {
             top: 0,
             flags,
             subp: false,
+            walk: Walk::default(),
         }
     }
 
@@ -157,6 +161,7 @@ impl WCursor {
         self.top = 0;
         self.flags = flags;
         self.subp = false;
+        self.walk = Walk::default();
     }
 
     /// `C_INITIALIZED`.
@@ -587,6 +592,7 @@ fn load_read<'t>(
         None
     };
     let snum = w.snum.min(CURSOR_STACK);
+    out.walk = w.walk;
     out.load(w.flags, &w.ki, snum, w.top, sub, |i| match sub {
         Some(sp) if i == 0 => Ok(sp),
         _ => core.page_by_slot(w.pg[i], w.pg_slot[i]),
@@ -600,6 +606,7 @@ fn store_back(w: &mut WCursor, rc: &Cursor<'_>) {
     w.top = rc.top_level();
     w.ki = *rc.ki_array();
     w.subp = rc.subpage().is_some();
+    w.walk = rc.walk;
     for i in 0..w.snum {
         w.pg[i] = if i == 0 && w.subp {
             SUBPAGE
@@ -660,6 +667,7 @@ fn descend<'t>(
     key: Option<&[u8]>,
 ) -> Result<PageRef<'t>> {
     let (mut mp, slot) = core.page_and_slot(db.root, w.pg_slot[0])?;
+    w.walk = Walk::default();
     w.pg[0] = mp.pgno();
     w.pg_slot[0] = slot;
     w.snum = 1;
@@ -1375,6 +1383,7 @@ impl<'env> RwTxn<'env> {
         x.c.top = 0;
         x.c.flags = C_SUB;
         x.c.subp = false;
+        x.c.walk = Walk::default();
         if subpage {
             x.c.snum = 1;
             x.c.flags = C_INITIALIZED | C_SUB;

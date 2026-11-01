@@ -45,6 +45,20 @@ fn txnid_key(key: &[u8]) -> Result<u64> {
     get_u64(key, 0).ok_or_else(corrupted)
 }
 
+/// Reads free DB key `key` in a walk of the free DB, after key `prev` if
+/// there was one. The keys are the ids of the transactions that freed the
+/// pages: unique, so a walk meets them in ascending order. A key not larger
+/// than the one before is a damaged tree, out of order or with branch pages
+/// that share a child, whose records a walk would read once per path to it
+/// (`KNOWN_C_BUGS.md` #50): `MDB_CORRUPTED`.
+pub(crate) fn next_txnid_key(prev: Option<u64>, key: &[u8]) -> Result<u64> {
+    let id = txnid_key(key)?;
+    match prev {
+        Some(prev) if id <= prev => Err(corrupted()),
+        _ => Ok(id),
+    }
+}
+
 /// How the buffer of a newly allocated page starts (see
 /// [`RwTxn::page_alloc_with`]).
 #[derive(Clone, Copy, Debug)]
@@ -101,6 +115,8 @@ impl<'env> RwTxn<'env> {
         num: usize,
         init: PageInit<'_>,
     ) -> Result<(u64, PageSlot)> {
+        // Counted first, whatever the outcome (see `TxnCore::walk_limit`).
+        self.core.allocations = self.core.allocations.saturating_add(1);
         // If there are any loose pages, just use them.
         if num == 1 {
             if let Some(pgno) = self.w.loose.pop() {
@@ -238,6 +254,7 @@ impl<'env> RwTxn<'env> {
                     break;
                 }
             }
+            let first = op == CursorOp::First;
             let kv = match op {
                 CursorOp::First => cursor_first(core, &mut m2, None),
                 CursorOp::SetRange => cursor_set(
@@ -259,7 +276,13 @@ impl<'env> RwTxn<'env> {
                 Err(e) if e.not_found() => break,
                 Err(e) => return Err(e),
             };
-            last = txnid_key(kv.key)?;
+            // C reads on whatever the key. `last` is one past the key read
+            // before, or past `pglast` where the search started: a smaller
+            // key is a damaged tree, and with branch pages that share a
+            // child this loop would read its records once per path to it,
+            // holding the writer lock (`KNOWN_C_BUGS.md` #50).
+            let prev = (!first).then(|| last - 1);
+            last = next_txnid_key(prev, kv.key)?;
             if oldest <= last {
                 if !found_old {
                     oldest = find_oldest(core);

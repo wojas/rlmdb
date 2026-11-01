@@ -296,11 +296,35 @@ fn file_of(pages: &[Vec<u8>], main: Db) -> Vec<u8> {
 
 /// [`file_of`] in the format of `layout`, with pages of `ps` bytes.
 fn file_with(layout: &Layout, ps: usize, pages: &[Vec<u8>], main: Db) -> Vec<u8> {
+    let free = Db {
+        root: P_INVALID,
+        ..Db::default()
+    };
+    file_with_dbs(layout, ps, pages, free, main, 1)
+}
+
+/// [`file_with`] with the free DB record `free` too (its flags and its
+/// `md_pad`, which holds the page size, are those of a new environment),
+/// and meta page 1 holding snapshot `txnid` (odd: a snapshot's meta page
+/// is `txnid & 1`).
+fn file_with_dbs(
+    layout: &Layout,
+    ps: usize,
+    pages: &[Vec<u8>],
+    free: Db,
+    main: Db,
+    txnid: u64,
+) -> Vec<u8> {
     let mut m0 = Meta::new_env_with_layout(layout, ps as u32, 1 << 20, 0);
     m0.dbs[0].root = P_INVALID;
     let mut m1 = m0;
-    m1.txnid = 1;
+    m1.txnid = txnid;
     m1.last_pgno = 1 + pages.len() as u64;
+    m1.dbs[0] = Db {
+        flags: m0.dbs[0].flags,
+        pad: m0.dbs[0].pad,
+        ..free
+    };
     m1.dbs[1] = main;
     let mut file = vec![0u8; 2 * ps];
     m0.write_initial_pages_with_layout(&mut file, ps, layout);
@@ -816,4 +840,237 @@ fn snapshots_without_their_meta_pages_are_refused() {
         drop(env);
         unchanged(&data, &file);
     }
+}
+
+/// A damaged tree whose branch pages share their children: page `first`
+/// is a leaf holding `leaf`, and each of the `levels` branch pages above
+/// it (the last is the root) names the page below `fanout` times, under
+/// the separators `sep(1)`, `sep(2)`, … A walk reaches the leaf
+/// `fanout^levels` times; the pages, in page number order.
+fn shared_tree(
+    layout: &'static Layout,
+    first: u64,
+    levels: u64,
+    fanout: usize,
+    leaf: &[(&[u8], &[u8])],
+    sep: impl Fn(usize) -> Vec<u8>,
+) -> Vec<Vec<u8>> {
+    let mut buf = vec![0u8; PS];
+    let mut p = PageMut::with_layout(&mut buf, layout);
+    p.init(first, P_LEAF);
+    for (i, (k, v)) in leaf.iter().enumerate() {
+        p.add_node(i, k, NodeData::Inline(v), 0).unwrap();
+    }
+    let mut pages = vec![buf];
+    for pgno in first + 1..=first + levels {
+        let seps: Vec<Vec<u8>> = (0..fanout)
+            .map(|i| if i == 0 { vec![] } else { sep(i) })
+            .collect();
+        let nodes: Vec<(&[u8], u64)> = seps.iter().map(|k| (&k[..], pgno - 1)).collect();
+        pages.push(branch_of(layout, PS, pgno, &nodes));
+    }
+    pages
+}
+
+/// The record of a [`shared_tree`].
+fn shared_db(first: u64, levels: u64, entries: u64) -> Db {
+    Db {
+        depth: levels as u16 + 1,
+        branch_pages: levels,
+        leaf_pages: 1,
+        entries,
+        root: first + levels,
+        ..Db::default()
+    }
+}
+
+/// Runs `f` on a thread of its own and fails if it has not finished
+/// within a minute: the walks below take hours where they are not
+/// bounded (the thread is then left running until the test process ends).
+fn bounded<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+        Ok(v) => v,
+        Err(RecvTimeoutError::Timeout) => panic!("{what}: still running after a minute"),
+        Err(RecvTimeoutError::Disconnected) => panic!("{what}: panicked"),
+    }
+}
+
+/// `MDB_CORRUPTED`, or a panic naming `what` and what came instead.
+fn expect_corrupted<T: std::fmt::Debug>(what: &str, r: rlmdb::Result<T>) {
+    match r {
+        Err(Error::Mdb(MdbError::Corrupted)) => {}
+        r => panic!("{what}: expected MDB_CORRUPTED, got {r:?}"),
+    }
+}
+
+/// 20 levels of 4: a 24-page file whose free DB a walk crosses 4^20 times.
+const SHARED_LEVELS: u64 = 20;
+
+/// A free DB whose branch pages share their children (20 levels of
+/// fan-out 4 over one record: txnid 1, no pages) under a main DB of one
+/// key. Walking it reads the record 4^20 times, which C does, without
+/// end in practice, in `mdb_page_alloc` holding the writer lock (every
+/// writer of the environment then waits), in the compacting copy's count
+/// of free pages and in `mdb_stat -f`. Free DB keys are unique and ascend,
+/// so each of these fails with `MDB_CORRUPTED` at the second sight of the
+/// record (`KNOWN_C_BUGS.md` #50): a put (the transaction fails with it),
+/// `Environment::freelist`, the compacting copy; a plain cursor walk is
+/// stopped by its step limit ([`Walk`](rlmdb)). The file is unchanged.
+#[test]
+fn walks_of_a_free_db_with_shared_children_stop() {
+    for layout in [&V09, &V10] {
+        let what = format!("{:?}", layout.format);
+        let record: (&[u8], &[u8]) = (&1u64.to_ne_bytes(), &0u64.to_ne_bytes());
+        let main_pgno = 3 + SHARED_LEVELS;
+        let mut pages = shared_tree(layout, 2, SHARED_LEVELS, 4, &[record], |i| {
+            (i as u64).to_ne_bytes().to_vec()
+        });
+        pages.push(leaf_of(layout, PS, main_pgno, &[b"a"]));
+        let main = Db {
+            depth: 1,
+            leaf_pages: 1,
+            entries: 1,
+            root: main_pgno,
+            ..Db::default()
+        };
+        // Snapshot 9: the record is old enough to be reused.
+        let free = shared_db(2, SHARED_LEVELS, 1);
+        let file = file_with_dbs(layout, PS, &pages, free, main, 9);
+        assert_eq!(file.len(), (SHARED_LEVELS as usize + 4) * PS);
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data.mdb");
+        std::fs::write(&data, &file).unwrap();
+        let path = dir.path().to_path_buf();
+        let w = what.clone();
+        bounded(&what, move || {
+            let env = open_rw(&path, 2);
+            let mut txn = env.begin_rw_txn().unwrap();
+            let r = txn.put(Dbi::MAIN, b"b", b"v", WriteFlags::empty());
+            expect_corrupted(&format!("{w}: put"), r);
+            match txn.commit() {
+                Err(Error::Mdb(MdbError::BadTxn)) => {}
+                r => panic!("{w}: commit after the put: expected MDB_BAD_TXN, got {r:?}"),
+            }
+            expect_corrupted(&format!("{w}: freelist"), env.freelist());
+            let compact = path.join("compact");
+            std::fs::create_dir(&compact).unwrap();
+            expect_corrupted(
+                &format!("{w}: compacting copy"),
+                env.copy_to_path(&compact, true),
+            );
+            let txn = env.begin_ro_txn().unwrap();
+            let mut c = txn.cursor(Dbi::FREE).unwrap();
+            let walk = std::iter::from_fn(|| c.next().transpose()).find_map(Result::err);
+            expect_corrupted(&format!("{w}: cursor walk"), walk.map_or(Ok(()), Err));
+        });
+        let after = std::fs::read(&data).unwrap();
+        assert!(after[..file.len()] == file[..], "{what}: file changed");
+    }
+}
+
+/// A main DB whose branch pages share their children (20 levels of
+/// fan-out 4 over a leaf of three keys): a cursor walk returns the three
+/// keys over and over, 4^20 times in C, and so do `mdb_dump` and every
+/// other walk of the tree. A walk stops with `MDB_CORRUPTED` once it has
+/// stepped onto more leaves than the map has pages (`Walk`,
+/// `KNOWN_C_BUGS.md` #50), forward and backward, in read and in write
+/// transactions, having returned each key at most that many times.
+#[test]
+fn cursor_walks_over_shared_children_stop() {
+    use rlmdb::CursorOp;
+    for layout in [&V09, &V10] {
+        let what = format!("{:?}", layout.format);
+        let leaf: &[(&[u8], &[u8])] = &[(b"a", b"1"), (b"m", b"2"), (b"z", b"3")];
+        let pages = shared_tree(layout, 2, SHARED_LEVELS, 4, leaf, |i| vec![b'a' + i as u8]);
+        let file = file_with(layout, PS, &pages, shared_db(2, SHARED_LEVELS, 3));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data.mdb"), &file).unwrap();
+        let path = dir.path().to_path_buf();
+        let w = what.clone();
+        bounded(&what, move || {
+            let env = open_rw(&path, 2);
+            // The walk stops at the map's page count (`TxnCore::walk_limit`):
+            // at most one leaf per step, three items on each.
+            let map_pages = env.info().unwrap().map_size as u64 / PS as u64;
+            let most = 3 * (map_pages + 1);
+            for op in [CursorOp::Next, CursorOp::Prev] {
+                let txn = env.begin_ro_txn().unwrap();
+                let mut c = txn.cursor(Dbi::MAIN).unwrap();
+                let mut items = 0u64;
+                let r = loop {
+                    match c.get(None, None, op) {
+                        Ok(Some(_)) => items += 1,
+                        r => break r,
+                    }
+                };
+                expect_corrupted(&format!("{w}: {op:?}"), r);
+                assert!(items > 3 && items <= most, "{w}: {op:?}: {items} items");
+
+                let mut txn = env.begin_rw_txn().unwrap();
+                let c = txn.open_cursor(Dbi::MAIN).unwrap();
+                let r = loop {
+                    match txn.cursor_get(c, None, None, op) {
+                        Ok(Some(_)) => {}
+                        r => break r.map(|_| ()),
+                    }
+                };
+                expect_corrupted(&format!("{w}: {op:?} in a write transaction"), r);
+            }
+        });
+    }
+}
+
+/// A sound tree that a write transaction keeps changing under a walking
+/// cursor, as a queue: at each step the cursor moves to the next item, one
+/// is appended at the end and the one 1000 items behind the cursor is
+/// deleted. Pages emptied behind the cursor are reused for the new leaves
+/// ahead of it, so the cursor steps onto many more leaves than the file
+/// has pages; each of those leaves was allocated in the transaction, which
+/// `TxnCore::walk_limit` counts, so the walk is not taken for one over
+/// shared children.
+#[test]
+fn queue_walks_in_a_write_txn_are_not_bounded_by_the_file() {
+    use rlmdb::CursorOp;
+    const ITEMS: usize = 2000;
+    const LAG: usize = 1000;
+    const STEPS: usize = 40_000;
+    let dir = tempfile::tempdir().unwrap();
+    let env = rlmdb::Environment::builder()
+        .map_size(64 << 20)
+        .open(dir.path())
+        .unwrap();
+    let key = |i: usize| format!("q{i:07}").into_bytes();
+    let value = [b'v'; 100];
+    let mut txn = env.begin_rw_txn().unwrap();
+    for i in 0..ITEMS {
+        txn.put(Dbi::MAIN, &key(i), &value, WriteFlags::empty())
+            .unwrap();
+    }
+    txn.commit().unwrap();
+
+    let mut txn = env.begin_rw_txn().unwrap();
+    let c = txn.open_cursor(Dbi::MAIN).unwrap();
+    let mut r = txn.cursor_get(c, None, None, CursorOp::First);
+    for i in 0..STEPS {
+        let (k, _) = r.unwrap().expect("an item under the cursor");
+        assert_eq!(k, key(i));
+        txn.put(Dbi::MAIN, &key(ITEMS + i), &value, WriteFlags::empty())
+            .unwrap();
+        if i >= LAG {
+            txn.del(Dbi::MAIN, &key(i - LAG), None).unwrap();
+        }
+        r = txn.cursor_get(c, None, None, CursorOp::Next);
+    }
+    drop(r);
+    txn.commit().unwrap();
+    // An item takes more than 110 bytes of a page: the walk stepped onto
+    // at least this many leaves.
+    let leaves = STEPS / (env.page_size() / 110) - 1;
+    let pages = env.info().unwrap().last_pgno + 1;
+    assert!(leaves > 2 * pages, "{leaves} leaves, {pages} pages");
 }
