@@ -475,6 +475,11 @@ impl<'env> RwTxn<'env> {
                     }
                 }
                 self.w.free_pgs.sort();
+                // C writes the list as it is. A page in it twice would be
+                // handed out twice (`KNOWN_C_BUGS.md` #50).
+                if !self.w.free_pgs.is_sorted_desc() {
+                    return Err(corrupted());
+                }
                 let loc = self.data_loc(mc)?;
                 let ids = std::mem::take(&mut self.w.free_pgs);
                 let written = self.loc_mut(loc).map(|out| ids.encode_into(out));

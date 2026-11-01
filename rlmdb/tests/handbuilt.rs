@@ -1074,3 +1074,85 @@ fn queue_walks_in_a_write_txn_are_not_bounded_by_the_file() {
     let pages = env.info().unwrap().last_pgno + 1;
     assert!(leaves > 2 * pages, "{leaves} leaves, {pages} pages");
 }
+
+/// Emptying a main DB whose branch pages share their children: C's
+/// `mdb_drop0` puts every page on the free list once per path to it, so
+/// the commit stores a free list naming pages twice (a 7-page file of 3
+/// levels of fan-out 3: 41 entries, "bad sequence" in `mdb_stat -ff`)
+/// and every later write transaction hands a page out twice (rlmdb's
+/// failed with `MDB_CORRUPTED`); with 20 levels of 4 the list outgrows
+/// memory first. `clear_db` fails with `MDB_CORRUPTED` once the walk has
+/// visited more pages, or listed more, than the file has
+/// (`KNOWN_C_BUGS.md` #50), also where it scans the leaves (here because
+/// `md_overflow_pages` says there are overflow pages), and the file stays
+/// as it was. A root naming one leaf twice gets past that (three entries
+/// in a file of four pages); its commit fails, since the free list is not
+/// strictly descending.
+#[test]
+fn drops_of_shared_children_stop() {
+    for layout in [&V09, &V10] {
+        let leaf: &[(&[u8], &[u8])] = &[(b"a", b"1"), (b"m", b"2"), (b"z", b"3")];
+        let sep = |i: usize| vec![b'a' + i as u8];
+        let shapes = [
+            (3, 3, 0, "3 levels of 3"),
+            (SHARED_LEVELS, 4, 0, "20 levels of 4"),
+            (SHARED_LEVELS, 4, 1, "20 levels of 4, leaves scanned"),
+        ];
+        for (levels, fanout, overflow_pages, shape) in shapes {
+            let what = format!("{:?}: {shape}", layout.format);
+            let pages = shared_tree(layout, 2, levels, fanout, leaf, sep);
+            let main = Db {
+                overflow_pages,
+                ..shared_db(2, levels, 3)
+            };
+            let file = file_with(layout, PS, &pages, main);
+            let dir = tempfile::tempdir().unwrap();
+            let data = dir.path().join("data.mdb");
+            std::fs::write(&data, &file).unwrap();
+            let path = dir.path().to_path_buf();
+            let w = what.clone();
+            bounded(&what, move || {
+                let env = open_rw(&path, 2);
+                let mut txn = env.begin_rw_txn().unwrap();
+                expect_corrupted(&format!("{w}: clear_db"), txn.clear_db(Dbi::MAIN));
+                match txn.commit() {
+                    Err(Error::Mdb(MdbError::BadTxn)) => {}
+                    r => panic!("{w}: commit: expected MDB_BAD_TXN, got {r:?}"),
+                }
+            });
+            let after = std::fs::read(&data).unwrap();
+            assert!(after[..file.len()] == file[..], "{what}: file changed");
+        }
+
+        let what = format!("{:?}: one leaf twice", layout.format);
+        let pages = vec![
+            leaf_of(layout, PS, 2, &[b"a", b"m"]),
+            branch_of(layout, PS, 3, &[(b"", 2), (b"m", 2)]),
+        ];
+        let main = Db {
+            depth: 2,
+            branch_pages: 1,
+            leaf_pages: 1,
+            entries: 2,
+            root: 3,
+            ..Db::default()
+        };
+        let file = file_with(layout, PS, &pages, main);
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data.mdb");
+        std::fs::write(&data, &file).unwrap();
+        let env = open_rw(dir.path(), 2);
+        let mut txn = env.begin_rw_txn().unwrap();
+        txn.clear_db(Dbi::MAIN).unwrap();
+        expect_corrupted(&format!("{what}: commit"), txn.commit());
+        let mut txn = env.begin_rw_txn().unwrap();
+        txn.put(Dbi::MAIN, b"b", b"2", WriteFlags::empty()).unwrap();
+        txn.commit().unwrap();
+        drop(env);
+        let after = std::fs::read(&data).unwrap();
+        assert!(
+            after[2 * PS..file.len()] == file[2 * PS..],
+            "{what}: pages changed"
+        );
+    }
+}

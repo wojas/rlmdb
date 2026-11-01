@@ -1127,7 +1127,18 @@ impl<'env> RwTxn<'env> {
             self.cur_mut(mc).pop();
         }
         let mx = self.cur(mc).clone();
+        // C trusts the tree. A sound one has fewer pages than the snapshot,
+        // each named once: a walk that visits more, or a free list that
+        // would hold more pages than there are, is over branch pages that
+        // share children, which would put the shared pages on the free list
+        // once per path to them (`KNOWN_C_BUGS.md` #50).
+        let limit = self.core.next_pgno;
+        let mut visits = 0u64;
         while self.cur(mc).snum > 0 {
+            visits += 1;
+            if visits > limit || self.w.free_pgs.len() as u64 > limit {
+                return Err(corrupted());
+            }
             let top = self.cur(mc).top;
             let (is_leaf, n) = {
                 let p = self.top_page(mc)?;
