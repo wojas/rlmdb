@@ -58,8 +58,13 @@ impl Drop for Holder {
 
 /// The exit code of C's `mdb_stat -r` without `-a`/`-s`/`-f`: that of the
 /// last `fputs` of the reader list (KNOWN_C_BUGS.md #2), which returns a
-/// positive count with glibc and macOS, 0 with the Windows C runtime.
-const C_R_EXIT: i32 = if cfg!(windows) { 0 } else { 1 };
+/// positive count with glibc and macOS, 0 with the Windows C runtime and
+/// OpenBSD's libc.
+const C_R_EXIT: i32 = if cfg!(any(windows, target_os = "openbsd")) {
+    0
+} else {
+    1
+};
 
 /// Runs `opts` with both tools; stdout and stderr must be identical;
 /// returns the exit codes (C, Rust) and Rust's output as text.
@@ -127,7 +132,21 @@ fn stale_reader() {
             }
         }
         #[cfg(not(windows))]
-        fs::write(lock, snapshot).unwrap();
+        {
+            // In place, while the holder has it mapped. On OpenBSD maps and
+            // files go out of step: the maps' dirty pages are written out
+            // first (a later write-back would undo the restore) and the
+            // restored bytes invalidated after.
+            use std::os::unix::fs::FileExt;
+            let f = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(lock)
+                .unwrap();
+            rlmdb::flush_file_maps(&f).unwrap();
+            f.write_all_at(snapshot, 0).unwrap();
+            rlmdb::invalidate_file(&f, 0, snapshot.len()).unwrap();
+        }
     }
     let dir = tempdir();
     let env = env_copy("main", dir.path());
@@ -136,6 +155,9 @@ fn stale_reader() {
     let _keeper = Holder::start(&env, false);
     Holder::start(&env, true).kill();
     let lock = env.join("lock.mdb");
+    // What the holder stored through its map has to reach the file first
+    // (OpenBSD).
+    rlmdb::flush_file_maps(&fs::File::open(&lock).unwrap()).unwrap();
     let snapshot = fs::read(&lock).unwrap();
     let mut outputs = Vec::new();
     for imp in [Impl::C, Impl::Rust] {
@@ -151,7 +173,12 @@ fn stale_reader() {
     }
     assert_eq!(outputs[0].stdout_str(), outputs[1].stdout_str());
     assert_eq!(outputs[0].stderr, outputs[1].stderr);
-    assert_eq!((outputs[0].code, outputs[1].code), (C_R_EXIT, 0));
+    assert_eq!(
+        (outputs[0].code, outputs[1].code),
+        (C_R_EXIT, 0),
+        "{}",
+        outputs[1].stderr_str()
+    );
     let out = outputs[1].stdout_text();
     assert!(out.contains("  1 stale readers cleared.\n"), "{out}");
     assert!(out.ends_with("(no active readers)\n"), "{out}");

@@ -12,11 +12,13 @@
 //!   `"<argv[0]>: illegal option -- x"` and
 //!   `"<argv[0]>: option requires an argument -- x"` (`getprogname()`
 //!   returns `argv[0]` as given).
-//! * **MinGW-w64** (Windows) parses as BSD does, with the messages
-//!   `"<argv[0]>: unknown option -- x"` and
-//!   `"<argv[0]>: option requires an argument -- x"`. MSVC has no `getopt`;
-//!   C tools built with it here get `tests/compat/msvc/unistd.h`, which
-//!   behaves the same.
+//! * **OpenBSD** parses as BSD does, with the messages
+//!   `"<progname>: unknown option -- x"` and
+//!   `"<progname>: option requires an argument -- x"`, where `progname` is
+//!   the last component of `argv[0]` (`__progname`). **MinGW-w64**
+//!   (Windows) ships OpenBSD's `getopt` and prints the same messages with
+//!   `argv[0]` as given. MSVC has no `getopt`; C tools built with it here
+//!   get `tests/compat/msvc/unistd.h`, which behaves the same.
 //!
 //! Common to both: `--` ends the options, a lone `-` is an operand, options
 //! can be clustered (`-ff`), and an option argument is either the rest of
@@ -33,8 +35,12 @@ pub enum Flavor {
     },
     /// The BSD `getopt` of macOS.
     Bsd,
-    /// MinGW-w64's `getopt` (Windows): BSD's parsing, its own messages.
+    /// OpenBSD's `getopt` as MinGW-w64 ships it on Windows: BSD's
+    /// parsing, `unknown option` messages with `argv[0]` as given.
     Mingw,
+    /// OpenBSD's `getopt`: as [`Flavor::Mingw`], with the program's base
+    /// name in the messages.
+    OpenBsd,
 }
 
 impl Flavor {
@@ -46,6 +52,8 @@ impl Flavor {
             }
         } else if cfg!(windows) {
             Flavor::Mingw
+        } else if cfg!(target_os = "openbsd") {
+            Flavor::OpenBsd
         } else {
             Flavor::Bsd
         }
@@ -105,7 +113,11 @@ impl<'a> GetOpt<'a> {
     /// The program name as `getopt` prints it in its messages: `argv[0]`
     /// (glibc), `getprogname()` (macOS), which is also `argv[0]` as given.
     fn prog_name(&self) -> &[u8] {
-        self.args.first().map_or(&b""[..], |a| a.as_slice())
+        let name = self.args.first().map_or(&b""[..], |a| a.as_slice());
+        match self.flavor {
+            Flavor::OpenBsd => name.rsplit(|&b| b == b'/').next().unwrap_or(name),
+            _ => name,
+        }
     }
 
     /// Whether `c` is an option letter and, if so, whether it takes an
@@ -126,7 +138,7 @@ impl<'a> GetOpt<'a> {
                 m.push(c);
                 m.extend_from_slice(b"'\n");
             }
-            Flavor::Bsd | Flavor::Mingw => {
+            Flavor::Bsd | Flavor::Mingw | Flavor::OpenBsd => {
                 let what = match (self.flavor, what) {
                     (Flavor::Bsd, "invalid option") => "illegal option",
                     (_, "invalid option") => "unknown option",
@@ -251,7 +263,7 @@ mod tests {
 
     #[test]
     fn clusters_and_arguments() {
-        for flavor in [GNU, Flavor::Bsd, Flavor::Mingw] {
+        for flavor in [GNU, Flavor::Bsd, Flavor::Mingw, Flavor::OpenBsd] {
             let (opts, ops) = parse(&["p", "-ef", "-sname", "-s", "-x", "db"], flavor);
             assert_eq!(
                 opts,
@@ -281,7 +293,7 @@ mod tests {
 
     #[test]
     fn double_dash_and_lone_dash() {
-        for flavor in [GNU, Flavor::Bsd, Flavor::Mingw] {
+        for flavor in [GNU, Flavor::Bsd, Flavor::Mingw, Flavor::OpenBsd] {
             let (opts, ops) = parse(&["p", "-e", "--", "-f"], flavor);
             assert_eq!(opts, vec![Opt::Flag(b'e')]);
             assert_eq!(ops, argv(&["-f"]));
@@ -318,6 +330,15 @@ mod tests {
         assert_eq!(
             opts[0],
             Opt::Invalid(b"mdb_stat: option requires an argument -- s\n".to_vec())
+        );
+        // OpenBSD's libc prints `__progname` (measured on OpenBSD 7.9).
+        let (opts, ops) = parse(&["/x/mdb_stat", "db", "-x"], Flavor::OpenBsd);
+        assert!(opts.is_empty());
+        assert_eq!(ops, argv(&["db", "-x"]));
+        let (opts, _) = parse(&["/x/mdb_stat", "-ex"], Flavor::OpenBsd);
+        assert_eq!(
+            opts[1],
+            Opt::Invalid(b"mdb_stat: unknown option -- x\n".to_vec())
         );
         let (opts, _) = parse(&["p", "-s"], GNU);
         assert_eq!(
