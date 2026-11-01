@@ -74,9 +74,10 @@ print.
 
 Deliberately out of scope:
 
-* Windows (all OS code is behind `rlmdb/src/os/`, so a `windows.rs`
-  can be added) and 32-bit targets (the file format depends on
-  `sizeof(size_t)`; a `compile_error!` says so).
+* 32-bit targets (the file format depends on `sizeof(size_t)`; a
+  `compile_error!` says so). Windows (64-bit, MSVC and MinGW), the BSDs
+  and big-endian Linux are supported; `COMPATIBILITY.md` says how far each
+  is tested.
 * `MDB_WRITEMAP`, `MDB_FIXEDMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT`: accepted
   and ignored. They are per-process choices, so C peers using them are
   unaffected.
