@@ -30,6 +30,13 @@ pub enum Peer {
     /// library of LMDB 1.0 ([`bins::cpeer10`]): the reference for 1.0
     /// environments, which are the only ones it opens.
     C10,
+    /// A peer built outside this crate: any program that speaks the peer
+    /// protocol (`README.md`, "External peers"). `$INTEROP_PEER` is its path, `$INTEROP_PEER_ARGS` extra
+    /// arguments of every command (split at whitespace) and
+    /// `$INTEROP_PEER_NAME` its name in messages (default `External`).
+    /// Tests with it are skipped while `$INTEROP_PEER` is not set, or for a
+    /// format it does not open ([`Peer::unavailable`]).
+    External,
 }
 
 impl fmt::Display for Peer {
@@ -39,6 +46,7 @@ impl fmt::Display for Peer {
             Peer::Rust => "Rust",
             Peer::COnRust => "COnRust",
             Peer::C10 => "C10",
+            Peer::External => external_name(),
         })
     }
 }
@@ -117,6 +125,49 @@ fn rpeer_path() -> Result<PathBuf> {
     })
 }
 
+/// Where the external peer is: `$INTEROP_PEER`, or `None`.
+fn external_path() -> Option<PathBuf> {
+    std::env::var_os("INTEROP_PEER")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The arguments every command of [`Peer::External`] gets after its own:
+/// `$INTEROP_PEER_ARGS` split at whitespace (no quoting, so an argument
+/// cannot contain a space), e.g. `--impl port`.
+fn external_args() -> &'static [String] {
+    static ARGS: OnceLock<Vec<String>> = OnceLock::new();
+    ARGS.get_or_init(|| {
+        std::env::var("INTEROP_PEER_ARGS")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect()
+    })
+}
+
+/// The name of [`Peer::External`] in messages and in the names of
+/// derived environments: `$INTEROP_PEER_NAME`, or `External`.
+///
+/// # Panics
+///
+/// If the name is not ASCII letters, digits, `-` and `_`.
+fn external_name() -> &'static str {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| {
+        let name = std::env::var("INTEROP_PEER_NAME")
+            .ok()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "External".into());
+        assert!(
+            name.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "INTEROP_PEER_NAME={name:?}: use ASCII letters, digits, - and _"
+        );
+        name
+    })
+}
+
 /// Exit status of a peer that does not implement a command (yet): `rpeer`
 /// for a command that needs a part of `rlmdb` that does not exist yet.
 pub const EXIT_NOT_IMPLEMENTED: i32 = 4;
@@ -172,13 +223,53 @@ impl Peer {
     }
 
     /// Can this peer open environments of `format`? The C peers only open
-    /// their own release's; the peers on rlmdb open both.
+    /// their own release's; the peers on rlmdb open both, and so may
+    /// `External` (which ones it does is only known at run time, see
+    /// [`Peer::unavailable`]).
     pub fn handles(&self, format: Format) -> bool {
         match self {
             Peer::C => format == Format::V09,
             Peer::C10 => format == Format::V10,
-            Peer::Rust | Peer::COnRust => true,
+            Peer::Rust | Peer::COnRust | Peer::External => true,
         }
+    }
+
+    /// Why this peer cannot run on environments of `format` here, if it
+    /// cannot: for [`Peer::External`], `$INTEROP_PEER` is not set, or the
+    /// peer refuses `--format` (its `commands --format <f>` fails, e.g.
+    /// with a usage error as `cpeer` gives for 1.0). The test is then
+    /// skipped. `None` for every other peer.
+    pub fn unavailable(&self, format: Format) -> Option<String> {
+        if *self != Peer::External {
+            return None;
+        }
+        let Some(path) = external_path() else {
+            return Some("the external peer: INTEROP_PEER is not set".into());
+        };
+        static V09: OnceLock<bool> = OnceLock::new();
+        static V10: OnceLock<bool> = OnceLock::new();
+        let cell = match format {
+            Format::V09 => &V09,
+            Format::V10 => &V10,
+        };
+        let opens = *cell.get_or_init(|| {
+            Command::new(&path)
+                .args(["commands", "--format", format.name()])
+                .args(external_args())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        });
+        (!opens).then(|| {
+            format!(
+                "the external peer {} ({} {}) does not open LMDB {} environments",
+                external_name(),
+                path.display(),
+                external_args().join(" "),
+                format.name()
+            )
+        })
     }
 
     /// Does this peer implement `command`? Asks the peer once per process
@@ -192,11 +283,13 @@ impl Peer {
         static RUST: OnceLock<CommandTable> = OnceLock::new();
         static CONRUST: OnceLock<CommandTable> = OnceLock::new();
         static C10: OnceLock<CommandTable> = OnceLock::new();
+        static EXTERNAL: OnceLock<CommandTable> = OnceLock::new();
         let cell = match self {
             Peer::C => &C,
             Peer::Rust => &RUST,
             Peer::COnRust => &CONRUST,
             Peer::C10 => &C10,
+            Peer::External => &EXTERNAL,
         };
         match cell.get_or_init(|| query_commands(*self)) {
             None => true,
@@ -211,6 +304,8 @@ impl Peer {
             Peer::Rust => rpeer_path(),
             Peer::COnRust => Ok(bins::cpeer_capi()?.to_path_buf()),
             Peer::C10 => Ok(bins::cpeer10().to_path_buf()),
+            Peer::External => external_path()
+                .ok_or_else(|| Error::new("the external peer: set INTEROP_PEER to its executable")),
         }
     }
 
@@ -299,6 +394,9 @@ impl PeerCmd {
     fn command(&self) -> Result<Command> {
         let mut cmd = Command::new(self.peer.bin()?);
         cmd.args(&self.args).args(&self.env_args);
+        if self.peer == Peer::External {
+            cmd.args(external_args());
+        }
         Ok(cmd)
     }
 

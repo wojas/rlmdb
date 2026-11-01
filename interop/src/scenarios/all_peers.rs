@@ -1,7 +1,8 @@
 //! Scenarios with all three peers of a format at once ([`Peer::all`]): the
 //! C peer of the format's release, Rust, and C on the Rust library. They
 //! take the format, not a pair; `tests/three_peers.rs` (LMDB 0.9) and
-//! `tests/three_peers10.rs` (LMDB 1.0) run them.
+//! `tests/three_peers10.rs` (LMDB 1.0) run them, `tests/external_peer.rs`
+//! with the external peer as a fourth ([`writers`]).
 
 use super::{audit, finish_reader_loop, loop_secs, new_env, Pair, MIB};
 use crate::report::WriterLoopReport;
@@ -13,8 +14,18 @@ use crate::{ensure, Format, Peer, Result};
 /// sum of their commits), and every reader sees consistent snapshots
 /// throughout. Audited by all three.
 pub fn three_writers(format: Format) -> Result<()> {
+    writers(format, &Peer::all(format))
+}
+
+/// [`three_writers`] with the peers `peers` (the first is the format's C
+/// peer, [`Peer::reference`]; `tests/external_peer.rs` adds
+/// [`Peer::External`]).
+pub fn writers(format: Format, peers: &[Peer]) -> Result<()> {
     let reference = Peer::reference(format);
-    let peers = Peer::all(format);
+    ensure!(
+        peers.first() == Some(&reference),
+        "the first peer must be {reference}: {peers:?}"
+    );
     let pair = Pair::with_format(reference, Peer::Rust, format);
     let env = new_env(&pair, 512 * MIB)?;
     let secs = loop_secs();
@@ -24,7 +35,7 @@ pub fn three_writers(format: Format) -> Result<()> {
         .run()?;
     let reader_secs = (secs + 0.5).to_string();
     let mut readers = Vec::new();
-    for peer in peers {
+    for &peer in peers {
         let mut p = peer
             .on("reader-loop", &env)
             .args(["three", reader_secs.as_str()])
@@ -33,7 +44,7 @@ pub fn three_writers(format: Format) -> Result<()> {
         readers.push((peer, p));
     }
     let mut writers = Vec::new();
-    for (k, peer) in peers.into_iter().enumerate() {
+    for (k, peer) in peers.iter().enumerate() {
         let mut cmd =
             peer.on("writer-loop", &env)
                 .args(["three", &secs.to_string(), &(40 + k).to_string()]);
@@ -60,7 +71,7 @@ pub fn three_writers(format: Format) -> Result<()> {
         last == 1 + total,
         "#commits is {last}, but the writers committed 1 + {total}: {reports:?}"
     );
-    for peer in peers {
+    for &peer in peers {
         peer.on("reader-loop", &env).args(["three", "0"]).run()?;
         audit(&Pair::with_format(reference, peer, format), &env)?;
     }

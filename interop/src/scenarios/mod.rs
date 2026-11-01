@@ -120,6 +120,16 @@ impl Pair {
         }
     }
 
+    /// Why the pair cannot run here, if it cannot: a peer of it is
+    /// [`Peer::unavailable`] for the pair's format (the external peer when
+    /// `$INTEROP_PEER` is not set, or when it does not open the format).
+    /// [`scenario_tests!`](crate::scenario_tests) skips such tests.
+    pub fn unavailable(&self) -> Option<String> {
+        self.peers()
+            .into_iter()
+            .find_map(|peer| peer.unavailable(self.format))
+    }
+
     /// The C peer of the pair's format: the reference implementation, which
     /// verifies and audits in every scenario ([`Peer::reference`]).
     pub fn reference(&self) -> Peer {
@@ -1551,6 +1561,14 @@ macro_rules! __scenario_tests_impl {
             fn $name() {
                 $crate::register_rpeer(option_env!("CARGO_BIN_EXE_rpeer"));
                 let pair = $pair;
+                if let Some(why) = pair.unavailable() {
+                    $crate::scenarios::skipped(format_args!(
+                        "scenario {} ({}): {why}",
+                        stringify!($name),
+                        pair
+                    ));
+                    return;
+                }
                 match $crate::scenarios::$name(pair) {
                     Ok(()) => {}
                     // A peer lacks a command the scenario cannot do without.
