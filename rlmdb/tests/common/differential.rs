@@ -1436,10 +1436,30 @@ pub fn run_round_sized(
     };
     // Same committed content, valid page usage on both.
     if map_size <= 64 << 20 {
-        assert!(
-            o.dump(cdir.path(), "t") == o.dump(rdir.path(), "t"),
-            "{tag}: dumps differ"
-        );
+        let (cd, rd) = (o.dump(cdir.path(), "t"), o.dump(rdir.path(), "t"));
+        if cd != rd {
+            // Dumped once more: a dump that changes although nothing wrote
+            // the environment in between was misread, not miswritten.
+            let redump = |side: &str, path: &Path, first: &str| {
+                let second = o.dump(path, "t");
+                if second == first {
+                    format!("{side} dumped again: the same\n")
+                } else {
+                    format!(
+                        "{side} dumped again: different\n{}",
+                        dump_diff(("first", first), ("second", &second))
+                    )
+                }
+            };
+            let again = redump("C", cdir.path(), &cd) + &redump("Rust", rdir.path(), &rd);
+            let (c, r) = (cdir.keep(), rdir.keep());
+            panic!(
+                "{tag}: dumps differ (environments kept: C {}, Rust {})\n{}{again}",
+                c.display(),
+                r.display(),
+                dump_diff(("C", &cd), ("Rust", &rd))
+            );
+        }
     } else {
         // Too big for mdb_dump text: walk both with Rust cursors.
         let cenv = Environment::builder()
@@ -1505,6 +1525,63 @@ pub fn run_round_sized(
     }
     o.after_round(cdir.path(), rdir.path(), tag);
     Round::Same
+}
+
+/// Where two dumps (the data lines of `mdb_dump`: odd lines keys, even
+/// lines values) differ, for a failure message: the line counts, then the
+/// lines between the common head and tail, at most 16 per side. Where both
+/// sides have a line there, it is shown from a little before the first
+/// character that differs (with its byte offset in the key or value),
+/// otherwise from its start; 160 characters at most.
+fn dump_diff((a_name, a): (&str, &str), (b_name, b): (&str, &str)) -> String {
+    let (a, b): (Vec<&str>, Vec<&str>) = (a.lines().collect(), b.lines().collect());
+    let head = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let tail = a[head..]
+        .iter()
+        .rev()
+        .zip(b[head..].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    let (da, db) = (&a[head..a.len() - tail], &b[head..b.len() - tail]);
+    let mut out = format!(
+        "{a_name} {} lines, {b_name} {}; the same in the first {head} and the last {tail}\n",
+        a.len(),
+        b.len()
+    );
+    for (name, lines, other) in [(a_name, da, db), (b_name, db, da)] {
+        out += &format!("{name}, {} lines:\n", lines.len());
+        for (i, line) in lines.iter().enumerate().take(16) {
+            // The dump's lines are a space and hex digits.
+            let from = match other.get(i) {
+                Some(o) => {
+                    let k = line
+                        .bytes()
+                        .zip(o.bytes())
+                        .take_while(|(x, y)| x == y)
+                        .count();
+                    let byte = k.saturating_sub(1) / 2;
+                    out += &format!("{:>7} differs at byte {byte}:", head + i + 1);
+                    // From 20 bytes before it: char 1 + 2 * byte.
+                    match byte.saturating_sub(20) {
+                        0 => 0,
+                        start => 1 + 2 * start,
+                    }
+                }
+                None => {
+                    out += &format!("{:>7}:", head + i + 1);
+                    0
+                }
+            };
+            let cut = line.get(from..(from + 160).min(line.len())).unwrap_or("");
+            out += &format!(
+                " {}{cut}{} ({} chars)\n",
+                if from > 0 { "..." } else { "" },
+                if from + 160 < line.len() { "..." } else { "" },
+                line.len()
+            );
+        }
+    }
+    out
 }
 
 /// Runs `rounds` rounds of `n` random ops (half of them a prefill of puts)
