@@ -294,7 +294,7 @@ point into the memory map or the transaction's dirty pages (zero copy).
 | Data-file formats | LMDB 0.9 only; a 1.0 file is `MDB_INVALID`. | LMDB 0.9 and 1.0 (see "`rlmdb.h`: data-file formats"); new environments are 0.9 by default. |
 | `mdb_strerror` of LMDB 1.0's codes (-30779 .. -30769) | "Invalid error code". | 1.0's messages. |
 | Threads | Without `MDB_NOTLS` a thread may hold one read transaction at a time (`MDB_BAD_RSLOT` otherwise) and a read transaction is tied to its thread. | Always behaves like `MDB_NOTLS`: any number of read transactions per thread, usable from any thread (one at a time). `MDB_NOTLS` is accepted. A superset of C. |
-| Opening one environment twice in a process | Allowed but unsafe (closing one handle drops the other's locks). | `mdb_env_open` fails with `EBUSY`, except under `MDB_NOLOCK`, where handles share one in-process reader table and writer lock (see "Several handles and `dlopen`"). |
+| Opening one environment twice in a process | Allowed but unsafe (setting the lock file up again re-initialises the reader table under the first handle's readers; closing one handle drops the other's locks). | `mdb_env_open` fails with `EBUSY`, also under another name (a symlink, hard links of its files, a bind mount) and before it touches the lock file, except under `MDB_NOLOCK`, where handles share one in-process reader table and writer lock (see "Several handles and `dlopen`"). |
 | Read transactions with `MDB_NOLOCK` | Not tracked: a write transaction of the same process reuses pages a live read transaction still reads (`lmdb.h` asks the caller to prevent that), and writers of different handles are not serialised. | Tracked in memory (`../KNOWN_C_BUGS.md` #35), in one table for all `MDB_NOLOCK` handles of the environment in the process, which also share a writer lock: writers of the process never reuse pages its readers read. `mdb_env_info` (`me_numreaders` 0), `mdb_reader_list` (`(no reader locks)`) and `mdb_reader_check` (none cleared) report what C reports. Other processes remain the caller's job, as in C. |
 | `MDB_FIXEDMAP`, `MDB_WRITEMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT` | Honoured. | Accepted and ignored (`mdb_env_get_flags` reports them). A new environment records map address 0 (`KNOWN_C_BUGS.md` #9); a C-created `MDB_FIXEDMAP` environment's recorded address is reported by `mdb_env_info`. |
 | Handles of existing databases opened in a transaction | Visible to other transactions only after that transaction commits; closed if it aborts (read or write transaction). | Published at once and kept after commit or abort. Handles of databases *created* by a write transaction follow C (published at commit, closed on abort). |
@@ -541,6 +541,11 @@ environments.
   Rust library serialises; reset, renew, and the reader information
   (`mdb_env_info`, `mdb_reader_list`, `mdb_reader_check`) as C reports it
   without a lock file; then the C page audit.
+* `tests/capi_alias.rs`: `tests/c/capi_alias.c`, against the Rust library
+  only: `mdb_env_open` of an environment the process has open, through
+  hard links of both of its files and of the lock file alone, fails with
+  `EBUSY`, and the open handle keeps its reader slot, the value its reader
+  holds and the txnid of its next writer.
 * `tests/capi_dlopen.rs`: `tests/c/capi_dlopen.c`, linked against no LMDB,
   loads the shared library with `dlopen` on several threads at once
   (`RTLD_LOCAL` and `RTLD_GLOBAL`), each opening the same environment

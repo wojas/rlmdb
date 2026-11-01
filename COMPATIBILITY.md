@@ -175,9 +175,11 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
 * **Not supported:** opening the same environment in one process through
   both the C library and the Rust library. POSIX record locks belong to the
   process, so closing either handle would drop the other's locks. (Within
-  the Rust library, a second open of the same path fails with `EBUSY`,
-  except under `MDB_NOLOCK`, where handles share one in-process reader
-  table and writer lock.)
+  the Rust library, a second open of the same environment fails with
+  `EBUSY`, also under another name (a symlink, hard links of its files, a
+  bind mount) and before it touches the lock file, except under
+  `MDB_NOLOCK`, where handles share one in-process reader table and writer
+  lock.)
 * `MDB_NOLOCK` environments have no lock file and no cross-process locking
   in either implementation: keeping other processes away while one writes
   is the application's job, as in C. Within one process rlmdb serialises
@@ -291,6 +293,7 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 | Lock files of the two versions refuse each other while held (`MDB_VERSION_MISMATCH` from rlmdb, C 0.9 and C 1.0; rlmdb meets one when a data file of the other format replaced the one a live process uses, and leaves the table alone), and an exclusive opener of either implementation re-initialises a stale table of the other version | `interop/tests/lockfile10.rs` `lock_versions_refuse_each_other`, `stale_lock_files_of_the_other_version_are_reinitialised` and the two tests above; `rlmdb` `core::reader` unit test `exclusive_opener_reinitialises_other_version` |
 | Reader table, stale readers, `mdb_reader_check` | `interop` `readers_list`, `stale_reader_cleared_by_reader`, `stale_reader_cleared_by_mdb_stat`; `rlmdb-tools/tests/readers.rs` |
 | MVCC across implementations, map growth | `interop` `mvcc_hold_reader`, `rlmdb-capi/tests/concurrency.rs` (snapshots byte-identical while the other side commits; `MDB_MAP_RESIZED`) |
+| A second open of an environment the process has open, under another name (hard links of both files, of the lock file alone): refused with `EBUSY` before the lock file is set up again or a descriptor of it closed, read-write, read-only and `MDB_NOLOCK`, both formats, with and without `MDB_NOSUBDIR`; the open handle keeps its reader slot, `mti_txnid`, its record locks (another process attaches to its table), the value its reader holds and the txnid of its next writer | `rlmdb` unit test `core::registry::tests::an_environment_under_another_name_is_refused_before_its_lock_file`, `rlmdb/tests/rust_env.rs` (`second_open_under_another_name_leaves_the_first_alone`), `rlmdb-capi/tests/capi_alias.rs` |
 | `MDB_NOTLS` superset | `interop` `notls_readers` and every scenario (C peers in TLS mode next to Rust readers), `rlmdb/tests/rust_env.rs` (`transactions_move_between_threads`) |
 | `MDB_NOSUBDIR`, read-only, `MDB_NOLOCK` | `interop` `nosubdir`, `rlmdb/tests/core_api_c2.rs` |
 | `MDB_NOLOCK` within a process: a long-lived reader keeps its pages (page numbers and free list the same as with a lock file), also against spilling and nested write transactions and against readers on other threads; reset, renew, abort and drop (on another thread) unregister; writers stay serialised; a reader that begins while commits happen pins the snapshot it reads (its value of a key the writer sets to its txnid equals its id, and values it holds do not change across many commits; both formats, in the writer's handle and in another one); an open handle sees commits another process made while it had no transaction (read transactions, a plain copy, its own writer); the C API shows C's page reuse with the C library and none with the Rust library, and both report the same reader information | `rlmdb` `core::reader` unit tests `no_lock_*`, `rlmdb/tests/rust_env.rs` (`no_lock_environment`, `no_lock_writers_are_serialised`, `no_lock_readers_pin_the_snapshot_they_read`), `rlmdb/tests/c_concurrency.rs` (`no_lock_handle_sees_commits_of_another_process`), `rlmdb-capi/tests/capi_nolock.rs` |

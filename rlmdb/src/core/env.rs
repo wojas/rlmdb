@@ -4,23 +4,31 @@
 //!
 //! 1. Resolve file names (`mdb_fname_init`): `path/data.mdb` and
 //!    `path/lock.mdb`, or with `NO_SUB_DIR` `path` and `path-lock`.
-//! 2. Decide the data-file format ([`sniff_format`]: the magic and version
-//!    of the first meta page; not in C, which handles one format only). An
-//!    existing file keeps its format, a new one gets the requested format
-//!    or the [`default_format`] (the process default of
+//! 2. Claim the environment in the process-wide registry (`registry`; not
+//!    in C): its path, then the data file, if it exists, which is opened
+//!    read-only for that and claimed by device and inode before the lock
+//!    file is touched. A second open of an environment with a lock file is
+//!    refused there, also under another name (a hard link, a bind mount),
+//!    before it could set up the open handle's lock file again.
+//! 3. Decide the data-file format ([`sniff_format`] of that descriptor: the
+//!    magic and version of the first meta page; not in C, which handles one
+//!    format only). An existing file keeps its format, a new one gets the
+//!    requested format or the [`default_format`] (the process default of
 //!    [`set_default_format`], the experimental `RLMDB_DEFAULT_FORMAT`
 //!    variable, LMDB 0.9). This happens before the lock file is touched, so
 //!    opening a file of the other format never re-initialises a peer's lock
 //!    file.
-//! 3. Unless read-only or `NO_LOCK`, set up the lock file *first*
-//!    (`LockRegion::open`, `mdb_env_setup_locks`). Read-only environments
-//!    open the data file first (it must exist) and the lock file second.
-//!    Without a lock file (`NO_LOCK`, or read-only on a read-only file
-//!    system) the environment tracks its read transactions in an in-memory
-//!    table instead (`reader::LocalReaders`; C tracks none), so that its
-//!    writers never reuse pages they read.
-//! 4. Open the data file (`O_RDWR|O_CREAT`, or `O_RDONLY`).
-//! 5. `mdb_env_open2`: read both meta pages with `pread`
+//! 4. Unless read-only or `NO_LOCK`, set up the lock file *first*
+//!    (`LockRegion::open`, `mdb_env_setup_locks`; it claims the lock file in
+//!    the registry before it locks it). Read-only environments open the
+//!    data file first (it must exist) and the lock file second. Without a
+//!    lock file (`NO_LOCK`, or read-only on a read-only file system) the
+//!    environment tracks its read transactions in an in-memory table
+//!    instead (`reader::LocalReaders`; C tracks none), so that its writers
+//!    never reuse pages they read.
+//! 5. Open the data file (`O_RDWR|O_CREAT`; read-only, the descriptor of
+//!    step 2) and claim it, unless it is the file claimed in step 2.
+//! 6. `mdb_env_open2`: read both meta pages with `pread`
 //!    (`mdb_env_read_header`); an empty file is a new environment whose two
 //!    meta pages are written immediately (`mdb_env_init_meta`), with the OS
 //!    page size (1.0: or the one set with `mdb_env_set_pagesize`) capped at
@@ -29,8 +37,8 @@
 //!    refused. The map size is the configured one, else the one recorded
 //!    in the meta (1 MiB for a new file), raised to cover all pages in use.
 //!    Then map the file read-only.
-//! 6. Open the `O_DSYNC` descriptor used for meta-page writes (`me_mfd`).
-//! 7. If we initialised the lock table, publish the current txnid and
+//! 7. Open the `O_DSYNC` descriptor used for meta-page writes (`me_mfd`).
+//! 8. If we initialised the lock table, publish the current txnid and
 //!    downgrade to a shared lock (`mdb_env_share_locks`).
 //!
 //! The data-file format of the environment ([`Format`]) decides the page
@@ -306,10 +314,29 @@ impl Environment {
         // is touched (closing it would drop the first handle's locks).
         let mut registration = Registration::claim_path(path, no_sub_dir, no_lock)?;
 
+        // The same for the data file under another name: claim it before
+        // the lock file is touched. A lock file this process holds already
+        // would be set up again (the exclusive lock is granted within the
+        // process) and its reader table re-initialised under the open
+        // handle's readers.
+        let mut local = None;
+        let existing = match open_existing(&data_path, mode)? {
+            Some(file) => {
+                let (file, shared) = registration.claim_data_file(file)?;
+                local = shared;
+                Some(file)
+            }
+            None => None,
+        };
+
         // Decide the format before the lock file is touched: C sets up the
         // lock file first and would re-initialise a lock file of the other
         // version (DUAL_FORMAT.md §4.2).
-        let layout = choose_format(sniff_data_file(&data_path)?, opts.format)?.layout();
+        let found = match &existing {
+            Some(file) => sniff_file(file)?,
+            None => None,
+        };
+        let layout = choose_format(found, opts.format)?.layout();
         let new_page_size = match opts.page_size {
             None => None,
             Some(ps) if layout.format == Format::V10 && valid_set_pagesize(ps, layout) => Some(ps),
@@ -321,21 +348,45 @@ impl Environment {
         let lock_layout = layout.lock();
         let mut lock = None;
         if !read_only && !no_lock {
-            lock = LockRegion::open(&lock_path, mode, opts.max_readers, false, lock_layout)?;
+            lock = LockRegion::open(
+                &lock_path,
+                mode,
+                opts.max_readers,
+                false,
+                lock_layout,
+                &mut registration,
+            )?;
         }
-        let data_file = if read_only {
-            os::env_file_options(OpenOptions::new().read(true), mode).open(&data_path)?
-        } else {
-            os::env_file_options(OpenOptions::new().read(true).write(true).create(true), mode)
-                .open(&data_path)?
+        let data_file = match existing {
+            Some(file) if read_only => file,
+            probe => {
+                let mut options = OpenOptions::new();
+                options.read(true);
+                if !read_only {
+                    options.write(true).create(true);
+                }
+                let file = os::env_file_options(&mut options, mode).open(&data_path)?;
+                // A new file, or the existing one again for writing (another
+                // file only if it was replaced since). The NO_LOCK handles
+                // of one data file in this process share a writer lock and a
+                // reader table.
+                let (file, shared) = registration.claim_data_file(file)?;
+                local = shared;
+                // Closed while its claim holds (registration outlives it).
+                drop(probe);
+                file
+            }
         };
-        // The NO_LOCK handles of one data file in this process share a
-        // writer lock and a reader table; with a lock file the data file
-        // must not be open in the process under another name either.
-        let local = registration.claim_file(&data_file)?;
         if read_only && !no_lock {
             // For RDONLY, get the lock file after we know the data file exists.
-            lock = LockRegion::open(&lock_path, mode, opts.max_readers, true, lock_layout)?;
+            lock = LockRegion::open(
+                &lock_path,
+                mode,
+                opts.max_readers,
+                true,
+                lock_layout,
+                &mut registration,
+            )?;
         }
 
         // mdb_env_open2
@@ -404,8 +455,11 @@ impl Environment {
             None
         } else {
             // Synchronous fd for meta writes. Needed even with
-            // MDB_NOSYNC/MDB_NOMETASYNC, in case these get reset.
-            Some(os::sync_write_options(OpenOptions::new().write(true)).open(&data_path)?)
+            // MDB_NOSYNC/MDB_NOMETASYNC, in case these get reset. Opened by
+            // name, as in C, so claimed like the data file (it is that file
+            // unless the name now leads elsewhere).
+            let file = os::sync_write_options(OpenOptions::new().write(true)).open(&data_path)?;
+            Some(registration.claim_data_file(file)?.0)
         };
 
         let max_readers = lock.as_ref().map_or(opts.max_readers, |l| l.max_readers());
@@ -963,9 +1017,28 @@ fn sniff_data_file(data_path: &Path) -> Result<Option<Format>> {
         Err(e) if os::is_missing(&e, data_path) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
+    let found = sniff_file(&file);
+    // The name may lead to the lock file of an environment open in this
+    // process, whose record locks closing it would drop.
+    crate::core::registry::dispose(file);
+    found
+}
+
+/// [`sniff_format`] of the open data file `file`.
+fn sniff_file(file: &File) -> Result<Option<Format>> {
     let mut head = [0u8; SNIFF_LEN];
-    let n = os::read_at(&file, &mut head, 0)?;
+    let n = os::read_at(file, &mut head, 0)?;
     Ok(meta::sniff_format(&head[..n]).map_err(MdbError::from)?)
+}
+
+/// The data file `data_path` opened read-only (with the options of the
+/// data file of a read-only environment), or `None` if it does not exist.
+fn open_existing(data_path: &Path, mode: u32) -> Result<Option<File>> {
+    match os::env_file_options(OpenOptions::new().read(true), mode).open(data_path) {
+        Ok(file) => Ok(Some(file)),
+        Err(e) if os::is_missing(&e, data_path) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// The format to open with: the existing file's (`found`), which must be

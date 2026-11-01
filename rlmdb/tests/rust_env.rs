@@ -143,6 +143,118 @@ fn no_lock_handles_may_share_an_environment() {
     drop(env);
 }
 
+/// Set (to an environment directory) in the environment of a
+/// [`reader_list_peer`] process.
+const PEER_VAR: &str = "RLMDB_RUST_ENV_READER_PEER";
+
+/// Not a test: the body of the peer process that
+/// [`second_open_under_another_name_leaves_the_first_alone`] starts (this
+/// binary run again with [`PEER_VAR`] set). It opens the environment
+/// read-only and prints its reader table as `PEER <pid>:<txnid> ...`.
+#[test]
+#[ignore = "helper process of second_open_under_another_name_leaves_the_first_alone"]
+fn reader_list_peer() {
+    let Ok(dir) = std::env::var(PEER_VAR) else {
+        return;
+    };
+    let env = Environment::builder()
+        .flags(EnvironmentFlags::READ_ONLY)
+        .open(dir)
+        .unwrap();
+    let mut line = String::from("PEER");
+    for r in env.reader_list().unwrap() {
+        line.push_str(&format!(" {}:{:?}", r.pid, r.txnid));
+    }
+    println!("{line}");
+}
+
+/// The reader table of the environment `dir` as another process sees it.
+fn peer_reader_list(dir: &std::path::Path) -> String {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "reader_list_peer",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(PEER_VAR, dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "peer failed: {stdout}");
+    // On the line of libtest's "test reader_list_peer ... ".
+    let at = stdout
+        .find("PEER")
+        .unwrap_or_else(|| panic!("peer: {stdout}"));
+    stdout[at..].lines().next().unwrap().to_owned()
+}
+
+/// A process has an environment open with a live read transaction; its
+/// files are reachable under other names (hard links here; a bind mount
+/// looks the same). Opening those fails with `EBUSY` before the lock file
+/// is set up again (the exclusive lock would be granted within the process
+/// and the reader table re-initialised) and without closing a descriptor of
+/// the lock file (which would drop the process's record locks on it). The
+/// first handle keeps its reader slot, its record locks (another process
+/// attaches to the table instead of re-initialising it), the value its
+/// reader holds and the txnid of its next writer. Both files under another
+/// name, then the lock file alone (`core::registry` tests every branch of
+/// the open).
+#[test]
+fn second_open_under_another_name_leaves_the_first_alone() {
+    let dir = tmp();
+    let [a, b, c] = ["a", "b", "c"].map(|name| {
+        let path = dir.path().join(name);
+        std::fs::create_dir(&path).unwrap();
+        path
+    });
+    let env = Environment::builder()
+        .flags(EnvironmentFlags::NO_SYNC)
+        .open(&a)
+        .unwrap();
+    let mut txn = env.begin_rw_txn().unwrap();
+    txn.put(Dbi::MAIN, b"key", &[11; 32000], WriteFlags::empty())
+        .unwrap();
+    txn.commit().unwrap();
+    let reader = env.begin_ro_txn().unwrap();
+    let held = reader.get(Dbi::MAIN, b"key").unwrap().unwrap();
+    let before = held.to_vec();
+    let pid = std::process::id() as i32;
+    let table = format!("PEER {pid}:Some(1)");
+    assert_eq!(peer_reader_list(&a), table);
+
+    if let Err(e) = std::fs::hard_link(a.join("data.mdb"), b.join("data.mdb")) {
+        eprintln!("NOTE: skipped: the file system refuses hard links: {e}");
+        return;
+    }
+    std::fs::hard_link(a.join("lock.mdb"), b.join("lock.mdb")).unwrap();
+    std::fs::hard_link(a.join("lock.mdb"), c.join("lock.mdb")).unwrap();
+    for alias in [&b, &c] {
+        assert!(
+            matches!(
+                Environment::builder().open(alias),
+                Err(Error::EnvAlreadyOpened)
+            ),
+            "{alias:?}"
+        );
+        let readers = env.reader_list().unwrap();
+        assert_eq!(readers.len(), 1, "{alias:?}");
+        assert_eq!((readers[0].pid, readers[0].txnid), (pid, Some(1)));
+        assert_eq!(env.info().unwrap().num_readers, 1);
+        assert_eq!(peer_reader_list(&a), table, "{alias:?}");
+        assert_eq!(held, &before[..]);
+    }
+    assert!(!c.join("data.mdb").exists());
+
+    let mut txn = env.begin_rw_txn().unwrap();
+    assert_eq!(txn.id(), 2);
+    txn.put(Dbi::MAIN, b"key", &[22; 32000], WriteFlags::empty())
+        .unwrap();
+    txn.commit().unwrap();
+    assert_eq!(held, &before[..]);
+}
+
 /// A database for the handle tests below: `n` keys, value = key repeated.
 fn fill(dir: &std::path::Path, n: u32) {
     let env = Environment::builder()

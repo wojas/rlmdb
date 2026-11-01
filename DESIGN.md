@@ -439,8 +439,9 @@ src/core/env.rs     Environment, EnvironmentBuilder, open sequence, meta selecti
 src/core/reader.rs  lock file and reader table: slots, oldest reader, reader_check/list;
                     the in-memory reader table without a lock file (NO_LOCK)
 src/core/registry.rs  the per-process registry of open environments (by path
-                    and by data-file identity): EBUSY with a lock file, the
-                    state NO_LOCK handles of one file share otherwise
+                    and by data-file and lock-file identity): EBUSY with a
+                    lock file, the state NO_LOCK handles of one file share
+                    otherwise
 src/core/txn.rs     TxnCore (snapshot, DBI view, page lookup), RoTxn, InactiveTxn,
                     the Transaction trait
 src/core/dbi.rs     Dbi handles, open/close, names, stale-record refresh

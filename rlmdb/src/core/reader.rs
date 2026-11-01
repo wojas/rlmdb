@@ -53,7 +53,7 @@ use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::consts::MDB_MAGIC;
-use crate::core::registry::LocalShared;
+use crate::core::registry::{LocalShared, Registration};
 use crate::error::{Error, MdbError, Result};
 use crate::format::lockfile::{
     LockLayout, READER_PID, READER_TID, READER_TID_SIZE, READER_TXNID, TXNINFO_FORMAT,
@@ -143,6 +143,12 @@ impl LockRegion {
     /// `Ok(None)` for a read-only environment on a read-only file system
     /// (no lock file is used then).
     ///
+    /// The file is claimed in `registration` before it is locked
+    /// ([`Registration::claim_lock_file`]): if this process has it open as
+    /// the lock file of another handle (under another name), the exclusive
+    /// lock below would be granted (record locks do not conflict within a
+    /// process) and the table re-initialised under that handle's readers.
+    ///
     /// The exclusive opener writes a fresh table of `layout`'s version,
     /// whatever the file held. Everyone else validates the table: wrong
     /// magic is `MDB_INVALID`, a `mti_format` other than
@@ -154,6 +160,7 @@ impl LockRegion {
         max_readers: u32,
         read_only: bool,
         layout: &'static LockLayout,
+        registration: &mut Registration,
     ) -> Result<Option<LockRegion>> {
         let file = match os::env_file_options(
             OpenOptions::new().read(true).write(true).create(true),
@@ -161,7 +168,7 @@ impl LockRegion {
         )
         .open(path)
         {
-            Ok(f) => f,
+            Ok(f) => registration.claim_lock_file(f)?,
             Err(e) if read_only && os::is_read_only_fs(&e) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
@@ -724,8 +731,18 @@ mod tests {
 
     use crate::format::lockfile::{LOCK_V09, LOCK_V10};
 
-    fn open(path: &Path, layout: &'static LockLayout) -> Result<LockRegion> {
-        Ok(LockRegion::open(path, 0o644, 4, false, layout)?.unwrap())
+    /// The lock file `path` (in a directory of its own), claimed in `reg`,
+    /// which must outlive it.
+    fn open(
+        path: &Path,
+        layout: &'static LockLayout,
+        reg: &mut Registration,
+    ) -> Result<LockRegion> {
+        Ok(LockRegion::open(path, 0o644, 4, false, layout, reg)?.unwrap())
+    }
+
+    fn registration(lock_path: &Path) -> Registration {
+        Registration::claim_path(lock_path.parent().unwrap(), false, false).unwrap()
     }
 
     #[test]
@@ -738,7 +755,8 @@ mod tests {
     fn fresh_table_of(layout: &'static LockLayout) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lock.mdb");
-        let region = open(&path, layout).unwrap();
+        let mut reg = registration(&path);
+        let region = open(&path, layout, &mut reg).unwrap();
         assert!(region.is_exclusive());
         assert_eq!(region.max_readers(), 4);
         assert_eq!(
@@ -792,7 +810,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lock.mdb");
         for layout in [&LOCK_V09, &LOCK_V10, &LOCK_V09, &LOCK_V10] {
-            let region = open(&path, layout).unwrap();
+            let mut reg = registration(&path);
+            let region = open(&path, layout, &mut reg).unwrap();
             assert!(region.is_exclusive());
             assert_eq!(region.lock_format(), layout.lock_format);
             region.downgrade(5).unwrap();
