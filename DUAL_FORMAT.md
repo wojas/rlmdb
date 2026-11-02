@@ -306,7 +306,7 @@ const char *rlmdb_version_string(void);			/* static, one line */
   The one-line string prints everything a bug report needs:
 
 ```
-rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3)
+rlmdb 0.0.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3)
 ```
 
   Programs read the version numbers from the struct instead of parsing

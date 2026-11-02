@@ -4,7 +4,7 @@
  *   capi_version <crate-version> <version-line> <mdb-version-string>
  *
  * The arguments are what the Rust side expects: the rlmdb crate version
- * ("0.1.0"), the Display line of rlmdb::VersionInfo and the string
+ * ("0.0.0"), the Display line of rlmdb::VersionInfo and the string
  * mdb_version returns. The program is also compiled as C++ (and linked
  * against the library), which checks the extern "C" guards of rlmdb.h.
  *

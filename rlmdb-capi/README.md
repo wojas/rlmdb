@@ -140,7 +140,7 @@ const char *rlmdb_version_string(void);		/* static, one line */
   appended; `size` tells a program compiled against a newer header which
   fields the library has.
 * `rlmdb_version_string()` returns everything in one line, for logs and
-  bug reports: `rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37;
+  bug reports: `rlmdb 0.0.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37;
   format 1.0 = LMDB 1.0.3)`. Programs read the version numbers from
   `rlmdb_version()` instead of parsing it; opt-in features, once there
   are any, will be listed by name (issue #2).
@@ -149,7 +149,7 @@ The Rust side is `rlmdb::version_info()`, from which the C structure and
 strings are filled once, at first use.
 
 **`mdb_version()` reports 0.9.85**, and the string
-`LMDB 0.9.85: (rlmdb 0.1.0)` (the rlmdb version where C has its release
+`LMDB 0.9.85: (rlmdb 0.0.0)` (the rlmdb version where C has its release
 date). The patch level is above every real 0.9 release, so a program can
 tell rlmdb from C LMDB, and the version stays in the 0.9 series that rlmdb
 is a drop-in for. The shipped `lmdb.h` keeps `MDB_VERSION_PATCH 37`

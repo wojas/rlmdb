@@ -92,7 +92,7 @@ const rlmdb_version_info *rlmdb_version(void);
 
 	/** @brief Return the version information as one line of text.
 	 *
-	 * For example "rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37;
+	 * For example "rlmdb 0.0.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37;
 	 * format 1.0 = LMDB 1.0.3)". Meant for logs and bug reports: programs
 	 * read the version numbers from #rlmdb_version() instead of parsing it,
 	 * and opt-in features, once there are any, will be listed by name

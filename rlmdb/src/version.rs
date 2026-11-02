@@ -27,7 +27,7 @@ const V10_RELEASE: (i32, i32, i32) = (1, 0, 3);
 /// is also what `rlmdb_version_string()` returns:
 ///
 /// ```text
-/// rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3)
+/// rlmdb 0.0.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3)
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -44,7 +44,7 @@ pub struct VersionInfo {
 }
 
 impl VersionInfo {
-    /// The string `mdb_version` returns, `LMDB 0.9.85: (rlmdb 0.1.0)`.
+    /// The string `mdb_version` returns, `LMDB 0.9.85: (rlmdb 0.0.0)`.
     ///
     /// It keeps the `LMDB <version>: (<text>)` shape of C's
     /// `MDB_VERSION_STRING` because programs print it verbatim; where C has
