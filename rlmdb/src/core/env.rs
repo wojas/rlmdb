@@ -1074,13 +1074,12 @@ fn choose_format(found: Option<Format>, requested: Option<Format>) -> Result<For
 /// do not ask for one: `RLMDB_DEFAULT_FORMAT=0.9` or `=1.0`
 /// ([`Format::name`]).
 ///
-/// **Experimental**: it may be removed or restricted in a later release
-/// (capability `default-format-env` tells whether it is honoured). A stray
-/// variable in a service's environment silently creates LMDB 1.0 files
-/// that C LMDB 0.9 cannot open, so programs and deployments should prefer
-/// [`EnvironmentBuilder::format`] and [`set_default_format`]. It is read at
-/// every open of a new environment, also through the C API and by the
-/// tools. A value other than `0.9` or `1.0` is ignored, never an error.
+/// **Experimental**: it may be removed or restricted in a later release. A
+/// stray variable in a service's environment silently creates LMDB 1.0
+/// files that C LMDB 0.9 cannot open, so programs and deployments should
+/// prefer [`EnvironmentBuilder::format`] and [`set_default_format`]. It is
+/// read at every open of a new environment, also through the C API and by
+/// the tools. A value other than `0.9` or `1.0` is ignored, never an error.
 pub const DEFAULT_FORMAT_ENV: &str = "RLMDB_DEFAULT_FORMAT";
 
 /// The process default of [`set_default_format`]: 0 = none, else

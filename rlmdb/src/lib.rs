@@ -187,8 +187,8 @@ pub use crate::version::{version_info, VersionInfo};
 /// What `mdb_version` reports, `(major, minor, patch)`: `(0, 9, 85)`, the
 /// 0.9 series this crate is a drop-in for with a patch level above every
 /// real 0.9 release, so that a program can tell rlmdb from C LMDB. The C
-/// releases the formats match, the rlmdb version and the capabilities are
-/// in [`version_info`].
+/// releases the formats match and the rlmdb version are in
+/// [`version_info`].
 pub fn lmdb_version() -> (i32, i32, i32) {
     (
         consts::MDB_VERSION_MAJOR,

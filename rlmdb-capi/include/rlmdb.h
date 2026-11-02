@@ -16,8 +16,8 @@
  *	LMDB 0.9 release, while lmdb.h keeps the 0.9.37 #MDB_VERSION_PATCH. A
  *	run-time patch level above the header's is normal for LMDB, and
  *	#mdb_version() is what programs are told to check. #rlmdb_version()
- *	tells the rest: the rlmdb version, the C LMDB release whose file
- *	format each supported format matches, and a list of capabilities.
+ *	tells the rest: the rlmdb version and the C LMDB release whose file
+ *	format each supported format matches.
  *
  *	@section rlmdb_format_sec Data-file formats
  *	rlmdb reads and writes the data files of LMDB 0.9 (#RLMDB_FORMAT_09,
@@ -34,8 +34,7 @@
  *	<li>LMDB 0.9, which every C LMDB release reads.
  *	</ol>
  *	RLMDB_DEFAULT_FORMAT is experimental: it may be removed or restricted in
- *	a later release (capability "default-format-env" tells whether it is
- *	honoured), so programs should use the functions. Requesting the other
+ *	a later release, so programs should use the functions. Requesting the other
  *	format of an existing file makes #mdb_env_open() fail with
  *	#MDB_VERSION_MISMATCH; there is no conversion in place.
  *	#rlmdb_sniff_format() tells which format a file has.
@@ -66,20 +65,15 @@ extern "C" {
 /** @defgroup rlmdb rlmdb extensions
  *	@{
  */
-/** @defgroup rlmdb_version Version and capabilities
+/** @defgroup rlmdb_version Version
  *	@{
  */
-/** @brief The version and capabilities of the rlmdb library.
+/** @brief The version information of the rlmdb library.
  *
  * Returned by #rlmdb_version(). Fields are only ever appended: a program
  * compiled against an older rlmdb.h reads the fields it knows, and one
  * compiled against a newer header checks @ref size before it reads a field
  * the library may not have.
- *
- * The v10 fields are 0, 0, 0 until the library has capability "format-1.0".
- * Capabilities are short lower-case tokens such as "format-0.9", one per
- * feature a program may want to test for; a token is added when its
- * feature lands and is not removed while the feature exists.
  */
 typedef struct rlmdb_version_info {
 	unsigned	size;		/**< sizeof(rlmdb_version_info) of the library */
@@ -87,34 +81,26 @@ typedef struct rlmdb_version_info {
 	int		lmdb_major, lmdb_minor, lmdb_patch;	/**< What #mdb_version() reports: 0, 9, 85 */
 	int		v09_major, v09_minor, v09_patch;	/**< C release the 0.9 format and API match */
 	int		v10_major, v10_minor, v10_patch;	/**< C release the 1.0 format matches */
-	const char *const *capabilities;	/**< Capability tokens, sorted, NULL-terminated */
 } rlmdb_version_info;
 
-	/** @brief Return the version and capabilities of the rlmdb library.
+	/** @brief Return the version information of the rlmdb library.
 	 *
 	 * @return A pointer to a static structure, valid for the life of the
-	 * process; it and the strings it points to must not be modified or freed.
+	 * process; it must not be modified or freed.
 	 */
 const rlmdb_version_info *rlmdb_version(void);
 
-	/** @brief Return the version and capabilities as one line of text.
+	/** @brief Return the version information as one line of text.
 	 *
 	 * For example "rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37;
-	 * format 1.0 = LMDB 1.0.3; caps: default-format-env format-0.9
-	 * format-1.0)". Meant for logs and bug reports; programs should
-	 * test #rlmdb_version() or #rlmdb_has_capability() instead of parsing it.
+	 * format 1.0 = LMDB 1.0.3)". Meant for logs and bug reports: programs
+	 * read the version numbers from #rlmdb_version() instead of parsing it,
+	 * and opt-in features, once there are any, will be listed by name
+	 * (rlmdb issue #2).
 	 * @return A static string, valid for the life of the process; it must not
 	 * be modified or freed.
 	 */
 const char *rlmdb_version_string(void);
-
-	/** @brief Tell whether the library has a capability.
-	 *
-	 * @param[in] name A capability token, for example "format-0.9"
-	 * @return 1 if the library has the capability, 0 if it does not or
-	 * if name is NULL.
-	 */
-int rlmdb_has_capability(const char *name);
 /**	@} */
 
 /** @defgroup rlmdb_format Data-file formats

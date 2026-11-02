@@ -143,7 +143,7 @@ Other differences:
   parentheses) where C prints `LMDB 0.9.37: (Oct 21, 2026)`: the string
   rlmdb's `mdb_version()` returns. Its patch level is above every C 0.9
   release so that rlmdb can be told apart (`../rlmdb-capi/README.md`,
-  "`rlmdb.h`: version and capabilities").
+  "`rlmdb.h`", "Version").
 * **`mdb_drop`** is not part of LMDB 0.9.37. This one is LMDB's own
   `mdb_drop` as first added (2017, before the 1.0 options `-L` and the
   crypto options `-m`/`-w`): same options, messages and exit codes. The

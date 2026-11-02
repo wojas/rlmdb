@@ -259,8 +259,8 @@ of it changes the files or what another process concludes about them.
   <version>)`, and the tools' `-V` prints that string; the shipped `lmdb.h`
   stays the 0.9.37 header. The patch level, above every C 0.9 release,
   tells rlmdb apart. `rlmdb_version()` (`rlmdb-capi/include/rlmdb.h`;
-  `rlmdb::version_info()` in Rust) reports the rest: rlmdb's version, the
-  C release the file format matches (0.9.37) and capability tokens.
+  `rlmdb::version_info()` in Rust) reports the rest: rlmdb's version and
+  the C release each file format matches (0.9.37, 1.0.3).
 * Through the C API (`rlmdb-capi/README.md`, "Differences from C LMDB
   0.9.37"): opening one environment twice in a process is `EBUSY`
   (except under `MDB_NOLOCK`, where handles share one in-process reader
@@ -307,7 +307,7 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 | The C API behaves as C (return codes, outputs, traces) | `rlmdb-capi/tests/c/capi_read.c`, `capi_write.c` (run against both libraries; traces must be identical; `DIFFERS()`/`DEVIATION()` mark the documented deviations), `rlmdb-capi/tests/tools.rs` (upstream `mdb_stat.c`/`mdb_dump.c` linked against both print the same) |
 | The tools behave as C's | `rlmdb-tools/tests/*.rs` (every option on every environment: same stdout, stderr, exit code; loaded environments identical as C sees them; `-V` prints rlmdb's version line where C prints its own) |
 | `mdb_version` reports 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)`; major and minor equal `lmdb.h`'s | `rlmdb-capi/tests/c/capi_read.c` (`MDB_VERSION_STRING` and 0.9.37 for C, 0.9.85 for Rust), `capi_version.c`, unit tests in `rlmdb/src/version.rs`, `rlmdb-capi/src/version.rs`, `rlmdb-tools/src/common.rs` |
-| `rlmdb.h`: `rlmdb_version()` (struct `size`, numbers, sorted NULL-terminated capabilities), `rlmdb_version_string()` (the `Display` line of `rlmdb::VersionInfo`), `rlmdb_has_capability()`; usable from C++ | `rlmdb-capi/tests/capi_version.rs` (`tests/c/capi_version.c` built as C and as C++, against the Rust library) |
+| `rlmdb.h`: `rlmdb_version()` (struct `size`, numbers), `rlmdb_version_string()` (the `Display` line of `rlmdb::VersionInfo`); usable from C++ | `rlmdb-capi/tests/capi_version.rs` (`tests/c/capi_version.c` built as C and as C++, against the Rust library) |
 | Corrupt input never crashes | `rlmdb` `format::page` unit tests (`corrupt_pointers_do_not_panic`), `rlmdb/tests/handbuilt.rs` (`corrupt_pages_give_errors_not_panics`) |
 
 ## The LMDB 1.0 data file
@@ -327,9 +327,8 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
   else by the process default (`rlmdb::set_default_format`,
   `rlmdb_set_default_format`), else by the environment variable
   `RLMDB_DEFAULT_FORMAT=1.0`. **The variable is experimental**: it may be
-  removed or restricted in a later release (capability `default-format-env`
-  tells whether it is honoured), because a stray variable silently creates
-  files C 0.9 cannot open. A value other than `0.9` or `1.0` is ignored.
+  removed or restricted in a later release, because a stray variable
+  silently creates files C 0.9 cannot open. A value other than `0.9` or `1.0` is ignored.
   None of the defaults applies to an existing file.
 * **Page sizes** 256 B to 64 KiB for new 1.0 environments
   (`EnvironmentBuilder::page_size`, C 1.0's `mdb_env_set_pagesize`; the OS

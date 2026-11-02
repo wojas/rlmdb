@@ -13,8 +13,8 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use rlmdb::{
-    default_format, process_default_format, set_default_format, version_info, Environment,
-    EnvironmentFlags, Error, Format, MdbError, DEFAULT_FORMAT_ENV,
+    default_format, process_default_format, set_default_format, Environment, EnvironmentFlags,
+    Error, Format, MdbError, DEFAULT_FORMAT_ENV,
 };
 
 /// Serialises the tests of this file (see the module documentation).
@@ -90,7 +90,6 @@ fn process_default() {
 #[test]
 fn environment_variable() {
     let d = Defaults::take();
-    assert!(version_info().has("default-format-env"));
     d.set_var("1.0");
     assert_eq!(default_format(), Format::V10);
     assert_eq!(create(tmp().path()), Format::V10);

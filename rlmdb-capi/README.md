@@ -114,12 +114,12 @@ is never called (the core reports errors instead of asserting).
 ## `rlmdb.h`
 
 `include/rlmdb.h` includes `lmdb.h` and declares rlmdb's own functions:
-the version and capabilities (module `version`) and the data-file formats
+the version (module `version`) and the data-file formats
 (module `format`), plus the LMDB 1.0 constants. C LMDB does not have the
 functions, so a program that calls them needs this library. The header's
 comments are their reference documentation.
 
-### Version and capabilities
+### Version
 
 ```c
 #include "rlmdb.h"
@@ -129,13 +129,11 @@ typedef struct rlmdb_version_info {
 	int		rlmdb_major, rlmdb_minor, rlmdb_patch;	/* the rlmdb version */
 	int		lmdb_major, lmdb_minor, lmdb_patch;	/* what mdb_version() reports: 0, 9, 85 */
 	int		v09_major, v09_minor, v09_patch;	/* C release the 0.9 format and API match: 0, 9, 37 */
-	int		v10_major, v10_minor, v10_patch;	/* C release the 1.0 format matches: 1, 0, 2 */
-	const char *const *capabilities;		/* sorted, NULL-terminated */
+	int		v10_major, v10_minor, v10_patch;	/* C release the 1.0 format matches: 1, 0, 3 */
 } rlmdb_version_info;
 
 const rlmdb_version_info *rlmdb_version(void);	/* static, never freed */
 const char *rlmdb_version_string(void);		/* static, one line */
-int rlmdb_has_capability(const char *name);	/* 1 or 0; 0 for NULL */
 ```
 
 * `rlmdb_version()` returns a static structure. Fields are only ever
@@ -143,15 +141,9 @@ int rlmdb_has_capability(const char *name);	/* 1 or 0; 0 for NULL */
   fields the library has.
 * `rlmdb_version_string()` returns everything in one line, for logs and
   bug reports: `rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37;
-  format 1.0 = LMDB 1.0.3; caps: default-format-env format-0.9
-  format-1.0)`.
-* `rlmdb_has_capability(name)` tests for one capability token. Tokens are
-  short lower-case names, added when a feature lands and kept while it
-  exists. Today: `default-format-env` (the experimental
-  `RLMDB_DEFAULT_FORMAT` is honoured), `format-0.9`, `format-1.0`; planned
-  are `split-freelist`, `convert-copy`, `prevsnapshot`, `txn-prepare`,
-  `checksum` and `encrypt`. `v10_*` are 0, 0, 0 in a library without
-  `format-1.0`.
+  format 1.0 = LMDB 1.0.3)`. Programs read the version numbers from
+  `rlmdb_version()` instead of parsing it; opt-in features, once there
+  are any, will be listed by name (issue #2).
 
 The Rust side is `rlmdb::version_info()`, from which the C structure and
 strings are filled once, at first use.
@@ -189,9 +181,8 @@ int rlmdb_env_set_pagesize(MDB_env *env, unsigned size);    /* LMDB 1.0's mdb_en
   (`rlmdb_set_default_format`), else the format the environment variable
   `RLMDB_DEFAULT_FORMAT` names (`0.9` or `1.0`; other values are ignored),
   else LMDB 0.9. **The variable is experimental**: it may be removed or
-  restricted in a later release (capability `default-format-env` says
-  whether it is honoured). It is read at every open; programs should use
-  the functions.
+  restricted in a later release. It is read at every open; programs should
+  use the functions.
 * `rlmdb_env_set_pagesize` (a power of two from 256 to 65536, as in C 1.0)
   applies to a new 1.0 environment; `mdb_env_open` fails with `EINVAL` if
   the environment turns out to be LMDB 0.9, which has no such setting.
@@ -494,9 +485,7 @@ environments.
   Rust library.
 * `tests/capi_version.rs`: `tests/c/capi_version.c` checks `rlmdb.h`
   against the Rust library (there is no C oracle): the structure's `size`
-  and numbers, the sorted, NULL-terminated capability list,
-  `rlmdb_has_capability` (also with NULL and unknown names),
-  `rlmdb_version_string()` equal to the Rust `Display` line and
+  and numbers, `rlmdb_version_string()` equal to the Rust `Display` line and
   `mdb_version`'s string. The same program is compiled as C++ and linked,
   which checks the header's `extern "C"` guards.
 * `tests/capi_format.rs`: `tests/c/capi_format.c` checks the format

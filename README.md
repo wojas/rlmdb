@@ -38,10 +38,9 @@ Implemented and tested against the C library on macOS (arm64) and Linux
   `mdb_copy.c` run against it and give the same results as against C,
   down to the page numbers on the free list. `mdb_version()` reports
   0.9.85, so programs can tell it from C LMDB; `rlmdb.h` adds
-  `rlmdb_version()`, `rlmdb_version_string()` and
-  `rlmdb_has_capability()` (rlmdb's version, the C release each format
-  matches, capability tokens), which `rlmdb::version_info()` provides on
-  the Rust side, and the data-file format functions
+  `rlmdb_version()` and `rlmdb_version_string()` (rlmdb's version and the
+  C release each format matches), which `rlmdb::version_info()` provides
+  on the Rust side, and the data-file format functions
   (`rlmdb_env_set_format`, `rlmdb_env_get_format`, `rlmdb_sniff_format`,
   `rlmdb_set_default_format`, `rlmdb_env_set_pagesize`) with LMDB 1.0's
   constants.
@@ -158,7 +157,7 @@ With the shared library, the loader must find it at run time
 (`LD_LIBRARY_PATH` on Linux; on macOS the dylib's install name is its
 absolute build path, or use `DYLD_LIBRARY_PATH`). Behaviour, the deviations
 from C, the thread rule for write transactions and `rlmdb.h` (rlmdb's
-version, capability and data-file format functions, next to `lmdb.h`) are
+version and data-file format functions, next to `lmdb.h`) are
 in
 [`rlmdb-capi/README.md`](rlmdb-capi/README.md).
 

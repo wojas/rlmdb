@@ -243,16 +243,14 @@ Implemented, except the converting copy:
   `mdb_cursor_is_db`, which the tools' `-a` needs.
 * `rlmdb::version_info() -> &'static VersionInfo` with `rlmdb` (crate
   version), `lmdb` (what `mdb_version` reports, 0.9.85), `v09` and `v10`
-  (the C releases each format matches, 0.9.37 and 1.0.3 today), and
-  `capabilities: &[&str]`; `Display` prints the single-line form of §4.4.
-  `VersionInfo::has(&self, cap)` for tests.
+  (the C releases each format matches, 0.9.37 and 1.0.3 today);
+  `Display` prints the single-line form of §4.4.
 * `Environment::copy_to(.., CopyFormat)`: a compacting copy that re-encodes
   pages in the other format is natural here because rlmdb owns both
   encoders; it walks the tree like `MDB_CP_COMPACT` and rebuilds nodes. This
   is the one thing lmdb-go cannot offer (it needs dump and load). Not in the
   first cut; wanted soon after, where it can replace or reimplement
-  `github.com/wojas/lmdbconvert`. Advertised as capability `convert-copy`
-  once it exists.
+  `github.com/wojas/lmdbconvert`.
 
 ### 4.4 C API: `rlmdb_*` additions, `lmdb.h` untouched
 
@@ -298,29 +296,23 @@ typedef struct rlmdb_version_info {
 	int		rlmdb_major, rlmdb_minor, rlmdb_patch;	/* the Rust crate version */
 	int		lmdb_major, lmdb_minor, lmdb_patch;	/* what mdb_version() reports: 0, 9, 85 */
 	int		v09_major, v09_minor, v09_patch;	/* C release the 0.9 format and API match: 0, 9, 37 */
-	int		v10_major, v10_minor, v10_patch;	/* C release the 1.0 format and API match: 1, 0, 2 */
-	const char *const *capabilities;		/* NULL-terminated, sorted, short tokens */
+	int		v10_major, v10_minor, v10_patch;	/* C release the 1.0 format and API match: 1, 0, 3 */
 } rlmdb_version_info;
 
 const rlmdb_version_info *rlmdb_version(void);		/* static, never freed */
 const char *rlmdb_version_string(void);			/* static, one line */
-int rlmdb_has_capability(const char *name);		/* 1 or 0 */
 ```
 
   The one-line string prints everything a bug report needs:
 
 ```
-rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3; caps: convert-copy format-0.9 format-1.0 split-freelist)
+rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3)
 ```
 
-  Capabilities are short lower-case tokens, one per feature a program may
-  want to test for, added as features land and never removed while the
-  feature exists: `format-0.9`, `format-1.0`, `split-freelist` (when the
-  free-list work from the `freelist-split` branch is merged),
-  `convert-copy`, `prevsnapshot`, `txn-prepare`, `checksum`, `encrypt`,
-  `default-format-env` (while `RLMDB_DEFAULT_FORMAT` is honoured, so its
-  experimental status is testable). The Rust side is `rlmdb::version_info()`
-  (§4.3); the C struct is filled from it once at first call.
+  Programs read the version numbers from the struct instead of parsing
+  the string; opt-in features, once there are any, will be listed by name
+  (issue #2). The Rust side is `rlmdb::version_info()` (§4.3); the C
+  struct is filled from it once at first call.
 
 Behaviour of existing functions:
 
@@ -333,7 +325,7 @@ Behaviour of existing functions:
   only computed in `mdb_env_open2`; 1.0 documents it as only valid after
   open.)
 * `mdb_env_open` refuses `MDB_PREVSNAPSHOT` with `EINVAL` for both formats
-  until it is implemented (capability `prevsnapshot`).
+  until it is implemented.
 * `mdb_env_set_flags` rejects `MDB_ENCRYPT` until encryption exists.
 * The key and data copies of `write.rs` (a caller's pointer may alias the
   page the put changes) are sized per environment: keys up to its maximum
@@ -494,9 +486,8 @@ the Rust and C peers open without it.
 ## 6. Decisions taken (owner, 2026-10-30)
 
 1. `mdb_version()` reports 0.9.85. A new `rlmdb_version()` returns a struct
-   with the rlmdb version, the 0.9 and 1.0 C releases each format matches,
-   and a list of short capability tokens; `rlmdb_version_string()` prints
-   all of it on one line. (§4.4)
+   with the rlmdb version and the 0.9 and 1.0 C releases each format
+   matches; `rlmdb_version_string()` prints all of it on one line. (§4.4)
 2. `RLMDB_DEFAULT_FORMAT` is honoured everywhere, marked experimental so it
    can be removed if it causes trouble. (§4.2)
 3. No new error codes: a format conflict is `MDB_VERSION_MISMATCH`. (§4.2,
@@ -524,8 +515,7 @@ the Rust and C peers open without it.
    (`KNOWN_C_BUGS.md`, section "LMDB 1.0").
 3. Lock file v2 on Linux and macOS, including the semaphore naming.
 4. Sniffing, selection, defaults (`RLMDB_DEFAULT_FORMAT`, experimental),
-   `rlmdb.h`, `rlmdb_version()` and the capability list, `mdb_version`
-   0.9.85, tools options. The version
+   `rlmdb.h`, `rlmdb_version()`, `mdb_version` 0.9.85, tools options. The version
    function can land first, on its own, since it is useful without any
    format work. Done (§4.2–§4.4); besides the items above it needed the
    per-environment key and data copies of the C API, 1.0's tool output

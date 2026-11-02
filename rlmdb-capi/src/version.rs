@@ -1,12 +1,10 @@
 //! Version information and error messages: `mdb_version` and
 //! `mdb_strerror` (`lmdb.h` sections "Version Macros" and "Return Codes"),
-//! and rlmdb's own `rlmdb_version`, `rlmdb_version_string` and
-//! `rlmdb_has_capability` (`include/rlmdb.h`), all filled from
-//! [`rlmdb::version_info`].
+//! and rlmdb's own `rlmdb_version` and `rlmdb_version_string`
+//! (`include/rlmdb.h`), both filled from [`rlmdb::version_info`].
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint};
-use std::ptr;
 use std::sync::OnceLock;
 
 use rlmdb::consts::{MDB_KEYEXIST, MDB_LAST_ERRCODE_V10};
@@ -36,15 +34,12 @@ pub struct rlmdb_version_info {
     pub v09_minor: c_int,
     /// The C LMDB release the 0.9 format and API match: patch.
     pub v09_patch: c_int,
-    /// The C LMDB release the 1.0 format matches: major (0 until
-    /// capability `format-1.0` exists).
+    /// The C LMDB release the 1.0 format matches: major.
     pub v10_major: c_int,
     /// The C LMDB release the 1.0 format matches: minor.
     pub v10_minor: c_int,
     /// The C LMDB release the 1.0 format matches: patch.
     pub v10_patch: c_int,
-    /// The capability tokens as C strings, sorted, terminated by NULL.
-    pub capabilities: *const *const c_char,
 }
 
 /// The C view of [`rlmdb::version_info`], built once.
@@ -57,32 +52,11 @@ struct CVersion {
     lmdb_line: CString,
 }
 
-// SAFETY: the only pointers in a `CVersion` are `info.capabilities` and
-// the entries of the array it points to; they point to memory leaked when
-// the value was built (never freed or written again), and the value itself
-// lives in a static and is only read.
-unsafe impl Send for CVersion {}
-// SAFETY: as for `Send`: shared access is read-only.
-unsafe impl Sync for CVersion {}
-
 /// The C version information, built on first use.
 fn c_version() -> &'static CVersion {
     static VERSION: OnceLock<CVersion> = OnceLock::new();
     VERSION.get_or_init(|| {
         let v = rlmdb::version_info();
-        // Leaked on purpose: rlmdb.h promises static strings and arrays.
-        let capabilities: Vec<*const c_char> = v
-            .capabilities
-            .iter()
-            .map(|cap| {
-                CString::new(*cap)
-                    .unwrap_or_default()
-                    .into_raw()
-                    .cast_const()
-            })
-            .chain([ptr::null()])
-            .collect();
-        let capabilities = Box::leak(capabilities.into_boxed_slice()).as_ptr();
         let int = |n: u32| c_int::try_from(n).unwrap_or(c_int::MAX);
         let info = rlmdb_version_info {
             size: size_of::<rlmdb_version_info>() as c_uint,
@@ -98,7 +72,6 @@ fn c_version() -> &'static CVersion {
             v10_major: v.v10.0,
             v10_minor: v.v10.1,
             v10_patch: v.v10.2,
-            capabilities,
         };
         CVersion {
             info,
@@ -131,34 +104,19 @@ pub unsafe extern "C" fn mdb_version(
     c_version().lmdb_line.as_ptr().cast_mut()
 }
 
-/// `rlmdb_version` (`rlmdb.h`): the version and capabilities of the
-/// library, a static structure.
+/// `rlmdb_version` (`rlmdb.h`): the version information of the library,
+/// a static structure.
 #[no_mangle]
 pub unsafe extern "C" fn rlmdb_version() -> *const rlmdb_version_info {
     &c_version().info
 }
 
-/// `rlmdb_version_string` (`rlmdb.h`): the version and capabilities as
-/// one line, the [`Display`](std::fmt::Display) form of
+/// `rlmdb_version_string` (`rlmdb.h`): the version information as one
+/// line, the [`Display`](std::fmt::Display) form of
 /// [`rlmdb::VersionInfo`]; a static string.
 #[no_mangle]
 pub unsafe extern "C" fn rlmdb_version_string() -> *const c_char {
     c_version().line.as_ptr()
-}
-
-/// `rlmdb_has_capability` (`rlmdb.h`): 1 if the library has capability
-/// `name`, else 0 (also for NULL and for names that are not UTF-8).
-#[no_mangle]
-pub unsafe extern "C" fn rlmdb_has_capability(name: *const c_char) -> c_int {
-    if name.is_null() {
-        return 0;
-    }
-    // SAFETY: a non-NULL `name` is a NUL-terminated string, per rlmdb.h.
-    let name = unsafe { CStr::from_ptr(name) };
-    c_int::from(
-        name.to_str()
-            .is_ok_and(|name| rlmdb::version_info().has(name)),
-    )
 }
 
 /// The messages of LMDB's own codes as static C strings: those of LMDB 0.9
@@ -198,6 +156,8 @@ pub unsafe extern "C" fn mdb_strerror(err: c_int) -> *mut c_char {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
+
     use super::*;
 
     /// The `MDB_VERSION_*` numbers of the shipped `lmdb.h`.
@@ -256,33 +216,9 @@ mod tests {
             header_version()
         );
         assert_eq!((info.v10_major, info.v10_minor, info.v10_patch), v.v10);
-        let mut caps = Vec::new();
-        let mut p = info.capabilities;
-        // SAFETY: the array is NULL-terminated and read up to the NULL; its
-        // other entries are static C strings.
-        unsafe {
-            while !(*p).is_null() {
-                caps.push(CStr::from_ptr(*p).to_str().unwrap());
-                p = p.add(1);
-            }
-        }
-        assert_eq!(caps, v.capabilities);
         // SAFETY: a static NUL-terminated string.
         let line = unsafe { CStr::from_ptr(rlmdb_version_string()) };
         assert_eq!(line.to_str().unwrap(), v.to_string());
-    }
-
-    #[test]
-    fn has_capability() {
-        // SAFETY: NULL or NUL-terminated strings.
-        let has = |name: Option<&CStr>| unsafe {
-            rlmdb_has_capability(name.map_or(ptr::null(), CStr::as_ptr))
-        };
-        assert_eq!(has(Some(c"format-0.9")), 1);
-        assert_eq!(has(Some(c"nope")), 0);
-        assert_eq!(has(Some(c"")), 0);
-        assert_eq!(has(Some(c"format-0.9\xff")), 0);
-        assert_eq!(has(None), 0);
     }
 
     #[test]

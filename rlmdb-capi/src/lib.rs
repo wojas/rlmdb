@@ -17,8 +17,8 @@
 //!
 //! # Modules (grouped like the sections of `lmdb.h`)
 //!
-//! * `mdb_version`, `mdb_strerror`, and `rlmdb.h`'s `rlmdb_version`,
-//!   `rlmdb_version_string`, `rlmdb_has_capability` in [`version`].
+//! * `mdb_version`, `mdb_strerror`, and `rlmdb.h`'s `rlmdb_version` and
+//!   `rlmdb_version_string` in [`version`].
 //! * `rlmdb.h`'s data-file format functions (`rlmdb_env_set_format`,
 //!   `rlmdb_env_get_format`, `rlmdb_sniff_format`,
 //!   `rlmdb_set_default_format`, `rlmdb_env_set_pagesize`) in

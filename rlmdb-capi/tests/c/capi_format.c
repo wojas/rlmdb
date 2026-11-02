@@ -133,8 +133,6 @@ static void test_constants(void)
 #else
 	CHECK(!strcmp(mdb_strerror(MDB_ADDR_BUSY + 1), "Invalid error code"));
 #endif
-	CHECK(rlmdb_has_capability("default-format-env") == 1);
-	CHECK(rlmdb_has_capability("format-1.0") == 1);
 }
 
 static void test_set_get(void)

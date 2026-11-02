@@ -1,8 +1,7 @@
 //! `tests/c/capi_version.c` checks `include/rlmdb.h` (`rlmdb_version`,
-//! `rlmdb_version_string`, `rlmdb_has_capability`) and `mdb_version`
-//! against the Rust library, built as C and as C++. There is no C oracle:
-//! C LMDB has no `rlmdb.h`; the expectations come from
-//! [`rlmdb::version_info`].
+//! `rlmdb_version_string`) and `mdb_version` against the Rust library,
+//! built as C and as C++. There is no C oracle: C LMDB has no `rlmdb.h`;
+//! the expectations come from [`rlmdb::version_info`].
 
 mod common;
 
