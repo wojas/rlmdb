@@ -36,13 +36,14 @@ must respect. The details live in:
   same places, same free list, same spill decisions, same compacting copy)
   and the tests check it down to page numbers
   (`rlmdb/tests/write_differential.rs`, `rlmdb-capi/tests/mtest.rs`,
-  `interop/`). Keep it that way by default: it catches write-path bugs
-  cheaply. An optimisation may diverge deliberately (which free page is
-  reused, where a split lands, when to spill) if it keeps the invariants
-  above, is validated by the logical-equivalence tests (dumps, stat,
-  cursor positions, C peers reading and writing the result), moves only
-  the affected checks from "same layout" to "equivalent", and is recorded
-  in a short ledger. Never diverge as a side effect of another change.
+  `interop/`). Keep it that way: it catches write-path bugs cheaply, and
+  the peer and differential tests always run in this plain compatibility
+  mode. A change that writes something else (which free page is reused,
+  where a split lands, when to spill, another free-list layout) is an
+  opt-in feature a caller enables by name (issue #2): off by default, the
+  files still readable and writable by C, with its own tests (the C peers
+  reading and writing what a Rust process with the feature wrote). Never
+  diverge as a side effect of another change.
 * Never recompute what C reads from the file. Example: macOS semaphore
   names are stored in the lock file with uninitialised padding, so they are
   read, not derived; in lock-file version 2 they are derived from the hash
