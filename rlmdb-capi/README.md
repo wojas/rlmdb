@@ -152,7 +152,7 @@ strings are filled once, at first use.
 `LMDB 0.9.85: (rlmdb 0.1.0)` (the rlmdb version where C has its release
 date). The patch level is above every real 0.9 release, so a program can
 tell rlmdb from C LMDB, and the version stays in the 0.9 series that rlmdb
-is a drop-in for. The shipped `lmdb.h` keeps `MDB_VERSION_PATCH 36`
+is a drop-in for. The shipped `lmdb.h` keeps `MDB_VERSION_PATCH 37`
 (`MDB_VERSION_STRING` is `LMDB 0.9.37: (Oct 21, 2026)`): it is unmodified,
 and a run-time patch level above the header's is the normal case for LMDB
 (a program built against an older 0.9 header runs with a newer 0.9
