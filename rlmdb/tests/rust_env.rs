@@ -4,7 +4,7 @@
 
 mod common;
 
-use rlmdb::consts::MDB_MAXKEYSIZE;
+use rlmdb::consts::{MAX_DBS_LIMIT, MDB_MAXKEYSIZE};
 use rlmdb::{
     CursorOp, Dbi, Environment, EnvironmentFlags, Error, Format, MdbError, Transaction, WriteFlags,
 };
@@ -802,4 +802,34 @@ fn auto_traits() {
     assert_sync::<Environment>();
     assert_send::<rlmdb::RoTxn<'static>>();
     assert_send::<rlmdb::InactiveTxn<'static>>();
+}
+
+/// `max_dbs` beyond [`MAX_DBS_LIMIT`] does not open (`EINVAL`): C takes
+/// any count and breaks above about 35 million (`KNOWN_C_BUGS.md` #54).
+/// A large count within the limit opens.
+#[test]
+fn max_dbs_beyond_the_limit_is_refused() {
+    for dbs in [MAX_DBS_LIMIT + 1, u32::MAX - 1, u32::MAX] {
+        let dir = tmp();
+        let r = Environment::builder().max_dbs(dbs).open(dir.path());
+        assert!(
+            matches!(r, Err(Error::Io(ref e)) if e.raw_os_error() == Some(libc::EINVAL)),
+            "max_dbs {dbs}: {r:?}"
+        );
+        assert!(
+            !dir.path().join("data.mdb").exists(),
+            "max_dbs {dbs}: created"
+        );
+    }
+    let dir = tmp();
+    let env = Environment::builder()
+        .max_dbs(100_000)
+        .open(dir.path())
+        .unwrap();
+    let mut txn = env.begin_rw_txn().unwrap();
+    let db = txn
+        .create_db(Some("one"), rlmdb::DatabaseFlags::CREATE)
+        .unwrap();
+    txn.put(db, b"k", b"v", WriteFlags::empty()).unwrap();
+    txn.commit().unwrap();
 }

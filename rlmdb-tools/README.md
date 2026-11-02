@@ -120,12 +120,18 @@ unusual input is affected; `mdb_dump` output loads identically):
 * Lines of any length are read whole, and NUL bytes in a line are data. C
   reads header lines in 4 KiB pieces and mixes up lines that contain a NUL
   byte (it continues the line in the buffer with the next input line).
-* `maxreaders=` takes only the plain decimal `mdb_dump` writes (0 leaves
-  the environment's default, as in C). C reads it with `sscanf("%u")`,
-  which also takes a sign, blanks and trailing junk, and sets the result
-  as the reader count unchecked: a `maxreaders=-1` line makes C create an
-  environment whose lock file is 256 GiB (#53). Here it is "invalid
-  maxreaders -1", the message C gives a value `%u` cannot read at all.
+* `maxreaders=`, `mapsize=` and `db_pagesize=` take only the plain
+  decimal `mdb_dump` writes (0 leaves the environment's default, as in
+  C). C reads them with `sscanf`, which also takes a sign, blanks and
+  trailing junk, and uses the result unchecked: a `maxreaders=-1` line
+  makes C create an environment whose lock file is 256 GiB, a
+  `mapsize=-1` line one whose recorded map size nothing opens again
+  (#53). Here they are "invalid maxreaders -1", the message C gives a
+  value `sscanf` cannot read at all.
+* A flag line (`dupsort=`, `integerkey=`, …) takes only the `1` that
+  `mdb_dump` writes for a set flag. C sets the flag for any value, so
+  `dupsort=0` in a hand-edited dump turns duplicates on, silently and for
+  good (#55). Here it is "invalid dupsort 0".
 * After loading the main DB with `-a`, the main DB's default comparator is
   restored. C leaves its "always greater" append comparator on the main
   DB, so a named database that follows in the same input is not found in

@@ -177,7 +177,7 @@ impl Input {
             } else if let Some(rest) = line.strip_prefix(b"mapaddr=") {
                 hdr.map_address = self.number(rest, 16, "mapaddr")?;
             } else if let Some(rest) = line.strip_prefix(b"mapsize=") {
-                hdr.map_size = self.number(rest, 10, "mapsize")?;
+                hdr.map_size = self.plain_decimal(rest, "mapsize")?;
             } else if let Some(rest) = line.strip_prefix(b"maxreaders=") {
                 hdr.max_readers = self.max_readers(rest)?;
             } else if let Some(rest) = line
@@ -185,11 +185,24 @@ impl Input {
                 .filter(|_| self.format == Format::V10)
             {
                 // LMDB 1.0 only; 0.9's mdb_load does not know the keyword.
-                hdr.page_size = self.number(rest, 10, "pagesize")? as u32;
-            } else if let Some((flag, _)) = DB_FLAG_NAMES.iter().find(|(_, name)| {
+                hdr.page_size = self
+                    .plain_decimal(rest, "pagesize")?
+                    .try_into()
+                    .map_err(|_| {
+                        self.message(
+                            &[b"invalid pagesize ", cstr(strip_newline(rest)), b"\n"].concat(),
+                        );
+                    })?;
+            } else if let Some((flag, name)) = DB_FLAG_NAMES.iter().find(|(_, name)| {
                 line.starts_with(name.as_bytes()) && line.get(name.len()) == Some(&b'=')
             }) {
-                // Any value sets the flag, as in C.
+                // `<flag>=1`, as mdb_dump writes a set flag. C sets the flag
+                // for any value (`dupsort=0` too, KNOWN_C_BUGS.md #55).
+                let value = cstr(strip_newline(&line[name.len() + 1..]));
+                if value != b"1" {
+                    self.message(&[b"invalid ", name.as_bytes(), b" ", value, b"\n"].concat());
+                    return Err(());
+                }
                 hdr.flags |= *flag;
             } else {
                 match line.iter().position(|&b| b == b'=') {
@@ -215,21 +228,30 @@ impl Input {
         })
     }
 
-    /// `maxreaders=`: the plain decimal that `mdb_dump` writes (`%u` of
-    /// the environment's reader count; 0 leaves the default, as in C), and
-    /// nothing else: C reads it with `sscanf("%u")`, which also takes a
-    /// sign, blanks and trailing junk, so `maxreaders=-1` passes as four
-    /// billion readers and the lock file of the loaded environment is
-    /// 256 GiB (`KNOWN_C_BUGS.md` #53). Anything but what `mdb_dump`
-    /// writes is "invalid maxreaders", as for a value `%u` cannot read.
-    fn max_readers(&self, rest: &[u8]) -> Result<u32, ()> {
+    /// A header number as `mdb_dump` writes it (`%u`/`%zu`, a plain
+    /// decimal; 0 leaves the default, as in C) and nothing else: C reads
+    /// them with `sscanf`, which also takes a sign, blanks and trailing
+    /// junk, so `maxreaders=-1` passes as four billion readers (a 256 GiB
+    /// lock file) and `mapsize=-1` as a map size nothing opens again
+    /// (`KNOWN_C_BUGS.md` #53). Anything else is "invalid <what>", C's
+    /// message for a value `sscanf` cannot read at all.
+    fn plain_decimal(&self, rest: &[u8], what: &str) -> Result<u64, ()> {
         let text = cstr(strip_newline(rest));
         let plain = !text.is_empty() && text.iter().all(u8::is_ascii_digit);
         plain
-            .then(|| std::str::from_utf8(text).ok()?.parse::<u32>().ok())
+            .then(|| std::str::from_utf8(text).ok()?.parse::<u64>().ok())
             .flatten()
             .ok_or_else(|| {
-                self.message(&[b"invalid maxreaders ", text, b"\n"].concat());
+                self.message(&[format!("invalid {what} ").as_bytes(), text, b"\n"].concat());
+            })
+    }
+
+    /// `maxreaders=`: [`plain_decimal`](Self::plain_decimal), 32 bits.
+    fn max_readers(&self, rest: &[u8]) -> Result<u32, ()> {
+        self.plain_decimal(rest, "maxreaders")?
+            .try_into()
+            .map_err(|_| {
+                self.message(&[b"invalid maxreaders ", cstr(strip_newline(rest)), b"\n"].concat());
             })
     }
 

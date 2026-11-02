@@ -265,6 +265,13 @@ pub const MDB_MINKEYS: usize = 2;
 pub const DEFAULT_MAPSIZE: usize = 1_048_576;
 /// `DEFAULT_READERS`: default size of the reader table.
 pub const DEFAULT_READERS: u32 = 126;
+
+/// The most named databases an environment can be configured for
+/// (`mdb_env_set_maxdbs`, `EnvironmentBuilder::max_dbs`): 1,048,576.
+/// Every transaction allocates a slot per database, so a count beyond
+/// this is of no practical use; C takes any count and breaks above about
+/// 35 million (`KNOWN_C_BUGS.md` #54). rlmdb has no such constant in C.
+pub const MAX_DBS_LIMIT: u32 = 1 << 20;
 /// `CURSOR_STACK`: maximum depth of a B-tree (and of a cursor's page stack).
 pub const CURSOR_STACK: usize = 32;
 /// `CACHELINE`: alignment of lock-file structures.

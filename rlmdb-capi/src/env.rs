@@ -323,12 +323,14 @@ pub unsafe extern "C" fn mdb_env_get_maxreaders(env: *mut MDB_env, readers: *mut
 }
 
 /// `mdb_env_set_maxdbs`: set the maximum number of named databases. Only
-/// before `mdb_env_open`.
+/// before `mdb_env_open`, and at most `MAX_DBS_LIMIT` (1,048,576): C takes
+/// any count and breaks above about 35 million, here a larger count is
+/// `EINVAL` (`KNOWN_C_BUGS.md` #54, `README.md`).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_env_set_maxdbs(env: *mut MDB_env, dbs: MDB_dbi) -> c_int {
     // SAFETY: env is NULL or a live handle (lmdb.h).
     match unsafe { MDB_env::from_ptr(env) } {
-        Some(e) if e.open_env().is_none() => {
+        Some(e) if e.open_env().is_none() && dbs <= rlmdb::consts::MAX_DBS_LIMIT => {
             e.config().max_dbs = dbs;
             SUCCESS
         }

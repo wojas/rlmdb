@@ -145,7 +145,8 @@ impl EnvironmentBuilder {
     }
 
     /// `mdb_env_set_maxdbs`: number of named databases that can be open at
-    /// the same time.
+    /// the same time, at most [`MAX_DBS_LIMIT`] (the open fails with
+    /// `EINVAL` beyond it; C takes any count, `KNOWN_C_BUGS.md` #54).
     pub fn max_dbs(&mut self, dbs: u32) -> &mut Self {
         self.max_dbs = dbs;
         self
@@ -294,7 +295,10 @@ impl Environment {
     /// `mdb_env_open` (see the module documentation for the sequence).
     fn open(opts: &EnvironmentBuilder, path: &Path, mode: u32) -> Result<Environment> {
         let mut flags = opts.flags.bits();
-        if flags & !(CHANGEABLE | CHANGELESS) != 0 || opts.max_readers < 1 {
+        if flags & !(CHANGEABLE | CHANGELESS) != 0
+            || opts.max_readers < 1
+            || opts.max_dbs > MAX_DBS_LIMIT
+        {
             return Err(Error::einval());
         }
         let read_only = flags & MDB_RDONLY != 0;

@@ -258,32 +258,58 @@ fn append_mode() {
     );
 }
 
-/// `maxreaders=` values that `mdb_dump` never writes (it prints `%u` of
-/// the environment's reader count): refused with C's "invalid maxreaders"
-/// message, where C's `sscanf("%u")` takes a sign, blanks and trailing
-/// junk, and a negative value makes it create a 256 GiB lock file
-/// (`KNOWN_C_BUGS.md` #53; `rlmdb-tools/README.md`). C is not run here;
-/// `malformed_input` compares the accepted `maxreaders=7` and
-/// `maxreaders=0` (the default, as in C) with it.
+/// Header values that `mdb_dump` never writes are refused with C's
+/// "invalid <keyword>" message (`KNOWN_C_BUGS.md` #53 and #55;
+/// `rlmdb-tools/README.md`): numbers that are not a plain decimal of the
+/// field's width (C's `sscanf` takes a sign, blanks and trailing junk;
+/// `maxreaders=-1` makes it create a 256 GiB lock file, `mapsize=-1` an
+/// environment nothing opens again), and flag lines whose value is not
+/// `1` (C sets the flag for any value, `dupsort=0` included). C is not
+/// run here; `malformed_input` compares the accepted forms with it
+/// (`maxreaders=7`, `maxreaders=0`: the default, as in C).
 #[test]
-fn maxreaders_values_mdb_dump_never_writes_are_refused() {
-    for value in [
+fn header_values_mdb_dump_never_writes_are_refused() {
+    let numbers = [
         "-1",
         "-1x",
         "+7",
         " 7",
         "7x",
         "7 ",
-        "4294967296",
         "18446744073709551616",
         "",
         "x",
-    ] {
+    ];
+    let mut cases: Vec<(String, String)> = Vec::new();
+    for value in numbers {
+        cases.push((
+            format!("maxreaders={value}"),
+            format!("invalid maxreaders {value}"),
+        ));
+        cases.push((
+            format!("mapsize={value}"),
+            format!("invalid mapsize {value}"),
+        ));
+    }
+    cases.push((
+        "maxreaders=4294967296".into(),
+        "invalid maxreaders 4294967296".into(),
+    ));
+    for value in ["0", "", "yes", "2", "1 "] {
+        cases.push((
+            format!("dupsort={value}"),
+            format!("invalid dupsort {value}"),
+        ));
+        cases.push((
+            format!("integerkey={value}"),
+            format!("invalid integerkey {value}"),
+        ));
+    }
+    for (line, message) in &cases {
         let dir = tempdir();
         let env = dir.path().join("env");
         fs::create_dir_all(&env).unwrap();
-        let input =
-            format!("VERSION=3\nformat=bytevalue\nmaxreaders={value}\nHEADER=END\nDATA=END\n");
+        let input = format!("VERSION=3\nformat=bytevalue\n{line}\nHEADER=END\nDATA=END\n");
         let r = run(
             Impl::Rust,
             "mdb_load",
@@ -292,19 +318,13 @@ fn maxreaders_values_mdb_dump_never_writes_are_refused() {
             dir.path(),
         );
         let err = r.stderr_text();
-        assert_eq!(r.code, 1, "maxreaders={value:?}: {err}");
-        assert_eq!(
-            err,
-            format!("mdb_load: line 3: invalid maxreaders {value}\n"),
-            "maxreaders={value:?}"
-        );
+        assert_eq!(r.code, 1, "{line:?}: {err}");
+        assert_eq!(err, format!("mdb_load: line 3: {message}\n"), "{line:?}");
         assert!(
             !env.join("lock.mdb").exists(),
-            "maxreaders={value:?}: environment created"
+            "{line:?}: environment created"
         );
     }
-    // What mdb_dump writes loads, as it does with C (`malformed_input`
-    // keeps a `maxreaders=7` case for the comparison).
 }
 
 /// Header and data errors: same messages (with line numbers), exit codes
@@ -322,13 +342,12 @@ fn malformed_input() {
         "format=printable\nHEADER=END\n 41\n 42\nDATA=END\n".into(),
         "type=hash\n".into(),
         "mapsize=abc\n".into(),
-        "mapsize= 2097152xyz\nHEADER=END\n".into(),
         "maxreaders=7\nHEADER=END\n 6b\n 76\nDATA=END\n".into(),
         "maxreaders=0\nHEADER=END\n 6b\n 76\nDATA=END\n".into(),
         "mapaddr=zz\n".into(),
         "mapaddr=0x0\nHEADER=END\n".into(),
         "foo=bar\nduplicates=1\nHEADER=END\n".into(),
-        "HEADER=END\nDATA=END\ndupsort=0\nHEADER=END\n 6b\n 31\n 6b\n 32\nDATA=END\n".into(),
+        "HEADER=END\nDATA=END\ndupsort=1\nHEADER=END\n 6b\n 31\n 6b\n 32\nDATA=END\n".into(),
         format!("{hdr} 6b\n 76\n"),
         format!("{hdr} 6b\n 76"),
         format!("{hdr} 6b\nDATA=END\n"),
