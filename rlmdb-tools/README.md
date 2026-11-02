@@ -2,9 +2,9 @@
 
 Rust versions of the LMDB 0.9 command line tools, built on `rlmdb`:
 `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`, plus `mdb_drop` (which
-0.9.36 does not ship; see below).
+0.9.37 does not ship; see below).
 
-They are drop-in replacements for the C tools of LMDB 0.9.36 (whose
+They are drop-in replacements for the C tools of LMDB 0.9.37 (whose
 sources the tests build from `../tests/lmdb-c/0.9`): same
 options, same output byte for byte, same messages on standard error, same
 exit codes, on the same platform. They work on environments that C
@@ -98,9 +98,9 @@ Each C release's tools are the oracle for their own format: for an LMDB
 
 ## Differences from the C tools
 
-C 0.9.36 bugs that are not reproduced (see `../KNOWN_C_BUGS.md`):
+C 0.9.37 bugs that are not reproduced (see `../KNOWN_C_BUGS.md`):
 
-* **`mdb_load` keeps the flags of the first database** (#1). C 0.9.36
+* **`mdb_load` keeps the flags of the first database** (#1). C 0.9.37
   ignores the header flags (`dupsort=1`, …) of the first database in its
   input (`flags = 0;` from ITS#8662), so e.g. a dumped `DUP_SORT` main DB
   is reloaded without duplicates.
@@ -128,14 +128,14 @@ unusual input is affected; `mdb_dump` output loads identically):
 Other differences:
 
 * **`-V`** prints `LMDB 0.9.85: (rlmdb 0.1.0)` (the rlmdb version in the
-  parentheses) where C prints `LMDB 0.9.36: (Aug 6, 2026)`: the string
+  parentheses) where C prints `LMDB 0.9.37: (Oct 21, 2026)`: the string
   rlmdb's `mdb_version()` returns. Its patch level is above every C 0.9
   release so that rlmdb can be told apart (`../rlmdb-capi/README.md`,
   "`rlmdb.h`: version and capabilities").
-* **`mdb_drop`** is not part of LMDB 0.9.36. This one is LMDB's own
+* **`mdb_drop`** is not part of LMDB 0.9.37. This one is LMDB's own
   `mdb_drop` as first added (2017, before the 1.0 options `-L` and the
   crypto options `-m`/`-w`): same options, messages and exit codes. The
-  tests build that C version against the 0.9.36 library as the oracle.
+  tests build that C version against the 0.9.37 library as the oracle.
 * **Signals.** C `mdb_dump` catches `SIGINT`, `SIGTERM`, `SIGHUP` and
   `SIGPIPE`, finishes the current record and exits with "Interrupted
   system call"; C `mdb_copy` ignores them. The Rust tools handle a closed

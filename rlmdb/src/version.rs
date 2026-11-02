@@ -42,11 +42,11 @@ const CAPABILITIES: &[&str] = &["default-format-env", "format-0.9", "format-1.0"
 
 /// The C LMDB release whose data and lock file formats and API the 0.9
 /// format matches (`tests/lmdb-c/0.9`).
-const V09_RELEASE: (i32, i32, i32) = (0, 9, 36);
+const V09_RELEASE: (i32, i32, i32) = (0, 9, 37);
 
 /// The C LMDB release the 1.0 format matches (`mdb.RE/1.0`); reported
 /// only with capability `format-1.0`.
-const V10_RELEASE: (i32, i32, i32) = (1, 0, 2);
+const V10_RELEASE: (i32, i32, i32) = (1, 0, 3);
 
 /// What this build of rlmdb is and supports; see [`version_info`].
 ///
@@ -57,7 +57,7 @@ const V10_RELEASE: (i32, i32, i32) = (1, 0, 2);
 /// is also what `rlmdb_version_string()` returns:
 ///
 /// ```text
-/// rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; format 1.0 = LMDB 1.0.2; caps: default-format-env format-0.9 format-1.0)
+/// rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3; caps: default-format-env format-0.9 format-1.0)
 /// ```
 ///
 /// The `format 1.0` part is there exactly with capability `format-1.0`.
@@ -69,7 +69,7 @@ pub struct VersionInfo {
     /// What `mdb_version` reports, [`crate::lmdb_version`]: 0.9.85.
     pub lmdb: (i32, i32, i32),
     /// The C LMDB release whose format and API the 0.9 format matches:
-    /// 0.9.36.
+    /// 0.9.37.
     pub v09: (i32, i32, i32),
     /// The C LMDB release whose format the 1.0 format matches; `(0, 0, 0)`
     /// while capability `format-1.0` is absent.
@@ -206,18 +206,18 @@ mod tests {
         assert_eq!(crate_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(v.lmdb, (0, 9, 85));
         assert_eq!(v.lmdb, crate::lmdb_version());
-        assert_eq!(v.v09, (0, 9, 36));
+        assert_eq!(v.v09, (0, 9, 37));
         // The 1.0 data format is there: v10 names the C release it matches.
         assert!(v.has("format-1.0"));
-        assert_eq!(v.v10, (1, 0, 2));
+        assert_eq!(v.v10, (1, 0, 3));
     }
 
     #[test]
     fn display_is_one_line() {
         let v = version_info();
         let expected = format!(
-            "rlmdb {} (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; \
-             format 1.0 = LMDB 1.0.2; caps: default-format-env format-0.9 format-1.0)",
+            "rlmdb {} (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; \
+             format 1.0 = LMDB 1.0.3; caps: default-format-env format-0.9 format-1.0)",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(v.to_string(), expected);
@@ -229,14 +229,14 @@ mod tests {
         let v = VersionInfo {
             rlmdb: (0, 2, 0),
             lmdb: (0, 9, 85),
-            v09: (0, 9, 36),
-            v10: (1, 0, 2),
+            v09: (0, 9, 37),
+            v10: (1, 0, 3),
             capabilities: &["convert-copy", "format-0.9", "format-1.0", "split-freelist"],
         };
         assert_eq!(
             v.to_string(),
-            "rlmdb 0.2.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; \
-             format 1.0 = LMDB 1.0.2; caps: convert-copy format-0.9 format-1.0 split-freelist)"
+            "rlmdb 0.2.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; \
+             format 1.0 = LMDB 1.0.3; caps: convert-copy format-0.9 format-1.0 split-freelist)"
         );
     }
 

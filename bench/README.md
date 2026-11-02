@@ -1,7 +1,7 @@
 # rlmdb-bench
 
 Benchmarks of the Rust rewrite (`rlmdb`) against the C library
-(`../tests/lmdb-c/0.9`, 0.9.36), with identical workloads and data on both
+(`../tests/lmdb-c/0.9`, 0.9.37), with identical workloads and data on both
 sides. Results and analysis: [`RESULTS.md`](RESULTS.md).
 
 * **C side**: `c/cbench.c`, linked with `mdb.c`/`midl.c` compiled by

@@ -100,7 +100,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Loads one named database with `mdb_load` (C). A leading empty main-DB
-/// section works around mdb_load 0.9.36 dropping the first section's flags
+/// section works around mdb_load 0.9.37 dropping the first section's flags
 /// (KNOWN_C_BUGS.md #1).
 fn load(env: &Path, name: &str, flags: &[&str], pairs: &[(Vec<u8>, Vec<u8>)]) {
     let mut input = String::from(

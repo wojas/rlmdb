@@ -1,7 +1,7 @@
 # rlmdb: LMDB in Rust
 
 A rewrite of [LMDB](http://www.lmdb.tech/) 0.9 in Rust that is binary
-compatible with the C implementation (LMDB 0.9.36, whose sources the tests
+compatible with the C implementation (LMDB 0.9.37, whose sources the tests
 build as their oracle from `tests/lmdb-c/0.9`): the
 data file and the lock file are byte for byte what C writes and expects,
 so C and Rust processes can open one environment **at the same time**,
@@ -15,7 +15,7 @@ On top of the Rust library sit a drop-in replacement for `liblmdb`
   what verifies it.
 * [`DESIGN.md`](DESIGN.md): goals, the on-disk and lock file format
   specification, the architecture, findings, and the status per stage.
-* [`KNOWN_C_BUGS.md`](KNOWN_C_BUGS.md): bugs of C 0.9.36 that are not
+* [`KNOWN_C_BUGS.md`](KNOWN_C_BUGS.md): bugs of C 0.9.37 that are not
   ported (and the few that are, on purpose).
 
 ## Status
@@ -47,7 +47,7 @@ Implemented and tested against the C library on macOS (arm64) and Linux
   constants.
 * **`rlmdb-tools`**: `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` with the
   same options, output, messages and exit codes as the C tools, plus
-  `mdb_drop` (not part of 0.9.36; modelled on 1.0's), and `mdb_load -F
+  `mdb_drop` (not part of 0.9.37; modelled on 1.0's), and `mdb_load -F
   0.9|1.0` for the format of a new environment.
 * **`interop`**: the cross-process test bed: C, Rust and "C on the Rust
   library" peers writing and reading one environment concurrently, in all
@@ -138,7 +138,7 @@ cargo build -p rlmdb-capi --release
 # target/release/liblmdb.a and target/release/liblmdb.{so,dylib}
 ```
 
-Compile against the shipped header (the unmodified 0.9.36 `lmdb.h`) and
+Compile against the shipped header (the unmodified 0.9.37 `lmdb.h`) and
 link either library instead of the C one:
 
 ```sh
@@ -250,7 +250,7 @@ The workspace is the repository root; every command above runs there.
   COMPATIBILITY.md    the compatibility contract
   DESIGN.md           design brief, format spec, findings, status
   DUAL_FORMAT.md      the LMDB 1.0 data file next to 0.9's
-  KNOWN_C_BUGS.md     C 0.9.36 bugs and what the Rust code does instead
+  KNOWN_C_BUGS.md     C 0.9.37 bugs and what the Rust code does instead
   rlmdb/          the library (package rlmdb, lib rlmdb)
     src/core/         environments, transactions, cursors, write path
     src/format/       on-disk structures over byte slices
@@ -261,7 +261,7 @@ The workspace is the repository root; every command above runs there.
   rlmdb-tools/         mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop
   interop/            cross-process test bed: C and Rust peers, scenarios
   bench/              benchmarks against C (rlmdb-bench), results
-  tests/lmdb-c/       the C reference sources: LMDB 0.9.36 (0.9/) and 1.0
+  tests/lmdb-c/       the C reference sources: LMDB 0.9.37 (0.9/) and 1.0
                       (1.0/) from pinned upstream commits, the test oracle
   scripts/
     linux-test.sh     cargo in a Linux (Debian glibc) container

@@ -1,5 +1,5 @@
 //! `mdb_copy` and `mdb_drop`: the Rust tools against the C ones (for
-//! `mdb_drop`, LMDB's first `mdb_drop.c` built against the 0.9.36 library,
+//! `mdb_drop`, LMDB's first `mdb_drop.c` built against the 0.9.37 library,
 //! see `tests/c/mdb_drop.c`). Copies must be byte-identical to C's and
 //! read back by the C tools exactly like the source; drops must leave the
 //! environment exactly as the C tool does, free list included.

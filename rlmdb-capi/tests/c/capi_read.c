@@ -4,7 +4,7 @@
  *
  * <fixture-env> and <writable-env> are copies of the environment written by
  * fixture.c. The program is built twice: against the C library (the
- * oracle: every expectation below must hold for C LMDB 0.9.36) and against
+ * oracle: every expectation below must hold for C LMDB 0.9.37) and against
  * the Rust library with -DLMDB_RUST. GAP() marks C behaviour the Rust
  * implementation does not have yet; in the Rust build it reports the gap,
  * and fails if the gap has closed (so the list stays accurate).
@@ -100,10 +100,10 @@ static void test_version(void)
 	int ma = -1, mi = -1, pa = -1;
 	char *s = mdb_version(&ma, &mi, &pa), e[256];
 
-	/* Both builds use a 0.9.36 lmdb.h. C reports the header's version at
+	/* Both builds use a 0.9.37 lmdb.h. C reports the header's version at
 	 * run time; rlmdb reports 0.9.85 (README.md, "Differences from C LMDB
-	 * 0.9.36"), which capi_version.c checks in detail. */
-	CHECK(MDB_VERSION_FULL == MDB_VERINT(0, 9, 36));
+	 * 0.9.37"), which capi_version.c checks in detail. */
+	CHECK(MDB_VERSION_FULL == MDB_VERINT(0, 9, 37));
 	CHECK(ma == MDB_VERSION_MAJOR && mi == MDB_VERSION_MINOR);
 #ifdef LMDB_RUST
 	CHECK(pa == 85);

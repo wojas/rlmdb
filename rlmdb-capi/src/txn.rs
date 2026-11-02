@@ -25,7 +25,7 @@ use crate::SUCCESS;
 
 const EINVAL: c_int = libc::EINVAL;
 
-/// `MDB_TXN_BEGIN_FLAGS` in 0.9.36: the only flag `mdb_txn_begin` uses.
+/// `MDB_TXN_BEGIN_FLAGS` in 0.9.37: the only flag `mdb_txn_begin` uses.
 const TXN_BEGIN_FLAGS: c_uint = MDB_RDONLY;
 
 /// `mdb_txn_begin`: create a transaction for use with the environment.

@@ -3,7 +3,7 @@
  *
  *	rlmdb is a rewrite of LMDB in Rust. Its C library (liblmdb.a,
  *	liblmdb.so, liblmdb.dylib, built from rlmdb-capi) exports the
- *	functions of the unmodified lmdb.h (LMDB 0.9.36's) and, declared here, a
+ *	functions of the unmodified lmdb.h (LMDB 0.9.37's) and, declared here, a
  *	few of its own that C LMDB does not have, plus the LMDB 1.0 constants a
  *	program needs with a 1.0 environment. A program that calls the
  *	functions needs the rlmdb library; one that only includes lmdb.h works
@@ -13,7 +13,7 @@
  *
  *	@section rlmdb_version_sec Which library is this?
  *	#mdb_version() reports 0.9.85 in rlmdb, a patch level above every real
- *	LMDB 0.9 release, while lmdb.h keeps the 0.9.36 #MDB_VERSION_PATCH. A
+ *	LMDB 0.9 release, while lmdb.h keeps the 0.9.37 #MDB_VERSION_PATCH. A
  *	run-time patch level above the header's is normal for LMDB, and
  *	#mdb_version() is what programs are told to check. #rlmdb_version()
  *	tells the rest: the rlmdb version, the C LMDB release whose file
@@ -99,8 +99,8 @@ const rlmdb_version_info *rlmdb_version(void);
 
 	/** @brief Return the version and capabilities as one line of text.
 	 *
-	 * For example "rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36;
-	 * format 1.0 = LMDB 1.0.2; caps: default-format-env format-0.9
+	 * For example "rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37;
+	 * format 1.0 = LMDB 1.0.3; caps: default-format-env format-0.9
 	 * format-1.0)". Meant for logs and bug reports; programs should
 	 * test #rlmdb_version() or #rlmdb_has_capability() instead of parsing it.
 	 * @return A static string, valid for the life of the process; it must not
@@ -225,7 +225,7 @@ int rlmdb_env_set_pagesize(MDB_env *env, unsigned size);
  *
  * The LMDB 1.0 values a program may meet with a 1.0 environment, under
  * their upstream names and with the values of LMDB 1.0's lmdb.h
- * (mdb.RE/1.0, LMDB 1.0.2), so that code written for 1.0 compiles and sees
+ * (mdb.RE/1.0, LMDB 1.0.3), so that code written for 1.0 compiles and sees
  * the same numbers. Each is only defined here if no other header did.
  * #mdb_strerror() knows the error codes.
  *	@{

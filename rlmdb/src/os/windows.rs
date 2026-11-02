@@ -3,7 +3,7 @@
 //!
 //! This is the Windows counterpart of `unix.rs` and `shared_lock.rs`, with
 //! the same public surface, written after the `_WIN32` paths of mdb.c
-//! (LMDB 0.9.36, `tests/lmdb-c/0.9`) and, for the version 2 lock file, of
+//! (LMDB 0.9.37, `tests/lmdb-c/0.9`) and, for the version 2 lock file, of
 //! LMDB 1.0 (`tests/lmdb-c/1.0/mdb.c`, "mdb10.c" below). Both 64-bit
 //! toolchains, `x86_64-pc-windows-msvc` and `x86_64-pc-windows-gnu`
 //! (MinGW), lay out C's structures alike, so one set of decisions covers

@@ -161,7 +161,7 @@ fn first_database_keeps_flags() {
             &dump_text_for_c(&spec, false, MAPSIZE),
         );
         let expected = c_view(&with_dummy.c_env);
-        assert_ne!(c_view(&l.c_env), expected, "C 0.9.36 should drop the flags");
+        assert_ne!(c_view(&l.c_env), expected, "C 0.9.37 should drop the flags");
         // Rust keeps them: the same result as C with the workaround.
         assert_eq!(c_view(&l.r_env), expected);
     }
@@ -220,7 +220,7 @@ fn no_overwrite_batches_count_stored_records() {
 /// input that is not sorted and more than one batch of 100.
 #[test]
 fn append_mode() {
-    // Sorted input, as mdb_dump writes it. C 0.9.36 leaves the "always
+    // Sorted input, as mdb_dump writes it. C 0.9.37 leaves the "always
     // greater" comparator on the main DB after loading it with -a, so a
     // named database after a main-DB block breaks (it crashes): only
     // main-DB blocks, or only named ones.

@@ -6,7 +6,7 @@ proves it by running **peer programs** as separate processes against one
 environment and checking what each sees.
 
 * `cpeer` (C, `c/cpeer*.c`) speaks the protocol below, linked against
-  `liblmdb` built from `../tests/lmdb-c/0.9` (LMDB 0.9.36+) by `build.rs`
+  `liblmdb` built from `../tests/lmdb-c/0.9` (LMDB 0.9.37+) by `build.rs`
   with the upstream Makefile's flags and the platform's default lock mode.
 * `rpeer` (Rust, `src/bin/rpeer/`, on the `rlmdb` crate) speaks the same
   protocol, with the same LMDB calls in the same order and the same output
@@ -138,10 +138,11 @@ The 1.0 format (`MDB_DATA_VERSION 3`, `MDB_LOCK_VERSION 2`) gets its own C
 oracle, next to the 0.9 one; `../DUAL_FORMAT.md` is the design. Its
 sources are vendored in `../tests/lmdb-c/1.0` (`../tests/lmdb-c/README.md`).
 
-* **Pinned commit.** The 1.0 sources are upstream commit `4865523ff0e1` of
-  the `mdb.RE/1.0` branch (in the upstream LMDB repository,
-  <https://github.com/LMDB/lmdb>): the `LMDB_1.0.2` release plus the
-  DUPSORT page-count fixes of ITS#10642 and ITS#10643. Do not pin the
+* **Pinned commit.** The 1.0 sources are upstream commit `d4dc8e21ddbc` of
+  the `mdb.RE/1.0` branch, the `LMDB_1.0.3` release (in OpenLDAP's
+  repository, mirrored at <https://github.com/openldap/openldap>): the
+  `LMDB_1.0.2` release plus the DUPSORT page-count fixes of ITS#10642 and
+  ITS#10643 (commit `4865523`), then the release. Do not pin the
   `LMDB_1.0.2` tag: it still has that bug, which would be baked into the
   oracle. The pin is `LMDB10_COMMIT` in `../scripts/update-c-sources.sh`.
 * **Sources.** `build.rs` compiles the files of `LMDB10_LIB_FILES` (the

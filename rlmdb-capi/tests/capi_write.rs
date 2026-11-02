@@ -1,6 +1,6 @@
 //! `tests/c/capi_write.c` exercises every write-side function of the C API
 //! and its error codes. It runs against the C library first (the oracle:
-//! the expectations hold for C LMDB 0.9.36) and then against the Rust
+//! the expectations hold for C LMDB 0.9.37) and then against the Rust
 //! library; both must report no failures, and the traces they print (`T
 //! ...` lines: statistics, counts, keys and values they observe) must be
 //! identical. Known gaps of the Rust implementation are printed by the

@@ -22,9 +22,9 @@ smaller job than it sounds: the two formats share every structure except the
 page header, the node data offset, the overflow reference and the lock-file
 header. The engine (B-tree, cursors, free list, spill, copy) is the same.
 
-Sources compared: `mdb.c` of upstream `mdb.RE/0.9` at a69ce88 (0.9.36 plus
+Sources compared: `mdb.c` of upstream `mdb.RE/0.9` at ff3f48f (0.9.37; its `mdb.c` is a69ce88's, 0.9.36 plus
 ITS#10615/10642/10643, vendored in `tests/lmdb-c/0.9`; line numbers below
-are from that file) and of upstream `mdb.RE/1.0` at 4865523 (1.0.2 plus the
+are from that file) and of upstream `mdb.RE/1.0` at d4dc8e2 (1.0.3: 1.0.2 plus the
 same ITS#10642/10643 fixes, vendored in `tests/lmdb-c/1.0`; "mdb10.c"
 below). Both commits are in the upstream LMDB repository
 (`tests/lmdb-c/README.md`).
@@ -243,7 +243,7 @@ Implemented, except the converting copy:
   `mdb_cursor_is_db`, which the tools' `-a` needs.
 * `rlmdb::version_info() -> &'static VersionInfo` with `rlmdb` (crate
   version), `lmdb` (what `mdb_version` reports, 0.9.85), `v09` and `v10`
-  (the C releases each format matches, 0.9.36 and 1.0.2 today), and
+  (the C releases each format matches, 0.9.37 and 1.0.3 today), and
   `capabilities: &[&str]`; `Display` prints the single-line form of §4.4.
   `VersionInfo::has(&self, cap)` for tests.
 * `Environment::copy_to(.., CopyFormat)`: a compacting copy that re-encodes
@@ -256,7 +256,7 @@ Implemented, except the converting copy:
 
 ### 4.4 C API: `rlmdb_*` additions, `lmdb.h` untouched
 
-`rlmdb-capi` keeps shipping the unmodified 0.9.36 `lmdb.h` and the `mdb_*`
+`rlmdb-capi` keeps shipping the unmodified 0.9.37 `lmdb.h` and the `mdb_*`
 symbols. New entry points go in a second header `include/rlmdb.h`
 (implemented as below; the header's comments document them):
 
@@ -297,7 +297,7 @@ typedef struct rlmdb_version_info {
 	unsigned	size;		/* sizeof(rlmdb_version_info) of the library; fields are only ever appended */
 	int		rlmdb_major, rlmdb_minor, rlmdb_patch;	/* the Rust crate version */
 	int		lmdb_major, lmdb_minor, lmdb_patch;	/* what mdb_version() reports: 0, 9, 85 */
-	int		v09_major, v09_minor, v09_patch;	/* C release the 0.9 format and API match: 0, 9, 36 */
+	int		v09_major, v09_minor, v09_patch;	/* C release the 0.9 format and API match: 0, 9, 37 */
 	int		v10_major, v10_minor, v10_patch;	/* C release the 1.0 format and API match: 1, 0, 2 */
 	const char *const *capabilities;		/* NULL-terminated, sorted, short tokens */
 } rlmdb_version_info;
@@ -310,7 +310,7 @@ int rlmdb_has_capability(const char *name);		/* 1 or 0 */
   The one-line string prints everything a bug report needs:
 
 ```
-rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36; format 1.0 = LMDB 1.0.2; caps: convert-copy format-0.9 format-1.0 split-freelist)
+rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3; caps: convert-copy format-0.9 format-1.0 split-freelist)
 ```
 
   Capabilities are short lower-case tokens, one per feature a program may
@@ -376,7 +376,7 @@ format. Needed:
   container). Since rlmdb has its own repository they are vendored in
   `tests/lmdb-c/1.0`, re-created by `scripts/update-c-sources.sh` from the
   pinned commit, and built where they are; `LMDB10_DIR` points the build
-  at another source directory for experiments. Pin at least 4865523
+  at another source directory for experiments. Pin at least 4865523 (d4dc8e2, LMDB 1.0.3, is vendored)
   (`mdb.RE/1.0` after ITS#10642/10643): the `LMDB_1.0.2` tag still has the
   DUPSORT page-count bug, which would otherwise be baked into the oracle.
 * Container builds: `linux-test.sh` bind-mounts the checkout at `/work`;

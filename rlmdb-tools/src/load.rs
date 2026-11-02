@@ -24,7 +24,7 @@
 //! empty key is skipped with a warning; 0.9's tool warns about
 //! `db_pagesize=` as an unknown keyword and fails on an empty key.
 //!
-//! Deliberate differences from C 0.9.36:
+//! Deliberate differences from C 0.9.37:
 //!
 //! * The header flags of the *first* database (`dupsort=1`, …) are used;
 //!   C drops them (`KNOWN_C_BUGS.md` #1).

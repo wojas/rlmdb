@@ -1,4 +1,4 @@
-# Known bugs and quirks in C LMDB 0.9.36 (and 1.0.2, see the last section) and what the Rust implementation does
+# Known bugs and quirks in C LMDB 0.9.37 (and 1.0.3, see the last section) and what the Rust implementation does
 
 Policy (see DESIGN.md): plain bugs are not reimplemented, but every deviation
 must keep C and Rust processes interoperable on the same environment. Each
@@ -62,7 +62,7 @@ entry says whether it touches on-disk or lock-file state.
 ## LMDB 1.0
 
 rlmdb writes the LMDB 1.0 format (`MDB_DATA_VERSION 3`) the way C 1.0
-(upstream `mdb.RE/1.0` at 4865523, LMDB 1.0.2 plus ITS#10642/10643,
+(upstream `mdb.RE/1.0` at d4dc8e2, the LMDB 1.0.3 release: 1.0.2 plus ITS#10642/10643,
 vendored in `tests/lmdb-c/1.0`) does; the
 differential tests check it page by page (`interop/tests/write_differential10.rs`,
 `format10.rs`), and the interop matrix of 1.0 runs every cross-process

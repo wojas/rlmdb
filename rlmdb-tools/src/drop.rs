@@ -4,7 +4,7 @@
 //! mdb_drop [-V] [-n] [-d] [-s subdb] dbpath
 //! ```
 //!
-//! LMDB 0.9.36 has no `mdb_drop`; this one follows LMDB's own `mdb_drop.c`
+//! LMDB 0.9.37 has no `mdb_drop`; this one follows LMDB's own `mdb_drop.c`
 //! as first added (it later gained `-L` and the 1.0 crypto options `-m`/`-w`,
 //! which have no 0.9 counterpart): by default the database (`-s subdb`, or
 //! the main DB) is emptied (`mdb_drop(txn, dbi, 0)`); with `-d` a named

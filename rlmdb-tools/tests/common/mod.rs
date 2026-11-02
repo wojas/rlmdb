@@ -446,7 +446,7 @@ pub fn assert_same(tool: &str, argv: &[Vec<u8>], stdin: &[u8], cwd: &Path) -> Ru
 
 /// The line `-V` prints. The one intended difference between the tools:
 /// the C tools print `MDB_VERSION_STRING` of `tests/lmdb-c/0.9/lmdb.h`
-/// (`LMDB 0.9.36: (<date>)`), the Rust tools the string rlmdb's
+/// (`LMDB 0.9.37: (<date>)`), the Rust tools the string rlmdb's
 /// `mdb_version` returns (`LMDB 0.9.85: (rlmdb <version>)`).
 pub fn version_line(imp: Impl) -> Vec<u8> {
     let line = match imp {

@@ -1,6 +1,6 @@
 //! Building C programs for the tests, against either library:
 //!
-//! * [`Lib::C`]: the C LMDB 0.9.36 sources in `tests/lmdb-c/0.9`, compiled
+//! * [`Lib::C`]: the C LMDB 0.9.37 sources in `tests/lmdb-c/0.9`, compiled
 //!   here into `liblmdbc.a` (the oracle);
 //! * [`Lib::Rust`]: `liblmdb.a` built by cargo from this crate (cargo builds
 //!   the crate's lib, all crate types at once, before the integration tests,
@@ -137,7 +137,7 @@ pub fn lmdb_h_functions() -> Vec<String> {
                 .then(|| name.to_owned())
         })
         .collect();
-    // 0.9.36 declares 56; a change of style would show here.
+    // 0.9.37 declares 56; a change of style would show here.
     assert!(names.len() > 50, "lmdb.h declares only {names:?}");
     names
 }

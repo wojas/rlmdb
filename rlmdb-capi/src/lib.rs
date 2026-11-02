@@ -1,7 +1,7 @@
 //! The C API of LMDB 0.9 (`lmdb.h`), implemented over the Rust [`rlmdb`]
 //! crate: `liblmdb.a` / `liblmdb.so` / `liblmdb.dylib` built from this crate
 //! are drop-in replacements for the C library, so existing C programs link
-//! against them unchanged. `include/lmdb.h` is the unmodified 0.9.36 header;
+//! against them unchanged. `include/lmdb.h` is the unmodified 0.9.37 header;
 //! `include/rlmdb.h` declares the few functions of rlmdb's own and the LMDB
 //! 1.0 constants a program needs with a 1.0 environment.
 //!

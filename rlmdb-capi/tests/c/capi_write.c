@@ -3,7 +3,7 @@
  *   capi_write <scratch-dir>
  *
  * Companion of capi_read.c, built the same way: against the C library (the
- * oracle: every expectation below must hold for C LMDB 0.9.36) and against
+ * oracle: every expectation below must hold for C LMDB 0.9.37) and against
  * the Rust library with -DLMDB_RUST. GAP() marks C behaviour the Rust
  * implementation does not have yet; DEVIATION() marks a documented,
  * deliberate difference (KNOWN_C_BUGS.md): the Rust build checks the

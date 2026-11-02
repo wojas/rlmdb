@@ -2,7 +2,7 @@
 //! operation numbers and format limits.
 //!
 //! Everything here has exactly the value used by `lmdb.h` and `mdb.c`
-//! (version 0.9.36). The C API crate exports these numbers unchanged, and the
+//! (version 0.9.37). The C API crate exports these numbers unchanged, and the
 //! on-disk and lock-file formats depend on several of them, so they must never
 //! be "tidied up".
 
@@ -297,7 +297,7 @@ pub const MDB_IDL_UM_MAX: usize = MDB_IDL_UM_SIZE - 1;
 pub const MDB_VERSION_MAJOR: i32 = 0;
 /// `MDB_VERSION_MINOR`, as `mdb_version` reports it: 9, as in `lmdb.h`.
 pub const MDB_VERSION_MINOR: i32 = 9;
-/// `MDB_VERSION_PATCH`, as `mdb_version` reports it: 85, where the 0.9.36
+/// `MDB_VERSION_PATCH`, as `mdb_version` reports it: 85, where the 0.9.37
 /// `lmdb.h` has 36. A patch level above every real 0.9 release lets a
 /// program tell rlmdb from C LMDB while it stays in the 0.9 series rlmdb is
 /// a drop-in for. The C release the 0.9 format matches is

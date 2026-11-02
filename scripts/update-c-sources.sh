@@ -12,11 +12,13 @@ set -eu
 
 # Upstream repository and the pinned commits. To move to another commit,
 # change it here and run the script.
-LMDB_URL=https://github.com/LMDB/lmdb
-# mdb.RE/0.9: LMDB 0.9.36 plus ITS#10615, ITS#10642 and ITS#10643.
-LMDB09_COMMIT=a69ce886a57ff75a8e8b88b93780a2228e324ba5
-# mdb.RE/1.0: LMDB 1.0.2 plus the same fixes (see interop/README.md).
-LMDB10_COMMIT=4865523ff0e1514d26a675d9cfd1d3a4b2b6c4c3
+LMDB_URL=https://github.com/openldap/openldap
+# mdb.RE/0.9: the LMDB_0.9.37 release (0.9.36 plus ITS#10615, ITS#10642 and
+# ITS#10643, then the release itself: version and man pages).
+LMDB09_COMMIT=ff3f48f7ba57ed482567ed23b0019c5eabada293
+# mdb.RE/1.0: the LMDB_1.0.3 release (1.0.2 plus the same fixes, then the
+# release itself; see interop/README.md).
+LMDB10_COMMIT=d4dc8e21ddbcb0c3d6a53b3c19c87559fad2b402
 
 # Files of libraries/liblmdb taken at each commit. The 1.0 list is what
 # interop/build.rs builds (LMDB10_LIB_FILES and UPSTREAM10_PROGRAMS).

@@ -1,5 +1,5 @@
 //! A rewrite of [LMDB](http://www.lmdb.tech/) 0.9 in Rust that is binary
-//! compatible with the C library (0.9.36): the data file (`data.mdb`) and
+//! compatible with the C library (0.9.37): the data file (`data.mdb`) and
 //! the lock file (`lock.mdb`) have exactly the C layout, so C and Rust
 //! processes can use one environment at the same time, reading and
 //! writing, with the same reader table and the same writer lock.

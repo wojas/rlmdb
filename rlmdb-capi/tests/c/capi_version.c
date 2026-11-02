@@ -39,9 +39,9 @@ static void test_struct(const char *crate_version)
 	/* The 0.9 format is that of the shipped header's release. */
 	CHECK(v->v09_major == MDB_VERSION_MAJOR && v->v09_minor == MDB_VERSION_MINOR &&
 		v->v09_patch == MDB_VERSION_PATCH);
-	CHECK(v->v09_major == 0 && v->v09_minor == 9 && v->v09_patch == 36);
+	CHECK(v->v09_major == 0 && v->v09_minor == 9 && v->v09_patch == 37);
 	if (rlmdb_has_capability("format-1.0"))
-		CHECK(v->v10_major == 1 && v->v10_minor == 0 && v->v10_patch == 2);
+		CHECK(v->v10_major == 1 && v->v10_minor == 0 && v->v10_patch == 3);
 	else
 		CHECK(v->v10_major == 0 && v->v10_minor == 0 && v->v10_patch == 0);
 }

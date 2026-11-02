@@ -4,7 +4,7 @@ This repository holds a clean-room-style *rewrite* of LMDB 0.9 in Rust. It is
 not a binding. The goals, in priority order:
 
 1. **Binary compatibility with C LMDB 0.9** (the source in
-   `tests/lmdb-c/0.9`, version 0.9.36 / `mdb.RE/0.9`). A C LMDB process and
+   `tests/lmdb-c/0.9`, version 0.9.37 / `mdb.RE/0.9`). A C LMDB process and
    a Rust LMDB process must be able to open the same environment *at the same
    time*, share the lock file, and read and write the same data file. The data
    file format (`MDB_DATA_VERSION 1`) and lock file format (`MDB_LOCK_VERSION 1`)
@@ -51,7 +51,7 @@ Out of scope for now (leave the door open, do not design it away):
 
 * `tests/lmdb-c/0.9/mdb.c` (10.5k lines) is the spec. Read it. Line
   references in this document refer to that file at upstream commit
-  `a69ce88` (the vendored version, `tests/lmdb-c/README.md`).
+  `ff3f48f` (the vendored version, `tests/lmdb-c/README.md`).
 * `tests/lmdb-c/0.9/lmdb.h` is the public C API and documents the
   semantics of every flag and function. The C API crate ships a copy of it.
 * `tests/lmdb-c/0.9/midl.c` / `midl.h`: the ID lists (`MDB_IDL`,
@@ -60,7 +60,7 @@ Out of scope for now (leave the door open, do not design it away):
   unchanged against `rlmdb-capi`.
 * `tests/lmdb-c/0.9/mdb_stat.c`, `mdb_dump.c`, `mdb_load.c`,
   `mdb_copy.c`: the tools, reimplemented in `rlmdb-tools` (`mdb_drop` does not
-  exist in 0.9.36; the Rust one is an extra modelled on 1.0's).
+  exist in 0.9.37; the Rust one is an extra modelled on 1.0's).
 
 ## On-disk format (what "compatible" means)
 
@@ -155,7 +155,7 @@ Big-endian Linux (s390x) runs under QEMU user emulation
 ### The LMDB 1.0 data file (`MDB_DATA_VERSION 3`)
 
 rlmdb also reads and writes the data file of LMDB 1.0 (`mdb.RE/1.0` at
-upstream commit 4865523, vendored in `tests/lmdb-c/1.0`; `DUAL_FORMAT.md`
+upstream commit d4dc8e2 (LMDB 1.0.3), vendored in `tests/lmdb-c/1.0`; `DUAL_FORMAT.md`
 is the design). The format
 of an environment is decided at open, before the lock file is touched: an
 existing file keeps its format (`rlmdb::sniff_format` looks at the magic and
@@ -232,7 +232,7 @@ Version 1 (LMDB 0.9), `MDB_txninfo` (line 779):
   recomputed: later openers read them from the lock file.
 * `format == MDB_LOCK_VERSION + (MDB_PIDLOCK << 16) == 0x10001` on Unix.
 
-Version 2 (LMDB 1.0, `mdb.RE/1.0` at 4865523, "mdb10.c", lines 865-1017):
+Version 2 (LMDB 1.0, `mdb.RE/1.0` at d4dc8e2, "mdb10.c", lines 865-1017):
 
 * Header = `magic:u32, format:u32, txnid:u64 (8), numreaders:u32 (16)`, then
   the reader lock, aligned: the `txnid` and `numreaders` moved in front of it.
@@ -392,7 +392,7 @@ side either way.
   DESIGN.md           this file
   README.md           overview, build and test instructions
   COMPATIBILITY.md    the compatibility contract and what verifies it
-  KNOWN_C_BUGS.md     C 0.9.36 bugs not ported (or ported on purpose)
+  KNOWN_C_BUGS.md     C 0.9.37 bugs not ported (or ported on purpose)
   scripts/            linux-test.sh (cargo in Docker), check-all.sh,
                       update-c-sources.sh (re-creates tests/lmdb-c)
   tests/lmdb-c/       the C reference sources (LMDB 0.9 and 1.0), vendored
@@ -708,9 +708,9 @@ strings match `mdb_strerror`.
   reader slots at offset 192 (macOS: `posix_sem`, slots at 128).
 * Do not commit. The coordinator commits between stages.
 
-## Bugs in C 0.9.36: do not port them, track them
+## Bugs in C 0.9.37: do not port them, track them
 
-Where a C 0.9.36 behaviour is a plain and clear bug, do not reimplement it.
+Where a C 0.9.37 behaviour is a plain and clear bug, do not reimplement it.
 Record it in `KNOWN_C_BUGS.md` (what, where in the C source, what we
 do instead) and keep the Rust behaviour the obviously correct one. The one
 hard constraint: the deviation must not cause interoperability issues. A
@@ -723,7 +723,7 @@ are bugs; the Rust side returns an error.
 
 ## Findings from the interop harness (stage 1B)
 
-Facts about C 0.9.36 behaviour that implementers must honour; the harness in
+Facts about C 0.9.37 behaviour that implementers must honour; the harness in
 `interop/` tests them. See `interop/README.md` for details.
 
 * A DUPSORT DB's `md_branch_pages`/`md_leaf_pages` **include its sub-DB
@@ -746,7 +746,7 @@ Facts about C 0.9.36 behaviour that implementers must honour; the harness in
   `-` for a slot not in a txn; header `"    pid     thread     txnid\n"`.
 * `mdb_dbi_flags` refuses DBI 0; the free DB's stored flags are
   `MDB_INTEGERKEY`.
-* `mdb_load` in 0.9.36 drops the flags of the first DB in its input (the
+* `mdb_load` in 0.9.37 drops the flags of the first DB in its input (the
   `flags = 0;` from ITS#8662); the Rust tool must not copy that bug.
 * `mtest6` calls `mdb_dkey`, which exists only with `MDB_DEBUG`;
   `rlmdb/tests` and `rlmdb-capi/tests` build it against a small shim,

@@ -113,7 +113,7 @@ fn c_version() -> &'static CVersion {
 /// Stores 0, 9, 85 in the non-NULL arguments and returns
 /// `"LMDB 0.9.85: (rlmdb <version>)"` ([`rlmdb::lmdb_version`],
 /// [`rlmdb::VersionInfo::mdb_version_string`]). The shipped `lmdb.h` says
-/// 0.9.36, the C release whose ABI and file formats the library implements;
+/// 0.9.37, the C release whose ABI and file formats the library implements;
 /// the higher patch level tells rlmdb apart from C LMDB.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_version(

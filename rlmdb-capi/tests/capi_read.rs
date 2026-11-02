@@ -1,6 +1,6 @@
 //! Test 2: `tests/c/capi_read.c` exercises every read-side function of the
 //! C API and its error codes. It runs against the C library first (the
-//! oracle: the expectations hold for C LMDB 0.9.36) and then against the
+//! oracle: the expectations hold for C LMDB 0.9.37) and then against the
 //! Rust library; both must report no failures. Known gaps of the Rust
 //! implementation are printed by the Rust build (see README.md).
 

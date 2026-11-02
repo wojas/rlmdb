@@ -2,7 +2,7 @@
 
 This repository holds `rlmdb`, a rewrite of LMDB 0.9 in Rust that is
 binary compatible with the C library in `tests/lmdb-c/0.9` (the reference
-is whatever that tree holds; 0.9.36 at the time of writing), and that also
+is whatever that tree holds; 0.9.37 at the time of writing), and that also
 reads and writes the data file of LMDB 1.0 (the reference is the pinned
 upstream `mdb.RE/1.0` commit vendored in `tests/lmdb-c/1.0`; see
 `tests/lmdb-c/README.md`). This file lists the rules that every change
@@ -126,7 +126,7 @@ deferred until the core has been validated through the C API.
   own format (C 1.0's for 1.0 files, in `interop/tests/tools10.rs`).
 * `include/rlmdb.h` holds rlmdb's own functions (`rlmdb_*`) and the LMDB
   1.0 constants (each under `#ifndef`, values copied from 1.0's `lmdb.h`
-  with a comment naming it); `lmdb.h` stays the pristine 0.9.36 header.
+  with a comment naming it); `lmdb.h` stays the pristine 0.9.37 header.
 
 ## 6. Performance
 

@@ -6,7 +6,7 @@
 //! and *of the same release*. Its version follows the data format: LMDB 0.9
 //! (`MDB_DATA_VERSION 1`) uses `MDB_LOCK_VERSION 1` (mdb.c lines 668-790),
 //! LMDB 1.0 (`MDB_DATA_VERSION 3`) uses `MDB_LOCK_VERSION 2` (mdb.c of
-//! `mdb.RE/1.0` at 4865523, "mdb10.c" below, lines 865-1017). A
+//! `mdb.RE/1.0` at d4dc8e2, "mdb10.c" below, lines 865-1017). A
 //! [`LockLayout`] describes one version on this platform; [`LockLayout::of`]
 //! picks it for a data [`Format`], and the reader table code
 //! (`core::reader`, `os::shared_lock`) takes every offset from it.

@@ -3,8 +3,8 @@
 `rlmdb-capi` builds `liblmdb.a`, `liblmdb.so` (Linux) and `liblmdb.dylib`
 (macOS), on Windows `lmdb.dll` with its import library and a static
 library (see "Windows" below), from the Rust rewrite in `../rlmdb`. They export the `mdb_*`
-symbols of LMDB 0.9.36 with the same ABI, error codes and flag values, so
-existing C programs compile against `include/lmdb.h` (the unmodified 0.9.36
+symbols of LMDB 0.9.37 with the same ABI, error codes and flag values, so
+existing C programs compile against `include/lmdb.h` (the unmodified 0.9.37
 header, with one comment added on top) and link against the Rust library
 unchanged. `include/rlmdb.h` declares the few functions rlmdb has beyond
 `lmdb.h` and the LMDB 1.0 constants (see "`rlmdb.h`" below).
@@ -128,7 +128,7 @@ typedef struct rlmdb_version_info {
 	unsigned	size;		/* sizeof(rlmdb_version_info) of the library */
 	int		rlmdb_major, rlmdb_minor, rlmdb_patch;	/* the rlmdb version */
 	int		lmdb_major, lmdb_minor, lmdb_patch;	/* what mdb_version() reports: 0, 9, 85 */
-	int		v09_major, v09_minor, v09_patch;	/* C release the 0.9 format and API match: 0, 9, 36 */
+	int		v09_major, v09_minor, v09_patch;	/* C release the 0.9 format and API match: 0, 9, 37 */
 	int		v10_major, v10_minor, v10_patch;	/* C release the 1.0 format matches: 1, 0, 2 */
 	const char *const *capabilities;		/* sorted, NULL-terminated */
 } rlmdb_version_info;
@@ -142,8 +142,8 @@ int rlmdb_has_capability(const char *name);	/* 1 or 0; 0 for NULL */
   appended; `size` tells a program compiled against a newer header which
   fields the library has.
 * `rlmdb_version_string()` returns everything in one line, for logs and
-  bug reports: `rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.36;
-  format 1.0 = LMDB 1.0.2; caps: default-format-env format-0.9
+  bug reports: `rlmdb 0.1.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37;
+  format 1.0 = LMDB 1.0.3; caps: default-format-env format-0.9
   format-1.0)`.
 * `rlmdb_has_capability(name)` tests for one capability token. Tokens are
   short lower-case names, added when a feature lands and kept while it
@@ -161,7 +161,7 @@ strings are filled once, at first use.
 date). The patch level is above every real 0.9 release, so a program can
 tell rlmdb from C LMDB, and the version stays in the 0.9 series that rlmdb
 is a drop-in for. The shipped `lmdb.h` keeps `MDB_VERSION_PATCH 36`
-(`MDB_VERSION_STRING` is `LMDB 0.9.36: (Aug 6, 2026)`): it is unmodified,
+(`MDB_VERSION_STRING` is `LMDB 0.9.37: (Oct 21, 2026)`): it is unmodified,
 and a run-time patch level above the header's is the normal case for LMDB
 (a program built against an older 0.9 header runs with a newer 0.9
 library); `mdb_version()` is what programs are told to check. Major and
@@ -286,14 +286,14 @@ in C (with `MDB_NOLOCK` also in another handle of the same environment,
 whose writers share the lock). Read transactions are not bound to a thread
 (below).
 
-## Differences from C LMDB 0.9.36
+## Differences from C LMDB 0.9.37
 
 Everything not listed behaves as in C, and values returned in `MDB_val`s
 point into the memory map or the transaction's dirty pages (zero copy).
 
 | Area | C LMDB | This library |
 |---|---|---|
-| `mdb_version()` | The header's version: 0, 9, 36 and `MDB_VERSION_STRING`, `LMDB 0.9.36: (Aug 6, 2026)`. | 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)` (see "`rlmdb.h`"); `lmdb.h` still says 0.9.36. |
+| `mdb_version()` | The header's version: 0, 9, 37 and `MDB_VERSION_STRING`, `LMDB 0.9.37: (Oct 21, 2026)`. | 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)` (see "`rlmdb.h`"); `lmdb.h` still says 0.9.37. |
 | Data-file formats | LMDB 0.9 only; a 1.0 file is `MDB_INVALID`. | LMDB 0.9 and 1.0 (see "`rlmdb.h`: data-file formats"); new environments are 0.9 by default. |
 | `mdb_strerror` of LMDB 1.0's codes (-30779 .. -30769) | "Invalid error code". | 1.0's messages. |
 | Threads | Without `MDB_NOTLS` a thread may hold one read transaction at a time (`MDB_BAD_RSLOT` otherwise) and a read transaction is tied to its thread. | Always behaves like `MDB_NOTLS`: any number of read transactions per thread, usable from any thread (one at a time). `MDB_NOTLS` is accepted. A superset of C. |

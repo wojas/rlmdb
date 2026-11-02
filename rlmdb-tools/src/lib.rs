@@ -9,7 +9,7 @@
 //! * [`dump`]: `mdb_dump` (`mdb_dump.c`),
 //! * [`load`]: `mdb_load` (`mdb_load.c`),
 //! * [`copy`]: `mdb_copy` (`mdb_copy.c`),
-//! * [`drop`](mod@drop): `mdb_drop`, which 0.9.36 does not have; modelled
+//! * [`drop`](mod@drop): `mdb_drop`, which 0.9.37 does not have; modelled
 //!   on LMDB 1.0's `mdb_drop.c`.
 //!
 //! The tools behave like the C ones byte for byte: same options (parsed by

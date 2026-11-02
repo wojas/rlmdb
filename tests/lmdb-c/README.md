@@ -8,13 +8,15 @@ access. Nothing here is linked into rlmdb's own libraries or tools.
 
 | Directory | Upstream commit | What it is |
 |-----------|-----------------|------------|
-| `0.9/` | `a69ce886a57ff75a8e8b88b93780a2228e324ba5` on `mdb.RE/0.9` | LMDB 0.9.36 plus ITS#10615, ITS#10642 and ITS#10643 (`lmdb.h` says 0.9.36) |
-| `1.0/` | `4865523ff0e1514d26a675d9cfd1d3a4b2b6c4c3` on `mdb.RE/1.0` | LMDB 1.0.2 plus the same fixes (the `LMDB_1.0.2` tag still has the DUPSORT page-count bug of ITS#10643; see `interop/README.md`) |
+| `0.9/` | `ff3f48f7ba57ed482567ed23b0019c5eabada293` on `mdb.RE/0.9` (tag `LMDB_0.9.37`) | LMDB 0.9.37: 0.9.36 plus ITS#10615, ITS#10642 and ITS#10643 (`mdb.c` as at a69ce88), then the release (version and man pages) |
+| `1.0/` | `d4dc8e21ddbcb0c3d6a53b3c19c87559fad2b402` on `mdb.RE/1.0` (tag `LMDB_1.0.3`) | LMDB 1.0.3: 1.0.2 plus the same fixes (`mdb.c` as at 4865523; the `LMDB_1.0.2` tag still has the DUPSORT page-count bug of ITS#10643, see `interop/README.md`), then the release |
 
-Both commits are in the upstream repository, <https://github.com/LMDB/lmdb>
-(the files are in its `libraries/liblmdb/`), not in this one. Where the
-documentation of this repository cites an upstream commit (`a69ce88`,
-`4865523`, `e4cf950`, ...), it means that repository.
+Both commits are in the upstream repository, OpenLDAP's, mirrored at
+<https://github.com/openldap/openldap> (the files are in its
+`libraries/liblmdb/`; the LMDB-only mirror <https://github.com/LMDB/lmdb>
+lags behind it), not in this one. Where the documentation of this
+repository cites an upstream commit (`ff3f48f`, `a69ce88`, `d4dc8e2`, `4865523`,
+`e4cf950`, ...), it means that repository.
 
 ## Contents
 
