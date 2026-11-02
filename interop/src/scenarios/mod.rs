@@ -1179,7 +1179,12 @@ pub fn mvcc_hold_reader(pair: Pair) -> Result<()> {
 /// environment. Writers must exclude each other (no lost updates of
 /// `#commits`), readers must always see consistent snapshots.
 pub fn concurrent_writers_readers(pair: Pair) -> Result<()> {
-    let env = new_env(&pair, 512 * MIB)?;
+    // 1 GiB (a `LargePermit` environment): on a 2-vCPU machine a reader
+    // loop is preempted inside a read transaction for up to half a second
+    // while the `--nosync` writer commits some 15 000 transactions per
+    // second, and the pages those snapshots pin filled a 512 MiB map
+    // (`MDB_MAP_FULL`) once in a dozen runs.
+    let env = new_env(&pair, 1024 * MIB)?;
     let secs = loop_secs();
     pair.writer
         .on("writer-loop", &env)
