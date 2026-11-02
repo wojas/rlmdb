@@ -141,6 +141,11 @@ deferred until the core has been validated through the C API.
   of section 1; unless the task says otherwise they are also
   layout-preserving (same file bytes). Record findings in
   `bench/RESULTS.md` or a file under `bench/results/`.
+* Linux x86-64 is the platform that matters most. Performance decisions
+  are judged on real x86-64 Linux hardware first: results lead with an
+  x86-64 Linux column, and a regression there outweighs a gain on macOS
+  or arm64. The arm64 Linux VM and emulation (Rosetta, QEMU) prove
+  correctness, not performance.
 
 ## 7. Code style
 
