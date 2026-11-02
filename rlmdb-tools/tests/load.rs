@@ -258,6 +258,55 @@ fn append_mode() {
     );
 }
 
+/// `maxreaders=` values that `mdb_dump` never writes (it prints `%u` of
+/// the environment's reader count): refused with C's "invalid maxreaders"
+/// message, where C's `sscanf("%u")` takes a sign, blanks and trailing
+/// junk, and a negative value makes it create a 256 GiB lock file
+/// (`KNOWN_C_BUGS.md` #53; `rlmdb-tools/README.md`). C is not run here;
+/// `malformed_input` compares the accepted `maxreaders=7` and
+/// `maxreaders=0` (the default, as in C) with it.
+#[test]
+fn maxreaders_values_mdb_dump_never_writes_are_refused() {
+    for value in [
+        "-1",
+        "-1x",
+        "+7",
+        " 7",
+        "7x",
+        "7 ",
+        "4294967296",
+        "18446744073709551616",
+        "",
+        "x",
+    ] {
+        let dir = tempdir();
+        let env = dir.path().join("env");
+        fs::create_dir_all(&env).unwrap();
+        let input =
+            format!("VERSION=3\nformat=bytevalue\nmaxreaders={value}\nHEADER=END\nDATA=END\n");
+        let r = run(
+            Impl::Rust,
+            "mdb_load",
+            &args(&[p(&env)]),
+            input.as_bytes(),
+            dir.path(),
+        );
+        let err = r.stderr_text();
+        assert_eq!(r.code, 1, "maxreaders={value:?}: {err}");
+        assert_eq!(
+            err,
+            format!("mdb_load: line 3: invalid maxreaders {value}\n"),
+            "maxreaders={value:?}"
+        );
+        assert!(
+            !env.join("lock.mdb").exists(),
+            "maxreaders={value:?}: environment created"
+        );
+    }
+    // What mdb_dump writes loads, as it does with C (`malformed_input`
+    // keeps a `maxreaders=7` case for the comparison).
+}
+
 /// Header and data errors: same messages (with line numbers), exit codes
 /// and partial results as C.
 #[test]
@@ -274,8 +323,8 @@ fn malformed_input() {
         "type=hash\n".into(),
         "mapsize=abc\n".into(),
         "mapsize= 2097152xyz\nHEADER=END\n".into(),
-        "maxreaders=-1x\n".into(),
         "maxreaders=7\nHEADER=END\n 6b\n 76\nDATA=END\n".into(),
+        "maxreaders=0\nHEADER=END\n 6b\n 76\nDATA=END\n".into(),
         "mapaddr=zz\n".into(),
         "mapaddr=0x0\nHEADER=END\n".into(),
         "foo=bar\nduplicates=1\nHEADER=END\n".into(),
@@ -312,36 +361,6 @@ fn malformed_input() {
         format!("{hdr} 6b\n 76\nDATA=END\ntrailing=1\n"),
     ];
     for case in &cases {
-        if cfg!(windows) && case.starts_with("maxreaders=-1") {
-            // C passes the lock-file size for this many readers through 32
-            // bits on Windows, and what follows depends on the compiler
-            // (KNOWN_C_BUGS.md #43): the MinGW-w64 build fails to map the
-            // lock file (error 5), the cl build opens it at the wrapped
-            // size. Only C runs: rlmdb makes the lock file its real size,
-            // 256 GiB, which Windows backs in full when it is mapped (a
-            // volume without sparse files, exFAT, writes it out at
-            // `set_len` already), so the outcome is the scratch volume's
-            // (a disk-full error, or an environment that opens after a
-            // very long time).
-            let dir = tempdir();
-            let env = dir.path().join("env");
-            fs::create_dir_all(&env).unwrap();
-            let c = run(
-                Impl::C,
-                "mdb_load",
-                &args(&[p(&env)]),
-                case.as_bytes(),
-                dir.path(),
-            );
-            let err = c.stderr_text();
-            if cfg!(target_env = "msvc") {
-                assert_eq!(c.code, 0, "{err}");
-            } else {
-                assert_eq!(c.code, 1, "{err}");
-                assert!(err.starts_with("mdb_env_open failed, error 5 "), "{err}");
-            }
-            continue;
-        }
         assert_load_same(Start::New, &[], case.as_bytes());
     }
     // A NUL right after the leading space ("strlen() == 0").

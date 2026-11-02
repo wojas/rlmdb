@@ -179,8 +179,7 @@ impl Input {
             } else if let Some(rest) = line.strip_prefix(b"mapsize=") {
                 hdr.map_size = self.number(rest, 10, "mapsize")?;
             } else if let Some(rest) = line.strip_prefix(b"maxreaders=") {
-                // sscanf("%u") stores the low 32 bits.
-                hdr.max_readers = self.number(rest, 10, "maxreaders")? as u32;
+                hdr.max_readers = self.max_readers(rest)?;
             } else if let Some(rest) = line
                 .strip_prefix(b"db_pagesize=")
                 .filter(|_| self.format == Format::V10)
@@ -214,6 +213,24 @@ impl Input {
         scan_unsigned(text, radix).ok_or_else(|| {
             self.message(&[format!("invalid {what} ").as_bytes(), text, b"\n"].concat());
         })
+    }
+
+    /// `maxreaders=`: the plain decimal that `mdb_dump` writes (`%u` of
+    /// the environment's reader count; 0 leaves the default, as in C), and
+    /// nothing else: C reads it with `sscanf("%u")`, which also takes a
+    /// sign, blanks and trailing junk, so `maxreaders=-1` passes as four
+    /// billion readers and the lock file of the loaded environment is
+    /// 256 GiB (`KNOWN_C_BUGS.md` #53). Anything but what `mdb_dump`
+    /// writes is "invalid maxreaders", as for a value `%u` cannot read.
+    fn max_readers(&self, rest: &[u8]) -> Result<u32, ()> {
+        let text = cstr(strip_newline(rest));
+        let plain = !text.is_empty() && text.iter().all(u8::is_ascii_digit);
+        plain
+            .then(|| std::str::from_utf8(text).ok()?.parse::<u32>().ok())
+            .flatten()
+            .ok_or_else(|| {
+                self.message(&[b"invalid maxreaders ", text, b"\n"].concat());
+            })
     }
 
     /// `readline()`: the next key or data item into `value`.

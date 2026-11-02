@@ -120,6 +120,12 @@ unusual input is affected; `mdb_dump` output loads identically):
 * Lines of any length are read whole, and NUL bytes in a line are data. C
   reads header lines in 4 KiB pieces and mixes up lines that contain a NUL
   byte (it continues the line in the buffer with the next input line).
+* `maxreaders=` takes only the plain decimal `mdb_dump` writes (0 leaves
+  the environment's default, as in C). C reads it with `sscanf("%u")`,
+  which also takes a sign, blanks and trailing junk, and sets the result
+  as the reader count unchecked: a `maxreaders=-1` line makes C create an
+  environment whose lock file is 256 GiB (#53). Here it is "invalid
+  maxreaders -1", the message C gives a value `%u` cannot read at all.
 * After loading the main DB with `-a`, the main DB's default comparator is
   restored. C leaves its "always greater" append comparator on the main
   DB, so a named database that follows in the same input is not found in
