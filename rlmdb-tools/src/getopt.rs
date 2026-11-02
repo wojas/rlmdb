@@ -11,7 +11,8 @@
 //! * **BSD** (macOS) stops at the first operand. Its messages are
 //!   `"<argv[0]>: illegal option -- x"` and
 //!   `"<argv[0]>: option requires an argument -- x"` (`getprogname()`
-//!   returns `argv[0]` as given).
+//!   returns `argv[0]` as given). **FreeBSD** prints the same messages
+//!   with the last component of `argv[0]` (`getprogname()` there).
 //! * **OpenBSD** parses as BSD does, with the messages
 //!   `"<progname>: unknown option -- x"` and
 //!   `"<progname>: option requires an argument -- x"`, where `progname` is
@@ -41,6 +42,9 @@ pub enum Flavor {
     /// OpenBSD's `getopt`: as [`Flavor::Mingw`], with the program's base
     /// name in the messages.
     OpenBsd,
+    /// FreeBSD's `getopt`: as [`Flavor::Bsd`], with the program's base
+    /// name in the messages.
+    FreeBsd,
 }
 
 impl Flavor {
@@ -54,6 +58,8 @@ impl Flavor {
             Flavor::Mingw
         } else if cfg!(target_os = "openbsd") {
             Flavor::OpenBsd
+        } else if cfg!(target_os = "freebsd") {
+            Flavor::FreeBsd
         } else {
             Flavor::Bsd
         }
@@ -115,7 +121,7 @@ impl<'a> GetOpt<'a> {
     fn prog_name(&self) -> &[u8] {
         let name = self.args.first().map_or(&b""[..], |a| a.as_slice());
         match self.flavor {
-            Flavor::OpenBsd => name.rsplit(|&b| b == b'/').next().unwrap_or(name),
+            Flavor::OpenBsd | Flavor::FreeBsd => name.rsplit(|&b| b == b'/').next().unwrap_or(name),
             _ => name,
         }
     }
@@ -138,9 +144,9 @@ impl<'a> GetOpt<'a> {
                 m.push(c);
                 m.extend_from_slice(b"'\n");
             }
-            Flavor::Bsd | Flavor::Mingw | Flavor::OpenBsd => {
+            Flavor::Bsd | Flavor::Mingw | Flavor::OpenBsd | Flavor::FreeBsd => {
                 let what = match (self.flavor, what) {
-                    (Flavor::Bsd, "invalid option") => "illegal option",
+                    (Flavor::Bsd | Flavor::FreeBsd, "invalid option") => "illegal option",
                     (_, "invalid option") => "unknown option",
                     _ => what,
                 };
@@ -263,7 +269,13 @@ mod tests {
 
     #[test]
     fn clusters_and_arguments() {
-        for flavor in [GNU, Flavor::Bsd, Flavor::Mingw, Flavor::OpenBsd] {
+        for flavor in [
+            GNU,
+            Flavor::Bsd,
+            Flavor::Mingw,
+            Flavor::OpenBsd,
+            Flavor::FreeBsd,
+        ] {
             let (opts, ops) = parse(&["p", "-ef", "-sname", "-s", "-x", "db"], flavor);
             assert_eq!(
                 opts,
@@ -293,7 +305,13 @@ mod tests {
 
     #[test]
     fn double_dash_and_lone_dash() {
-        for flavor in [GNU, Flavor::Bsd, Flavor::Mingw, Flavor::OpenBsd] {
+        for flavor in [
+            GNU,
+            Flavor::Bsd,
+            Flavor::Mingw,
+            Flavor::OpenBsd,
+            Flavor::FreeBsd,
+        ] {
             let (opts, ops) = parse(&["p", "-e", "--", "-f"], flavor);
             assert_eq!(opts, vec![Opt::Flag(b'e')]);
             assert_eq!(ops, argv(&["-f"]));
@@ -330,6 +348,13 @@ mod tests {
         assert_eq!(
             opts[0],
             Opt::Invalid(b"mdb_stat: option requires an argument -- s\n".to_vec())
+        );
+        // FreeBSD's libc prints `__progname` with BSD's wording (measured on
+        // FreeBSD 15.1).
+        let (opts, _) = parse(&["/x/mdb_stat", "-ex"], Flavor::FreeBsd);
+        assert_eq!(
+            opts[1],
+            Opt::Invalid(b"mdb_stat: illegal option -- x\n".to_vec())
         );
         // OpenBSD's libc prints `__progname` (measured on OpenBSD 7.9).
         let (opts, ops) = parse(&["/x/mdb_stat", "db", "-x"], Flavor::OpenBsd);

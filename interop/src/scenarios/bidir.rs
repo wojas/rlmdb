@@ -479,9 +479,9 @@ fn writer_gets_lock(peer: Peer, env: &TestEnv, seed: u32) -> Result<()> {
 /// of the killed transactions may be visible; the data and page usage stay
 /// consistent.
 ///
-/// Linux: the writer lock is a robust process-shared mutex. With another
-/// process keeping the environment open, the next writer gets `EOWNERDEAD`,
-/// recovers (`mdb_mutex_failed`) and continues.
+/// Linux and FreeBSD: the writer lock is a robust process-shared mutex.
+/// With another process keeping the environment open, the next writer gets
+/// `EOWNERDEAD`, recovers (`mdb_mutex_failed`) and continues.
 ///
 /// macOS: the writer lock is a POSIX semaphore, which is not robust (in C
 /// too): while another process has the environment open, the next writer

@@ -48,7 +48,7 @@ tests/lmdb-c/0.9/mdb_stat.c target/release/liblmdb.a -lpthread
 flags (`-L target/release -llmdb`).
 
 On the BSDs (from `--print native-static-libs` of the Rust targets; the
-interop tests link the C peer this way, on OpenBSD tested, see
+interop tests link the C peer this way, tested on OpenBSD and FreeBSD, see
 `COMPATIBILITY.md`): FreeBSD `-lrt -lutil -lexecinfo -lkvm -lmemstat
 -lprocstat -ldevstat -lpthread -lgcc_s -lc -lm`, NetBSD `-lutil -lrt
 -lexecinfo -lpthread -lgcc_s -lc -lm`, OpenBSD `-lpthread -lc++abi -lc -lm
