@@ -36,7 +36,8 @@ cargo run --release -p rlmdb-bench -- --impl rust --only rand_put --raw
 cargo run --release -p rlmdb-bench -- --help
 # Linux (4 KiB pages), in the Docker container of scripts/linux-test.sh;
 # environments go to the container's /tmp (a tmpfs in the VM's memory, see
-# scripts/linux-test.sh), not the bind-mounted workspace:
+# scripts/linux-test.sh), not the bind-mounted workspace. The container is
+# limited to 2 GiB, the 1.5 GiB tmpfs included, which the default run fits:
 scripts/linux-test.sh run --release -p rlmdb-bench -- --dir /tmp/lmdb-bench
 ```
 

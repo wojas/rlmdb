@@ -210,7 +210,8 @@ sources are vendored in `../tests/lmdb-c/1.0` (`../tests/lmdb-c/README.md`).
   OS page size, 4096 and 16384). The 0.9 output is unchanged.
 * **Containers.** `scripts/linux-test.sh` bind-mounts the checkout at
   `/work`; the vendored sources are part of it, so nothing else is
-  needed.
+  needed. Its container has 2 GiB of memory, the 1.5 GiB tmpfs at `/tmp`
+  where the environments live included.
 
 ### Layout numbers
 
@@ -299,6 +300,12 @@ Neither version opens the other's environment (`versions_refuse_each_other`):
   for both peers of a pair, and `scenario_tests!` skips such tests).
 * `TestEnv`: an environment in a temp dir (`new()`, `new_nosubdir()`,
   `with_name()`, `derived(name)` for copy targets).
+  `with_permit(LargePermit::acquire())` makes it a large one: a test
+  process has one large environment at a time. The scenarios' `new_env`
+  does that for maps of 1 GiB or more (the scenarios that hold a snapshot
+  while a writer loop runs, whose files grow to 0.9 GiB at 64 KiB pages),
+  so that the suite runs on a machine with 2 GB of memory, scratch on a
+  tmpfs included; a scenario must not create two of them.
 * `TestEnv::with_format(Format::V10)` and `with_page_size(Some(1024))`: a
   1.0 environment of that page size; every peer command on it gets
   `--format 1.0` (and `--pagesize`), and the helpers of `interop::tools`

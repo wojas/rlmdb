@@ -48,7 +48,10 @@ use crate::report::{
     CreateReport, FreelistReport, HoldReady, ReaderLoopReport, ReadersReport, StatReport,
     VerifyReport, WriteReport, WriterLoopReport,
 };
-use crate::{bail, bins, ensure, tools, Error, Format, Output, Peer, PeerProcess, Result, TestEnv};
+use crate::{
+    bail, bins, ensure, tools, Error, Format, LargePermit, Output, Peer, PeerProcess, Result,
+    TestEnv,
+};
 
 /// The two peers of a scenario, and the format of its environments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -435,9 +438,20 @@ pub fn create(peer: Peer, env: &TestEnv, mapsize: u64) -> Result<CreateReport> {
     Ok(r)
 }
 
-/// A new environment in the pair's format, created by the pair's writer.
+/// Map size from which [`new_env`] makes a large environment, one at a time
+/// per process ([`LargePermit`]): the scenarios that hold a snapshot while a
+/// writer loop runs have maps of 1 GiB, and their data files grow towards
+/// it (0.9 GiB at 64 KiB pages).
+const LARGE_MAP: u64 = 1024 * MIB;
+
+/// A new environment in the pair's format, created by the pair's writer; with
+/// a map of [`LARGE_MAP`] or more, after the process's other large
+/// environment is gone.
 fn new_env(pair: &Pair, mapsize: u64) -> Result<TestEnv> {
-    let env = pair.env()?;
+    let mut env = pair.env()?;
+    if mapsize >= LARGE_MAP {
+        env = env.with_permit(LargePermit::acquire());
+    }
     create(pair.writer, &env, mapsize)?;
     Ok(env)
 }

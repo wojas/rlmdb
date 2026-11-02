@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use tempfile::TempDir;
 
@@ -27,6 +27,49 @@ pub struct TestEnv {
     nosubdir: bool,
     format: Format,
     page_size: Option<u32>,
+    /// Released after `root` is removed: fields drop in declaration order,
+    /// and every clone holds both.
+    permit: Option<Arc<LargePermit>>,
+}
+
+/// The right to have one large environment in this process: one whose
+/// data file may grow to a large map, such as a scenario's writer loop under
+/// a held snapshot, whose freed pages cannot be reused (at 64 KiB pages
+/// close to 1 GiB). Large environments wait for each other; the others run
+/// in parallel as before. This keeps a test run within a small machine's
+/// memory (the scratch directory may be a tmpfs, as in
+/// `scripts/linux-test.sh`) without changing what any test does.
+///
+/// Released when dropped. A test that holds one must not wait for a second
+/// (it would wait for itself).
+#[derive(Debug)]
+pub struct LargePermit(());
+
+/// Whether a large environment exists in this process, and its waiters.
+static LARGE_TAKEN: Mutex<bool> = Mutex::new(false);
+static LARGE_FREED: Condvar = Condvar::new();
+
+impl LargePermit {
+    /// Waits until no other large environment exists in this process.
+    pub fn acquire() -> LargePermit {
+        // A panicking test does not leave the flag set (the permit is
+        // dropped while unwinding), so a poisoned lock holds a valid flag.
+        let mut taken = LARGE_TAKEN.lock().unwrap_or_else(PoisonError::into_inner);
+        while *taken {
+            taken = LARGE_FREED
+                .wait(taken)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *taken = true;
+        LargePermit(())
+    }
+}
+
+impl Drop for LargePermit {
+    fn drop(&mut self) {
+        *LARGE_TAKEN.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        LARGE_FREED.notify_one();
+    }
 }
 
 /// A new temporary directory `interop-*`; kept after the test if
@@ -60,6 +103,7 @@ impl TestEnv {
             nosubdir: false,
             format: Format::V09,
             page_size: None,
+            permit: None,
         })
     }
 
@@ -74,6 +118,7 @@ impl TestEnv {
             nosubdir: true,
             format: Format::V09,
             page_size: None,
+            permit: None,
         })
     }
 
@@ -82,6 +127,13 @@ impl TestEnv {
     /// it in that format).
     pub fn with_format(mut self, format: Format) -> TestEnv {
         self.format = format;
+        self
+    }
+
+    /// This environment location, holding `permit` until the temporary
+    /// directory is removed (with the last `TestEnv` sharing it).
+    pub fn with_permit(mut self, permit: LargePermit) -> TestEnv {
+        self.permit = Some(Arc::new(permit));
         self
     }
 
@@ -103,6 +155,7 @@ impl TestEnv {
             nosubdir: self.nosubdir,
             format: self.format,
             page_size: self.page_size,
+            permit: self.permit.clone(),
         }
     }
 

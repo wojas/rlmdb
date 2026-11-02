@@ -192,6 +192,14 @@ deferred until the core has been validated through the C API.
   the tests on Windows with both toolchains (MSVC, MinGW-w64);
   `scripts/windows-test.sh` runs a command in a copy of the checkout on a
   Windows machine over ssh.
+* Every test and benchmark must run on a machine with 2 GB of RAM, the
+  build, the C oracles, parallel test binaries and peers and any tmpfs
+  for scratch included. `scripts/linux-test.sh` holds its container to
+  that by default (`LINUX_TEST_MEMORY=2g`, no swap; its 1.5 GiB tmpfs at
+  `/tmp` counts against it) and prints the peak at the end; needing more
+  is a regression. Prefer making a test lighter; where the size is the
+  point (an interop environment whose file may grow to a map of 1 GiB),
+  it takes a `LargePermit` (one per process at a time).
 * Long tests are `#[ignore]`d; run `cargo test -p rlmdb --release --
   --ignored` after changes to the write path or spilling.
 * New behaviour needs a test on the appropriate level: unit tests next to

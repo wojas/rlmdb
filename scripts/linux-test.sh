@@ -7,8 +7,26 @@
 #   default: test --workspace
 # Environment:
 #   LINUX_TEST_IMAGE  image to use (default rust:1-bookworm)
+#   LINUX_TEST_MEMORY memory limit of the container, swap included (docker
+#                     run --memory and --memory-swap; default 2g; empty or
+#                     0 for no limit). Every test and benchmark must run on
+#                     a machine with 2 GB of RAM, build included, so the
+#                     default holds the whole run to that and a regression
+#                     shows up here. At the end the script prints the
+#                     container's peak memory (cgroup v2 memory.peak; it
+#                     includes reclaimable page cache, so under a limit it
+#                     approaches the limit whenever much is written) and how
+#                     many processes the kernel killed for lack of memory.
 #   LINUX_TEST_TMPFS  size of the tmpfs mounted at /tmp in the container
-#                     (default 4g; empty or 0 leaves /tmp on the VM disk)
+#                     (default 1536m; empty or 0 leaves /tmp on the VM disk).
+#                     Its contents are memory of the container and count
+#                     against LINUX_TEST_MEMORY; the size only caps them
+#                     (nothing is reserved). 1.5 GiB holds the largest
+#                     scratch data there is (rlmdb-bench's ls data set,
+#                     about 1.1 GiB at the default --n; an interop scenario
+#                     whose file grows to 0.9 GiB, plus the tests running
+#                     beside it) and leaves 0.5 GiB of a 2 GiB limit to the
+#                     processes even when full.
 #   LINUX_TEST_TARGET cross-compile for this Rust target triple and run the
 #                     tests under QEMU user emulation, for example
 #                     s390x-unknown-linux-gnu (big-endian, 64-bit):
@@ -61,8 +79,10 @@
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 image=${LINUX_TEST_IMAGE:-rust:1-bookworm}
-tmpfs=${LINUX_TEST_TMPFS-4g}
+tmpfs=${LINUX_TEST_TMPFS-1536m}
 case $tmpfs in ""|0) tmpfs_mount= ;; *) tmpfs_mount="--tmpfs /tmp:exec,size=$tmpfs" ;; esac
+memory=${LINUX_TEST_MEMORY-2g}
+case $memory in ""|0) memory_limit= ;; *) memory_limit="--memory=$memory --memory-swap=$memory" ;; esac
 # Docker Desktop's credential helper is not installed on this machine, so use
 # a scratch config and talk to the Lima docker socket directly.
 export DOCKER_CONFIG=${DOCKER_CONFIG:-/tmp/lmdb-rs-dockercfg}
@@ -127,8 +147,21 @@ if [ "$cmd" = cargo ]; then
   set -- sh -c 'case $1 in clippy) rustup component add clippy >/dev/null 2>&1 ;; esac; exec cargo "$@"' sh "$@"
   cmd=
 fi
-# shellcheck disable=SC2086  # $tmpfs_mount, $cross_env and $cmd are words or empty
+# Report the container's peak memory and OOM kills after the command (its
+# exit status is kept). The cgroup is the container's own (cgroup v2 with a
+# cgroup namespace), created with it, so the peak covers the whole run.
+set -- sh -c '"$@"; status=$?
+  cg=/sys/fs/cgroup
+  if [ -r $cg/memory.peak ]; then
+    limit=$(cat $cg/memory.max)
+    case $limit in max) limit=none ;; *) limit="$((limit / 1048576)) MiB" ;; esac
+    kills=$(sed -n "s/^oom_kill //p" $cg/memory.events)
+    echo "linux-test.sh: peak memory $(($(cat $cg/memory.peak) / 1048576)) MiB (limit $limit), OOM kills ${kills:-0}" >&2
+  fi
+  exit $status' sh "$@"
+# shellcheck disable=SC2086  # $tmpfs_mount, $memory_limit, $cross_env and $cmd are words or empty
 exec docker run --rm -i \
+  $memory_limit \
   $tmpfs_mount \
   $cross_env \
   -v "$here:/work" \

@@ -190,7 +190,9 @@ host, then the same in the Linux container (both with `--no-fail-fast`), and pri
 PASS/FAIL per step (`--no-linux` skips the container).
 
 `scripts/linux-test.sh [cargo args]` runs cargo in `rust:1-bookworm` with
-the repository bind-mounted and its own target volume. Linux matters
+the repository bind-mounted and its own target volume, limited to 2 GiB
+of memory: everything here, build and benchmarks included, runs on a
+machine with 2 GB of RAM. Linux matters
 because its lock file differs (process-shared robust pthread mutexes
 instead of named semaphores, a different header size) and its pages are
 4 KiB instead of macOS's 16 KiB.

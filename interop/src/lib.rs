@@ -54,4 +54,4 @@ pub use peer::{
 };
 /// The data-file format of an environment (`rlmdb::Format`): LMDB 0.9 or 1.0.
 pub use rlmdb::Format;
-pub use testenv::TestEnv;
+pub use testenv::{LargePermit, TestEnv};
