@@ -893,6 +893,165 @@ static void test_dupfixed_small(void)
 
 /* ---------------------------------------------------------------------- */
 
+/* mdb_cursor_count of a cursor on a key after another cursor (or mdb_put)
+ * put duplicates of that key: converting a single item, into a sub-page,
+ * growing it, promoting it to a sub-DB, into a sub-DB, splitting its leaf;
+ * before and after the cursor's item. C's count is the one before the put
+ * (its cursor keeps a stale copy of the duplicates' record,
+ * KNOWN_C_BUGS.md row 14): one short where the node was rewritten, short by
+ * every added item in a sub-DB. rlmdb's is right. The positions are C's
+ * (traced). */
+
+static MDB_val be32(unsigned char *b, unsigned v)
+{
+	b[0] = (unsigned char)(v >> 24);
+	b[1] = (unsigned char)(v >> 16);
+	b[2] = (unsigned char)(v >> 8);
+	b[3] = (unsigned char)v;
+	return bv(b, 4);
+}
+
+static unsigned be32_of(MDB_val d)
+{
+	const unsigned char *b = d.mv_data;
+	return d.mv_size == 4 ? (unsigned)b[0] << 24 | (unsigned)b[1] << 16 |
+		(unsigned)b[2] << 8 | b[3] : 0;
+}
+
+static size_t leaf_pages(MDB_txn *txn, MDB_dbi dbi)
+{
+	MDB_stat st;
+	st.ms_leaf_pages = 0;
+	OK(mdb_stat(txn, dbi, &st));
+	return st.ms_leaf_pages;
+}
+
+/* A new database of `flags` named `name` with keys "a" and "z" around "k".
+ * Puts items 10, 20, ... under "k" until n are there, or (n == 0) until a
+ * put adds a leaf page for the (from-1)-th time (the first time: "k" moves
+ * to a sub-DB; then its leaf splits); returns that put's number. */
+static unsigned fill_k(MDB_txn *txn, const char *name, unsigned flags, unsigned n,
+	int from, MDB_dbi *dbp)
+{
+	unsigned char b[4];
+	MDB_val k = sv("k"), d;
+	unsigned i;
+	int added = 0;
+
+	OK(mdb_dbi_open(txn, name, MDB_CREATE | flags, dbp));
+	d = be32(b, 1);
+	k = sv("a");
+	OK(mdb_put(txn, *dbp, &k, &d, 0));
+	k = sv("z");
+	OK(mdb_put(txn, *dbp, &k, &d, 0));
+	k = sv("k");
+	for (i = 1; n ? i <= n : i < 1000000; i++) {
+		size_t lp = leaf_pages(txn, *dbp);
+		d = be32(b, 10 * i);
+		OK(mdb_put(txn, *dbp, &k, &d, 0));
+		if (!n && leaf_pages(txn, *dbp) != lp && ++added == from)
+			return i;
+	}
+	return n;
+}
+
+/* Cursor A on item `on` of "k" (items 10 ... 10n), then `how`: 0 another
+ * cursor puts `v`, 1 mdb_put puts it, 2 MDB_MULTIPLE puts v, v+1, v+2. */
+static void count_case(MDB_txn *txn, const char *what, unsigned flags, int how,
+	unsigned n, unsigned on, unsigned v)
+{
+	static int seq;
+	unsigned char b[4], items[12];
+	char name[32];
+	MDB_dbi db;
+	MDB_cursor *a, *c;
+	MDB_val k, d, m[2];
+	size_t cnt, truth;
+	unsigned added = how == 2 ? 3 : 1, cur, next, prev;
+	int rc, rc_next, rc_prev;
+
+	snprintf(name, sizeof(name), "count%d", seq++);
+	fill_k(txn, name, flags, n, 0, &db);
+	OK(mdb_cursor_open(txn, db, &a));
+	OK(mdb_cursor_open(txn, db, &c));
+	k = sv("k");
+	d = be32(b, on);
+	OK(mdb_cursor_get(a, &k, &d, MDB_GET_BOTH));
+	d = be32(b, v);
+	if (how == 0) {
+		OK(mdb_cursor_put(c, &k, &d, 0));
+	} else if (how == 1) {
+		OK(mdb_put(txn, db, &k, &d, 0));
+	} else {
+		be32(items, v);
+		be32(items + 4, v + 1);
+		be32(items + 8, v + 2);
+		m[0] = bv(items, 4);
+		m[1].mv_size = 3;
+		m[1].mv_data = NULL;
+		OK(mdb_cursor_put(c, &k, m, MDB_MULTIPLE));
+	}
+	OK(mdb_cursor_get(c, &k, &d, MDB_SET));
+	OK(mdb_cursor_count(c, &truth));
+	CHECK(truth == n + added);
+	OK(mdb_cursor_count(a, &cnt));
+#ifdef LMDB_RUST
+	CHECK(cnt == truth);
+#else
+	CHECK(cnt < truth);	/* stale, KNOWN_C_BUGS.md row 14 */
+#endif
+	rc = mdb_cursor_get(a, &k, &d, MDB_GET_CURRENT);
+	cur = rc ? 0 : be32_of(d);
+	rc_next = mdb_cursor_get(a, &k, &d, MDB_NEXT_DUP);
+	next = rc_next ? 0 : be32_of(d);
+	rc_prev = mdb_cursor_get(a, &k, &d, MDB_PREV_DUP);
+	prev = rc_prev ? 0 : be32_of(d);
+	T("count after a put, %s (flags %#x, %s): %zu items, A on %u (%d), next dup %u (%d), "
+		"then previous %u (%d)", what, flags, how == 0 ? "cursor" : how == 1 ? "mdb_put" :
+		"MDB_MULTIPLE", truth, cur, rc, next, rc_next, prev, rc_prev);
+	mdb_cursor_close(a);
+	mdb_cursor_close(c);
+}
+
+static void test_count_after_other_put(void)
+{
+	MDB_env *env = new_env("count", 1UL << 24, 200, 0);
+	unsigned flags[2] = { MDB_DUPSORT | MDB_DUPFIXED, MDB_DUPSORT };
+	MDB_txn *txn;
+	MDB_dbi probe;
+	unsigned s, t;
+	char name[32];
+	int f, how;
+
+	OK(mdb_txn_begin(env, NULL, 0, &txn));
+	for (f = 0; f < 2; f++) {
+		snprintf(name, sizeof(name), "probe%d", f);
+		/* "k" moves to a sub-DB with item s, its leaf splits with item t */
+		s = fill_k(txn, name, flags[f], 0, 1, &probe);
+		snprintf(name, sizeof(name), "probe-split%d", f);
+		t = fill_k(txn, name, flags[f], 0, 2, &probe);
+		CHECK(s > 4 && t > s);
+		for (how = 0; how < (f == 0 ? 3 : 2); how++) {
+			count_case(txn, "single item, after", flags[f], how, 1, 10, 15);
+			count_case(txn, "single item, before", flags[f], how, 1, 10, 5);
+			count_case(txn, "sub-page, after", flags[f], how, 3, 20, 25);
+			count_case(txn, "sub-page, before", flags[f], how, 3, 20, 15);
+			count_case(txn, "sub-page grows", flags[f], how, 4, 20, 45);
+			count_case(txn, "to a sub-DB, after", flags[f], how, s - 1, 20, 10 * s + 5);
+			count_case(txn, "to a sub-DB, before", flags[f], how, s - 1, 20, 5);
+			count_case(txn, "sub-DB, after", flags[f], how, s + 5, 20, 25);
+			count_case(txn, "sub-DB, before", flags[f], how, s + 5, 20, 15);
+			count_case(txn, "sub-DB leaf splits, after", flags[f], how, t - 1, 10, 10 * t + 5);
+			count_case(txn, "sub-DB leaf splits, before", flags[f], how, t - 1,
+				10 * (t - 1), 5);
+		}
+	}
+	OK(mdb_txn_commit(txn));
+	mdb_env_close(env);
+}
+
+/* ---------------------------------------------------------------------- */
+
 static void test_comparators(void)
 {
 	MDB_env *env = new_env("cmp", 1UL << 22, 4, 0);
@@ -1712,6 +1871,7 @@ int main(int argc, char **argv)
 	test_copy("put");
 	test_dupfixed_small();
 	test_copy("small");
+	test_count_after_other_put();
 
 	printf("capi_write: %d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

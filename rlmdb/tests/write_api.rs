@@ -977,3 +977,153 @@ fn current_other_key(format: Format, ps: Option<usize>, flags: DatabaseFlags) {
         }
     }
 }
+
+/// `mdb_cursor_count` of a cursor on a key after another cursor (or a
+/// plain put, or `MDB_MULTIPLE`) put duplicates of that key: converting
+/// the key's single item, into its sub-page, growing it, promoting it to a
+/// sub-DB, into the sub-DB, splitting the sub-DB's leaf; before and after
+/// the cursor's item. The count is the key's (C's is the one before the
+/// put, `KNOWN_C_BUGS.md` row 14; `rlmdb-capi/tests/c/capi_write.c` runs
+/// the same against C), and the cursor stays on its item. Both formats, 1.0
+/// at 256 B and 1 KiB pages too, `MDB_DUPSORT` and `MDB_DUPFIXED`.
+#[test]
+fn count_after_another_cursors_put() {
+    let shapes = [
+        (Format::V09, None),
+        (Format::V10, None),
+        (Format::V10, Some(256)),
+        (Format::V10, Some(1024)),
+    ];
+    for (format, ps) in shapes {
+        for flags in [
+            DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED,
+            DatabaseFlags::DUP_SORT,
+        ] {
+            count_after_put(format, ps, flags);
+        }
+    }
+}
+
+/// One shape of [`count_after_another_cursors_put`].
+fn count_after_put(format: Format, ps: Option<usize>, flags: DatabaseFlags) {
+    let shape = format!("{format:?}, page size {ps:?}, flags {flags:?}");
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Environment::builder();
+    b.format(format)
+        .max_dbs(200)
+        .map_size(64 << 20)
+        .flags(EnvironmentFlags::NO_SYNC);
+    if let Some(ps) = ps {
+        b.page_size(ps);
+    }
+    let env = b.open(dir.path()).unwrap();
+    let fixed = flags.contains(DatabaseFlags::DUP_FIXED);
+    let item = |v: u32| v.to_be_bytes();
+    let mut txn = env.begin_rw_txn().unwrap();
+    let mut seq = 0;
+    // A new DB with "a" and "z" around "k", which gets items 10, 20, ...:
+    // `n` of them, or (n == 0) until a put adds a leaf page for the
+    // `from`-th time (1: "k" moves to a sub-DB; 2: its leaf splits); the
+    // DB and the number of items.
+    let mut fill = |txn: &mut rlmdb::RwTxn<'_>, n: u32, from: u32| {
+        seq += 1;
+        let name = format!("count{seq}");
+        let db = txn
+            .create_db(Some(&name), flags | DatabaseFlags::CREATE)
+            .unwrap();
+        for k in [b"a", b"z"] {
+            txn.put(db, k, &item(1), WriteFlags::empty()).unwrap();
+        }
+        let mut added = 0;
+        for i in 1.. {
+            let leaves = txn.stat(db).unwrap().leaf_pages;
+            txn.put(db, b"k", &item(10 * i), WriteFlags::empty())
+                .unwrap();
+            if n == 0 && txn.stat(db).unwrap().leaf_pages != leaves {
+                added += 1;
+                if added == from {
+                    return (db, i);
+                }
+            }
+            if i == n {
+                return (db, n);
+            }
+        }
+        unreachable!()
+    };
+    let (_, s) = fill(&mut txn, 0, 1);
+    let (_, t) = fill(&mut txn, 0, 2);
+    assert!(s > 4 && t > s, "{shape}: sub-DB at {s}, split at {t}");
+    let cases = [
+        ("single item, after", 1, 10, 15),
+        ("single item, before", 1, 10, 5),
+        ("sub-page, after", 3, 20, 25),
+        ("sub-page, before", 3, 20, 15),
+        ("sub-page grows", 4, 20, 45),
+        ("to a sub-DB, after", s - 1, 20, 10 * s + 5),
+        ("to a sub-DB, before", s - 1, 20, 5),
+        ("sub-DB, after", s + 5, 20, 25),
+        ("sub-DB, before", s + 5, 20, 15),
+        ("sub-DB leaf splits, after", t - 1, 10, 10 * t + 5),
+        ("sub-DB leaf splits, before", t - 1, 10 * (t - 1), 5),
+    ];
+    for how in 0..if fixed { 3 } else { 2 } {
+        for &(what, n, on, v) in &cases {
+            let what = format!("{shape}: {what}, put {how}");
+            let (db, _) = fill(&mut txn, n, 0);
+            let a = txn.open_cursor(db).unwrap();
+            let b = txn.open_cursor(db).unwrap();
+            txn.cursor_get(a, Some(b"k"), Some(&item(on)), CursorOp::GetBoth)
+                .unwrap()
+                .unwrap();
+            let new: Vec<u32> = if how == 2 {
+                vec![v, v + 1, v + 2]
+            } else {
+                vec![v]
+            };
+            match how {
+                0 => txn
+                    .cursor_put(b, b"k", &item(v), WriteFlags::empty())
+                    .unwrap(),
+                1 => txn.put(db, b"k", &item(v), WriteFlags::empty()).unwrap(),
+                _ => {
+                    let items: Vec<u8> = new.iter().flat_map(|&x| item(x)).collect();
+                    let stored = txn
+                        .cursor_put_multiple(b, b"k", &items, 4, WriteFlags::empty())
+                        .unwrap();
+                    assert_eq!(stored, 3, "{what}");
+                }
+            }
+            let mut all: Vec<u32> = (1..=n).map(|i| 10 * i).chain(new).collect();
+            all.sort_unstable();
+            assert_eq!(
+                txn.cursor_count(a).unwrap(),
+                all.len() as u64,
+                "{what}: count"
+            );
+            let dup = |e: Option<(&[u8], &[u8])>| {
+                e.map(|(_, d)| u32::from_be_bytes(d.try_into().unwrap()))
+            };
+            let cur = txn.cursor_get(a, None, None, CursorOp::GetCurrent).unwrap();
+            assert_eq!(dup(cur), Some(on), "{what}: current");
+            let at = all.iter().position(|&x| x == on).unwrap();
+            let next = txn.cursor_get(a, None, None, CursorOp::NextDup).unwrap();
+            assert_eq!(dup(next), all.get(at + 1).copied(), "{what}: next dup");
+            assert_eq!(
+                txn.cursor_count(a).unwrap(),
+                all.len() as u64,
+                "{what}: count after next dup"
+            );
+            let prev = txn.cursor_get(a, None, None, CursorOp::PrevDup).unwrap();
+            let want = if at + 1 < all.len() {
+                Some(on)
+            } else {
+                at.checked_sub(1).map(|p| all[p])
+            };
+            assert_eq!(dup(prev), want, "{what}: previous dup");
+            txn.close_cursor(a);
+            txn.close_cursor(b);
+        }
+    }
+    txn.commit().unwrap();
+}
