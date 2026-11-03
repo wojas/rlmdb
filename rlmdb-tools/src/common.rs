@@ -173,7 +173,7 @@ pub fn dbi_open_name(env: &Environment) -> &'static str {
 pub fn db_name_of<'k>(format: Format, cursor: &RoCursor<'_>, key: &'k [u8]) -> Option<&'k [u8]> {
     match format {
         Format::V09 => (!key.contains(&0)).then_some(key),
-        Format::V10 => cursor.current_is_db().then(|| c_name(key)),
+        Format::V10 => cursor.is_db().then(|| c_name(key)),
     }
 }
 

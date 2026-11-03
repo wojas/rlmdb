@@ -38,7 +38,7 @@ fn records(env: &Path) -> Vec<(Option<Vec<u8>>, Records)> {
     let mut main = Vec::new();
     let mut c = txn.cursor(txn.open_db(None).unwrap()).unwrap();
     while let Some((k, v)) = c.next().unwrap() {
-        if c.current_is_db() || (e.format() == Format::V09 && txn.open_db_bytes(Some(k)).is_ok()) {
+        if c.is_db() || (e.format() == Format::V09 && txn.open_db_bytes(Some(k)).is_ok()) {
             names.push(Some(k.strip_suffix(b"\0").unwrap_or(k).to_vec()));
         } else {
             main.push((k.to_vec(), v.to_vec()));

@@ -158,7 +158,7 @@ impl ErasedRoCursor {
     /// `mdb_cursor_is_db` (LMDB 1.0): the cursor is on the record of a
     /// named database.
     pub(crate) fn current_is_db(&self) -> bool {
-        self.cursor.current_is_db()
+        self.cursor.is_db()
     }
 }
 

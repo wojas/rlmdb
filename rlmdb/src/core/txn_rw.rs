@@ -1037,15 +1037,15 @@ impl<'env> RwTxn<'env> {
     }
 
     /// `mdb_cursor_is_db` (LMDB 1.0) on a handle: `true` if the cursor is
-    /// on the record of a named database (see [`RoCursor::current_is_db`]).
-    pub fn cursor_is_db(&mut self, id: CursorId) -> Result<bool> {
+    /// on the record of a named database (see [`RoCursor::is_db`]).
+    pub fn cursor_is_db(&self, id: CursorId) -> Result<bool> {
         let slot = self.cursor_slot(id)?;
         let c = CRef::main(slot);
         let dbi = self.cur(c).dbi;
         let dcmp = self.core.dbs.borrow()[dbi].dup_cmp;
         let core = &self.core;
         let (mc, mx) = read_cursors(core, &self.w.cursors, c)?;
-        Ok(RoCursor::from_parts(core, Dbi(dbi as u32), mc, mx, dcmp).current_is_db())
+        Ok(RoCursor::from_parts(core, Dbi(dbi as u32), mc, mx, dcmp).is_db())
     }
 
     /// `mdb_cursor_put` on a handle (see [`RwCursor::put`]).
@@ -1307,6 +1307,7 @@ trait CursorHost {
     ) -> Result<usize>;
     fn del(&mut self, id: CursorId, flags: WriteFlags) -> Result<()>;
     fn count(&mut self, id: CursorId) -> Result<u64>;
+    fn is_db(&self, id: CursorId) -> Result<bool>;
     fn close(&mut self, id: CursorId);
 }
 
@@ -1352,6 +1353,10 @@ impl CursorHost for RwTxn<'_> {
 
     fn count(&mut self, id: CursorId) -> Result<u64> {
         self.cursor_count(id)
+    }
+
+    fn is_db(&self, id: CursorId) -> Result<bool> {
+        self.cursor_is_db(id)
     }
 
     fn close(&mut self, id: CursorId) {
@@ -1412,6 +1417,14 @@ impl RwCursor<'_> {
     /// `mdb_cursor_count` (see [`RoCursor::count`]).
     pub fn count(&mut self) -> Result<u64> {
         self.txn.count(self.id)
+    }
+
+    /// `mdb_cursor_is_db` (LMDB 1.0): `true` if the cursor is on the record
+    /// of a named database, never an error (see [`RoCursor::is_db`]).
+    pub fn is_db(&self) -> bool {
+        // The cursor borrows its transaction, so its handle stays valid and
+        // no nested transaction blocks it: the lookup cannot fail.
+        self.txn.is_db(self.id).unwrap_or(false)
     }
 
     /// `MDB_FIRST`.

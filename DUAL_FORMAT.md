@@ -241,7 +241,7 @@ Implemented, except the converting copy:
   `process_default_format()`, `default_format()` (the resolution of §4.2)
   and `DEFAULT_FORMAT_ENV`; `Format::name`/`Format::from_name` (`"0.9"`,
   `"1.0"`).
-* `RoCursor::current_is_db` / `RwTxn::cursor_is_db`: 1.0's
+* `RoCursor::is_db`, `RwCursor::is_db` / `RwTxn::cursor_is_db`: 1.0's
   `mdb_cursor_is_db`, which the tools' `-a` needs.
 * `rlmdb::version_info() -> &'static VersionInfo` with `rlmdb` (crate
   version), `lmdb` (what `mdb_version` reports, 0.9.85), `v09` and `v10`

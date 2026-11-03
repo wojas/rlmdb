@@ -7,7 +7,7 @@
 //!
 //! * `mdb_env_set_pagesize` (as `rlmdb_env_set_pagesize`);
 //! * `mdb_txn_flags`;
-//! * `mdb_cursor_is_db` ([`rlmdb::RoCursor::current_is_db`]).
+//! * `mdb_cursor_is_db` ([`rlmdb::RoCursor::is_db`]).
 //!
 //! Not implemented: two-phase commit (`mdb_txn_prepare`,
 //! `mdb_env_rollback`), encryption and checksums (`mdb_env_set_encrypt`,
