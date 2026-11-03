@@ -583,12 +583,12 @@ impl<'env> RwTxn<'env> {
     }
 
     /// `TXN_DBI_EXIST(txn, dbi, DB_USRVALID)` for a write operation, then
-    /// the stale-record refresh of `mdb_cursor_init`. Returns the entry
-    /// (resolved once for the whole operation).
-    fn user_dbi(&self, db: Dbi) -> Result<TxnDb> {
-        let entry = self.core.dbi_entry(db, DB_USRVALID)?;
+    /// the stale-record refresh of `mdb_cursor_init`. Returns the record's
+    /// persistent flags (resolved once for the whole operation).
+    fn user_dbi(&self, db: Dbi) -> Result<u16> {
+        self.core.check_dbi(db, DB_USRVALID)?;
         self.check_usable()?;
-        self.core.refreshed(db, entry)
+        Ok(self.core.fresh_order(db)?.0)
     }
 
     // --- databases ---------------------------------------------------------------
@@ -870,16 +870,16 @@ impl<'env> RwTxn<'env> {
         data: PutData<'_>,
         flags: u32,
     ) -> Result<Option<DataLoc>> {
-        let entry = self.core.dbi_entry(db, DB_USRVALID)?;
+        self.core.check_dbi(db, DB_USRVALID)?;
         if flags & !(MDB_NOOVERWRITE | MDB_NODUPDATA | MDB_RESERVE | MDB_APPEND | MDB_APPENDDUP)
             != 0
         {
             return Err(Error::einval());
         }
         self.check_usable()?;
-        let entry = self.core.refreshed(db, entry)?;
-        check_reserve(entry.db.flags, flags)?;
-        let slot = self.w.cursors.open(db.0 as usize, entry.dup_order(), true);
+        let (db_flags, dup_order) = self.core.fresh_order(db)?;
+        check_reserve(db_flags, flags)?;
+        let slot = self.w.cursors.open(db.0 as usize, dup_order, true);
         let c = CRef::main(slot);
         let rc = self.put_at(c, key, data, flags);
         let loc = match rc {
@@ -927,8 +927,8 @@ impl<'env> RwTxn<'env> {
     /// pair `key`/`data` if `data` is given, else all of the key's items.
     /// Returns `false` if there was nothing to delete (`MDB_NOTFOUND`).
     pub fn del(&mut self, db: Dbi, key: &[u8], data: Option<&[u8]>) -> Result<bool> {
-        let entry = self.user_dbi(db)?;
-        let dupsort = u32::from(entry.db.flags) & MDB_DUPSORT != 0;
+        let db_flags = self.user_dbi(db)?;
+        let dupsort = u32::from(db_flags) & MDB_DUPSORT != 0;
         // Must ignore any data unless DUP_SORT.
         let data = if dupsort { data } else { None };
         match self.del0(db.0 as usize, key, data, 0) {

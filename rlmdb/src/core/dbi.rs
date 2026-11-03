@@ -397,6 +397,51 @@ impl TxnCore<'_> {
         Ok(entry)
     }
 
+    /// [`Self::dbi_entry`] without copying the entry out: the same checks,
+    /// in the same order, with the same errors. For the write operations,
+    /// which read what they need of the entry afterwards
+    /// ([`Self::fresh_order`]); a copy of the whole entry, returned through
+    /// memory, was a measurable part of every put.
+    #[inline]
+    pub(crate) fn check_dbi(&self, dbi: Dbi, validity: u8) -> Result<()> {
+        let i = dbi.0 as usize;
+        let (mut state, mut seq) = self
+            .dbs
+            .borrow()
+            .get(i)
+            .map(|e| (e.state, e.seq))
+            .ok_or_else(Error::einval)?;
+        if state == 0 {
+            let entry = self.first_use(i)?;
+            (state, seq) = (entry.state, entry.seq);
+        }
+        if state & validity == 0 {
+            return Err(Error::einval());
+        }
+        if seq != self.env.dbis.seq(i) {
+            return Err(MdbError::BadDbi.into());
+        }
+        Ok(())
+    }
+
+    /// For a `dbi` that [`Self::check_dbi`] accepted: the refresh of
+    /// [`Self::refreshed`], then the persistent flags of the record and
+    /// its duplicate order ([`TxnDb::dup_order`]).
+    #[inline]
+    pub(crate) fn fresh_order(&self, dbi: Dbi) -> Result<(u16, Option<Comparator>)> {
+        let i = dbi.0 as usize;
+        let entry = {
+            let dbs = self.dbs.borrow();
+            let entry = dbs.get(i).ok_or_else(Error::einval)?;
+            if entry.state & DB_STALE == 0 {
+                return Ok((entry.db.flags, entry.dup_order()));
+            }
+            *entry
+        };
+        let entry = self.refresh_stale(i, entry)?;
+        Ok((entry.db.flags, entry.dup_order()))
+    }
+
     /// The first use of DBI slot `i` in this transaction: take a stale
     /// view of the environment's slot (see [`Self::dbi_entry`]).
     #[cold]
