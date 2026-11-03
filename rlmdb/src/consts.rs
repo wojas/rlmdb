@@ -272,6 +272,14 @@ pub const DEFAULT_READERS: u32 = 126;
 /// this is of no practical use; C takes any count and breaks above about
 /// 35 million (`KNOWN_C_BUGS.md` row 54). rlmdb has no such constant in C.
 pub const MAX_DBS_LIMIT: u32 = 1 << 20;
+/// The most reader slots a new lock file can be configured for
+/// (`mdb_env_set_maxreaders`, `EnvironmentBuilder::max_readers`):
+/// 1,048,576. A slot is 64 bytes in both lock-file versions, so the lock
+/// file is 64 MiB at the limit; C takes any count and makes a 256 GiB
+/// lock file at four billion (`KNOWN_C_BUGS.md` row 60). An existing lock
+/// file with a larger table is still attached to. rlmdb has no such
+/// constant in C.
+pub const MAX_READERS_LIMIT: u32 = 1 << 20;
 /// `CURSOR_STACK`: maximum depth of a B-tree (and of a cursor's page stack).
 pub const CURSOR_STACK: usize = 32;
 /// `CACHELINE`: alignment of lock-file structures.

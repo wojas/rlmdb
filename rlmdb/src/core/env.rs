@@ -138,7 +138,10 @@ impl EnvironmentBuilder {
     }
 
     /// `mdb_env_set_maxreaders`: reader table size when creating the lock
-    /// file (an existing lock file keeps its size). Must be at least 1.
+    /// file (an existing lock file keeps its size, also a larger one).
+    /// Must be at least 1 and at most [`MAX_READERS_LIMIT`] (the open fails
+    /// with `EINVAL` otherwise; C takes any count above zero,
+    /// `KNOWN_C_BUGS.md` row 60).
     pub fn max_readers(&mut self, readers: u32) -> &mut Self {
         self.max_readers = readers;
         self
@@ -297,6 +300,7 @@ impl Environment {
         let mut flags = opts.flags.bits();
         if flags & !(CHANGEABLE | CHANGELESS) != 0
             || opts.max_readers < 1
+            || opts.max_readers > MAX_READERS_LIMIT
             || opts.max_dbs > MAX_DBS_LIMIT
         {
             return Err(Error::einval());

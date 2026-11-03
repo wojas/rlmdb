@@ -288,12 +288,18 @@ pub unsafe extern "C" fn mdb_env_set_mapsize(env: *mut MDB_env, size: usize) -> 
 }
 
 /// `mdb_env_set_maxreaders`: set the maximum number of threads/reader
-/// slots. Only before `mdb_env_open`; at least 1.
+/// slots. Only before `mdb_env_open`; at least 1 and at most
+/// `MAX_READERS_LIMIT` (1,048,576): C takes any count above zero, and
+/// four billion make a 256 GiB lock file; here a larger count is `EINVAL`
+/// (`KNOWN_C_BUGS.md` row 60, `README.md`).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_env_set_maxreaders(env: *mut MDB_env, readers: c_uint) -> c_int {
     // SAFETY: env is NULL or a live handle (lmdb.h).
     match unsafe { MDB_env::from_ptr(env) } {
-        Some(e) if e.open_env().is_none() && readers >= 1 => {
+        Some(e)
+            if e.open_env().is_none()
+                && (1..=rlmdb::consts::MAX_READERS_LIMIT).contains(&readers) =>
+        {
             e.config().max_readers = readers;
             SUCCESS
         }

@@ -246,11 +246,16 @@ impl Input {
             })
     }
 
-    /// `maxreaders=`: [`plain_decimal`](Self::plain_decimal), 32 bits.
+    /// `maxreaders=`: [`plain_decimal`](Self::plain_decimal), at most
+    /// `MAX_READERS_LIMIT`, which the library refuses beyond (C takes any
+    /// count, `KNOWN_C_BUGS.md` row 60); a larger count is "invalid
+    /// maxreaders" too, before any environment is created.
     fn max_readers(&self, rest: &[u8]) -> Result<u32, ()> {
         self.plain_decimal(rest, "maxreaders")?
             .try_into()
-            .map_err(|_| {
+            .ok()
+            .filter(|&n| n <= rlmdb::consts::MAX_READERS_LIMIT)
+            .ok_or_else(|| {
                 self.message(&[b"invalid maxreaders ", cstr(strip_newline(rest)), b"\n"].concat());
             })
     }

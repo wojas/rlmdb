@@ -127,7 +127,8 @@ unusual input is affected; `mdb_dump` output loads identically):
   makes C create an environment whose lock file is 256 GiB, a
   `mapsize=-1` line one whose recorded map size nothing opens again
   (row 53). Here they are "invalid maxreaders -1", the message C gives a
-  value `sscanf` cannot read at all.
+  value `sscanf` cannot read at all. So is a `maxreaders=` above
+  1,048,576, which the library refuses (row 60).
 * A flag line (`dupsort=`, `integerkey=`, …) takes only the `1` that
   `mdb_dump` writes for a set flag. C sets the flag for any value, so
   `dupsort=0` in a hand-edited dump turns duplicates on, silently and for
