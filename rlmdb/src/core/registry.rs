@@ -502,9 +502,15 @@ mod tests {
         std::fs::create_dir(&env_dir).unwrap();
         let link = dir.path().join("link");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&env_dir, &link).unwrap();
+        let linked = std::os::unix::fs::symlink(&env_dir, &link);
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&env_dir, &link).unwrap();
+        let linked = std::os::windows::fs::symlink_dir(&env_dir, &link);
+        if let Err(e) = linked {
+            // A volume without symbolic links (exFAT), or a Windows account
+            // without the privilege: nothing to test here.
+            eprintln!("NOTE: no symbolic links in the scratch directory ({e}); skipped");
+            return;
+        }
         let no_lock = EnvironmentFlags::NO_LOCK;
         let no_sub_dir = EnvironmentFlags::NO_SUB_DIR;
         let a = Environment::builder()
@@ -514,7 +520,10 @@ mod tests {
         // Through a symlink (the same canonical path), as the data file
         // itself and through a hard link of it (other paths, the same file).
         let hard = dir.path().join("hard.mdb");
-        std::fs::hard_link(env_dir.join("data.mdb"), &hard).unwrap();
+        if let Err(e) = std::fs::hard_link(env_dir.join("data.mdb"), &hard) {
+            eprintln!("NOTE: no hard links in the scratch directory ({e}); skipped");
+            return;
+        }
         let b = Environment::builder().flags(no_lock).open(&link).unwrap();
         let c = Environment::builder()
             .flags(no_lock | no_sub_dir)
