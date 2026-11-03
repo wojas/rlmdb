@@ -11,9 +11,10 @@
 //!   whose new environments are LMDB 1.0.
 //!
 //! All three export the same functions: those of LMDB 0.9.37's `lmdb.h`
-//! (`include/lmdb.h`, the unmodified header) and rlmdb's own `rlmdb_*`
-//! functions; `include/rlmdb.h` declares the latter and the LMDB 1.0
-//! constants.
+//! (`include/lmdb.h`, the unmodified header), those LMDB 1.0's `lmdb.h`
+//! adds ([`v10`]; implemented where rlmdb can, `ENOTSUP` otherwise), and
+//! rlmdb's own `rlmdb_*` functions; `include/rlmdb.h` declares the latter
+//! two groups and the LMDB 1.0 constants.
 //!
 //! Environments of both data-file formats the core handles, LMDB 0.9 and
 //! LMDB 1.0, are opened through the same `mdb_*` functions: an existing
@@ -37,6 +38,9 @@
 //!   [`format`](mod@format).
 //! * `mdb_env_*`, `mdb_reader_list`, `mdb_reader_check` in [`env`](mod@env)
 //!   (`mdb_env_create` through [`env::env_create`]).
+//! * The functions of LMDB 1.0's `lmdb.h` that 0.9's lacks
+//!   (`mdb_env_set_pagesize`, `mdb_txn_flags`, `mdb_cursor_is_db`, the
+//!   unimplemented ones) in [`v10`].
 //! * `mdb_txn_*` in [`txn`].
 //! * `mdb_dbi_*`, `mdb_stat`, `mdb_set_compare` & co., `mdb_cmp`,
 //!   `mdb_dcmp` in [`dbi`].
@@ -82,6 +86,7 @@ mod platform;
 pub mod profile;
 pub mod txn;
 pub mod types;
+pub mod v10;
 pub mod version;
 pub mod write;
 

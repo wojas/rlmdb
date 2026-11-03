@@ -2,7 +2,8 @@
 //! `rlmdb_env_set_format`, `rlmdb_env_get_format`, `rlmdb_sniff_format`,
 //! `rlmdb_set_default_format` and `rlmdb_env_set_pagesize`
 //! (`DUAL_FORMAT.md` §4.4). C LMDB has none of them: a C library
-//! handles one format only.
+//! handles one format only. (`rlmdb_env_set_pagesize` is LMDB 1.0's
+//! `mdb_env_set_pagesize`, which [`crate::v10`] exports too.)
 //!
 //! Formats are numbered as in `rlmdb.h`: [`RLMDB_FORMAT_09`] (LMDB 0.9,
 //! `MDB_DATA_VERSION 1`), [`RLMDB_FORMAT_10`] (LMDB 1.0, `MDB_DATA_VERSION
@@ -31,7 +32,7 @@ pub const RLMDB_FORMAT_09: c_uint = 9;
 pub const RLMDB_FORMAT_10: c_uint = 10;
 
 /// The smallest page size of `mdb_env_set_pagesize` (LMDB 1.0).
-const MIN_SET_PAGESIZE: c_uint = 256;
+const MIN_SET_PAGESIZE: usize = 256;
 
 /// The `rlmdb.h` number of `format`.
 pub(crate) fn format_number(format: Option<Format>) -> c_uint {
@@ -143,27 +144,42 @@ pub unsafe extern "C" fn rlmdb_set_default_format(format: c_uint) -> c_int {
     }
 }
 
-/// `rlmdb_env_set_pagesize`: LMDB 1.0's `mdb_env_set_pagesize`, the page
-/// size of a new 1.0 environment: a power of two from 256 to 65536, else
-/// `EINVAL` (also after the open and for a NULL handle), as in C 1.0. An
-/// existing environment keeps its page size. LMDB 0.9 has no such call:
-/// `mdb_env_open` fails with `EINVAL` if the environment turns out to be
-/// 0.9 ([`rlmdb::EnvironmentBuilder::page_size`]).
+/// `rlmdb_env_set_pagesize`: LMDB 1.0's `mdb_env_set_pagesize` under
+/// rlmdb's prefix, from before rlmdb exported the 1.0 name; both behave
+/// alike (`set_pagesize` of this module).
 #[no_mangle]
 pub unsafe extern "C" fn rlmdb_env_set_pagesize(env: *mut MDB_env, size: c_uint) -> c_int {
     // SAFETY: env is NULL or a live handle (rlmdb.h).
+    unsafe { set_pagesize(env, i64::from(size)) }
+}
+
+/// `mdb_env_set_pagesize` (LMDB 1.0, `mdb.c` line 12205): the page size
+/// of a new 1.0 environment, with C 1.0's checks in its order: `EINVAL`
+/// for a NULL handle or after the open, then for a size outside 256 ..
+/// `MAX_PAGESIZE` (65536), then for one that is not a power of two. An
+/// existing environment keeps its page size. LMDB 0.9 has no such call:
+/// `mdb_env_open` fails with `EINVAL` if the environment turns out to be
+/// 0.9 ([`rlmdb::EnvironmentBuilder::page_size`]).
+///
+/// # Safety
+///
+/// `env` is NULL or a live handle.
+pub(crate) unsafe fn set_pagesize(env: *mut MDB_env, size: i64) -> c_int {
+    // SAFETY: per this function's contract.
     let Some(e) = (unsafe { MDB_env::from_ptr(env) }) else {
         return EINVAL;
     };
-    let max = Format::V10.layout().max_pagesize;
-    if e.open_env().is_some()
-        || !size.is_power_of_two()
-        || size < MIN_SET_PAGESIZE
-        || size as usize > max
-    {
+    if e.open_env().is_some() {
         return EINVAL;
     }
-    e.config().page_size = Some(size as usize);
+    let max = Format::V10.layout().max_pagesize;
+    let Ok(size) = usize::try_from(size) else {
+        return EINVAL;
+    };
+    if size > max || size < MIN_SET_PAGESIZE || !size.is_power_of_two() {
+        return EINVAL;
+    }
+    e.config().page_size = Some(size);
     SUCCESS
 }
 

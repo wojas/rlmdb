@@ -76,10 +76,15 @@ pub unsafe fn env_create(profile: Profile, env: *mut *mut MDB_env) -> c_int {
 /// else in the process default (`rlmdb_set_default_format`), else in the
 /// one the experimental `RLMDB_DEFAULT_FORMAT` variable names, else in the
 /// library's ([`env_create`]: LMDB 1.0 in the LMDB 1.0 stub, else 0.9); a
-/// page size set with `rlmdb_env_set_pagesize` applies to a new 1.0
+/// page size set with `mdb_env_set_pagesize` applies to a new 1.0
 /// environment ([`rlmdb::EnvironmentBuilder::format`],
 /// [`rlmdb::EnvironmentBuilder::fallback_format`],
 /// [`rlmdb::EnvironmentBuilder::page_size`]).
+///
+/// `ENOTSUP` after `mdb_modsetup` asked for encryption or checksums,
+/// which rlmdb does not implement ([`crate::v10::mdb_modsetup`]): the
+/// program cannot see that `mdb_modsetup` failed, and must not get a
+/// plain environment instead.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_env_open(
     env: *mut MDB_env,
@@ -100,6 +105,9 @@ pub unsafe extern "C" fn mdb_env_open(
     #[allow(clippy::unnecessary_cast)]
     let mode = mode as u32;
     let config = *e.config();
+    if config.crypto_requested {
+        return libc::ENOTSUP;
+    }
     let mut builder = Environment::builder();
     builder
         .map_size(config.map_size)
@@ -364,7 +372,7 @@ pub unsafe extern "C" fn mdb_env_set_maxdbs(env: *mut MDB_env, dbs: MDB_dbi) -> 
 /// `rlmdb_env_set_format`, else the process default, the
 /// `RLMDB_DEFAULT_FORMAT` variable or the library's format,
 /// [`rlmdb::default_format_or`]), the 1.0 limit for the page size it would
-/// get (`rlmdb_env_set_pagesize`, else the OS page size). An existing file
+/// get (`mdb_env_set_pagesize`, else the OS page size). An existing file
 /// of the other format or with another page size changes that at the
 /// open. (C 1.0 returns 0 before the open: it only computes the limit in
 /// `mdb_env_open`.) 511 for a NULL handle, as C 0.9.

@@ -5,8 +5,8 @@
  *
  * The program links no LMDB: it loads the library with dlopen
  * (LoadLibrary on Windows) and resolves every function named in
- * <names-file> (one per line: those of LMDB 0.9's lmdb.h and of rlmdb.h),
- * printing "missing <name>" for each it cannot find. Then it
+ * <names-file> (one per line: those of LMDB 0.9's and 1.0's lmdb.h and of
+ * rlmdb.h), printing "missing <name>" for each it cannot find. Then it
  * prints, as "R ..." lines for the test driver to compare with what the
  * library should report:
  *

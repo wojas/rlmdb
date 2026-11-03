@@ -70,8 +70,12 @@ pub(crate) struct EnvConfig {
     /// process default and the variable: the library's
     /// ([`crate::Profile::default_format`], set by `mdb_env_create`).
     pub(crate) fallback_format: Format,
-    /// `rlmdb_env_set_pagesize`: the page size of a new 1.0 environment.
+    /// `mdb_env_set_pagesize` (and `rlmdb_env_set_pagesize`): the page size
+    /// of a new 1.0 environment.
     pub(crate) page_size: Option<usize>,
+    /// `mdb_modsetup` asked for encryption or checksums, which are not
+    /// implemented: `mdb_env_open` fails with `ENOTSUP`.
+    pub(crate) crypto_requested: bool,
 }
 
 /// `MDB_env`: an LMDB environment handle (opaque to C).
@@ -100,6 +104,7 @@ impl MDB_env {
                 format: None,
                 fallback_format,
                 page_size: None,
+                crypto_requested: false,
             }),
             env: OnceLock::new(),
             path: OnceLock::new(),

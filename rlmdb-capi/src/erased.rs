@@ -154,6 +154,12 @@ impl ErasedRoCursor {
     pub(crate) fn current_has_dups(&self) -> bool {
         self.cursor.current_has_dups()
     }
+
+    /// `mdb_cursor_is_db` (LMDB 1.0): the cursor is on the record of a
+    /// named database.
+    pub(crate) fn current_is_db(&self) -> bool {
+        self.cursor.current_is_db()
+    }
 }
 
 /// An active write transaction (`mdb_txn_begin` without `MDB_RDONLY`),

@@ -1,8 +1,8 @@
 //! The three libraries built from this crate (`src/profile.rs`):
 //! `librlmdb`, the LMDB 0.9 stub and the LMDB 1.0 stub.
 //!
-//! * Each exports every function declared in LMDB 0.9's `lmdb.h` and in
-//!   `rlmdb.h` (parsed at test time):
+//! * Each exports every function declared in LMDB 0.9's `lmdb.h`, in LMDB
+//!   1.0's `lmdb.h` and in `rlmdb.h` (parsed at test time):
 //!   `tests/c/capi_symbols.c` loads it with `dlopen` (`LoadLibrary`) and
 //!   resolves each. Where `nm` runs, the exported functions are exactly
 //!   those.
@@ -12,6 +12,8 @@
 //!   1.0, as `rlmdb_sniff_format` tells), while `rlmdb_env_set_format`,
 //!   `rlmdb_set_default_format` and `RLMDB_DEFAULT_FORMAT` override that
 //!   in all three.
+//! * `rlmdb.h` declares exactly the functions 1.0's `lmdb.h` has beyond
+//!   0.9's.
 //! * On ELF systems the SONAMEs are `librlmdb.so`, `liblmdb.so.0` and
 //!   `liblmdb.so`, with `DF_1_NODELETE`; on macOS the install names are
 //!   `@rpath/librlmdb.dylib` and `@rpath/liblmdb.dylib`.
@@ -35,13 +37,20 @@ fn profile(artifact: Artifact) -> Profile {
     }
 }
 
-/// The functions of LMDB 0.9's `lmdb.h` and `rlmdb.h`.
+/// The functions of LMDB 0.9's `lmdb.h`, LMDB 1.0's `lmdb.h` and
+/// `rlmdb.h`, after checking how they relate.
 fn api_functions() -> BTreeSet<String> {
     let set = |v: Vec<String>| v.into_iter().collect::<BTreeSet<_>>();
     let h09 = set(header_functions(&c_src().join("lmdb.h"), "mdb_"));
+    let h10 = set(header_functions(&c10_src().join("lmdb.h"), "mdb_"));
     let rlmdb_h = crate_dir().join("include/rlmdb.h");
+    let ours10 = set(header_functions(&rlmdb_h, "mdb_"));
     let ours = set(header_functions(&rlmdb_h, "rlmdb_"));
     assert_eq!(h09.len(), 56, "{h09:?}");
+    assert!(h09.is_subset(&h10), "{:?}", h09.difference(&h10));
+    let added: BTreeSet<String> = h10.difference(&h09).cloned().collect();
+    assert_eq!(added.len(), 13, "{added:?}");
+    assert_eq!(ours10, added, "rlmdb.h must declare what LMDB 1.0 adds");
     assert_eq!(
         ours,
         set([
@@ -56,7 +65,7 @@ fn api_functions() -> BTreeSet<String> {
         .map(String::from)
         .to_vec())
     );
-    h09.union(&ours).cloned().collect()
+    h10.union(&ours).cloned().collect()
 }
 
 /// Runs `capi_symbols` on `artifact`'s shared library with
