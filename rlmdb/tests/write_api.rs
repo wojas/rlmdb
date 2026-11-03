@@ -1127,3 +1127,401 @@ fn count_after_put(format: Format, ps: Option<usize>, flags: DatabaseFlags) {
     }
     txn.commit().unwrap();
 }
+
+/// Moves after a failed exact search (`KNOWN_C_BUGS.md` row 59). `MDB_SET`
+/// of "b" leaves the cursor on the node of "c", whose duplicates the test
+/// varies, with the sub-cursor reset. The next `MDB_NEXT`, `MDB_PREV`,
+/// `MDB_NEXT_DUP`, `MDB_PREV_DUP` or `MDB_NEXT_MULTIPLE` enters those
+/// duplicates; C enters them with the record its sub-cursor last read,
+/// which here is stale. Either another cursor added duplicates since then
+/// (C counts too few; after a sub-DB's root split it walks the old root,
+/// and a sub-page the put moved crashes it), or it is another key's
+/// record ("e": C walks its duplicates), or there is none (the cursor
+/// never was on duplicates, row 6: C asserts); a sub-cursor that a delete
+/// marked (`C_DEL`, row 29: "b" was deleted under the cursor, moving it
+/// onto "c") keeps the mark, and C returns the first duplicate twice. rlmdb
+/// sets the sub-cursor up from the node, so the walk sees every duplicate
+/// of "c" once, in order, the
+/// count is right, and the walk ends on the key next to "c" ("a" or "e")
+/// as C's walk does with a right record (the cases "the record is right"
+/// have one: there rlmdb and C agree). The
+/// count and `MDB_GET_CURRENT` right after the failed search stay C's
+/// `EINVAL`. Write transactions in both formats, 1.0 at 256 B and 1 KiB
+/// pages too, `MDB_DUPSORT` and `MDB_DUPFIXED`; read transactions for the
+/// stale records that need no other cursor.
+#[test]
+fn moves_after_a_failed_search() {
+    let shapes = [
+        (Format::V09, None),
+        (Format::V10, None),
+        (Format::V10, Some(256)),
+        (Format::V10, Some(1024)),
+    ];
+    for (format, ps) in shapes {
+        for flags in [
+            DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED,
+            DatabaseFlags::DUP_SORT,
+        ] {
+            moves_after_failed_search(format, ps, flags);
+        }
+    }
+}
+
+/// What the cursor was on before the failed search, in
+/// [`moves_after_a_failed_search`].
+#[derive(Clone, Copy, Debug)]
+enum Before {
+    /// "c" itself.
+    Same,
+    /// "e", with this many duplicates of 8 bytes (those of "c" have 4).
+    Other(u32),
+    /// Nothing: a new cursor.
+    Fresh,
+    /// "b", which `mdb_del` then deleted, moving the cursor onto "c".
+    Deleted,
+}
+
+/// A cursor of [`moves_after_a_failed_search`], in a write or a read
+/// transaction; results are copied out.
+trait Moves {
+    fn get(
+        &mut self,
+        key: Option<&[u8]>,
+        op: CursorOp,
+    ) -> rlmdb::Result<Option<(Vec<u8>, Vec<u8>)>>;
+    fn count(&mut self) -> rlmdb::Result<u64>;
+}
+
+impl Moves for (&mut rlmdb::RwTxn<'_>, rlmdb::CursorId) {
+    fn get(
+        &mut self,
+        key: Option<&[u8]>,
+        op: CursorOp,
+    ) -> rlmdb::Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let (txn, c) = self;
+        let e = txn.cursor_get(*c, key, None, op)?;
+        Ok(e.map(|(k, d)| (k.to_vec(), d.to_vec())))
+    }
+
+    fn count(&mut self) -> rlmdb::Result<u64> {
+        self.0.cursor_count(self.1)
+    }
+}
+
+impl Moves for rlmdb::RoCursor<'_> {
+    fn get(
+        &mut self,
+        key: Option<&[u8]>,
+        op: CursorOp,
+    ) -> rlmdb::Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let e = rlmdb::RoCursor::get(self, key, None, op)?;
+        Ok(e.map(|(k, d)| (k.to_vec(), d.to_vec())))
+    }
+
+    fn count(&mut self) -> rlmdb::Result<u64> {
+        rlmdb::RoCursor::count(self)
+    }
+}
+
+/// Puts "a" and "c" (items `10, 20, ..., 10 n`, 4 bytes) and "e" (`m`
+/// items `0, 1, ...` of 8 bytes if `m > 0`, else one of 4 bytes) into a new
+/// database "t".
+fn put_ace(txn: &mut rlmdb::RwTxn<'_>, flags: DatabaseFlags, n: u32, m: u32) -> Dbi {
+    let db = txn
+        .create_db(Some("t"), flags | DatabaseFlags::CREATE)
+        .unwrap();
+    let e = WriteFlags::empty();
+    txn.put(db, b"a", &1u32.to_be_bytes(), e).unwrap();
+    for i in 1..=n {
+        txn.put(db, b"c", &(10 * i).to_be_bytes(), e).unwrap();
+    }
+    if m == 0 {
+        txn.put(db, b"e", &1u32.to_be_bytes(), e).unwrap();
+    }
+    for i in 0..u64::from(m) {
+        txn.put(db, b"e", &i.to_be_bytes(), e).unwrap();
+    }
+    db
+}
+
+/// Positions `c` as `before` says (for [`Before::Deleted`] the caller
+/// deletes "b").
+fn position(c: &mut impl Moves, before: Before) {
+    let key: &[u8] = match before {
+        Before::Same => b"c",
+        Before::Other(_) => b"e",
+        Before::Deleted => b"b",
+        Before::Fresh => return,
+    };
+    assert!(c.get(Some(key), CursorOp::Set).unwrap().is_some());
+}
+
+/// Searches "b" and checks what C's argument checks say about the cursor
+/// now; `MDB_GET_CURRENT` only if `current` (C's clears the sub-cursor's
+/// `C_DEL` mark, also when it fails).
+fn miss_b(c: &mut impl Moves, current: bool, what: &str) {
+    assert_eq!(c.get(Some(b"b"), CursorOp::Set).unwrap(), None, "{what}");
+    // The sub-cursor is not on an item: C's EINVAL, kept.
+    assert_eq!(errno(c.count().unwrap_err()), libc::EINVAL, "{what}: count");
+    if current {
+        let cur = c.get(None, CursorOp::GetCurrent).unwrap_err();
+        assert_eq!(errno(cur), libc::EINVAL, "{what}: current");
+    }
+}
+
+/// `op` and then the same move while on "c" (`MDB_NEXT_MULTIPLE`: pages of
+/// items): every item of `all` once, in order; the count after the first
+/// move; the key the walk ends on.
+fn walk_c(c: &mut impl Moves, op: CursorOp, all: &[u32], what: &str) {
+    let back = matches!(op, CursorOp::Prev | CursorOp::PrevDup);
+    let mut seen = Vec::new();
+    let mut e = c.get(None, op).unwrap();
+    assert_eq!(c.count().unwrap(), all.len() as u64, "{what}: count");
+    while let Some((_, d)) = e.as_ref().filter(|(k, _)| k == b"c") {
+        assert!(!d.is_empty() && d.len() % 4 == 0, "{what}: {d:?}");
+        seen.extend(
+            d.chunks(4)
+                .map(|x| u32::from_be_bytes(x.try_into().unwrap())),
+        );
+        e = c.get(None, op).unwrap();
+    }
+    if back {
+        seen.reverse();
+    }
+    assert_eq!(seen, all, "{what}: walk");
+    let end = match op {
+        CursorOp::Next => Some(&b"e"[..]),
+        CursorOp::Prev => Some(&b"a"[..]),
+        _ => None,
+    };
+    assert_eq!(
+        e.as_ref().map(|(k, _)| &k[..]),
+        end,
+        "{what}: after the walk"
+    );
+}
+
+/// One shape of [`moves_after_a_failed_search`].
+fn moves_after_failed_search(format: Format, ps: Option<usize>, flags: DatabaseFlags) {
+    let shape = format!("{format:?}, page size {ps:?}, flags {flags:?}");
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Environment::builder();
+    b.format(format)
+        .max_dbs(4)
+        .map_size(64 << 20)
+        .flags(EnvironmentFlags::NO_SYNC);
+    if let Some(ps) = ps {
+        b.page_size(ps);
+    }
+    let env = b.open(dir.path()).unwrap();
+    let fixed = flags.contains(DatabaseFlags::DUP_FIXED);
+    // How many items "c" has when it moves to a sub-DB (s) and when that
+    // sub-DB's leaf splits (t).
+    let (s, t) = {
+        let mut txn = env.begin_rw_txn().unwrap();
+        let db = put_ace(&mut txn, flags, 0, 0);
+        let (mut s, mut i) = (0, 0u32);
+        loop {
+            i += 1;
+            let leaves = txn.stat(db).unwrap().leaf_pages;
+            txn.put(db, b"c", &(10 * i).to_be_bytes(), WriteFlags::empty())
+                .unwrap();
+            if txn.stat(db).unwrap().leaf_pages != leaves {
+                if s > 0 {
+                    break (s, i);
+                }
+                s = i;
+            }
+        }
+    };
+    assert!(s > 4 && t > s + 1, "{shape}: sub-DB at {s}, split at {t}");
+    // A sub-DB of one leaf.
+    let sub = s + 1;
+    let odd = |n: u32| (0..n).map(|i| 10 * i + 5).collect::<Vec<u32>>();
+    // (what, items of "c", the cursor before, items another cursor adds,
+    // with MDB_MULTIPLE).
+    let mut cases = vec![
+        (
+            "sub-page, another cursor adds one",
+            3,
+            Before::Same,
+            vec![25],
+            false,
+        ),
+        (
+            "sub-page becomes a sub-DB",
+            s - 1,
+            Before::Same,
+            vec![5, 15],
+            false,
+        ),
+        (
+            "sub-DB, another cursor adds one",
+            sub,
+            Before::Same,
+            vec![25],
+            false,
+        ),
+        (
+            "sub-DB's root splits",
+            sub,
+            Before::Same,
+            odd(t - s + 1),
+            false,
+        ),
+        ("another key's sub-page", 3, Before::Other(2), vec![], false),
+        (
+            "another key's sub-DB",
+            3,
+            Before::Other(s + 1),
+            vec![],
+            false,
+        ),
+        (
+            "a sub-DB, another key's sub-page",
+            sub,
+            Before::Other(2),
+            vec![],
+            false,
+        ),
+        (
+            "a sub-page, never on duplicates",
+            3,
+            Before::Fresh,
+            vec![],
+            false,
+        ),
+        (
+            "a sub-DB, never on duplicates",
+            sub,
+            Before::Fresh,
+            vec![],
+            false,
+        ),
+        (
+            "sub-page, a delete marked it",
+            3,
+            Before::Deleted,
+            vec![],
+            false,
+        ),
+        (
+            "sub-DB, a delete marked it",
+            sub,
+            Before::Deleted,
+            vec![],
+            false,
+        ),
+        (
+            "sub-page, the record is right",
+            3,
+            Before::Same,
+            vec![],
+            false,
+        ),
+        (
+            "sub-DB, the record is right",
+            sub,
+            Before::Same,
+            vec![],
+            false,
+        ),
+    ];
+    let mut ops = vec![
+        CursorOp::Next,
+        CursorOp::Prev,
+        CursorOp::NextDup,
+        CursorOp::PrevDup,
+    ];
+    if fixed {
+        cases.push((
+            "sub-page, MDB_MULTIPLE of two",
+            3,
+            Before::Same,
+            vec![15, 25],
+            true,
+        ));
+        cases.push((
+            "sub-DB's root splits, MDB_MULTIPLE",
+            sub,
+            Before::Same,
+            odd(t - s + 1),
+            true,
+        ));
+        ops.push(CursorOp::NextMultiple);
+    }
+    for (what, n, before, add, multiple) in &cases {
+        let m = match before {
+            Before::Other(m) => *m,
+            _ => 0,
+        };
+        let mut all: Vec<u32> = (1..=*n)
+            .map(|i| 10 * i)
+            .chain(add.iter().copied())
+            .collect();
+        all.sort_unstable();
+        // Each move in a nested transaction (aborted) of one that holds the
+        // data, so that the data is put once.
+        let mut txn = env.begin_rw_txn().unwrap();
+        let db = put_ace(&mut txn, flags, *n, m);
+        let deleted = matches!(before, Before::Deleted);
+        if deleted {
+            txn.put(db, b"b", &1u32.to_be_bytes(), WriteFlags::empty())
+                .unwrap();
+        }
+        for &op in &ops {
+            let what = format!("{shape}: {what}, {op:?}");
+            let mut child = txn.begin_nested_txn().unwrap();
+            let c0 = child.open_cursor(db).unwrap();
+            let c1 = child.open_cursor(db).unwrap();
+            position(&mut (&mut child, c0), *before);
+            if deleted {
+                assert!(child.del(db, b"b", None).unwrap(), "{what}");
+            }
+            miss_b(&mut (&mut child, c0), !deleted, &what);
+            if *multiple {
+                let items: Vec<u8> = add.iter().flat_map(|v| v.to_be_bytes()).collect();
+                let stored = child
+                    .cursor_put_multiple(c1, b"c", &items, 4, WriteFlags::empty())
+                    .unwrap();
+                assert_eq!(stored, add.len(), "{what}");
+            } else {
+                for v in add {
+                    child
+                        .cursor_put(c1, b"c", &v.to_be_bytes(), WriteFlags::empty())
+                        .unwrap();
+                }
+            }
+            walk_c(&mut (&mut child, c0), op, &all, &what);
+            // MDB_PREV_MULTIPLE does not enter the duplicates: C's
+            // MDB_NOTFOUND.
+            if fixed && op == CursorOp::Next {
+                let what = format!("{what}, then MDB_PREV_MULTIPLE");
+                let c2 = child.open_cursor(db).unwrap();
+                if !deleted {
+                    position(&mut (&mut child, c2), *before);
+                }
+                miss_b(&mut (&mut child, c2), true, &what);
+                let got = child.cursor_get(c2, None, None, CursorOp::PrevMultiple);
+                assert!(matches!(got, Ok(None)), "{what}: {got:?}");
+            }
+        }
+        if !add.is_empty() || deleted {
+            continue;
+        }
+        // The stale records that need no other cursor, in read
+        // transactions.
+        txn.commit().unwrap();
+        for &op in &ops {
+            let what = format!("{shape}: {what}, {op:?}, read transaction");
+            let r = env.begin_ro_txn().unwrap();
+            let mut c = r.cursor(db).unwrap();
+            position(&mut c, *before);
+            miss_b(&mut c, true, &what);
+            walk_c(&mut c, op, &all, &what);
+        }
+        let mut txn = env.begin_rw_txn().unwrap();
+        txn.drop_db(db).unwrap();
+        txn.commit().unwrap();
+    }
+}

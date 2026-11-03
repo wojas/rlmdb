@@ -633,7 +633,9 @@ pub(crate) fn new_xcursor<'t, const N: usize>(
         return None;
     }
     // Until mdb_xcursor_init1 runs the sub-tree is empty. (C leaves mx_db
-    // uninitialised and asserts if it is searched before that.)
+    // uninitialised and asserts if it is searched before that: a move after
+    // a failed MDB_SET does, where ours sets the sub-cursor up from the node
+    // first, KNOWN_C_BUGS.md rows 6 and 59.)
     Some(Cursor::unpositioned(
         Db::empty(0),
         entry.dup_cmp.unwrap_or(Comparator::Memn),
@@ -711,6 +713,35 @@ pub(crate) fn xcursor_init1<'t, const N: usize>(
     if mx.cmp.is_int() && mx.db.pad == 8 {
         mx.cmp = Comparator::Clong;
     }
+    Ok(())
+}
+
+/// Before a move enters the sub-cursor `mx` of a main cursor `mc` on
+/// `node`, a node with duplicates, while `mx` is not initialised: sets it
+/// up from the node as `mdb_xcursor_init1` does, but not positioned, so
+/// that the move positions it (`cursor_first` / `cursor_last` from the
+/// root) on the key's own duplicates and `mdb_cursor_count` counts them.
+/// Only a failed exact search (`MDB_SET`, `MDB_SET_KEY`, `MDB_GET_BOTH`)
+/// leaves a main cursor on such a node with the sub-cursor reset.
+///
+/// C enters it with what the sub-cursor last held (`mdb_cursor_set`
+/// clears `C_INITIALIZED` and fails before `mdb_xcursor_init1`;
+/// `mdb_cursor_open` never sets a record up): another key's record, one
+/// from before other cursors added duplicates (`mdb_xcursor_init2` skips a
+/// sub-cursor that is not initialised), or garbage. It then walks another
+/// key's duplicates or the old root of a sub-DB, counts the old number, or
+/// reads the main leaf as a moved sub-page's root and crashes; a `C_DEL`
+/// mark left from an earlier delete (row 29) makes it return the first
+/// duplicate twice (`KNOWN_C_BUGS.md` row 59). Where C's record is right
+/// and unmarked, the result is C's.
+#[inline(never)]
+fn reenter_dups<'t, const N: usize>(
+    mc: &Cursor<'t, N>,
+    mx: &mut Cursor<'t, N>,
+    node: NodeRef<'t>,
+) -> Result<()> {
+    xcursor_init1(mc, mx, node)?;
+    mx.flags &= !C_INITIALIZED;
     Ok(())
 }
 
@@ -1013,6 +1044,11 @@ fn cursor_next_in<'t, const N: usize>(
             Some(leaf) if leaf.is_dupdata() => {
                 if op == CursorOp::Next || op == CursorOp::NextDup {
                     let x = mx.as_deref_mut().ok_or_else(corrupted)?;
+                    if !x.is_initialized() {
+                        // After a failed MDB_SET: C enters the duplicates
+                        // with a stale record (KNOWN_C_BUGS.md row 59).
+                        reenter_dups(mc, x, leaf)?;
+                    }
                     let rc = cursor_next(txn, x, None, CursorOp::Next);
                     if op != CursorOp::Next || !matches!(&rc, Err(e) if e.not_found()) {
                         let dup = rc?;
@@ -1101,6 +1137,10 @@ fn cursor_prev_in<'t, const N: usize>(
         if leaf.is_dupdata() {
             if op == CursorOp::Prev || op == CursorOp::PrevDup {
                 let x = mx.as_deref_mut().ok_or_else(corrupted)?;
+                if !x.is_initialized() {
+                    // As in cursor_next (KNOWN_C_BUGS.md row 59).
+                    reenter_dups(mc, x, leaf)?;
+                }
                 let rc = cursor_prev(txn, x, None, CursorOp::Prev);
                 if op != CursorOp::Prev || !matches!(&rc, Err(e) if e.not_found()) {
                     let dup = rc?;

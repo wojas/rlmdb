@@ -1299,6 +1299,44 @@ fn stale_sub_eof(ops: &[String], c: (&str, &str), r: (&str, &str)) -> bool {
     (c_stopped && r_found) || (had_prev_multiple && key(r.0).is_some() && key(r.0) == key(r.1))
 }
 
+/// `KNOWN_C_BUGS.md` row 59: `op` moves into the duplicates of a node whose
+/// sub-cursor a failed exact search reset (`prev`, the line of the op
+/// before, has `MDB_GET_CURRENT`'s `EINVAL` for its position), where C
+/// starts from the record its sub-cursor last had (another key's, or
+/// garbage), and Rust's line `rl` is on that key's own first duplicate
+/// (`next`, `next_dup`; `next_multiple`: a run of them from the first) or
+/// its last (`prev`, `prev_dup`). `pairs`: the database's items in order.
+pub fn stale_dup_record(op: &str, prev: &str, rl: &str, pairs: &[Pair]) -> bool {
+    if !prev.ends_with("| cur rc=22 k=- d=-") {
+        return false;
+    }
+    let Some((r_op, r_cur)) = rl.split_once(" | ") else {
+        return false;
+    };
+    let Some(key) = r_cur
+        .strip_prefix("cur rc=0 k=")
+        .and_then(|k| k.split(' ').next())
+    else {
+        return false;
+    };
+    let dups: Vec<String> = pairs
+        .iter()
+        .filter(|(k, _)| hex(k) == key)
+        .map(|(_, d)| hex(d))
+        .collect();
+    let (Some(first), Some(last)) = (dups.first(), dups.last()) else {
+        return false;
+    };
+    match op {
+        "next" | "next_dup" => r_op == format!("{op} rc=0 d={first}"),
+        "prev" | "prev_dup" => r_op == format!("{op} rc=0 d={last}"),
+        "next_multiple" => r_op
+            .strip_prefix("next_multiple rc=0 d=")
+            .is_some_and(|d| d.starts_with(first.as_str()) && dups.concat().starts_with(d)),
+        _ => false,
+    }
+}
+
 /// Runs the same random cursor operations through C and Rust and asserts
 /// identical results and positions.
 pub fn differential(
@@ -1381,6 +1419,18 @@ pub fn differential(
                 && stale_sub_eof(&ops[..=i], (&c_lines[i - 1], cl), (&r_lines[i - 1], rl))
             {
                 eprintln!("NOTE: known C bug, row 28 (stale C_EOF) at op {i}: C {cl}, Rust {rl}");
+                c_bugs += 1;
+                break;
+            }
+            // KNOWN_C_BUGS.md row 59: a move into the duplicates of the node
+            // a failed exact search left the cursor on: C walks the record
+            // its sub-cursor last had, Rust the key's own. Stop comparing.
+            if cl != rl
+                && i > 0
+                && c_lines[i - 1] == r_lines[i - 1]
+                && stale_dup_record(&ops[i], &r_lines[i - 1], rl, pairs)
+            {
+                eprintln!("NOTE: known C bug, row 59 (stale duplicates record) at op {i}: C {cl}, Rust {rl}");
                 c_bugs += 1;
                 break;
             }

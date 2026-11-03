@@ -98,7 +98,9 @@ fn get_multiple_on_a_single_item_after_a_key_with_duplicates() {
 /// `mdb_cursor_get` does not. C finds the sub-cursor uninitialised
 /// (`mdb_cursor_set` clears it) and returns `MDB_NOTFOUND`. The same probe
 /// runs the other operations whose dispatch does not start from the current
-/// key; every result and position must be C's.
+/// key; every result and position must be C's, but for `MDB_NEXT_MULTIPLE`
+/// into the duplicates of a key the search left the cursor on, which C
+/// fetches from a stale record (`KNOWN_C_BUGS.md` row 59).
 #[test]
 fn cursor_ops_after_a_failed_set_on_dupfixed() {
     let dir = tempfile::tempdir().unwrap();
@@ -109,6 +111,7 @@ fn cursor_ops_after_a_failed_set_on_dupfixed() {
     let db = txn.create_db(Some("f"), flags).unwrap();
     // Even keys exist: some with a single item, most with a few
     // duplicates, a few with several pages of them (a sub-DB).
+    let mut pairs = Vec::new();
     for i in (0..800).step_by(2) {
         let n = match i {
             _ if i % 97 == 0 => 5000,
@@ -116,8 +119,9 @@ fn cursor_ops_after_a_failed_set_on_dupfixed() {
             _ => i % 5 + 2,
         };
         for d in 0..n {
-            txn.put(db, &key(i), &(d * 2 + 1).to_be_bytes(), WriteFlags::empty())
-                .unwrap();
+            let item = (d * 2 + 1u32).to_be_bytes();
+            txn.put(db, &key(i), &item, WriteFlags::empty()).unwrap();
+            pairs.push((key(i), item.to_vec()));
         }
     }
     txn.commit().unwrap();
@@ -223,6 +227,15 @@ fn cursor_ops_after_a_failed_set_on_dupfixed() {
             && cl.ends_with("| cur rc=-30798 k=- d=-")
         {
             assert_eq!(rl, "next_multiple rc=-30798 d=- | cur rc=-30798 k=- d=-");
+            continue;
+        }
+        // KNOWN_C_BUGS.md row 59: a failed exact search left the cursor on
+        // a key with duplicates and the sub-cursor reset; C's
+        // MDB_NEXT_MULTIPLE fetches from the record its sub-cursor last had
+        // (MDB_FIRST's, the first key's sub-DB), Rust the key's own first
+        // page.
+        if cl != *rl && common::stale_dup_record(&ops[i], &rust[i - 1], rl, &pairs) {
+            assert_eq!(c_lines[i - 1], rust[i - 1]);
             continue;
         }
         assert_eq!(&cl, rl, "op {i}: {}, after {:?}", ops[i], &ops[i - 2..i]);
