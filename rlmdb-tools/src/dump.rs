@@ -3,7 +3,7 @@
 //! [`crate::dumpfmt`]).
 //!
 //! ```text
-//! mdb_dump [-V] [-f output] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath
+//! mdb_dump [-V] [-f output] [-i txnid] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath
 //! ```
 //!
 //! `-v` (C 1.0's option, here for both formats) dumps the previous
@@ -15,6 +15,23 @@
 //! one the messages are 1.0's (`mdb_dbi_open`), and `-a`/`-l` list the
 //! records of named databases (`mdb_cursor_is_db`; 1.0 stores a name with
 //! its NUL, which 0.9's tool would skip).
+//!
+//! `-i txnid` is LMDB 1.0's: instead of the text dump it writes an
+//! incremental dump since transaction `txnid`
+//! ([`rlmdb::Environment::incr_dump`]) to standard output or, with
+//! `-f`, into a new file (`mdb_env_incr_dump`, which refuses an existing
+//! one), as `tests/lmdb-c/1.0/mdb_dump.c` does: the txnid is read as
+//! `sscanf("%zu")` reads it (`5x` is 5, `-1` is `SIZE_MAX`), and one that
+//! is not a number or is 0 is "invalid txnid" with the C library's
+//! `strerror(errno)` (of 0, or with the BSD C library of `ERANGE` after an
+//! earlier `-i` overflowed: [`crate::cfmt::SSCANF_KEEPS_ERANGE`],
+//! [`crate::cfmt::crt_strerror`]);
+//! the other options but `-n` are ignored. With `-i` the options follow
+//! 1.0's tool, which opens `-f`'s file only after the environment; without
+//! it, 0.9's, which reopens standard output on it when it reads the
+//! option. An LMDB 0.9 environment cannot be dumped this way:
+//! "mdb_env_incr_dump failed, error 45 Operation not supported" (the
+//! number is the platform's `ENOTSUP`).
 //!
 //! C installs handlers for `SIGPIPE`, `SIGHUP`, `SIGINT` and `SIGTERM` that
 //! make the dump stop after the current record with "Interrupted system
@@ -29,7 +46,9 @@ use std::fs::OpenOptions;
 
 use rlmdb::{DatabaseFlags, Dbi, Environment, EnvironmentFlags, RoTxn, Transaction};
 
-use crate::cfmt::{crt_errno, err_code, io_errno, pointer, strerror};
+use crate::cfmt::{
+    crt_errno, crt_strerror, err_code, io_errno, pointer, scan_size, strerror, SSCANF_KEEPS_ERANGE,
+};
 use crate::common::{
     db_name_of, dbi_open_name, open_db, path_of, report_failed, Tool, EXIT_FAILURE,
 };
@@ -37,7 +56,13 @@ use crate::dumpfmt::encode_line;
 use crate::getopt::{GetOpt, Opt};
 use crate::output::{eprint_bytes, Output};
 
-const SYNOPSIS: &str = "[-V] [-f output] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath";
+const SYNOPSIS: &str = "[-V] [-f output] [-i txnid] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath";
+
+/// The options `getopt` takes.
+const OPTSTRING: &str = "af:i:lnps:vV";
+
+/// `ERANGE`, which `sscanf` leaves in `errno` when a number overflows.
+const ERANGE: i32 = 34;
 
 const NOTFOUND: i32 = rlmdb::consts::MDB_NOTFOUND;
 const EINTR: i32 = 4;
@@ -64,6 +89,10 @@ struct Options {
     /// `-v`: `MDB_PREVSNAPSHOT`.
     prev_snapshot: bool,
     subname: Option<Vec<u8>>,
+    /// `-i`: the incremental dump since this txnid (never 0).
+    txnid: Option<u64>,
+    /// `-f` with `-i`: the file for the incremental dump.
+    outname: Option<Vec<u8>>,
 }
 
 /// The `main` of `mdb_dump`; returns the exit code.
@@ -72,7 +101,20 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         return tool.usage(SYNOPSIS);
     }
     let mut o = Options::default();
-    let mut getopt = GetOpt::new(args, "af:lnps:vV");
+    // With -i anywhere, -f names the file of the incremental dump (C 1.0
+    // opens it after the environment); without, C 0.9's tool reopens
+    // standard output on it at once.
+    let incremental = {
+        let mut scan = GetOpt::new(args, OPTSTRING);
+        let mut found = false;
+        while let Some(opt) = scan.next() {
+            found |= matches!(opt, Opt::Arg(b'i', _));
+        }
+        found
+    };
+    // `errno` as C's sscanf leaves it, for the "invalid txnid" message.
+    let mut errno = 0;
+    let mut getopt = GetOpt::new(args, OPTSTRING);
     while let Some(opt) = getopt.next() {
         match opt {
             Opt::Flag(b'V') => return tool.version(),
@@ -85,6 +127,23 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
                 }
                 o.all_dbs += 1;
             }
+            Opt::Arg(b'f', path) if incremental => o.outname = Some(path),
+            Opt::Arg(b'i', arg) => match scan_size(&arg) {
+                Some((txnid, overflow)) if txnid != 0 => {
+                    if overflow && SSCANF_KEEPS_ERANGE {
+                        errno = ERANGE;
+                    }
+                    o.txnid = Some(txnid);
+                }
+                parsed => {
+                    if parsed.is_some_and(|(_, overflow)| overflow) && SSCANF_KEEPS_ERANGE {
+                        errno = ERANGE;
+                    }
+                    let text = crt_strerror(errno);
+                    tool.eprint_prog(&[&arg, b": invalid txnid: ", text.as_bytes(), b"\n"]);
+                    return EXIT_FAILURE;
+                }
+            },
             Opt::Arg(b'f', path) => {
                 // freopen(optarg, "w", stdout)
                 let mut opts = OpenOptions::new();
@@ -141,6 +200,19 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
             return EXIT_FAILURE;
         }
     };
+    if let Some(txnid) = o.txnid {
+        let rc = match &o.outname {
+            Some(name) => env.incr_dump_to_path(path_of(name), txnid),
+            None => incr_dump_to_stdout(&env, txnid),
+        };
+        return match rc {
+            Ok(()) => 0,
+            Err(e) => {
+                report_failed("mdb_env_incr_dump", &e);
+                EXIT_FAILURE
+            }
+        };
+    }
     let txn = match env.begin_ro_txn() {
         Ok(t) => t,
         Err(e) => {
@@ -177,6 +249,17 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     } else {
         0
     }
+}
+
+/// `mdb_env_incr_dumpfd(env, MDB_STDOUT, txnid)`: the incremental dump
+/// goes to standard output's descriptor (on Windows its handle), not
+/// through the text output.
+fn incr_dump_to_stdout(env: &Environment, txnid: u64) -> Result<(), rlmdb::Error> {
+    #[cfg(unix)]
+    let fd = std::os::fd::AsFd::as_fd(&std::io::stdout()).try_clone_to_owned()?;
+    #[cfg(windows)]
+    let fd = std::os::windows::io::AsHandle::as_handle(&std::io::stdout()).try_clone_to_owned()?;
+    env.incr_dump(std::fs::File::from(fd), txnid)
 }
 
 /// `-a` / `-l`: dump (or list) every named database of the main DB.

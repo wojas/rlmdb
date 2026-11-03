@@ -14,6 +14,32 @@ pub fn strerror(code: i32) -> String {
     rlmdb::strerror(code)
 }
 
+/// `strerror(code)` of the C runtime, where it differs from
+/// [`strerror`]'s (`mdb_strerror`): for 0, which `mdb_strerror` calls
+/// "Successful return: 0" (glibc says "Success", macOS "Undefined error:
+/// 0", the Windows runtimes "No error"), and on Windows for the `errno`
+/// values `mdb_strerror` takes for system error codes (only `ERANGE`,
+/// "Result too large", is printed this way).
+pub fn crt_strerror(code: i32) -> String {
+    if cfg!(windows) {
+        return match code {
+            0 => "No error".to_owned(),
+            34 => "Result too large".to_owned(),
+            _ => strerror(code),
+        };
+    }
+    if code != 0 {
+        return strerror(code);
+    }
+    // The C library's text, as std formats an OS error: "<text> (os error
+    // 0)".
+    let text = std::io::Error::from_raw_os_error(0).to_string();
+    match text.strip_suffix(" (os error 0)") {
+        Some(t) => t.to_owned(),
+        None => text,
+    }
+}
+
 /// The C return code of an LMDB error (what the C function would return).
 pub fn err_code(e: &Error) -> i32 {
     e.to_err_code()
@@ -177,9 +203,58 @@ pub fn scan_unsigned(s: &[u8], radix: u32) -> Option<u64> {
     Some(if negative { m.wrapping_neg() } else { m })
 }
 
+/// Whether `sscanf` leaves `ERANGE` in `errno` after a number that
+/// overflows. The BSD C library does (measured on macOS; FreeBSD's
+/// `vfscanf`, which macOS's comes from, and those of the other BSDs
+/// convert with `strtoumax`); glibc's `sscanf` does not (C 1.0's `mdb_dump
+/// -i 99999999999999999999 -i 0` says "Success" there). The Windows
+/// runtimes are not measured and taken not to.
+pub const SSCANF_KEEPS_ERANGE: bool = cfg!(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+));
+
+/// `sscanf(s, "%zu", &v) == 1` as glibc and macOS read it (`strtoull`):
+/// the value and whether it overflowed (`ERANGE`, which `sscanf` may leave
+/// in `errno`, [`SSCANF_KEEPS_ERANGE`]; the value is `SIZE_MAX`, whatever
+/// the sign), or `None` when there are no digits. A minus sign negates
+/// modulo 2^64.
+pub fn scan_size(s: &[u8]) -> Option<(u64, bool)> {
+    let (negative, digits) = split_number(cstr(s), 10);
+    if digits.is_empty() {
+        return None;
+    }
+    let exact = digits.iter().try_fold(0u64, |acc, &d| {
+        acc.checked_mul(10)?
+            .checked_add(u64::from((d as char).to_digit(10)?))
+    });
+    Some(match exact {
+        Some(m) if negative => (m.wrapping_neg(), false),
+        Some(m) => (m, false),
+        None => (u64::MAX, true),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes() {
+        assert_eq!(scan_size(b"5x"), Some((5, false)));
+        assert_eq!(scan_size(b"  +3"), Some((3, false)));
+        assert_eq!(scan_size(b"-1"), Some((u64::MAX, false)));
+        assert_eq!(scan_size(b"0x10"), Some((0, false)));
+        assert_eq!(scan_size(b"18446744073709551615"), Some((u64::MAX, false)));
+        assert_eq!(scan_size(b"18446744073709551616"), Some((u64::MAX, true)));
+        assert_eq!(scan_size(b"-99999999999999999999"), Some((u64::MAX, true)));
+        assert_eq!(scan_size(b""), None);
+        assert_eq!(scan_size(b"-"), None);
+        assert_eq!(scan_size(b"abc"), None);
+    }
 
     #[test]
     fn numbers() {
