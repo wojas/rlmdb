@@ -1,7 +1,9 @@
 # LMDB in Rust: design brief
 
-This repository holds a clean-room-style *rewrite* of LMDB 0.9 in Rust. It is
-not a binding. The goals, in priority order:
+This repository holds a *rewrite* of LMDB in Rust, written with the C source
+as the reference: a derivative work of LMDB under the OpenLDAP Public License
+(see `COPYRIGHT`), not a binding and not a clean-room implementation. The
+goals, in priority order:
 
 1. **Binary compatibility with C LMDB 0.9** (the source in
    `tests/lmdb-c/0.9`, version 0.9.36 / `mdb.RE/0.9`). A C LMDB process and
