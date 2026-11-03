@@ -513,12 +513,25 @@ impl TxnCore<'_> {
     /// there is no exact match; `MDB_INCOMPATIBLE` if the key holds plain
     /// data instead of a DB record.
     pub(crate) fn find_named_db(&self, name: &[u8]) -> Result<NamedDb> {
+        let main = self.dbs.borrow()[MAIN_DBI as usize];
+        let mut mc = Cursor::new(main.db, main.key_cmp, 0, self.layout);
+        self.find_named_db_at(&mut mc, name)
+    }
+
+    /// [`Self::find_named_db`] with `mc`, an unpositioned cursor on the
+    /// main DB, which is left where the search ends, as `mdb_cursor_set`
+    /// with `MDB_SET` leaves the cursor of `mdb_dbi_open` (mdb.c 0.9 line
+    /// 10020, 1.0 line 12356): on the record, or where `name` would be
+    /// inserted in the leaf the descent reached.
+    pub(crate) fn find_named_db_at<'t>(
+        &'t self,
+        mc: &mut Cursor<'t>,
+        name: &[u8],
+    ) -> Result<NamedDb> {
         // mdb_cursor_set: a zero-length key (DB name) is invalid.
         if name.is_empty() {
             return Err(MdbError::BadValSize.into());
         }
-        let main = self.dbs.borrow()[MAIN_DBI as usize];
-        let mut mc = Cursor::new(main.db, main.key_cmp, 0, self.layout);
         mc.page_search(self, Some(name), 0)?;
         let (found, exact) = mc.node_search(name)?;
         if !found || !exact {

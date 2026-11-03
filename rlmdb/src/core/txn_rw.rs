@@ -664,31 +664,7 @@ impl<'env> RwTxn<'env> {
             }
             .into());
         }
-        let found = match self.core.find_named_db(name) {
-            Ok(NamedDb::Found(db)) => Some(db),
-            Ok(NamedDb::Missing) => None,
-            Err(e) if e.not_found() => None,
-            Err(e) => return Err(e),
-        };
-        let (db, state) = match found {
-            Some(db) => (db, DB_VALID | DB_USRVALID),
-            None => {
-                if flags & MDB_CREATE == 0 {
-                    return Err(MdbError::NotFound.into());
-                }
-                let db = Db::empty((flags & PERSISTENT_FLAGS) as u16);
-                let slot = self.open_slot(MAIN_DBI as usize, true);
-                let rc = self.put_at(
-                    CRef::main(slot),
-                    name,
-                    PutData::bytes(&db.to_bytes()),
-                    u32::from(crate::format::node::F_SUBDATA),
-                );
-                self.close_slot(slot);
-                rc?;
-                (db, DB_NEW | DB_VALID | DB_USRVALID | DB_DIRTY)
-            }
-        };
+        let (db, state) = self.find_or_create_named_db(name, flags)?;
         // Got info, register DBI in this txn and the environment.
         let entry = DbiSlot {
             name: Some(name.into()),
@@ -726,28 +702,7 @@ impl<'env> RwTxn<'env> {
     /// record again (if the name is not in the main DB) and take a new view
     /// of the slot.
     fn recreate_db(&mut self, i: usize, name: &[u8], flags: u32) -> Result<()> {
-        let found = match self.core.find_named_db(name) {
-            Ok(NamedDb::Found(db)) => Some(db),
-            Ok(NamedDb::Missing) => None,
-            Err(e) if e.not_found() => None,
-            Err(e) => return Err(e),
-        };
-        let (db, state) = match found {
-            Some(db) => (db, DB_VALID | DB_USRVALID),
-            None => {
-                let db = Db::empty((flags & PERSISTENT_FLAGS) as u16);
-                let slot = self.open_slot(MAIN_DBI as usize, true);
-                let rc = self.put_at(
-                    CRef::main(slot),
-                    name,
-                    PutData::bytes(&db.to_bytes()),
-                    u32::from(crate::format::node::F_SUBDATA),
-                );
-                self.close_slot(slot);
-                rc?;
-                (db, DB_NEW | DB_VALID | DB_USRVALID | DB_DIRTY)
-            }
-        };
+        let (db, state) = self.find_or_create_named_db(name, flags)?;
         let registry = &self.core.env.dbis;
         let slots = registry.read();
         let (key_cmp, dup_cmp) = DbiRegistry::comparators(&slots[i], i, db.flags);
@@ -761,6 +716,49 @@ impl<'env> RwTxn<'env> {
             name_id: name_id(name),
         };
         Ok(())
+    }
+
+    /// The search and the create branch of `mdb_dbi_open` (mdb.c 0.9 lines
+    /// 10020 and 10045, 1.0 lines 12356 and 12381): the record of database
+    /// `name` in the main DB with the view's state bits; if there is none,
+    /// `MDB_NOTFOUND` without [`DatabaseFlags::CREATE`] in `flags`, else an
+    /// empty record with the persistent bits of `flags`, stored in the main
+    /// DB (`DB_NEW | DB_DIRTY`).
+    ///
+    /// As in C, the record is put with the cursor the search left where it
+    /// ended, not after a search of its own: the put's `mdb_cursor_set`
+    /// then starts on that leaf (0.9 line 6187, 1.0 line 8073), comparing
+    /// `name` with its first and last keys; a name before the first goes
+    /// to index 0 of a root leaf. In a main DB in order that is where a new
+    /// search puts it too; in one out of order (a comparator changed
+    /// between opens, a damaged file) it can be another place, and the
+    /// page must be C's.
+    fn find_or_create_named_db(&mut self, name: &[u8], flags: u32) -> Result<(Db, u8)> {
+        let slot = self.open_slot(MAIN_DBI as usize, true);
+        let rc = self.find_or_create_at(CRef::main(slot), name, flags);
+        self.close_slot(slot);
+        rc
+    }
+
+    /// [`RwTxn::find_or_create_named_db`] with the main-DB cursor `mc`.
+    fn find_or_create_at(&mut self, mc: CRef, name: &[u8], flags: u32) -> Result<(Db, u8)> {
+        match self.read_op(mc, |txn, c, _| txn.find_named_db_at(c, name)) {
+            Ok(NamedDb::Found(db)) => return Ok((db, DB_VALID | DB_USRVALID)),
+            Ok(NamedDb::Missing) => {}
+            Err(e) if e.not_found() => {}
+            Err(e) => return Err(e),
+        }
+        if flags & MDB_CREATE == 0 {
+            return Err(MdbError::NotFound.into());
+        }
+        let db = Db::empty((flags & PERSISTENT_FLAGS) as u16);
+        self.put_at(
+            mc,
+            name,
+            PutData::bytes(&db.to_bytes()),
+            u32::from(crate::format::node::F_SUBDATA),
+        )?;
+        Ok((db, DB_NEW | DB_VALID | DB_USRVALID | DB_DIRTY))
     }
 
     /// `mdb_drop(txn, db, 1)`: delete database `db` from the environment
