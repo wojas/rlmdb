@@ -18,7 +18,10 @@
 # synced, 0.16 s with MDB_NOSYNC, on a local SSD); with the temp directory
 # on C:, C 1.0 writers with 256-byte pages ran past the 120 s command
 # timeout of the interop scenarios. INTEROP_TIMEOUT_SECS gives slow runners
-# a margin on top.
+# a margin on top: even on D:, with the scenarios of all page sizes running
+# in parallel on the runner's four cores, a C 1.0 fill or delete with
+# 256-byte pages has taken over five minutes (a 300 s margin failed three
+# runs out of four). A peer that hangs still fails the test, later.
 name: Windows
 
 on:
@@ -55,7 +58,7 @@ jobs:
         env:
           TMP: ${{ runner.temp }}
           TEMP: ${{ runner.temp }}
-          INTEROP_TIMEOUT_SECS: "300"
+          INTEROP_TIMEOUT_SECS: "900"
 
   gnu:
     name: Windows x86-64 (GNU, MinGW-w64)
@@ -92,4 +95,4 @@ jobs:
         env:
           TMP: ${{ runner.temp }}
           TEMP: ${{ runner.temp }}
-          INTEROP_TIMEOUT_SECS: "300"
+          INTEROP_TIMEOUT_SECS: "900"
