@@ -234,6 +234,13 @@ impl Peer {
         }
     }
 
+    /// Does this peer take `--prevsnapshot` (`MDB_PREVSNAPSHOT`, LMDB 1.0's
+    /// open flag)? Not [`Peer::C`] (LMDB 0.9); the peers on rlmdb take it
+    /// for both formats. [`Peer::External`] is not asked: no.
+    pub fn opens_prev_snapshot(&self) -> bool {
+        matches!(self, Peer::C10 | Peer::Rust | Peer::COnRust)
+    }
+
     /// Why this peer cannot run on environments of `format` here, if it
     /// cannot: for [`Peer::External`], `$INTEROP_PEER` is not set, or the
     /// peer refuses `--format` (its `commands --format <f>` fails, e.g.

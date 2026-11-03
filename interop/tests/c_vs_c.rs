@@ -24,7 +24,7 @@ fn scenario_table_is_complete() {
     assert!(names.contains(&"gen_vectors"));
     assert!(names.contains(&"stale_reader_cleared_by_mdb_stat"));
     assert!(names.contains(&"killed_writer"));
-    assert_eq!(names.len(), 34, "{names:?}");
+    assert_eq!(names.len(), 35, "{names:?}");
 }
 
 /// The C peer implements every command, including the harness's own

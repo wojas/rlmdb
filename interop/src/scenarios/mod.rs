@@ -1543,6 +1543,7 @@ macro_rules! __scenario_list {
             reader_loop_during_nested
             notls_readers
             two_phase_commit
+            prev_snapshot
         }
     };
 }
