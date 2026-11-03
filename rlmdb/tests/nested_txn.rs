@@ -803,6 +803,48 @@ fn unsorted_main_run(format: Format, child: bool, reuse: bool) {
     }
 }
 
+/// A nested transaction that aborts keeps the handles of the databases its
+/// parent has a live view of, as C does (it closes only the handles of
+/// databases the child created, `mdb_dbis_update`): the parent commits,
+/// with its changes to them. Before, the abort looked each up in the
+/// parent's main DB to close the handles of databases that do not exist
+/// there (`KNOWN_C_BUGS.md` row 19), missed "dups" in the main DB out of
+/// order and closed its handle: the commit failed with `MDB_BAD_DBI`, or,
+/// once "xa" had taken the slot, lost the put and leaked its page.
+#[test]
+fn child_abort_keeps_parent_handles_in_unsorted_main() {
+    for format in [Format::V09, Format::V10] {
+        unsorted_main_run(format, true, false);
+        unsorted_main_run(format, true, true);
+    }
+}
+
+/// In an LMDB 0.9 file, emptying the main DB removes the records of the
+/// named databases but keeps their handles (`KNOWN_C_BUGS.md` row 21), and
+/// the commit writes back the records of those the transaction changed. A
+/// nested transaction's abort keeps such a handle, as C does: the parent
+/// has a live view of the database. (The abort used to look it up in the
+/// parent's empty main DB and close it; the commit then failed with
+/// `MDB_BAD_DBI`.)
+#[test]
+fn child_abort_keeps_handles_after_the_parent_emptied_the_main_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = open_format(dir.path(), Format::V09);
+    let mut t = env.begin_rw_txn().unwrap();
+    let x = t.create_db(Some("x"), DatabaseFlags::CREATE).unwrap();
+    put(&mut t, x, "a", b"1");
+    t.commit().unwrap();
+    let mut t = env.begin_rw_txn().unwrap();
+    put(&mut t, x, "b", b"2");
+    t.clear_db(Dbi::MAIN).unwrap();
+    t.begin_nested_txn().unwrap().abort();
+    expect(&t, x, "b", Some(b"2"), "after the child");
+    t.commit().unwrap();
+    let r = env.begin_ro_txn().unwrap();
+    expect(&r, x, "a", Some(b"1"), "committed");
+    expect(&r, x, "b", Some(b"2"), "committed");
+}
+
 /// A new database's record goes where C's `mdb_dbi_open` puts it: with the
 /// cursor its search left on the leaf, whose `mdb_cursor_set` puts a name
 /// before the first key at index 0 (a new search of a main DB out of order
@@ -811,5 +853,83 @@ fn unsorted_main_run(format: Format, child: bool, reuse: bool) {
 fn new_database_record_goes_where_c_puts_it_in_unsorted_main() {
     for format in [Format::V09, Format::V10] {
         unsorted_main_run(format, false, true);
+    }
+}
+
+/// What row 19's abort still does in a nested transaction: a handle the
+/// child opened for a database that exists only because the child created
+/// it, registered again (without `DB_NEW`) after its first handle was
+/// closed and that slot reused, is closed when the child aborts. Otherwise
+/// it would name nothing, and `create_db` in the parent would return it.
+#[test]
+fn child_abort_closes_the_handle_of_a_database_only_the_child_had() {
+    for format in [Format::V09, Format::V10] {
+        let dir = tempfile::tempdir().unwrap();
+        let env = open_format(dir.path(), format);
+        let mut t = env.begin_rw_txn().unwrap();
+        t.create_db(Some("y"), DatabaseFlags::CREATE).unwrap();
+        t.commit().unwrap();
+        env.close_db(env.begin_ro_txn().unwrap().open_db(Some("y")).unwrap());
+
+        let mut t = env.begin_rw_txn().unwrap();
+        let mut c = t.begin_nested_txn().unwrap();
+        let x1 = c.create_db(Some("x"), DatabaseFlags::CREATE).unwrap();
+        env.close_db(x1);
+        // "y" takes the slot, so "x" is found in the main DB and registered
+        // in another, as a database that existed before.
+        assert_eq!(c.open_db(Some("y")).unwrap(), x1);
+        let x2 = c.open_db(Some("x")).unwrap();
+        assert_ne!(x2, x1);
+        c.abort();
+        let e = t.open_db(Some("x")).unwrap_err();
+        assert!(e.not_found(), "{format:?}: {e:?}");
+        let x = t.create_db(Some("x"), DatabaseFlags::CREATE).unwrap();
+        put(&mut t, x, "k", b"x");
+        t.commit().unwrap();
+        let r = env.begin_ro_txn().unwrap();
+        let x = r.open_db(Some("x")).unwrap();
+        expect(&r, x, "k", Some(b"x"), &format!("{format:?}"));
+    }
+}
+
+/// What row 19's abort still does in a nested transaction for a database
+/// another transaction deleted after its handle was opened (here a read
+/// transaction on an older snapshot opened it, as another process could
+/// have deleted it): once the child looked at the handle, its abort closes
+/// it, and `create_db` in the parent creates the database afresh instead
+/// of returning a handle that names nothing (as C's `mdb_dbi_open` would,
+/// finding the name open). The parent has no live view of such a
+/// database, so this does not depend on which transaction registered the
+/// handle: looking only at the handles registered in the child would keep
+/// this one open.
+#[test]
+fn child_abort_closes_the_handle_of_a_database_deleted_elsewhere() {
+    for format in [Format::V09, Format::V10] {
+        let at = format!("{format:?}");
+        let dir = tempfile::tempdir().unwrap();
+        let env = open_format(dir.path(), format);
+        let mut t = env.begin_rw_txn().unwrap();
+        let gone = t.create_db(Some("gone"), DatabaseFlags::CREATE).unwrap();
+        put(&mut t, gone, "k", b"old");
+        t.commit().unwrap();
+        let old = env.begin_ro_txn().unwrap();
+        let mut t = env.begin_rw_txn().unwrap();
+        t.drop_db(gone).unwrap();
+        t.commit().unwrap();
+        let gone = old.open_db(Some("gone")).unwrap();
+        expect(&old, gone, "k", Some(b"old"), &at);
+        drop(old);
+
+        let mut t = env.begin_rw_txn().unwrap();
+        let c = t.begin_nested_txn().unwrap();
+        // (The record is not found: the handle names nothing.)
+        assert!(c.get(gone, b"k").is_err(), "{at}");
+        c.abort();
+        let db = t.create_db(Some("gone"), DatabaseFlags::CREATE).unwrap();
+        put(&mut t, db, "k", b"new");
+        t.commit().unwrap();
+        let r = env.begin_ro_txn().unwrap();
+        let db = r.open_db(Some("gone")).unwrap();
+        expect(&r, db, "k", Some(b"new"), &at);
     }
 }

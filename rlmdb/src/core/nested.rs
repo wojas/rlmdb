@@ -37,7 +37,9 @@
 //! appended, the DB table, next page number, allocation count, dirty
 //! room, flags and free-page state replace the parent's (keeping the
 //! parent's `DB_NEW` marks). An abort restores the parent's cursors and
-//! closes the handles of databases the child created (`mdb_dbis_update`).
+//! closes the handles of databases the child created (`mdb_dbis_update`),
+//! and of those that do not exist in the parent's state
+//! (`RwTxn::close_vanished_handles`, KNOWN_C_BUGS.md row 19).
 //!
 //! A child leaked with `mem::forget` never gives the state back. Its
 //! parent keeps `TXN_HAS_CHILD`, so it refuses every operation and cannot
@@ -234,7 +236,7 @@ impl<'env> RwTxn<'env> {
             self.core.dirty.clear();
             self.core.spilled.clear();
             let main = p.dbs[MAIN_DBI as usize].db;
-            self.close_vanished_handles(main);
+            self.close_vanished_handles(main, Some(p.dbs.as_slice()));
         }
 
         // The parent's pages come back.

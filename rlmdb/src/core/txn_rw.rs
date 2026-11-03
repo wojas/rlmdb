@@ -403,7 +403,7 @@ impl<'env> RwTxn<'env> {
         self.core.spilled.clear();
         if !keep {
             if let Some(main) = self.w.base_main {
-                self.close_vanished_handles(main);
+                self.close_vanished_handles(main, None);
             }
         }
         self.w.free_pgs.clear();
@@ -470,7 +470,21 @@ impl<'env> RwTxn<'env> {
     /// that it (or a committed child) had created after the first handle
     /// was closed (`drop_db`) would stay open in C and refer to nothing,
     /// and `create_db` would return it (KNOWN_C_BUGS.md row 19).
-    pub(crate) fn close_vanished_handles(&mut self, main: Db) {
+    ///
+    /// A nested transaction reverts to the state of its parent, whose DB
+    /// table is `parent` (`None` for a top-level transaction). A database
+    /// the parent has a live view of under the same registration
+    /// ([`TxnDb::is_live_view`]) is the parent's, so its handle is kept
+    /// without a lookup, as C keeps it. That is more than a saved search:
+    /// the main DB can be out of order (a comparator changed between
+    /// opens, a damaged file), and a search could then miss a database the
+    /// parent changed; closing its handle would make the parent's commit
+    /// fail with `MDB_BAD_DBI`, or, once a new database took the slot, lose
+    /// the parent's changes to it and leak its pages, where C writes them.
+    /// Every other handle is still looked up, also one registered before
+    /// the child began: its database may have been deleted by another
+    /// process (row 19 says what remains of the difference to C).
+    pub(crate) fn close_vanished_handles(&mut self, main: Db, parent: Option<&[TxnDb]>) {
         let registry = &self.core.env.dbis;
         let candidates: Vec<usize> = self
             .core
@@ -480,7 +494,12 @@ impl<'env> RwTxn<'env> {
             .enumerate()
             .skip(CORE_DBS as usize)
             .filter(|(i, e)| {
-                e.state & DB_VALID != 0 && e.state & DB_NEW == 0 && e.seq == registry.seq_of(*i)
+                e.state & DB_VALID != 0
+                    && e.state & DB_NEW == 0
+                    && e.seq == registry.seq_of(*i)
+                    && !parent
+                        .and_then(|p| p.get(*i))
+                        .is_some_and(|pe| pe.is_live_view(e.seq))
             })
             .map(|(i, _)| i)
             .collect();

@@ -284,6 +284,15 @@ impl TxnDb {
         (u32::from(self.db.flags) & MDB_DUPSORT != 0)
             .then(|| self.dup_cmp.unwrap_or(Comparator::Memn))
     }
+
+    /// Whether this is a live view of the slot's registration with
+    /// sequence number `seq`: valid, taken under that registration, and
+    /// its record read from the transaction's state or written in it (not
+    /// `DB_STALE`). The transaction then holds the database: its changes
+    /// are in this record, which the commit writes back.
+    pub(crate) fn is_live_view(&self, seq: u32) -> bool {
+        self.state & (DB_VALID | DB_STALE) == DB_VALID && self.seq == seq
+    }
 }
 
 /// A fingerprint of a database name (FNV-1a, never 0).
