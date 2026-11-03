@@ -117,7 +117,7 @@ fn crafted_dumps() {
     ] {
         for print in [false, true] {
             // The leading empty block keeps C from dropping the first
-            // database's flags (KNOWN_C_BUGS.md #1).
+            // database's flags (KNOWN_C_BUGS.md row 1).
             let input = dump_text_for_c(&spec, print, MAPSIZE);
             assert_load_same(Start::New, &[], &input);
         }
@@ -144,7 +144,7 @@ fn crafted_dumps_into_existing() {
     assert_load_same(Start::Copy("dupmain"), &[], &input);
 }
 
-/// The fix for KNOWN_C_BUGS.md #1: the first database keeps its flags.
+/// The fix for KNOWN_C_BUGS.md row 1: the first database keeps its flags.
 #[test]
 fn first_database_keeps_flags() {
     for spec in [spec_dupmain(), spec_named()[2..4].to_vec()] {
@@ -259,7 +259,7 @@ fn append_mode() {
 }
 
 /// Header values that `mdb_dump` never writes are refused with C's
-/// "invalid <keyword>" message (`KNOWN_C_BUGS.md` #53 and #55;
+/// "invalid <keyword>" message (`KNOWN_C_BUGS.md` rows 53 and 55;
 /// `rlmdb-tools/README.md`): numbers that are not a plain decimal of the
 /// field's width (C's `sscanf` takes a sign, blanks and trailing junk;
 /// `maxreaders=-1` makes it create a 256 GiB lock file, `mapsize=-1` an
@@ -569,7 +569,8 @@ fn round_trips() {
                 a.push(p(&src));
                 strip_mapaddr(&c_ok("mdb_dump", &a, dir.path()))
             };
-            // Rust dump -> C load (with the empty first block for bug #1).
+            // Rust dump -> C load (with the empty first block for
+            // KNOWN_C_BUGS.md row 1).
             let rust_dump = dump_with(Impl::Rust, &src, &opts);
             assert_eq!(strip_mapaddr(&rust_dump), expected_p, "{name} {opts:?}");
             let mut c_input = empty_block_like(&rust_dump, None);

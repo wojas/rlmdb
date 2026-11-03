@@ -193,7 +193,7 @@ fn named_database_keys_keep_the_nul_in_1_0() {
 }
 
 /// Emptying the main DB of an environment with named databases: LMDB 0.9
-/// leaves their pages behind (`KNOWN_C_BUGS.md` #21, ported), LMDB 1.0
+/// leaves their pages behind (`KNOWN_C_BUGS.md` row 21, ported), LMDB 1.0
 /// deletes them first and refuses while one is open (C 1.0's
 /// `mdb_drop`). That the files are C 1.0's, page for page, is
 /// `interop/tests/tools10.rs` (`mdb_drop_matches_mdb_drop10`).
@@ -589,7 +589,7 @@ fn page_usage(dir: &Path) -> (u64, std::collections::BTreeSet<u64>) {
 /// With 1 KiB pages a new key's first duplicate can be too big for a node
 /// and go straight to a new, empty sub-DB; `MDB_APPENDDUP` then appends to
 /// that empty sub-DB. C reads a node out of bounds there (`KNOWN_C_BUGS.md`
-/// #31); rlmdb appends at index 0.
+/// row 31); rlmdb appends at index 0.
 #[test]
 fn appenddup_into_a_new_sub_db() {
     let dir = tmp();
@@ -631,7 +631,7 @@ fn all_items(env: &Environment, db: rlmdb::Dbi) -> Vec<(Vec<u8>, Vec<u8>)> {
     out
 }
 
-/// The Go port's reproducer of `KNOWN_C_BUGS.md` #38, with 4 KiB pages:
+/// The Go port's reproducer of `KNOWN_C_BUGS.md` row 38, with 4 KiB pages:
 /// `MDB_CURRENT` replaces the only item of a 103-byte key in a `DUP_SORT`
 /// DB with one of 1978 bytes (the maximum), which does not fit a node with
 /// the key. C stores it on overflow pages, and its next duplicate put then
@@ -690,7 +690,7 @@ fn current_with_an_item_too_big_for_a_node() {
     assert_eq!(stat.leaf_pages, 2);
 }
 
-/// The other way into the state of `KNOWN_C_BUGS.md` #38: a duplicate
+/// The other way into the state of `KNOWN_C_BUGS.md` row 38: a duplicate
 /// comparator that calls items of different sizes equal (this one looks at
 /// the first byte only) makes a put of a longer item an overwrite of the
 /// key's only item ("does data match?" in `mdb_cursor_put`), and C would

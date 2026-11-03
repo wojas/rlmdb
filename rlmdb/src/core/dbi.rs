@@ -570,7 +570,7 @@ impl TxnCore<'_> {
     /// Opening it again must keep that view: within a write transaction the
     /// DB record in the main DB is only written back at commit, so reading
     /// it would lose this transaction's changes to the database (C does,
-    /// KNOWN_C_BUGS.md #19). Registers the view's slot again and returns
+    /// KNOWN_C_BUGS.md row 19). Registers the view's slot again and returns
     /// its handle.
     pub(crate) fn reopen_live_view(&self, slots: &mut Vec<DbiSlot>, name: &[u8]) -> Option<Dbi> {
         let id = name_id(name);

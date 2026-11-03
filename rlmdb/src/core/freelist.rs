@@ -50,7 +50,7 @@ fn txnid_key(key: &[u8]) -> Result<u64> {
 /// pages: unique, so a walk meets them in ascending order. A key not larger
 /// than the one before is a damaged tree, out of order or with branch pages
 /// that share a child, whose records a walk would read once per path to it
-/// (`KNOWN_C_BUGS.md` #50): `MDB_CORRUPTED`.
+/// (`KNOWN_C_BUGS.md` row 50): `MDB_CORRUPTED`.
 pub(crate) fn next_txnid_key(prev: Option<u64>, key: &[u8]) -> Result<u64> {
     let id = txnid_key(key)?;
     match prev {
@@ -280,7 +280,7 @@ impl<'env> RwTxn<'env> {
             // before, or past `pglast` where the search started: a smaller
             // key is a damaged tree, and with branch pages that share a
             // child this loop would read its records once per path to it,
-            // holding the writer lock (`KNOWN_C_BUGS.md` #50).
+            // holding the writer lock (`KNOWN_C_BUGS.md` row 50).
             let prev = (!first).then(|| last - 1);
             last = next_txnid_key(prev, kv.key)?;
             if oldest <= last {
@@ -400,7 +400,7 @@ impl<'env> RwTxn<'env> {
     /// is left of `pghead` into the free DB. Called by commit.
     ///
     /// The cursor is tracked (C uses an untracked one); see
-    /// `KNOWN_C_BUGS.md` #11.
+    /// `KNOWN_C_BUGS.md` row 11.
     pub(crate) fn freelist_save(&mut self) -> Result<()> {
         let slot = self.open_slot(FREE_DBI as usize, true);
         let rc = self.freelist_save0(CRef::main(slot));
@@ -476,7 +476,7 @@ impl<'env> RwTxn<'env> {
                 }
                 self.w.free_pgs.sort();
                 // C writes the list as it is. A page in it twice would be
-                // handed out twice (`KNOWN_C_BUGS.md` #50).
+                // handed out twice (`KNOWN_C_BUGS.md` row 50).
                 if !self.w.free_pgs.is_sorted_desc() {
                     return Err(corrupted());
                 }
@@ -585,7 +585,7 @@ impl<'env> RwTxn<'env> {
 /// `mdb_find_oldest`: the oldest snapshot any reader uses, or our txnid
 /// minus one if there is none older. Without a lock file C looks at no
 /// reader at all; here the in-memory table of this process's readers
-/// stands in for the lock file's (`KNOWN_C_BUGS.md` #35).
+/// stands in for the lock file's (`KNOWN_C_BUGS.md` row 35).
 fn find_oldest(core: &crate::core::txn::TxnCore<'_>) -> u64 {
     core.env.readers().find_oldest(core.txnid)
 }

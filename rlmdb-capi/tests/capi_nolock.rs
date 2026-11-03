@@ -3,7 +3,7 @@
 //! oracle for what `mdb_env_info`, `mdb_reader_list` and `mdb_reader_check`
 //! report without a lock file, and the demonstration that C reuses pages
 //! of a live read transaction there) and against the Rust library, which
-//! keeps them (`KNOWN_C_BUGS.md` #35), also between two handles of the
+//! keeps them (`KNOWN_C_BUGS.md` row 35), also between two handles of the
 //! environment in one process. Both must report no failures and
 //! print the same trace, and the environments they leave behind must pass
 //! the C peer's page audit (`check-freelist`).

@@ -225,7 +225,7 @@ pub struct Layout {
     /// largest key is the constant `MDB_MAXKEYSIZE` (511): below 2 KiB a
     /// node with such a key no longer fits `me_nodemax` and a `P_LEAF2`
     /// page holds a single such item, so C writes past its pages
-    /// (`KNOWN_C_BUGS.md` #48). Smaller 0.9 pages are refused.
+    /// (`KNOWN_C_BUGS.md` row 48). Smaller 0.9 pages are refused.
     pub min_pagesize: usize,
     /// Whether the key of a named database in the main DB includes the
     /// name's terminating NUL (1.0's `mdb_dbi_open` stores `strlen(name) +
@@ -389,7 +389,7 @@ impl Layout {
     /// recorded in it (`mdb_drop(txn, i, 1)` for each, freeing their pages),
     /// and refuses with `MDB_DBIS_BUSY` while a named database is open (1.0,
     /// mdb.c 1.0 `mdb_drop`), instead of only emptying the main DB, which
-    /// leaks the named databases' pages (0.9, `KNOWN_C_BUGS.md` #21). Which
+    /// leaks the named databases' pages (0.9, `KNOWN_C_BUGS.md` row 21). Which
     /// pages are free afterwards depends on it.
     #[inline(always)]
     pub const fn drops_named_dbs_with_main(&self) -> bool {

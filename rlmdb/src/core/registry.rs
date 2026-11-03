@@ -17,7 +17,7 @@
 //!   write transactions, the last committed txnid and the reader table in
 //!   which their read transactions pin snapshots, so a writer of any handle
 //!   keeps the pages of readers of every handle (C coordinates nothing
-//!   there, `KNOWN_C_BUGS.md` #35). It exists while one of them is open.
+//!   there, `KNOWN_C_BUGS.md` row 35). It exists while one of them is open.
 //! * A handle with a lock file and a `NO_LOCK` handle never share a file
 //!   (their readers would be invisible to each other's writers): whichever
 //!   comes second gets `EBUSY`.

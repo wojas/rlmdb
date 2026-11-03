@@ -660,7 +660,7 @@ static void test_large_items(unsigned psize)
  * not fit a node with the key (keys of 103 bytes, items of the maximum key
  * size; with 4 KiB pages the Go port's reproducer: 1978 bytes). C stores
  * it on overflow pages and misreads it at the next duplicate put
- * (KNOWN_C_BUGS.md #38); rlmdb deletes and inserts it, into a sub-DB, so
+ * (KNOWN_C_BUGS.md row 38); rlmdb deletes and inserts it, into a sub-DB, so
  * nothing is on overflow pages and the second duplicate goes next to it.
  * One byte more than the maximum fails before anything changes. */
 static void test_current_too_big(unsigned psize)

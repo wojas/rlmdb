@@ -10,7 +10,7 @@
 //!   after a re-open the environment shows the last good snapshot.
 //! * So does a sync that fails after the meta page reached the file (on
 //!   macOS the `F_FULLFSYNC` after the write; C returns the error and
-//!   keeps the page, `KNOWN_C_BUGS.md` #41): the old txnid is written back
+//!   keeps the page, `KNOWN_C_BUGS.md` row 41): the old txnid is written back
 //!   over the page, so a plain copy that another handle or process takes
 //!   before the re-open shows the last good snapshot too.
 //! * A read-only handle of another process that begins a read transaction
@@ -18,7 +18,7 @@
 //!   in the file, `mti_txnid` still 0), or after that commit failed and
 //!   left its meta page, reads the published snapshot, txnid 0. C's
 //!   read-only handles take the newest meta page while `mti_txnid` is 0,
-//!   that commit's (`KNOWN_C_BUGS.md` #45).
+//!   that commit's (`KNOWN_C_BUGS.md` row 45).
 //! * A failed spill write fails the operation; the transaction can only be
 //!   aborted (`MDB_BAD_TXN`).
 //! * `copy_to_fd` into a broken pipe (or `/dev/full` on Linux) reports the
@@ -575,9 +575,9 @@ fn c_dump_shows(c: &common::CTools, src: &Path, value: &[u8]) -> bool {
 /// the file: `mti_txnid` is still 0. A read-only handle of another process
 /// reads the published snapshot (txnid 0, no data), not the newest meta
 /// page, which is the in-flight commit's; C 0.9's reads that one
-/// (`KNOWN_C_BUGS.md` #45). The commit then fails (its sync), and the old
+/// (`KNOWN_C_BUGS.md` row 45). The commit then fails (its sync), and the old
 /// txnid goes back into the page. With the commit's meta page put back, as
-/// C leaves it after a failed `F_FULLFSYNC` (#41), the writer lock is free
+/// C leaves it after a failed `F_FULLFSYNC` (row 41), the writer lock is free
 /// and still no reader of ours takes the page.
 #[cfg(unix)]
 #[test]

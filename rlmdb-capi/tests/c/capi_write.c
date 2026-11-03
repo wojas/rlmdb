@@ -420,7 +420,8 @@ static void test_put_get_del(void)
 	RC(mdb_put(txn, dups, &k, &d, MDB_NOOVERWRITE), MDB_KEYEXIST);
 	CHECK(veq(d, "d0"));	/* the first duplicate */
 	CHECK(entries(txn, dups) == 5);
-	/* MDB_RESERVE is not for DUPSORT (C does not check, see KNOWN_C_BUGS.md #16) */
+	/* MDB_RESERVE is not for DUPSORT (C does not check, see
+	 * KNOWN_C_BUGS.md row 16) */
 	d.mv_size = 4;
 	DEVIATION(RC(mdb_put(txn, dups, &k, &d, MDB_RESERVE), EINVAL));
 
@@ -524,7 +525,7 @@ static void test_put_get_del(void)
 	trace_stat("ikey after deleting every third key", txn, ikey);
 	OK(mdb_txn_commit(txn));
 
-	/* MDB_DUPFIXED with mismatched sizes: refused (KNOWN_C_BUGS.md #12) */
+	/* MDB_DUPFIXED with mismatched sizes: refused (KNOWN_C_BUGS.md row 12) */
 	OK(mdb_txn_begin(env, NULL, 0, &txn));
 	k = sv("f");
 	u = 1;
@@ -675,7 +676,7 @@ static void test_cursors(void)
 	 * under a key of the maximum size: at 0.9's page sizes (the OS page
 	 * size) it fits a node, so C and Rust replace it in place. (Where it
 	 * does not, with pages of 2 KiB, C stores it on overflow pages and
-	 * rlmdb deletes and inserts: KNOWN_C_BUGS.md #38.) */
+	 * rlmdb deletes and inserts: KNOWN_C_BUGS.md row 38.) */
 	{
 		char kmax[511], dmax[511];
 		memset(kmax, 'K', sizeof(kmax));
@@ -1118,7 +1119,7 @@ static void comparator_reuse(int dup, int nested)
 }
 
 #ifdef LMDB_RUST
-/* KNOWN_C_BUGS.md #20: the abort of a child that deleted a database with
+/* KNOWN_C_BUGS.md row 20: the abort of a child that deleted a database with
  * mdb_drop(del = 1) reopens the handle for the parent, and with it the
  * comparison function installed on it (mdb_set_compare, dup 0, or
  * mdb_set_dupsort, dup 1): mdb_cmp/mdb_dcmp and what the parent reads and

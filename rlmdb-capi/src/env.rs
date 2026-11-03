@@ -159,7 +159,7 @@ pub unsafe extern "C" fn mdb_env_info(env: *mut MDB_env, info: *mut MDB_envinfo)
                 me_maxreaders: i.max_readers,
                 // 0 without a lock file, as in C (the read transactions
                 // are then tracked in memory, which C does not do;
-                // KNOWN_C_BUGS.md #35).
+                // KNOWN_C_BUGS.md row 35).
                 me_numreaders: i.num_readers,
             };
             // SAFETY: info is non-NULL and writable (lmdb.h).
@@ -325,7 +325,7 @@ pub unsafe extern "C" fn mdb_env_get_maxreaders(env: *mut MDB_env, readers: *mut
 /// `mdb_env_set_maxdbs`: set the maximum number of named databases. Only
 /// before `mdb_env_open`, and at most `MAX_DBS_LIMIT` (1,048,576): C takes
 /// any count and breaks above about 35 million, here a larger count is
-/// `EINVAL` (`KNOWN_C_BUGS.md` #54, `README.md`).
+/// `EINVAL` (`KNOWN_C_BUGS.md` row 54, `README.md`).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_env_set_maxdbs(env: *mut MDB_env, dbs: MDB_dbi) -> c_int {
     // SAFETY: env is NULL or a live handle (lmdb.h).

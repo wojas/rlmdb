@@ -419,7 +419,7 @@ pub struct ReaderLoopReport {
     /// `#commits` of the last snapshot.
     pub last_commit: u64,
     /// Steps back of `#commits` tolerated as C LMDB's reader meta race
-    /// (`KNOWN_C_BUGS.md` #31; `cpeer` only, `rpeer` prints 0).
+    /// (`KNOWN_C_BUGS.md` row 31; `cpeer` only, `rpeer` prints 0).
     pub meta_races: u64,
 }
 

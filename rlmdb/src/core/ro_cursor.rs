@@ -321,12 +321,12 @@ impl<'txn> RoCursor<'txn> {
                 // The sub-cursor stays initialised when the cursor moves
                 // from a key with duplicates onto one without (as in C,
                 // which then returns the other key's duplicates,
-                // KNOWN_C_BUGS.md #27): only fetch for a key with some.
+                // KNOWN_C_BUGS.md row 27): only fetch for a key with some.
                 let dups = current_has_dups(&self.mc);
                 let mx = self.mx.as_mut().ok_or(MdbError::Incompatible)?;
                 // C tests C_EOF, which MDB_LAST & co. also set on the last
                 // item (and which stays when more duplicates are added after
-                // it): it fetches nothing there (KNOWN_C_BUGS.md #28). We
+                // it): it fetches nothing there (KNOWN_C_BUGS.md row 28). We
                 // fetch on an item, and past the end of the page only
                 // without C_EOF, as C: a failed MDB_GET_BOTH whose datum
                 // sorts after all the key's duplicates leaves the sub-cursor

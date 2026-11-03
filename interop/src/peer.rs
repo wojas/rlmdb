@@ -782,7 +782,7 @@ impl Drop for PeerProcess {
 /// handle to the dead process: the process id stays taken until the handle
 /// is closed (Windows gives ids to new processes soon after), and C's
 /// reader check counts the process as alive meanwhile (`KNOWN_C_BUGS.md`
-/// #42). Elsewhere the process is reaped and only its id is kept.
+/// row 42). Elsewhere the process is reaped and only its id is kept.
 pub struct DeadProcess {
     pid: u32,
     #[cfg(windows)]

@@ -1273,7 +1273,7 @@ pub fn rust_cursorops(txn: &RoTxn<'_>, db: Dbi, ops: &[String]) -> Vec<String> {
     out
 }
 
-/// `KNOWN_C_BUGS.md` #28 in a read transaction: `ops` ends with a forward
+/// `KNOWN_C_BUGS.md` row 28 in a read transaction: `ops` ends with a forward
 /// move on which C reported `MDB_NOTFOUND` without moving while Rust found
 /// an item, or C left the key after a recent `prev_multiple` while Rust
 /// stayed on it. `c`, `r`: C's and Rust's lines for the previous op and for
@@ -1330,7 +1330,7 @@ pub fn differential(
             // C asserted (or crashed) on some op; compare what it printed.
             // Seen now and then (mtest3's data is seeded from the clock):
             // `Assertion 'root > 1' failed in mdb_page_search()`, C's
-            // uninitialised sub-cursor of KNOWN_C_BUGS.md #6 after a failed
+            // uninitialised sub-cursor of KNOWN_C_BUGS.md row 6 after a failed
             // MDB_SET followed by a duplicate move.
             let i = c_lines.len();
             eprintln!(
@@ -1360,18 +1360,18 @@ pub fn differential(
                 c_bugs += 1;
                 break;
             }
-            // KNOWN_C_BUGS.md #6: the uninitialised sub-cursor of a malloc'ed
-            // C cursor. A read transaction's cursor cannot fail with
+            // KNOWN_C_BUGS.md row 6: the uninitialised sub-cursor of a
+            // malloc'ed C cursor. A read transaction's cursor cannot fail with
             // MDB_BAD_DBI; C does when it steps a sub-cursor it never set up
             // and finds garbage in its database fields (seen on Windows,
             // whose heap hands out used memory where Unix's gives zeros).
             // Stop comparing.
             if cl != rl && cl.contains(" rc=-30780 ") {
-                eprintln!("NOTE: known C bug #6 (uninitialised sub-cursor) at op {i}: {cl}");
+                eprintln!("NOTE: known C bug, row 6 (uninitialised sub-cursor) at op {i}: {cl}");
                 c_bugs += 1;
                 break;
             }
-            // KNOWN_C_BUGS.md #28: a C_EOF left by MDB_LAST & co. (on a
+            // KNOWN_C_BUGS.md row 28: a C_EOF left by MDB_LAST & co. (on a
             // sub-cursor that MDB_PREV_MULTIPLE then moved back a page) or by
             // a failed MDB_NEXT_NODUP (on a key with more duplicates) makes
             // C's next forward move skip the key's other duplicates; Rust
@@ -1380,12 +1380,12 @@ pub fn differential(
                 && i > 0
                 && stale_sub_eof(&ops[..=i], (&c_lines[i - 1], cl), (&r_lines[i - 1], rl))
             {
-                eprintln!("NOTE: known C bug #28 (stale C_EOF) at op {i}: C {cl}, Rust {rl}");
+                eprintln!("NOTE: known C bug, row 28 (stale C_EOF) at op {i}: C {cl}, Rust {rl}");
                 c_bugs += 1;
                 break;
             }
             if cl != rl {
-                // KNOWN_C_BUGS.md #27: on a key with a single item that the
+                // KNOWN_C_BUGS.md row 27: on a key with a single item that the
                 // cursor reached from a key with duplicates, C's
                 // MDB_GET_MULTIPLE returns the other key's duplicates.
                 let (c_op, c_cur) = cl.split_once(" | ").unwrap();
@@ -1394,7 +1394,7 @@ pub fn differential(
                     && r_op == "get_multiple rc=0 d="
                     && c_cur == r_cur
                 {
-                    eprintln!("NOTE: known C bug #27 (stale GET_MULTIPLE) at op {i}");
+                    eprintln!("NOTE: known C bug, row 27 (stale GET_MULTIPLE) at op {i}");
                     compared += 1;
                     continue;
                 }
@@ -1407,10 +1407,10 @@ pub fn differential(
                 let (r_op, r_cur) = rl.split_once(" | ").unwrap();
                 let untouched =
                     c_op.ends_with("rc=0 d=-") && r_op.starts_with(c_op.trim_end_matches('-'));
-                // KNOWN_C_BUGS.md #5: C's mdb_cursor_count reads an
+                // KNOWN_C_BUGS.md row 5: C's mdb_cursor_count reads an
                 // unchecked node when the cursor is past the end (no current
                 // item, after a failed MDB_SET/MDB_GET_BOTH) and usually
-                // reports 1, but with the uninitialised sub-cursor of #6 it
+                // reports 1, but with the uninitialised sub-cursor of row 6 it
                 // can also say EINVAL: any C result is undefined there, so
                 // only Rust's MDB_NOTFOUND and the positions are checked.
                 let count_past_end = c_op.starts_with("count rc=")

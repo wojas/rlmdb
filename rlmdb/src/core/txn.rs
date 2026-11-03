@@ -12,7 +12,7 @@
 //! 3. Read the meta page of that txnid (`txnid & 1`) and take the free/main
 //!    DB records and `last_pgno` from it. C's read-only handles take the
 //!    newest meta page instead while `mti_txnid` is 0; we do not
-//!    (`KNOWN_C_BUGS.md` #45).
+//!    (`KNOWN_C_BUGS.md` row 45).
 //!
 //! Step 3 races with writers: a writer committing txn `N+2` rewrites the
 //! meta page our txn `N` uses. C accepts that (very unlikely) torn read.
@@ -277,7 +277,7 @@ impl<'env> TxnCore<'env> {
         // pages: a smaller last page would make a writer hand out meta page
         // 1 as a new page and overwrite it at commit, `u64::MAX` page 0.
         // The open checks the meta page it reads, but a transaction may
-        // take one written since (`KNOWN_C_BUGS.md` #49).
+        // take one written since (`KNOWN_C_BUGS.md` row 49).
         if meta.last_pgno < NUM_METAS as u64 - 1 || meta.last_pgno == u64::MAX {
             return Err(MdbError::Corrupted.into());
         }
@@ -653,7 +653,7 @@ impl<'env> RoTxn<'env> {
                 // C's read-only handles take the newest meta page instead:
                 // that can be the first commit's, written but not yet
                 // published, or failed, and writers build on `mti_txnid`
-                // (`KNOWN_C_BUGS.md` #45).
+                // (`KNOWN_C_BUGS.md` row 45).
                 let txnid = lock.publish_current_txnid(*index);
                 let copy = copy_meta(env, (txnid & 1) as usize);
                 let Some(meta) = torn.check(copy, || lock.txnid() != txnid)? else {

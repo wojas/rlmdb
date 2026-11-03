@@ -580,7 +580,7 @@ impl<'env> RwTxn<'env> {
     /// levels: a damaged file, or in theory one of more than 2^31 pages).
     ///
     /// C has no such check and writes past the end of `mc_pg` and `mc_ki`
-    /// (`KNOWN_C_BUGS.md` #36); the split fails instead, before it changes
+    /// (`KNOWN_C_BUGS.md` row 36); the split fails instead, before it changes
     /// anything, and with it the write transaction, as after any error of
     /// `mdb_page_split`.
     fn check_root_push(&self, mc: CRef, mp: u64) -> Result<()> {

@@ -122,7 +122,7 @@ fn rust(tool: &str, args: &[&str], stdin: &[u8]) -> Run {
 
 /// Runs `tool args` (the environment last) on both sides and requires the
 /// same result, but for the exit code of `mdb_stat -r` alone, which is 1 in
-/// C 1.0 as in 0.9 and 0 in rlmdb (`KNOWN_C_BUGS.md` #2).
+/// C 1.0 as in 0.9 and 0 in rlmdb (`KNOWN_C_BUGS.md` row 2).
 fn assert_same(tool: &str, args: &[&str]) -> Run {
     let env = Path::new(args.last().expect("an environment"));
     let mut c = if recorded_map_address(env) == 0 {
@@ -441,7 +441,7 @@ fn drop_runs(dir: &Path, src: &Path, tag: &str) {
         &["-d", "-s", "fix"][..],
         &["-d", "-s", "dup"][..],
         // The main DB: C 1.0 deletes its named databases first, so their
-        // pages are freed (0.9 leaks them, KNOWN_C_BUGS.md #21).
+        // pages are freed (0.9 leaks them, KNOWN_C_BUGS.md row 21).
         &[][..],
         &["-s", "nope"][..],
         &["-d", "-s", "intk"][..],

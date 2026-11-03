@@ -146,7 +146,7 @@ impl EnvironmentBuilder {
 
     /// `mdb_env_set_maxdbs`: number of named databases that can be open at
     /// the same time, at most [`MAX_DBS_LIMIT`] (the open fails with
-    /// `EINVAL` beyond it; C takes any count, `KNOWN_C_BUGS.md` #54).
+    /// `EINVAL` beyond it; C takes any count, `KNOWN_C_BUGS.md` row 54).
     pub fn max_dbs(&mut self, dbs: u32) -> &mut Self {
         self.max_dbs = dbs;
         self
@@ -425,7 +425,7 @@ impl Environment {
         };
         // C does not check the page size of an existing file. The range is
         // the format's (`Layout::min_pagesize`): smaller 0.9 pages cannot
-        // hold its largest keys (`KNOWN_C_BUGS.md` #48).
+        // hold its largest keys (`KNOWN_C_BUGS.md` row 48).
         if !page_size.is_power_of_two() || !(min_pagesize..=max_pagesize).contains(&page_size) {
             return Err(MdbError::Invalid.into());
         }
@@ -819,7 +819,7 @@ impl Environment {
 
     /// Number of pages on the free list of the latest snapshot (the
     /// "Free pages" line of `mdb_stat -f`). `MDB_CORRUPTED` if the free
-    /// DB's keys do not ascend (`KNOWN_C_BUGS.md` #50).
+    /// DB's keys do not ascend (`KNOWN_C_BUGS.md` row 50).
     pub fn freelist(&self) -> Result<usize> {
         let txn = self.begin_ro_txn()?;
         let mut cursor = txn.cursor(Dbi::FREE)?;

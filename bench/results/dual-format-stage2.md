@@ -11,7 +11,7 @@ rounds of 3 reps, `n` = 1000000). Other jobs kept the load average between
 6 and 25 during the runs, so single rows move by up to ±10 % between runs.
 
 The first run showed `seq_put_append` 1.05 (min 1.06): `MDB_APPEND` puts
-searched the tree twice (the empty-tree check for `KNOWN_C_BUGS.md` #32
+searched the tree twice (the empty-tree check for `KNOWN_C_BUGS.md` row 32
 called `cursor_last`, which searched again). Fixed; the run after the fix:
 
 | workload | base ns/op | new ns/op | new/base (median) | (min) |

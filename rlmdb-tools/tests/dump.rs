@@ -351,7 +351,7 @@ fn run_bounded(tool: &str, argv: &[&str], env: &Path) -> Run {
 /// Trees whose branch pages share their children: C's `mdb_dump` prints
 /// the main DB's record 4^20 times and `mdb_stat -f` reads the free DB's
 /// as often, hours for a 24-page file. The library stops a walk that steps
-/// onto more leaves than the file has pages (`KNOWN_C_BUGS.md` #50), so
+/// onto more leaves than the file has pages (`KNOWN_C_BUGS.md` row 50), so
 /// `mdb_dump` fails with `MDB_CORRUPTED` after a few copies of the record
 /// and `mdb_stat -f`, which ends its walk at an error as C does, reports
 /// what it read.

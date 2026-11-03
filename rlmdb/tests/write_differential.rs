@@ -352,7 +352,7 @@ fn nodemax09(ps: usize) -> usize {
 /// most 511 bytes, `me_nodemax` is at least 2038): both sides replace in
 /// place. With 2 KiB pages, a file C 0.9 does not create but opens, the
 /// larger items do not fit: C's `MDB_CURRENT` would store them on overflow
-/// pages, rlmdb's deletes and inserts (`KNOWN_C_BUGS.md` #38) and must
+/// pages, rlmdb's deletes and inserts (`KNOWN_C_BUGS.md` row 38) and must
 /// leave the file C's `mdb_cursor_del` + `mdb_cursor_put` leave, page for
 /// page but for the bytes C 0.9 leaves uninitialised
 /// ([`C09::same_pages`]).
@@ -371,7 +371,7 @@ fn diff_current_single_item() {
     assert_eq!(r, Round::Same);
 }
 
-/// `KNOWN_C_BUGS.md` #56: `MDB_CURRENT` replacing a duplicate in a sub-DB
+/// `KNOWN_C_BUGS.md` row 56: `MDB_CURRENT` replacing a duplicate in a sub-DB
 /// tree where C's in-place replacement leaves the new item in a leaf
 /// searches do not look in
 /// ([`differential::current_dup_outside_leaf_script`], 320 items of up to
@@ -410,7 +410,7 @@ fn diff_current_dup_outside_leaf() {
     }
 }
 
-/// The 0.9 side of `KNOWN_C_BUGS.md` #38
+/// The 0.9 side of `KNOWN_C_BUGS.md` row 38
 /// ([`differential::single_item_on_overflow_pages`]): with 2 KiB pages C
 /// 0.9's `MDB_CURRENT` leaves a key's only item (511 bytes, the key 500)
 /// on overflow pages; rlmdb converts, replaces and deletes it correctly,
@@ -456,7 +456,7 @@ fn diff_deep_dupfixed() {
 /// Replays a dumped script (`WRITEOPS_REPLAY=<file>`, written with
 /// `WRITEOPS_DUMP=<dir>`). `WRITEOPS_DEBUG=1` also prints every step where
 /// C's and Rust's duplicate counts differ (C's go stale, KNOWN_C_BUGS.md
-/// #14).
+/// row 14).
 #[test]
 #[ignore]
 fn replay() {

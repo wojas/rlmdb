@@ -91,7 +91,7 @@ pub fn wrong_data_sets() -> Vec<DataSet> {
 /// commit an older `#commits` (2) with C's `mdb_load`, consistent with the
 /// rest of the data, and no commit after it; the reader loop's output. It
 /// must fail: only a step back that C's reader meta race explains and that
-/// the next snapshot repairs is tolerated (`KNOWN_C_BUGS.md` #31).
+/// the next snapshot repairs is tolerated (`KNOWN_C_BUGS.md` row 31).
 pub fn reader_loop_after_step_back(peer: Peer) -> interop::Result<interop::Output> {
     let env = TestEnv::new()?;
     scenarios::create(Peer::C, &env, 64 << 20)?;

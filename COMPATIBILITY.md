@@ -81,7 +81,7 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
   side either way. Reader liveness uses the same `fcntl` byte locks at the
   process id. On Windows `mti_format` is `0x1` (`MDB_PIDLOCK` 0): readers
   take no pid locks, and `mdb_reader_check` asks whether the process
-  exists, as C does there (`KNOWN_C_BUGS.md` #42 for the one difference).
+  exists, as C does there (`KNOWN_C_BUGS.md` row 42 for the one difference).
 * **Lock file: format 2** (LMDB 1.0's `MDB_LOCK_VERSION 2`), the lock file
   of LMDB 1.0 data files: the version follows the data format. Header
   `magic, format, txnid, numreaders`, then the reader lock; `mti_format` is
@@ -131,18 +131,18 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
   page of its copy then names pages the copy lacks. A sound environment
   has no such page while the copy holds the writer lock: it takes a commit
   whose meta page reached the file while its write or sync failed (C on
-  macOS keeps the page after a failed `F_FULLFSYNC`, `KNOWN_C_BUGS.md` #41;
+  macOS keeps the page after a failed `F_FULLFSYNC`, `KNOWN_C_BUGS.md` row 41;
   C and rlmdb keep it when writing the old txnid back fails too) or,
   without a lock file, a writer of another process racing the copy. So the
   bytes differ from `mdb_copy`'s only for files that no C writer leaves
   without such a failure (or an unserialised writer) in between. Where C
-  0.9.37 would leave a corrupt tree or leak pages (`KNOWN_C_BUGS.md` #11,
-  #14, #15, #19, #38, #56), Rust writes the correct result instead, which C
+  0.9.37 would leave a corrupt tree or leak pages (`KNOWN_C_BUGS.md` rows 11,
+  14, 15, 19, 38 and 56), Rust writes the correct result instead, which C
   reads normally. Where a C bug decides shared state (sort order of misused
-  integer keys #7, pages leaked by `mdb_drop` on the main DB #21, a
-  child's dirty room #22), the bug is ported, so both sides agree.
+  integer keys in row 7, pages leaked by `mdb_drop` on the main DB in row 21, a
+  child's dirty room in row 22), the bug is ported, so both sides agree.
 * A new Rust environment records map address 0 (`mm_address`), because
-  `MDB_FIXEDMAP` is ignored; to C, 0 means "map anywhere" (#9). The
+  `MDB_FIXEDMAP` is ignored; to C, 0 means "map anywhere" (row 9). The
   `MDB_FIXEDMAP` bit itself is stored in the meta flags as C stores it.
 
 ## Mixed C and Rust processes
@@ -154,10 +154,10 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
   reader of either pins is never overwritten by a writer of either. A C
   reader that races a commit in `mdb_txn_renew0` can see a snapshot newer
   than the txnid it pins, and its next snapshot is then older
-  (`KNOWN_C_BUGS.md` #31); readers on `rlmdb` re-check the meta page and
+  (`KNOWN_C_BUGS.md` row 31); readers on `rlmdb` re-check the meta page and
   never go back. A read transaction of a C read-only handle can read the
   first commit of an environment while it is in flight, or after it
-  failed (#45); readers on `rlmdb` pin the published snapshot.
+  failed (row 45); readers on `rlmdb` pin the published snapshot.
 * A process that dies holding the writer lock: on Linux the robust mutex
   lets the next writer (C or Rust) recover, as between C processes. On
   macOS semaphores are not robust; C has the same limitation. FreeBSD
@@ -190,7 +190,7 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
   write transactions with its in-process writer lock and tracks read
   transactions in an in-memory reader table, so a writer never reuses a
   page that a live read transaction of the process reads; C tracks no
-  readers then and does reuse them (`KNOWN_C_BUGS.md` #35). Any number of
+  readers then and does reuse them (`KNOWN_C_BUGS.md` row 35). Any number of
   `MDB_NOLOCK` handles may open one environment in a process, as in C
   (each `Environment` or `MDB_env` with its own map; for example one per
   embedded interpreter, each loading the library with `dlopen`): they
@@ -210,7 +210,7 @@ Environment flags (`mdb_env_open`, `EnvironmentFlags`):
 | Flag | Rust |
 |---|---|
 | `MDB_NOSUBDIR`, `MDB_RDONLY`, `MDB_NOSYNC`, `MDB_NOMETASYNC`, `MDB_NORDAHEAD` | honoured, as in C |
-| `MDB_NOLOCK` | no lock file and no cross-process locking, as in C; read transactions of the process are tracked in memory (see above, `KNOWN_C_BUGS.md` #35) |
+| `MDB_NOLOCK` | no lock file and no cross-process locking, as in C; read transactions of the process are tracked in memory (see above, `KNOWN_C_BUGS.md` row 35) |
 | `MDB_NOTLS` | accepted; always in effect (see below) |
 | `MDB_WRITEMAP`, `MDB_MAPASYNC` | accepted and ignored: pages are always written with `pwrite`, which is compatible with C peers that use a writable map |
 | `MDB_FIXEDMAP` | accepted and ignored (the bit is recorded in a new file, the address is 0) |
@@ -228,10 +228,10 @@ Database flags (`MDB_REVERSEKEY`, `MDB_DUPSORT`, `MDB_INTEGERKEY`,
 flags (`MDB_NOOVERWRITE`, `MDB_NODUPDATA`, `MDB_CURRENT`, `MDB_RESERVE`,
 `MDB_APPEND`, `MDB_APPENDDUP`, `MDB_MULTIPLE`) are all honoured with C's
 semantics and stored as C stores them, with three refusals where C would
-corrupt data: `MDB_RESERVE` on `MDB_DUPSORT` is `EINVAL` (#16),
-`MDB_DUPFIXED` items of another size are `MDB_BAD_VALSIZE` (#12), and
+corrupt data: `MDB_RESERVE` on `MDB_DUPSORT` is `EINVAL` (row 16),
+`MDB_DUPFIXED` items of another size are `MDB_BAD_VALSIZE` (row 12), and
 writes to a database with `MDB_DUPFIXED` but not `MDB_DUPSORT` are
-`MDB_INCOMPATIBLE` (#17).
+`MDB_INCOMPATIBLE` (row 17).
 
 ## `MDB_NOTLS`: a superset
 
@@ -250,13 +250,13 @@ Everything below is visible only to the program calling the library; none
 of it changes the files or what another process concludes about them.
 
 * Plain C bugs not ported (`KNOWN_C_BUGS.md`): cursor operations on a
-  cursor left past the end of a page (#4–#6, #8, #13, #18) return
+  cursor left past the end of a page (rows 4–6, 8, 13 and 18) return
   `MDB_NOTFOUND` or move sensibly instead of reading free page space;
-  other cursors' duplicate counts are correct (#14); malformed input
-  gives errors, never a crash or a read outside a slice (#3). Tool fixes:
-  `mdb_load` keeps the first database's flags (#1) and handles `-a`,
-  `format=print` and odd lines correctly (#23–#26), `mdb_stat -r` exits 0
-  (#2).
+  other cursors' duplicate counts are correct (row 14); malformed input
+  gives errors, never a crash or a read outside a slice (row 3). Tool fixes:
+  `mdb_load` keeps the first database's flags (row 1) and handles `-a`,
+  `format=print` and odd lines correctly (rows 23–26), `mdb_stat -r` exits 0
+  (row 2).
 * Version: `mdb_version()` reports 0.9.85 and `LMDB 0.9.85: (rlmdb
   <version>)`, and the tools' `-V` prints that string; the shipped `lmdb.h`
   stays the 0.9.37 header. The patch level, above every C 0.9 release,
@@ -305,7 +305,7 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 | Nested transactions | `rlmdb/tests/nested_txn.rs` (written by one side, checked by the other), `interop` `nested_txns`, `reader_loop_during_nested`, `rlmdb-capi/tests/c/capi_write.c` |
 | Copies byte-identical to `mdb_copy [-c]` | `rlmdb/tests/env_copy.rs`, `rlmdb-tools/tests/copy_drop.rs`, `interop` `copy_dump_equal` |
 | A plain copy of a file with a meta page newer than the snapshot it pins gets the snapshot's meta there (readable, where `mdb_copy`'s copy is not); a failed sync after the meta page write is fatal and writes the old txnid back, so a copy taken before the re-open, by another process or `NO_LOCK` handle, shows the last good snapshot (both formats) | `rlmdb/tests/env_copy.rs` (`plain_copy_never_emits_a_meta_newer_than_its_snapshot`), `rlmdb/tests/robust_io_errors.rs` (`robust_failed_meta_sync_is_fatal`, and on macOS `robust_failed_full_fsync_is_fatal`) |
-| A read transaction of a read-only handle pins the snapshot `mti_txnid` names also while it is 0, so it never reads the first commit of an environment while that commit is in flight or after it failed, where C's read-only handles take the newest meta page (`KNOWN_C_BUGS.md` #45; both formats; C 0.9's `mdb_dump` as the oracle) | `rlmdb/tests/robust_io_errors.rs` (`robust_read_only_reader_skips_unpublished_first_commit`) |
+| A read transaction of a read-only handle pins the snapshot `mti_txnid` names also while it is 0, so it never reads the first commit of an environment while that commit is in flight or after it failed, where C's read-only handles take the newest meta page (`KNOWN_C_BUGS.md` row 45; both formats; C 0.9's `mdb_dump` as the oracle) | `rlmdb/tests/robust_io_errors.rs` (`robust_read_only_reader_skips_unpublished_first_commit`) |
 | The C API behaves as C (return codes, outputs, traces) | `rlmdb-capi/tests/c/capi_read.c`, `capi_write.c` (run against both libraries; traces must be identical; `DIFFERS()`/`DEVIATION()` mark the documented deviations), `rlmdb-capi/tests/tools.rs` (upstream `mdb_stat.c`/`mdb_dump.c` linked against both print the same) |
 | The tools behave as C's | `rlmdb-tools/tests/*.rs` (every option on every environment: same stdout, stderr, exit code; loaded environments identical as C sees them; `-V` prints rlmdb's version line where C prints its own) |
 | `mdb_version` reports 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)`; major and minor equal `lmdb.h`'s | `rlmdb-capi/tests/c/capi_read.c` (`MDB_VERSION_STRING` and 0.9.37 for C, 0.9.85 for Rust), `capi_version.c`, unit tests in `rlmdb/src/version.rs`, `rlmdb-capi/src/version.rs`, `rlmdb-tools/src/common.rs` |

@@ -2,7 +2,7 @@
 //! read transaction, a Rust read transaction in this test process, and the
 //! stale slot of a killed reader. The Rust tool prints exactly what the C
 //! tool prints; only the exit code of `-r` alone differs (C exits 1,
-//! KNOWN_C_BUGS.md #2; not on Windows, see [`C_R_EXIT`]).
+//! KNOWN_C_BUGS.md row 2; not on Windows, see [`C_R_EXIT`]).
 
 mod common;
 
@@ -42,7 +42,7 @@ impl Holder {
     /// Kills the process (SIGKILL): its reader slot stays in the table.
     /// Dropping it closes the process handle too: Windows keeps a dead
     /// process's object while a handle to it is open, and C's reader check
-    /// would count it as alive (`KNOWN_C_BUGS.md` #42).
+    /// would count it as alive (`KNOWN_C_BUGS.md` row 42).
     fn kill(mut self) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
@@ -57,7 +57,7 @@ impl Drop for Holder {
 }
 
 /// The exit code of C's `mdb_stat -r` without `-a`/`-s`/`-f`: that of the
-/// last `fputs` of the reader list (KNOWN_C_BUGS.md #2), which returns a
+/// last `fputs` of the reader list (KNOWN_C_BUGS.md row 2), which returns a
 /// positive count with glibc and macOS, 0 with the Windows C runtime and
 /// OpenBSD's libc.
 const C_R_EXIT: i32 = if cfg!(any(windows, target_os = "openbsd")) {

@@ -311,7 +311,7 @@ impl<'env> RwTxn<'env> {
             }
             // Reopen the handles the child closed with drop_db: the drop is
             // undone, and C would leave the parent unable to commit its
-            // changes to that DB (KNOWN_C_BUGS.md #20).
+            // changes to that DB (KNOWN_C_BUGS.md row 20).
             for (i, mut slot, _) in std::mem::take(&mut self.w.dropped) {
                 let pe = &mut p.dbs[i];
                 // Only a handle of the database the parent has a view of

@@ -805,7 +805,7 @@ fn auto_traits() {
 }
 
 /// `max_dbs` beyond [`MAX_DBS_LIMIT`] does not open (`EINVAL`): C takes
-/// any count and breaks above about 35 million (`KNOWN_C_BUGS.md` #54).
+/// any count and breaks above about 35 million (`KNOWN_C_BUGS.md` row 54).
 /// A large count within the limit opens.
 #[test]
 fn max_dbs_beyond_the_limit_is_refused() {

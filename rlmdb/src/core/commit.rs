@@ -75,7 +75,7 @@ impl<'env> RwTxn<'env> {
             return Ok(());
         }
         // C uses an untracked cursor; tracking it is equivalent here and
-        // keeps it consistent after nested splits (KNOWN_C_BUGS.md #11).
+        // keeps it consistent after nested splits (KNOWN_C_BUGS.md row 11).
         let slot = self.open_slot(MAIN_DBI as usize, true);
         let rc = self.update_db_records_with(CRef::main(slot), n);
         self.close_slot(slot);
@@ -200,7 +200,7 @@ impl<'env> RwTxn<'env> {
     /// used. A failed sync after the write (macOS: the `F_FULLFSYNC` after
     /// the `O_DSYNC` write) is the same failure: the new page is in the
     /// file but the commit is not, so it gets the same treatment, where C
-    /// returns the error and leaves the page (`KNOWN_C_BUGS.md` #41). The
+    /// returns the error and leaves the page (`KNOWN_C_BUGS.md` row 41). The
     /// txnid is published only after both succeeded.
     ///
     /// Without a lock file the txnid is published in the state the file's

@@ -378,7 +378,7 @@ fn check_multiple(cur: &mut RoCursor<'_>, ds: &DataSet, it: &ModelItem) -> CmdRe
         // C's MDB_GET_MULTIPLE on a key whose only value is stored without
         // a sub-page succeeds and leaves `data` untouched, i.e. still the
         // value MDB_SET returned. The Rust API reports that as empty data
-        // (KNOWN_C_BUGS.md #8); map it back to C's behaviour.
+        // (KNOWN_C_BUGS.md row 8); map it back to C's behaviour.
         if !(op == CursorOp::GetMultiple && multiple.is_empty()) {
             data = multiple;
         }

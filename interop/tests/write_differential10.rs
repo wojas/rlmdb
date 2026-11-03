@@ -138,7 +138,7 @@ fn nodemax(ps: usize) -> usize {
     (((ps - 24) / 2) & !1) - 2
 }
 
-/// `p` with the generator kept out of `KNOWN_C_BUGS.md` #32 (see
+/// `p` with the generator kept out of `KNOWN_C_BUGS.md` row 32 (see
 /// `Profile::appenddup_nodemax`) for pages of `ps` bytes.
 fn for_page_size(mut p: Profile, ps: usize) -> Profile {
     p.appenddup_nodemax = Some(nodemax(ps));
@@ -346,7 +346,7 @@ fn diff10_dupfixed_1byte_upper_wraps() {
 /// allows, with keys of 103 bytes (fewer where keys are limited to less).
 /// Items that do not fit a node with the key are deleted and inserted, as
 /// C's `mdb_cursor_del` + `mdb_cursor_put` do (C's `MDB_CURRENT` would put
-/// them on overflow pages, `KNOWN_C_BUGS.md` #38); with 4 KiB pages that
+/// them on overflow pages, `KNOWN_C_BUGS.md` row 38); with 4 KiB pages that
 /// includes the Go port's reproducer, an item of 1978 bytes (the maximum)
 /// replacing one under a 103-byte key, then a second duplicate. The files
 /// must agree page for page.
@@ -366,7 +366,7 @@ fn diff10_current_single_item() {
     }
 }
 
-/// `KNOWN_C_BUGS.md` #38 ([`differential::single_item_on_overflow_pages`]):
+/// `KNOWN_C_BUGS.md` row 38 ([`differential::single_item_on_overflow_pages`]):
 /// C 1.0's `MDB_CURRENT` leaves a key's only item on overflow pages (items
 /// of the maximum key size, keys of 103 bytes or the maximum, the Go port's
 /// shape with 4 KiB pages); rlmdb's next duplicate put reads the item
@@ -389,7 +389,7 @@ fn c10_single_item_on_overflow_pages() {
     }
 }
 
-/// `KNOWN_C_BUGS.md` #56: `MDB_CURRENT` replacing a duplicate in a sub-DB
+/// `KNOWN_C_BUGS.md` row 56: `MDB_CURRENT` replacing a duplicate in a sub-DB
 /// tree where C's in-place replacement leaves the new item in a leaf
 /// searches do not look in
 /// ([`differential::current_dup_outside_leaf_script`], 320 items of a 24th

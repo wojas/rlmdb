@@ -8,7 +8,7 @@
  * live read transaction still reads (lmdb.h makes avoiding that the
  * caller's job), so values the read transaction returned change under it.
  * The Rust library tracks the read transactions of the process in memory
- * (KNOWN_C_BUGS.md #35) and keeps their pages. Each build checks what its
+ * (KNOWN_C_BUGS.md row 35) and keeps their pages. Each build checks what its
  * library does there (NOLOCK_READERS() below); everything else, including
  * what mdb_env_info, mdb_reader_list and mdb_reader_check report, must be
  * the same, and the trace ("T ..." lines) must be identical.

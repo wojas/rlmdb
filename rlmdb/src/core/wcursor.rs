@@ -1402,7 +1402,7 @@ impl<'env> RwTxn<'env> {
     /// Re-reads the duplicates' record of the node at main cursor `mc` into
     /// its sub-cursor (`mx_db`), keeping the sub-cursor's position. C trusts
     /// the cached copy, which goes stale when another cursor changes the
-    /// same key's duplicates (KNOWN_C_BUGS.md #14).
+    /// same key's duplicates (KNOWN_C_BUGS.md row 14).
     pub(crate) fn refresh_xdb(&mut self, mc: CRef) -> Result<()> {
         let parent_flags = u32::from(self.db_of(mc).flags);
         let db = {
@@ -1448,7 +1448,7 @@ impl<'env> RwTxn<'env> {
     /// After the duplicates of `mc`'s current key changed: give every other
     /// tracked cursor on the same key whose sub-cursor is set up the new
     /// record (their positions are kept up to date by the fixups; C leaves
-    /// their `mx_db` stale, KNOWN_C_BUGS.md #14).
+    /// their `mx_db` stale, KNOWN_C_BUGS.md row 14).
     pub(crate) fn share_xdb(&mut self, mc: CRef) {
         let (dbi, top, pg, ki) = {
             let w = self.cur(mc);
@@ -1501,7 +1501,7 @@ impl<'env> RwTxn<'env> {
             x.c.top = 0;
             // On the key's first item now. C ORs in C_INITIALIZED, so a
             // C_DEL or C_EOF left from an earlier delete or move makes the
-            // next MDB_NEXT return the item again (KNOWN_C_BUGS.md #29);
+            // next MDB_NEXT return the item again (KNOWN_C_BUGS.md row 29);
             // only a main cursor that sits before the item (after a
             // delete, C_DEL) must not skip it.
             x.c.flags = C_SUB | C_INITIALIZED | (main_flags & C_DEL);

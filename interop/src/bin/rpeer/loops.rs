@@ -618,7 +618,7 @@ fn wait_for_dbs(env: &Environment, db: Option<&str>, deadline: f64) -> CmdResult
 /// the first, then `reads=.. first_commit=.. last_commit=.. meta_races=0`.
 ///
 /// Unlike `cpeer`, which tolerates C LMDB's reader meta race
-/// (`KNOWN_C_BUGS.md` #31) and counts it in `meta_races`, this fails on any
+/// (`KNOWN_C_BUGS.md` row 31) and counts it in `meta_races`, this fails on any
 /// step back of `#commits`: `rlmdb` re-checks `mti_txnid` after copying the
 /// meta page, so its snapshots cannot go back.
 pub fn cmd_reader_loop(o: &mut Opts) -> CmdResult {

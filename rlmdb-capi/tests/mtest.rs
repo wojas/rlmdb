@@ -71,7 +71,7 @@ fn tool_output(tool: &str, lib: Lib, args: &[&str], env: &Path) -> String {
 
 /// `text` without the lines that show the recorded map address (C records
 /// it for `MDB_FIXEDMAP` environments, Rust writes 0: `KNOWN_C_BUGS.md`
-/// #9).
+/// row 9).
 fn without_map_address(text: &str) -> String {
     text.lines()
         .filter(|l| !l.trim_start().starts_with("Map address") && !l.starts_with("mapaddr="))
@@ -217,7 +217,7 @@ fn section(out: &mut String, name: Option<&str>, flags: &[&str], pairs: &[(Vec<u
 /// reverse keys, sorted and reverse-sorted duplicates, fixed-size integer
 /// duplicates (enough for sub-databases), overflow values, and plain data
 /// in the main DB. The first section is the main DB, so `mdb_load`
-/// dropping its flags does not matter (`KNOWN_C_BUGS.md` #1).
+/// dropping its flags does not matter (`KNOWN_C_BUGS.md` row 1).
 fn dump_input() -> String {
     let kv = |k: Vec<u8>, v: Vec<u8>| (k, v);
     let mut s = String::new();

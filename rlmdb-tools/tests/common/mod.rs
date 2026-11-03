@@ -656,7 +656,7 @@ pub fn dump_text(dbs: &[DbSpec], print: bool, mapsize: usize) -> Vec<u8> {
 }
 
 /// The dump text for the C `mdb_load`, which drops the header flags of
-/// the first database (KNOWN_C_BUGS.md #1): an empty main-DB block goes
+/// the first database (KNOWN_C_BUGS.md row 1): an empty main-DB block goes
 /// first, so every real database keeps its flags.
 pub fn dump_text_for_c(dbs: &[DbSpec], print: bool, mapsize: usize) -> Vec<u8> {
     let mut out = dump_text(&[DbSpec::new(None, &[])], print, mapsize);
@@ -668,7 +668,7 @@ pub fn dump_text_for_c(dbs: &[DbSpec], print: bool, mapsize: usize) -> Vec<u8> {
 /// `maxreaders=`, `format=`, …) of the first header of `dump`, for the
 /// database `name` (`None` = the main DB). Put in front of a dump for the
 /// C `mdb_load` so that it does not drop the first real database's flags
-/// (KNOWN_C_BUGS.md #1).
+/// (KNOWN_C_BUGS.md row 1).
 pub fn empty_block_like(dump: &[u8], name: Option<&[u8]>) -> Vec<u8> {
     const FLAGS: &[&[u8]] = &[
         b"database=",

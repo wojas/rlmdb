@@ -35,7 +35,7 @@
 //!   to 1 and stores its id in `mtb_semid`; the others check it with
 //!   `IPC_STAT` and `IPC_SET` (mdb10.c lines 6096-6110 and 6165-6173).
 //!   Unlike C, the exclusive opener refuses an existing set of the key
-//!   that is not ours to reset (`KNOWN_C_BUGS.md` #46).
+//!   that is not ours to reset (`KNOWN_C_BUGS.md` row 46).
 //!   Every `semop` uses `SEM_UNDO`, so the kernel releases the semaphore
 //!   of a process that dies holding it, and the flag in the lock file
 //!   (`mti_rlocked`, `mti_wlocked`) that the dead holder left set makes
@@ -534,7 +534,7 @@ mod imp {
         /// opener finds when the last user of the environment removed them
         /// ([`SharedLocks::close`]) between our failed exclusive probe and
         /// our shared lock; the caller then probes again
-        /// (`LockRegion::open`, `KNOWN_C_BUGS.md` #47).
+        /// (`LockRegion::open`, `KNOWN_C_BUGS.md` row 47).
         pub fn attach(map: &LockMap, layout: &LockLayout) -> io::Result<Option<SharedLocks>> {
             let (rname, wname) = match (layout.objects, layout.wlock) {
                 (LockObjects::SemaphoreNames, Some(wlock)) => (
@@ -884,7 +884,7 @@ mod sysv {
 
     /// Checks that set `semid`, which `semget` returned for the lock
     /// file's key, is one [`create`] may reset. C 1.0 resets whatever set
-    /// it gets (`KNOWN_C_BUGS.md` #46); the key is `ftok`'s, which keeps 8
+    /// it gets (`KNOWN_C_BUGS.md` row 46); the key is `ftok`'s, which keeps 8
     /// bits of the device and 16 of the inode, so another program's set
     /// can have it.
     ///

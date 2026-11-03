@@ -211,7 +211,7 @@ fn cursor_current_rules() {
 
 #[test]
 fn current_dup_that_does_not_fit_its_subpage() {
-    // KNOWN_C_BUGS.md #15: MDB_CURRENT with a longer duplicate in a full
+    // KNOWN_C_BUGS.md row 15: MDB_CURRENT with a longer duplicate in a full
     // sub-page. lmdb.h says this is a delete followed by an insert.
     let dir = tempfile::tempdir().unwrap();
     let env = env_at(dir.path(), 16 << 20);
@@ -562,7 +562,7 @@ fn dupfixed_without_dupsort_is_refused() {
     txn.commit().unwrap();
 }
 
-/// `KNOWN_C_BUGS.md` #56: `MDB_CURRENT` replacing a duplicate in a sub-DB
+/// `KNOWN_C_BUGS.md` row 56: `MDB_CURRENT` replacing a duplicate in a sub-DB
 /// tree by an item that sorts where the old one is. C keeps the new item
 /// in the old one's leaf at its index and does not look at the branch keys
 /// around the leaf, which need not be its items (deleting a leaf's first

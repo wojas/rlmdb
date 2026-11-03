@@ -201,7 +201,8 @@ impl Environment {
             let mut c = txn.cursor(Dbi::FREE)?;
             let mut prev = None;
             while let Some((key, data)) = c.next()? {
-                // Records read twice would be counted twice (#49).
+                // Records read twice would be counted twice
+                // (KNOWN_C_BUGS.md row 49).
                 prev = Some(next_txnid_key(prev, key)?);
                 freecount =
                     freecount.wrapping_add(Idl::encoded_len(data).ok_or(MdbError::Corrupted)?);
@@ -257,7 +258,7 @@ impl Environment {
 /// other page is never newer in a sound environment: it takes a commit
 /// whose meta page reached the file while its write or sync failed (C on
 /// macOS leaves such a page after a failed `F_FULLFSYNC`,
-/// `KNOWN_C_BUGS.md` #41; C and rlmdb when writing the old txnid back
+/// `KNOWN_C_BUGS.md` row 41; C and rlmdb when writing the old txnid back
 /// failed too), or, without a lock file, a writer of another process that
 /// races the copy.
 fn hide_newer_meta(l: &Layout, ps: usize, metas: &mut [u8], txnid: u64) {
@@ -331,7 +332,7 @@ struct CopyWriter<'o, W: Write> {
     /// shares or reaches again (a child pointing back up) would be written
     /// again and again, C's `mdb_env_cwalk` writes them all (exponentially
     /// many with sharing at every level), so passing this ends the copy
-    /// with `MDB_CORRUPTED` (`KNOWN_C_BUGS.md` #44).
+    /// with `MDB_CORRUPTED` (`KNOWN_C_BUGS.md` row 44).
     limit: u64,
 }
 

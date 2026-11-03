@@ -122,7 +122,7 @@ pub(crate) struct Kv<'t> {
 /// transaction allocated. In a tree whose branch pages share a child (two
 /// branches, or two slots of one, naming one page) a walk reaches that
 /// child once per path to it: exponentially often with sharing at several
-/// levels, which C walks to the end (`KNOWN_C_BUGS.md` #50).
+/// levels, which C walks to the end (`KNOWN_C_BUGS.md` row 50).
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Walk {
     /// Steps taken.
@@ -836,7 +836,7 @@ pub(crate) fn cursor_last<'t, const N: usize>(
 /// goes straight to a new sub-DB whose root leaf has no items yet, and
 /// `MDB_APPENDDUP` then appends to that sub-DB. C sets `mc_ki` to
 /// `NUMKEYS - 1` (0xffff) there and compares the new item with a node read
-/// out of bounds (`KNOWN_C_BUGS.md` #32; only reachable with LMDB 1.0's
+/// out of bounds (`KNOWN_C_BUGS.md` row 32; only reachable with LMDB 1.0's
 /// small pages). Here an empty leaf yields `None` with the cursor before
 /// its first slot (`mc_ki` wraps to 0 when the caller moves it on), which
 /// is where C inserts whenever its garbage compares lower.
@@ -995,7 +995,7 @@ fn cursor_next_in<'t, const N: usize>(
         // C returns MDB_NOTFOUND at once for a cursor on the last item of
         // its page. In a write transaction the key may have got more
         // duplicates since, or the tree a page to the right (MDB_APPEND),
-        // so look (KNOWN_C_BUGS.md #28; MDB_PREV_MULTIPLE also leaves a
+        // so look (KNOWN_C_BUGS.md row 28; MDB_PREV_MULTIPLE also leaves a
         // sub-cursor so marked on an earlier page). Only a cursor past its
         // page's end stops here.
         if mc.ki_top() >= mp.num_keys() {

@@ -88,7 +88,7 @@ Each C release's tools are the oracle for their own format: for an LMDB
   `-c`); there is no converting copy yet (`DUAL_FORMAT.md` §4.3).
 * `mdb_drop` without `-s` on a 1.0 environment deletes the named databases
   first, as C 1.0 does, so their pages are freed (0.9 leaks them,
-  `../KNOWN_C_BUGS.md` #21).
+  `../KNOWN_C_BUGS.md` row 21).
 * The options are 0.9's: 1.0's `-L`, `-v`, `-i`, `-m`/`-w` are not there.
 * Not reproduced from C 1.0: its `mdb_env_info` reports the process's map
   address when the file records none, so `mdb_stat10 -e` prints it and
@@ -100,11 +100,11 @@ Each C release's tools are the oracle for their own format: for an LMDB
 
 C 0.9.37 bugs that are not reproduced (see `../KNOWN_C_BUGS.md`):
 
-* **`mdb_load` keeps the flags of the first database** (#1). C 0.9.37
+* **`mdb_load` keeps the flags of the first database** (row 1). C 0.9.37
   ignores the header flags (`dupsort=1`, …) of the first database in its
   input (`flags = 0;` from ITS#8662), so e.g. a dumped `DUP_SORT` main DB
   is reloaded without duplicates.
-* **`mdb_stat -r` exits with 0** (#2). With `-r`/`-rr` but none of `-a`,
+* **`mdb_stat -r` exits with 0** (row 2). With `-r`/`-rr` but none of `-a`,
   `-s`, `-f`, C exits with 1 after printing the reader table (it returns
   the value of the last `fputs`).
 
@@ -126,12 +126,12 @@ unusual input is affected; `mdb_dump` output loads identically):
   trailing junk, and uses the result unchecked: a `maxreaders=-1` line
   makes C create an environment whose lock file is 256 GiB, a
   `mapsize=-1` line one whose recorded map size nothing opens again
-  (#53). Here they are "invalid maxreaders -1", the message C gives a
+  (row 53). Here they are "invalid maxreaders -1", the message C gives a
   value `sscanf` cannot read at all.
 * A flag line (`dupsort=`, `integerkey=`, …) takes only the `1` that
   `mdb_dump` writes for a set flag. C sets the flag for any value, so
   `dupsort=0` in a hand-edited dump turns duplicates on, silently and for
-  good (#55). Here it is "invalid dupsort 0".
+  good (row 55). Here it is "invalid dupsort 0".
 * After loading the main DB with `-a`, the main DB's default comparator is
   restored. C leaves its "always greater" append comparator on the main
   DB, so a named database that follows in the same input is not found in

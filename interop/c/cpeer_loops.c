@@ -617,7 +617,7 @@ out:
 
 /* A snapshot (txnid `t`, in *txn) showed fewer #commits than `max`, seen at
  * txnid `n`. Tolerate this only as C LMDB's reader meta race
- * (KNOWN_C_BUGS.md #31): mdb_txn_renew0 pins `n` in the reader slot, then
+ * (KNOWN_C_BUGS.md row 31): mdb_txn_renew0 pins `n` in the reader slot, then
  * copies the roots from meta page n & 1 without checking that it still holds
  * n. A reader delayed there over two commits copies the roots of a commit
  * m = n + 2 (or n + 4, ...) whose writer may not have published m yet; the
@@ -714,7 +714,8 @@ cmd_reader_loop(struct opts *o)
 		rc = check_snapshot(txn, mdbi, ddbi, (int)(reads % 3 == 2), &commits, buf);
 		if (rc)
 			break;
-		/* #commits never goes down, except in C's meta race (#31). */
+		/* #commits never goes down, except in C's meta race
+		 * (KNOWN_C_BUGS.md row 31). */
 		if (commits < last) {
 			if ((rc = rl_meta_race(env, &txn, mdbi, ddbi, last_id, last, &commits, buf)))
 				break;

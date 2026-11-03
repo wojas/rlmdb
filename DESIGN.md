@@ -131,7 +131,7 @@ Big-endian Linux (s390x) runs under QEMU user emulation
   (`mdb_freelist_save`, line 3169; `midl.h`). Pages listed under txn T may be
   reused once no reader is using a snapshot older than T (`mdb_find_oldest`;
   without a lock file, no reader of this process, from an in-memory table:
-  `KNOWN_C_BUGS.md` #35).
+  `KNOWN_C_BUGS.md` row 35).
   A Rust writer must leave the free DB in exactly the state a C writer would
   accept: every freed page recorded once, no page both free and in use, loose
   pages handled, and overflow pages counted correctly.
@@ -145,7 +145,7 @@ Big-endian Linux (s390x) runs under QEMU user emulation
   x86 and `mdb_cmp_cint` elsewhere (line 1494); C swaps `mdb_cmp_int` for it
   on 8-byte items in `mdb_xcursor_init1` (line 7771), `mdb_cursor_set` for
   `GET_BOTH` (line 6342) and `mdb_dcmp`. The implemented `crate::cmp`
-  module is the reference now; see `KNOWN_C_BUGS.md` #7 for the
+  module is the reference now; see `KNOWN_C_BUGS.md` row 7 for the
   mismatched-size behaviour that is ported on purpose. Otherwise: keys use `mdb_cmp_memnr` for `MDB_REVERSEKEY`, `mdb_cmp_cint`
   for `MDB_INTEGERKEY`, else `mdb_cmp_memn`. Dup data: `MDB_INTEGERDUP` →
   `mdb_cmp_int` if `MDB_DUPFIXED` else `mdb_cmp_cint`; `MDB_REVERSEDUP` →
@@ -172,7 +172,7 @@ through the environment's `format::Layout`. What differs on disk:
 | `F_BIGDATA` node data | the 8-byte pgno | `MDB_ovpage {pgno, txnid, pages}`, 24 bytes |
 | sub-page (`P_SUBP`) | flags `0x52`, 16-byte header | flags `0x42` (no `P_DIRTY`), 24-byte header whose `mp_txnid` is the txnid of the transaction that built it |
 | meta | at 16 | at 24; `mm_flags` may carry `MDB_ENCRYPT`, page 0's last two bytes a checksum size (both refused: `MDB_ENV_ENCRYPTION`, `MDB_BAD_CHECKSUM`) |
-| page size | the OS page size, at most 32 KiB; files of 2 KiB pages and up open (`KNOWN_C_BUGS.md` #48) | any power of two from 256 to 64 KiB (`EnvironmentBuilder::page_size`, `mdb_env_set_pagesize`; 1.0's `mtest` uses 1 KiB) |
+| page size | the OS page size, at most 32 KiB; files of 2 KiB pages and up open (`KNOWN_C_BUGS.md` row 48) | any power of two from 256 to 64 KiB (`EnvironmentBuilder::page_size`, `mdb_env_set_pagesize`; 1.0's `mtest` uses 1 KiB) |
 | maximum key size | 511 | `me_nodemax - 56`: 442 on 1 KiB pages, 1978 on 4 KiB, 8122 on 16 KiB, 32698 on 64 KiB |
 | named database keys | the name | the name with its terminating NUL |
 
@@ -340,7 +340,7 @@ module documentation lists every Windows decision):
   by `UnlockFile` (`mdb_env_share_locks`). The lock is released explicitly
   before the file is closed (`mdb_env_close0`).
 * Readers take no pid lock; `mdb_reader_check` asks whether the process
-  exists (`OpenProcess`; `KNOWN_C_BUGS.md` #42 on C's missing
+  exists (`OpenProcess`; `KNOWN_C_BUGS.md` row 42 on C's missing
   `SYNCHRONIZE` right).
 * The data file map follows the C release of the format: 0.9 extends the file
   to the map size and maps it (`CreateFileMapping`), so a 0.9 data file on
@@ -375,7 +375,7 @@ Both versions:
   snapshot `txnid` into the slot (line 2758). Readers start from
   `metas[mti_txnid & 1]`, not "the newer meta"; only with `mti_txnid == 0`
   in a read-only env does C fall back to the newer meta (line 2825), which
-  rlmdb does not (`KNOWN_C_BUGS.md` #45).
+  rlmdb does not (`KNOWN_C_BUGS.md` row 45).
   `mdb_env_read_header` (line 3804) reads 152 bytes per meta page at offset 0
   and at the first meta's page size. Writers lock `wmutex` for the
   whole write transaction and commit sets `mti_txnid`.
@@ -654,7 +654,7 @@ strings match `mdb_strerror`.
   shares that table and the writer lock (`core::registry`, keyed by device
   and inode). Other processes, and other copies of the library in the
   process, are the caller's job, as `lmdb.h` says for `MDB_NOLOCK`
-  (`KNOWN_C_BUGS.md` #35).
+  (`KNOWN_C_BUGS.md` row 35).
 * Meta pages *are* written concurrently by other processes. Read them with
   volatile reads (`ptr::read_volatile` in `os`) into an owned `Meta` value and
   validate (`magic`, `version`), re-reading as C does at txn begin
@@ -662,7 +662,7 @@ strings match `mdb_strerror`.
   after the copy and retries, where C accepts a torn read). The re-check
   also keeps a process's snapshots monotonic: a delayed C reader can copy
   the meta page of a commit two later than the txnid it pins, and its next
-  snapshot is then older (`KNOWN_C_BUGS.md` #31).
+  snapshot is then older (`KNOWN_C_BUGS.md` row 31).
 * Dirty pages in a write txn are owned `Box<[u8]>` buffers (one per page or
   overflow run), kept in a sorted list by pgno (`ID2L` semantics). Readers in
   the same txn resolve a pgno first in the dirty list, then parent txns'
@@ -825,7 +825,7 @@ design only.
 ## Findings of stage 3 C2
 
 Nested transactions, spilling, `mdb_drop`, env copy; see
-`KNOWN_C_BUGS.md` #18-#22.
+`KNOWN_C_BUGS.md` rows 18-22.
 
 * Nested transactions move the parent's dirty/spilled pages and cursor
   arena into the child (`core/nested.rs`); the parent is borrowed. As in C,
@@ -836,10 +836,10 @@ Nested transactions, spilling, `mdb_drop`, env copy; see
   (`write_differential::diff_spill_full_size`, ignored) ends with the same
   `mdb_stat -a -f` page usage as C. A child inherits its parent's dirty room
   and cannot re-spill pages an ancestor spilled, so it can hit `TXN_FULL`
-  (ported, #22).
+  (ported, row 22).
 * `mdb_drop(del=1)` closes the handle at once (C); an aborting child
-  reopens what it dropped (#20), and an abort closes handles of databases
-  that no longer exist (#19).
+  reopens what it dropped (row 20), and an abort closes handles of databases
+  that no longer exist (row 19).
 * `copy_to_path`/`copy_to_fd` output is byte-identical to `mdb_copy` and
   `mdb_copy -c` (the compacting writer reproduces C's double-buffer reuse,
   so even unused page bytes match).

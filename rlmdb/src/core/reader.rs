@@ -15,7 +15,7 @@
 //! environment keeps a `LocalReaders` table instead, which tracks the read
 //! transactions of this process exactly as the lock file's table would; only
 //! other processes are the caller's business, as in C
-//! (`KNOWN_C_BUGS.md` #35). All `NO_LOCK` handles of one data file in the
+//! (`KNOWN_C_BUGS.md` row 35). All `NO_LOCK` handles of one data file in the
 //! process share one table (`registry::LocalShared`). `ReaderTable` is the
 //! environment's choice of the two.
 //!
@@ -29,7 +29,7 @@
 //!   the end of the open (`LockRegion::downgrade`, `mdb_env_share_locks`),
 //!   publishing the current txnid in `mti_txnid` first. Not kept: where the
 //!   last user removes the semaphores when it closes, an opener that finds
-//!   them gone probes again instead of failing (`KNOWN_C_BUGS.md` #47).
+//!   them gone probes again instead of failing (`KNOWN_C_BUGS.md` row 47).
 //! * The lock file has the version of the environment's data format
 //!   ([`LockLayout`]: version 1 for LMDB 0.9, version 2 for LMDB 1.0,
 //!   `mdb_env_setup_locks` at mdb10.c line 5957). The protocol is the same in
@@ -175,7 +175,7 @@ impl LockRegion {
     /// holding byte 0 exclusively, and an opener that failed its exclusive
     /// probe while that process still held the environment open gets its
     /// shared lock only after they are gone. C fails the open then
-    /// (`KNOWN_C_BUGS.md` #47); we close the lock file, which releases the
+    /// (`KNOWN_C_BUGS.md` row 47); we close the lock file, which releases the
     /// shared lock, and start again with the exclusive probe, which then
     /// either succeeds (we create the locks) or waits for the process that
     /// does create them to downgrade. Locks are only ever created under the

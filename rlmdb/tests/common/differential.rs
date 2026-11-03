@@ -172,7 +172,7 @@ fn rust_step(
 
 /// Removes the duplicate counts (` n=..`) from a step's output: C's cached
 /// counts go stale when another cursor changes the same key's duplicates
-/// (KNOWN_C_BUGS.md #14), Rust's do not. The counts in the DB records are
+/// (KNOWN_C_BUGS.md row 14), Rust's do not. The counts in the DB records are
 /// checked by the page audit at the end of each round instead.
 fn mask_counts(_op: &str, line: &str) -> String {
     line.split(" | ")
@@ -297,7 +297,7 @@ pub struct Profile {
     /// leaf node (1.0's `LEAFSIZE`, both padded to even lengths) is larger
     /// than `nodemax`. For a new key that item goes straight to a new,
     /// empty sub-DB, where C reads a node out of bounds (`KNOWN_C_BUGS.md`
-    /// #32) and goes on unpredictably; only reachable with LMDB 1.0's small
+    /// row 32) and goes on unpredictably; only reachable with LMDB 1.0's small
     /// pages.
     pub appenddup_nodemax: Option<usize>,
 }
@@ -364,7 +364,7 @@ fn gen_data(rng: &mut Rng, p: &Profile) -> Vec<u8> {
 /// `MDB_SET_RANGE` or `MDB_GET_BOTH` is repositioned with `MDB_FIRST` before
 /// anything else uses it (a correct client would not move it; C would use
 /// the stale sub-cursor, or read the node past the last one, `KNOWN_C_BUGS.md`
-/// #4/#6/#14).
+/// rows 4, 6 and 14).
 pub struct Gen<'a> {
     rng: &'a mut Rng,
     p: &'a Profile,
@@ -385,7 +385,7 @@ impl Gen<'_> {
     /// trusts if the page number matches the root: once the root's page
     /// number is reused (1.0 reuses the emptied root at once) and its buffer
     /// replaced (a nested commit), C's `MDB_FIRST`/`MDB_LAST`/`MDB_PREV`
-    /// read freed memory (`KNOWN_C_BUGS.md` #33). Such a cursor is cleared
+    /// read freed memory (`KNOWN_C_BUGS.md` row 33). Such a cursor is cleared
     /// with `MDB_SET_RANGE`, which drops `mc_pg[0]` before searching.
     fn next(&mut self, prev: Option<(&str, &str)>, depth: usize) -> String {
         if let Some((op, line)) = prev {
@@ -443,7 +443,7 @@ impl Gen<'_> {
         // In a nested transaction the ancestors' cursors can be used too.
         let op = gen_op(rng, p, self.ncur * (depth + 1));
         // MDB_CURRENT only on a cursor that is on an item: C asserts or
-        // corrupts otherwise (KNOWN_C_BUGS.md #13).
+        // corrupts otherwise (KNOWN_C_BUGS.md row 13).
         let f: Vec<&str> = op.split(':').collect();
         if f[0] == "cp" && f[4] == MDB_CURRENT.to_string() {
             let on_item = prev.is_some_and(|(_, l)| l.contains(&format!("| c{} rc=0 ", f[1])));
@@ -611,7 +611,7 @@ pub fn dupfixed_1byte_puts(key: &[u8], n: u8) -> Vec<String> {
 /// Where the new item does not fit a node, the op is `cr`: C deletes the
 /// item and puts the new one, which is what rlmdb's `MDB_CURRENT` must
 /// write there (C's would store the item on overflow pages,
-/// `KNOWN_C_BUGS.md` #38). Elsewhere both sides put with `MDB_CURRENT`:
+/// `KNOWN_C_BUGS.md` row 38). Elsewhere both sides put with `MDB_CURRENT`:
 /// items that fit, and one byte over `maxkey` (`MDB_BAD_VALSIZE`, nothing
 /// changed). The other cursor sits on the same item (where the next key
 /// has a single item too) or on the key before it. The replaced keys then
@@ -678,7 +678,7 @@ pub fn current_single_item_script(
             let i = single.next().expect("enough keys");
             // After the delete, the other cursor is on the next key: keep
             // it off duplicates there (C's sub-cursor fixups after a
-            // delete are another matter, KNOWN_C_BUGS.md #18).
+            // delete are another matter, KNOWN_C_BUGS.md row 18).
             let same = same && i + 1 < N && !dups.contains(&(i + 1));
             if replace(&mut ops, i, len, same) {
                 routed_keys.push((i, len));
@@ -813,7 +813,7 @@ fn sub_db_leaf_firsts(o: &dyn Oracle, dbflags: u32, key: &[u8], items: &[Vec<u8>
 }
 
 /// A script (for [`Ops::List`], two cursors, an `MDB_DUPSORT` DB with
-/// `dbflags`, `KNOWN_C_BUGS.md` #56) that puts `n` items of `item_len`
+/// `dbflags`, `KNOWN_C_BUGS.md` row 56) that puts `n` items of `item_len`
 /// bytes under one key, then, from the right, at one boundary between two
 /// leaves of the sub-DB at a time ([`sub_db_leaf_firsts`]), replaces an
 /// item with `MDB_CURRENT`, the other cursor on the item after the next
@@ -993,7 +993,7 @@ pub struct Items {
     pub before: Vec<u8>,
 }
 
-/// `KNOWN_C_BUGS.md` #38: C's `MDB_CURRENT` replacing a key's only item in
+/// `KNOWN_C_BUGS.md` row 38: C's `MDB_CURRENT` replacing a key's only item in
 /// an `MDB_DUPSORT` DB (`dbflags`) by one of `len` bytes that does not fit
 /// a node with the key (of `klen` bytes) stores it on overflow pages. The
 /// oracle's `writeops` builds that state, between two other keys; rlmdb
@@ -1342,7 +1342,7 @@ impl Driver<'_> {
         if matches!(self.ops, Ops::Gen(..)) {
             // A cursor whose cached duplicate count C let go stale is put
             // back on its item with MDB_GET_BOTH, which makes C rebuild its
-            // sub-cursor (KNOWN_C_BUGS.md #14).
+            // sub-cursor (KNOWN_C_BUGS.md row 14).
             for n in 0..cl.split(" | ").count().saturating_sub(1) {
                 if count_of(&cl, n) != count_of(&rl_raw, n) {
                     if let Some((k, d)) = item_of(&rl_raw, n) {
@@ -1355,7 +1355,7 @@ impl Driver<'_> {
         let cl = mask_counts(&op, &cl);
         if cl != rl && self.dupsort {
             if let Some(stale) = stale_subcursors(&op, &cl, &rl) {
-                // KNOWN_C_BUGS.md #18: C left these cursors' sub-cursors
+                // KNOWN_C_BUGS.md row 18: C left these cursors' sub-cursors
                 // stale; put them on Rust's (correct) item, which makes C
                 // set the sub-cursor up again.
                 for n in stale {
@@ -1363,7 +1363,7 @@ impl Driver<'_> {
                         self.heal.push_back(format!("g:{n}:{MDB_GET_BOTH}:{k}:{d}"));
                     }
                 }
-                eprintln!("NOTE: {tag}: stale C sub-cursor after step {i} (known bug #18)");
+                eprintln!("NOTE: {tag}: stale C sub-cursor after step {i} (known bug, row 18)");
                 self.prev = Some((op, rl));
                 self.i += 1;
                 return true;
@@ -1372,7 +1372,7 @@ impl Driver<'_> {
         if cl != rl {
             let prev = self.prev.as_ref().map(|(_, l)| l.as_str());
             if let Some(n) = stale_eof(&op, prev, &cl, &rl) {
-                // KNOWN_C_BUGS.md #28: C's cursor kept a C_EOF from before
+                // KNOWN_C_BUGS.md row 28: C's cursor kept a C_EOF from before
                 // and stopped although items were added after it; put it
                 // where Rust's (correctly) went.
                 if let Some((k, d)) = item_of(&rl, n) {
@@ -1382,7 +1382,7 @@ impl Driver<'_> {
                         format!("g:{n}:{MDB_SET}:{k}")
                     });
                 }
-                eprintln!("NOTE: {tag}: stale C_EOF in C at step {i} (known bug #28)");
+                eprintln!("NOTE: {tag}: stale C_EOF in C at step {i} (known bug, row 28)");
                 self.prev = Some((op, rl));
                 self.i += 1;
                 return true;
@@ -1483,7 +1483,7 @@ impl Driver<'_> {
                 op.split(':').next().unwrap_or(""),
             ) {
                 if count_of(pc, n) != count_of(pr, n) {
-                    // KNOWN_C_BUGS.md #14: C's cached count for this cursor
+                    // KNOWN_C_BUGS.md row 14: C's cached count for this cursor
                     // is stale; its delete would act on it (and may lose
                     // data).
                     eprintln!("NOTE: {}: stale C count before step {}", self.tag, self.i);
@@ -1740,7 +1740,7 @@ pub fn run_round_sized(
     );
     let (code, stdout, stderr) = o.check_freelist(cdir.path());
     if code != 0 {
-        // KNOWN_C_BUGS.md #14: C's MDB_NODUPDATA cursor delete subtracts a
+        // KNOWN_C_BUGS.md row 14: C's MDB_NODUPDATA cursor delete subtracts a
         // stale duplicate count, so only md_entries may be off.
         let only_entries = stderr.lines().all(|l| {
             !l.starts_with("cpeer:") || {
@@ -1761,7 +1761,7 @@ pub fn run_round_sized(
             only_entries,
             "{tag}: check-freelist of C:\n{stdout}\n{stderr}"
         );
-        eprintln!("NOTE: {tag}: C miscounted entries (known bug #14)");
+        eprintln!("NOTE: {tag}: C miscounted entries (known bug, row 14)");
         return Round::Same;
     }
     if map_size > 64 << 20 {
@@ -1874,7 +1874,7 @@ fn cursor_of(op: &str) -> Option<usize> {
     }
 }
 
-/// `KNOWN_C_BUGS.md` #18: after a delete (`d`, `cd`) moved cursors onto
+/// `KNOWN_C_BUGS.md` row 18: after a delete (`d`, `cd`) moved cursors onto
 /// a key with duplicates, C's cursors whose sub-cursor was still marked
 /// initialised from an earlier key report `MDB_NOTFOUND` or another
 /// duplicate of that key. Returns the cursors that differ only that way,
@@ -1906,7 +1906,7 @@ fn stale_subcursors(op: &str, cl: &str, rl: &str) -> Option<Vec<usize>> {
     (!stale.is_empty()).then_some(stale)
 }
 
-/// `KNOWN_C_BUGS.md` #28: C's cursor kept a `C_EOF` from an earlier move
+/// `KNOWN_C_BUGS.md` row 28: C's cursor kept a `C_EOF` from an earlier move
 /// (`MDB_LAST`, a failed `MDB_NEXT`, an `MDB_SET` that did not clear it)
 /// although items were added after it since: `MDB_NEXT` & co. report
 /// `MDB_NOTFOUND`, and `MDB_GET_MULTIPLE` fetches nothing and stays put,
@@ -1948,7 +1948,7 @@ fn stale_eof(op: &str, prev: Option<&str>, cl: &str, rl: &str) -> Option<usize> 
 }
 
 /// C results that come from reading an unchecked node past the end of a
-/// page (`KNOWN_C_BUGS.md` #13): `MDB_CURRENT` on a cursor that is not on
+/// page (`KNOWN_C_BUGS.md` row 13): `MDB_CURRENT` on a cursor that is not on
 /// an item. Rust reports `MDB_NOTFOUND`.
 fn known_c_bug(op: &str, cl: &str, rl: &str) -> bool {
     op.starts_with("cp:")

@@ -19,7 +19,7 @@ fn env(dir: &std::path::Path) -> Environment {
 /// `MDB_GET_MULTIPLE` on a key with a single item, reached by moving off a
 /// key with duplicates: the sub-cursor is still initialised for the other
 /// key. Rust used to fail with `MDB_CORRUPTED`; C returns the other key's
-/// duplicates (KNOWN_C_BUGS.md #27). Nothing to fetch is the answer.
+/// duplicates (KNOWN_C_BUGS.md row 27). Nothing to fetch is the answer.
 #[test]
 fn get_multiple_on_a_single_item_after_a_key_with_duplicates() {
     let dir = tempfile::tempdir().unwrap();
@@ -123,7 +123,7 @@ fn cursor_ops_after_a_failed_set_on_dupfixed() {
     txn.commit().unwrap();
 
     // Each case: reset the cursor with MDB_FIRST (which also clears a
-    // C_EOF that MDB_SET's shortcuts would keep, KNOWN_C_BUGS.md #28), fail
+    // C_EOF that MDB_SET's shortcuts would keep, KNOWN_C_BUGS.md row 28), fail
     // a search, then probe.
     const PROBES: &[&str] = &[
         "prev_multiple",
@@ -211,9 +211,9 @@ fn cursor_ops_after_a_failed_set_on_dupfixed() {
     assert_eq!(c_lines.len(), rust.len());
     for (i, (cl, rl)) in c_lines.iter().zip(&rust).enumerate() {
         // MDB_GET_MULTIPLE with nothing to fetch: C leaves `data` untouched,
-        // Rust returns it empty (KNOWN_C_BUGS.md #8).
+        // Rust returns it empty (KNOWN_C_BUGS.md row 8).
         let cl = cl.replacen("get_multiple rc=0 d=- ", "get_multiple rc=0 d= ", 1);
-        // KNOWN_C_BUGS.md #4: past the end of a leaf page C's
+        // KNOWN_C_BUGS.md row 4: past the end of a leaf page C's
         // mdb_cursor_next reads the pointer slot NUMKEYS from the free
         // space; a stale one naming an F_DUPDATA node makes MDB_NEXT_MULTIPLE
         // "succeed" with the stale sub-cursor's duplicates while the cursor
@@ -442,7 +442,7 @@ fn item(k: &str, d: &str) -> Option<(Vec<u8>, Vec<u8>)> {
 /// After a delete earlier on its leaf page, a cursor on a key with
 /// duplicates returned its current item again on `MDB_NEXT`: C's
 /// `mdb_cursor_del0` marks the sub-cursor of every cursor at or after the
-/// deleted node `C_DEL` (KNOWN_C_BUGS.md #29).
+/// deleted node `C_DEL` (KNOWN_C_BUGS.md row 29).
 #[test]
 fn next_after_a_delete_before_the_cursor() {
     let dir = tempfile::tempdir().unwrap();
@@ -473,7 +473,7 @@ fn next_after_a_delete_before_the_cursor() {
 /// A sub-cursor marked `C_DEL` by a delete that moved its cursor onto a key
 /// without duplicates: when another cursor gives that key a second item,
 /// C's `mdb_xcursor_init2` only adds `C_INITIALIZED`, and the cursor's
-/// next `MDB_NEXT` returned its item again (KNOWN_C_BUGS.md #29).
+/// next `MDB_NEXT` returned its item again (KNOWN_C_BUGS.md row 29).
 #[test]
 fn next_after_another_cursor_adds_a_duplicate() {
     let dir = tempfile::tempdir().unwrap();
@@ -497,7 +497,7 @@ fn next_after_another_cursor_adds_a_duplicate() {
 
 /// `MDB_LAST` leaves `C_EOF` set; C's `mdb_cursor_next` then returns
 /// `MDB_NOTFOUND` without looking, even after items were added after the
-/// cursor (KNOWN_C_BUGS.md #28): a duplicate of the last key, or a key
+/// cursor (KNOWN_C_BUGS.md row 28): a duplicate of the last key, or a key
 /// that `MDB_APPEND` put alone on a new page.
 #[test]
 fn next_after_last_sees_items_added_after_it() {
@@ -581,7 +581,7 @@ fn next_after_last_sees_items_added_after_it() {
 /// one) and deleted it: `mdb_cursor_del0` skipped setting up the
 /// sub-cursor for the key with duplicates the cursor moved onto, because
 /// of the stale `C_EOF`, so `MDB_GET_CURRENT` failed with `EINVAL`
-/// (KNOWN_C_BUGS.md #28; found by the model test, seed 28).
+/// (KNOWN_C_BUGS.md row 28; found by the model test, seed 28).
 #[test]
 fn delete_by_a_cursor_with_a_stale_eof() {
     let dir = tempfile::tempdir().unwrap();
@@ -724,7 +724,7 @@ fn a_panicking_comparator_fails_the_transaction() {
 
 /// `MDB_MULTIPLE` with an item equal to the key's only item (stored
 /// without a sub-page): C stops there, so the later items are never
-/// written and the count tells the caller none were (KNOWN_C_BUGS.md #30).
+/// written and the count tells the caller none were (KNOWN_C_BUGS.md row 30).
 #[test]
 fn put_multiple_does_not_stop_at_an_existing_single_item() {
     let dir = tempfile::tempdir().unwrap();

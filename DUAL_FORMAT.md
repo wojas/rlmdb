@@ -454,33 +454,33 @@ the Rust and C peers open without it.
 
 ## 5. Upstream 1.x bugs found by lmdb-go (label `upstream-bug`)
 
-* **#45, `mdb_cursor_close` use-after-free** when a read-only cursor is
-  closed after its transaction ended (1.0.0, 1.0.1, still in 1.0.2:
-  `MDB_CURSOR_UNREF` reads `mc_txn->mt_env` before the "do not peek" guard).
-  Comes from the reader page cache, not the format. rlmdb cannot have it:
-  cursors borrow their transaction. It matters for the oracle: the C 1.0
-  peer and C programs in tests must close cursors before aborting, or carry
-  lmdb-go's `cursor-close-after-txn.patch`. The C peer closes every cursor
-  before its transaction ends (`c/cpeer*.c`), so `cpeer10` does not reach
-  it: the matrix of stage 5 ran without a crash of a C 1.0 program,
-  `cpeer_capi` on rlmdb running the same code.
-* **#44, double free of `mt_u.dirty_list`** when a nested write transaction
-  fails to begin under memory pressure (0.9.34+, 1.0.x; ITS#10342 fallout).
-  Not format related; rlmdb's nested transactions own their lists. Only
-  reachable under `malloc` failure, so it does not affect the differential
-  tests, nor the matrix: `nested_txns`, `reader_loop_during_nested` and
-  the writer loops (a nested transaction in one of six transactions) pass
-  with C 1.0 in every pair.
-* **#47, 0.9.36 regressions.** (a) `MDB_USE_PWRITEV` build break, Linux
-  only, irrelevant to rlmdb except when building the oracle with that
-  option. (b) ITS#9388 page counts for DUPSORT: the vendored
+* **PowerDNS/lmdb-go#45, `mdb_cursor_close` use-after-free** when a
+  read-only cursor is closed after its transaction ended (1.0.0, 1.0.1,
+  still in 1.0.2: `MDB_CURSOR_UNREF` reads `mc_txn->mt_env` before the "do
+  not peek" guard). Comes from the reader page cache, not the format. rlmdb
+  cannot have it: cursors borrow their transaction. It matters for the
+  oracle: the C 1.0 peer and C programs in tests must close cursors before
+  aborting, or carry lmdb-go's `cursor-close-after-txn.patch`. The C peer
+  closes every cursor before its transaction ends (`c/cpeer*.c`), so
+  `cpeer10` does not reach it: the matrix of stage 5 ran without a crash of
+  a C 1.0 program, `cpeer_capi` on rlmdb running the same code.
+* **PowerDNS/lmdb-go#44, double free of `mt_u.dirty_list`** when a nested
+  write transaction fails to begin under memory pressure (0.9.34+, 1.0.x;
+  ITS#10342 fallout). Not format related; rlmdb's nested transactions own
+  their lists. Only reachable under `malloc` failure, so it does not affect
+  the differential tests, nor the matrix: `nested_txns`,
+  `reader_loop_during_nested` and the writer loops (a nested transaction in
+  one of six transactions) pass with C 1.0 in every pair.
+* **PowerDNS/lmdb-go#47, 0.9.36 regressions.** (a) `MDB_USE_PWRITEV` build
+  break, Linux only, irrelevant to rlmdb except when building the oracle
+  with that option. (b) ITS#9388 page counts for DUPSORT: the vendored
   `tests/lmdb-c/0.9` already carries the follow-up fixes (ITS#10642,
   ITS#10643, same on both release branches), so the oracle is right; the
-  open point in #47 remains: files written by 0.9.35 count sub-tree pages
-  differently and nothing marks which convention a file uses, so after an
-  upgrade the counters are mixed. rlmdb follows C here (it must keep the
-  same `MDB_db` numbers) and should say so in `KNOWN_C_BUGS.md`. (c) The
-  intentional change that empty `MDB_DUPSORT` values are now
+  open point in PowerDNS/lmdb-go#47 remains: files written by 0.9.35 count
+  sub-tree pages differently and nothing marks which convention a file uses,
+  so after an upgrade the counters are mixed. rlmdb follows C here (it must
+  keep the same `MDB_db` numbers) and should say so in `KNOWN_C_BUGS.md`.
+  (c) The intentional change that empty `MDB_DUPSORT` values are now
   `MDB_BAD_VALSIZE` is in both 0.9.36 and 1.0.
 
 ## 6. Decisions taken (owner, 2026-10-30)

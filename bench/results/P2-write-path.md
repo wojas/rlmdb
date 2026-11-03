@@ -672,7 +672,7 @@ paths changed here). What the rebase changed in this work:
 * `MDB_APPEND` now positions with `cursor_last_for_append` on the read
   path, where an empty leaf yields no last key (the cursor stays before
   its first slot, `mc_ki` 0xffff, and the new key goes there:
-  `KNOWN_C_BUGS.md` #32). `RwTxn::seek_last` does the same on the write
+  `KNOWN_C_BUGS.md` row 32). `RwTxn::seek_last` does the same on the write
   cursor's own stack: it hands its closure `Option<&[u8]>`, sets `mc_ki` to
   0xffff and the flags as there for an empty leaf, and `put_position`
   treats `None` as `Ordering::Greater` on both paths before moving `mc_ki`

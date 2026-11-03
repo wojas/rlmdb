@@ -289,7 +289,7 @@ pub unsafe extern "C" fn mdb_cursor_get(
                     unsafe { *key = k };
                 }
                 // MDB_GET_MULTIPLE with nothing to fetch: C returns success
-                // and leaves `data` untouched (KNOWN_C_BUGS.md #8).
+                // and leaves `data` untouched (KNOWN_C_BUGS.md row 8).
                 if !(op == CursorOp::GetMultiple && d.mv_size == 0) && !data.is_null() {
                     // SAFETY: data is non-NULL and writable (lmdb.h).
                     unsafe { *data = d };

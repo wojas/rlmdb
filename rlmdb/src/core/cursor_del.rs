@@ -121,7 +121,7 @@ impl<'env> RwTxn<'env> {
                 // the sub-cursor was never set up for this key (after a
                 // failed MDB_SET/MDB_GET_BOTH): it would subtract another
                 // key's count, or drop another key's sub-DB. Read the
-                // record of this node instead (KNOWN_C_BUGS.md #14).
+                // record of this node instead (KNOWN_C_BUGS.md row 14).
                 self.xcursor_init1(mc)?;
                 // cursor_del0 will subtract the final entry.
                 let n = self.db_of(mx).entries;
@@ -135,7 +135,7 @@ impl<'env> RwTxn<'env> {
                     x.subp = true;
                 }
                 // The sub-cursor keeps its position; make sure its record
-                // is this key's (KNOWN_C_BUGS.md #14).
+                // is this key's (KNOWN_C_BUGS.md row 14).
                 self.refresh_xdb(mc)?;
                 self.del_at(mx, MDB_NOSPILL)?;
                 // If sub-DB still has entries, we're done.
@@ -274,7 +274,7 @@ impl<'env> RwTxn<'env> {
             }
             // (C also skips cursors with C_EOF here; m3 is on an item now,
             // and C_EOF may be left from before, e.g. by an MDB_SET that
-            // did not clear it: KNOWN_C_BUGS.md #28.)
+            // did not clear it: KNOWN_C_BUGS.md row 28.)
             if !m3.sub && self.w.cursors.slot(s).is_some_and(|sl| sl.x.is_some()) {
                 let nflags = {
                     let p = self.top_page(m3)?;
@@ -290,7 +290,7 @@ impl<'env> RwTxn<'env> {
                     // (A cursor the delete moved here starts at the first
                     // duplicate even if its sub-cursor still looks set up:
                     // the deleting cursor's can be left from an earlier
-                    // key, KNOWN_C_BUGS.md #18.)
+                    // key, KNOWN_C_BUGS.md row 18.)
                     if moved || !self.cur(mx).is_init() {
                         self.xcursor_init1(m3)?;
                         self.read_op(mx, |txn, c, _| cursor_first(txn, c, None).map(|_| ()))?;
@@ -299,7 +299,7 @@ impl<'env> RwTxn<'env> {
                 // Its next MDB_NEXT must not skip the node's first
                 // duplicate. C marks the sub-cursor of every cursor at or
                 // after the deleted node, so one that stayed on its item
-                // returns that item again (KNOWN_C_BUGS.md #29).
+                // returns that item again (KNOWN_C_BUGS.md row 29).
                 if moved {
                     self.cur_mut(CRef::sub(s)).flags |= C_DEL;
                 }
@@ -966,7 +966,7 @@ impl<'env> RwTxn<'env> {
     /// The freed pages go on this transaction's free list, even those it
     /// dirtied itself (which C writes at commit anyway). The handle is
     /// closed for every transaction at once, as in C; if this is a nested
-    /// transaction that aborts, it is reopened (KNOWN_C_BUGS.md #20).
+    /// transaction that aborts, it is reopened (KNOWN_C_BUGS.md row 20).
     pub(crate) fn mdb_drop(&mut self, dbi: usize, del: bool) -> Result<()> {
         if dbi == MAIN_DBI as usize && self.layout().drops_named_dbs_with_main() {
             let main_flags = u32::from(self.core.dbs.borrow()[dbi].db.flags);
@@ -1131,7 +1131,7 @@ impl<'env> RwTxn<'env> {
         // each named once: a walk that visits more, or a free list that
         // would hold more pages than there are, is over branch pages that
         // share children, which would put the shared pages on the free list
-        // once per path to them (`KNOWN_C_BUGS.md` #50).
+        // once per path to them (`KNOWN_C_BUGS.md` row 50).
         let limit = self.core.next_pgno;
         let mut visits = 0u64;
         while self.cur(mc).snum > 0 {

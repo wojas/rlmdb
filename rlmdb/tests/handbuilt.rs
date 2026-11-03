@@ -577,7 +577,7 @@ fn root_split_beyond_the_cursor_stack_fails_the_txn() {
 /// compacting copy writes a page once per path to it, which C's
 /// `mdb_env_cwalk` does without bound (4^12 pages for a file of 15 here).
 /// The copy stops with `MDB_CORRUPTED` as soon as it would hold more pages
-/// than the file (`KNOWN_C_BUGS.md` #44); a plain copy is unaffected.
+/// than the file (`KNOWN_C_BUGS.md` row 44); a plain copy is unaffected.
 #[test]
 fn compacting_copy_of_shared_pages_stops_at_the_source_size() {
     const LEVELS: u64 = 12;
@@ -655,7 +655,7 @@ fn empty_file(layout: &Layout, ps: usize) -> Vec<u8> {
 /// none (it uses the OS page size) but opens them, and its largest key and
 /// `MDB_DUPSORT` item (511 bytes) no longer fits their nodes, a `P_LEAF2`
 /// page holding a single such item: C writes past its pages
-/// (`KNOWN_C_BUGS.md` #48). rlmdb opened them and panicked splitting a
+/// (`KNOWN_C_BUGS.md` row 48). rlmdb opened them and panicked splitting a
 /// `MDB_DUPFIXED` page of 512 bytes (the first put of a 511-byte item).
 /// They are refused with `MDB_INVALID`, read-write and read-only; at 2 KiB
 /// pages of items of the largest size split as at any other size.
@@ -783,7 +783,7 @@ fn merge_with_a_lying_depth_commits() {
 /// writer takes `mm_last_pg + 1` as its next new page, so with 0 the
 /// first put of a transaction built its root leaf on page 1 and the commit
 /// wrote it over meta page 1, after which the environment no longer
-/// opened; C does the same (`KNOWN_C_BUGS.md` #49). Every transaction on
+/// opened; C does the same (`KNOWN_C_BUGS.md` row 49). Every transaction on
 /// such a snapshot fails to begin with `MDB_CORRUPTED` and the file stays
 /// as it was: for 0 recorded when the environment is opened, and for
 /// `u64::MAX` (which the open refuses) written into the newest meta page
@@ -922,7 +922,7 @@ const SHARED_LEVELS: u64 = 20;
 /// writer of the environment then waits), in the compacting copy's count
 /// of free pages and in `mdb_stat -f`. Free DB keys are unique and ascend,
 /// so each of these fails with `MDB_CORRUPTED` at the second sight of the
-/// record (`KNOWN_C_BUGS.md` #50): a put (the transaction fails with it),
+/// record (`KNOWN_C_BUGS.md` row 50): a put (the transaction fails with it),
 /// `Environment::freelist`, the compacting copy; a plain cursor walk is
 /// stopped by its step limit ([`Walk`](rlmdb)). The file is unchanged.
 #[test]
@@ -982,7 +982,7 @@ fn walks_of_a_free_db_with_shared_children_stop() {
 /// keys over and over, 4^20 times in C, and so do `mdb_dump` and every
 /// other walk of the tree. A walk stops with `MDB_CORRUPTED` once it has
 /// stepped onto more leaves than the snapshot has pages (`Walk`,
-/// `KNOWN_C_BUGS.md` #50), forward and backward, in read and in write
+/// `KNOWN_C_BUGS.md` row 50), forward and backward, in read and in write
 /// transactions, having returned each key at most that many times.
 #[test]
 fn cursor_walks_over_shared_children_stop() {
@@ -1088,7 +1088,7 @@ fn queue_walks_in_a_write_txn_are_not_bounded_by_the_file() {
 /// failed with `MDB_CORRUPTED`); with 20 levels of 4 the list outgrows
 /// memory first. `clear_db` fails with `MDB_CORRUPTED` once the walk has
 /// visited more pages, or listed more, than the file has
-/// (`KNOWN_C_BUGS.md` #50), also where it scans the leaves (here because
+/// (`KNOWN_C_BUGS.md` row 50), also where it scans the leaves (here because
 /// `md_overflow_pages` says there are overflow pages), and the file stays
 /// as it was. A root naming one leaf twice gets past that (three entries
 /// in a file of four pages); its commit fails, since the free list is not

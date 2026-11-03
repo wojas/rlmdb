@@ -469,7 +469,7 @@ impl<'env> RwTxn<'env> {
     /// created (`DB_NEW`); a handle the transaction opened for a database
     /// that it (or a committed child) had created after the first handle
     /// was closed (`drop_db`) would stay open in C and refer to nothing,
-    /// and `create_db` would return it (KNOWN_C_BUGS.md #19).
+    /// and `create_db` would return it (KNOWN_C_BUGS.md row 19).
     pub(crate) fn close_vanished_handles(&mut self, main: Db) {
         let registry = &self.core.env.dbis;
         let candidates: Vec<usize> = self
@@ -786,7 +786,7 @@ impl<'env> RwTxn<'env> {
     /// Emptying the main DB of an environment with named databases differs
     /// between the formats, as between C 0.9 and C 1.0. LMDB 0.9 removes
     /// their records but frees none of their pages, which leak
-    /// (`KNOWN_C_BUGS.md` #21). LMDB 1.0 deletes every named database first
+    /// (`KNOWN_C_BUGS.md` row 21). LMDB 1.0 deletes every named database first
     /// ([`RwTxn::drop_db`], so their pages are freed), and fails with
     /// `MdbError::DbisBusy` while a handle of a named database is open in the
     /// environment (unless the main DB is `DUP_SORT` or `INTEGER_KEY`, which

@@ -567,7 +567,7 @@ down (but see below). Every third snapshot walks the main DB backwards.
 Prints `READY` after the first snapshot, then `reads=<n>
 first_commit=<#commits> last_commit=<#commits> meta_races=<n>`.
 
-C LMDB's reader can see `#commits` go down (`KNOWN_C_BUGS.md` #31):
+C LMDB's reader can see `#commits` go down (`KNOWN_C_BUGS.md` row 31):
 `mdb_txn_renew0` copies the roots from meta page `txnid & 1` without
 checking that it still holds that txnid, so a reader delayed over two
 commits gets the roots of a commit `m` later than the txnid it pins, and

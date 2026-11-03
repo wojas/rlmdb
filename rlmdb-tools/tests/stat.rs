@@ -1,6 +1,6 @@
 //! `mdb_stat`: the Rust tool against the C tool on every test environment
 //! and option combination (identical stdout, stderr and exit code), plus
-//! the documented exit-code fix for `-r` (KNOWN_C_BUGS.md #2).
+//! the documented exit-code fix for `-r` (KNOWN_C_BUGS.md row 2).
 
 mod common;
 
@@ -202,7 +202,7 @@ fn posixly_correct() {
 }
 
 /// `-r` alone: same output, but exit code 0 where C exits 1
-/// (KNOWN_C_BUGS.md #2: the result of the last `fputs`, which is 0 with
+/// (KNOWN_C_BUGS.md row 2: the result of the last `fputs`, which is 0 with
 /// the Windows C runtime and OpenBSD's libc, so there C exits 0 too). With
 /// `-a`/`-s`/`-f` both exit 0.
 #[test]

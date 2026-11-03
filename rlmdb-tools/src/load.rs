@@ -27,7 +27,7 @@
 //! Deliberate differences from C 0.9.37:
 //!
 //! * The header flags of the *first* database (`dupsort=1`, …) are used;
-//!   C drops them (`KNOWN_C_BUGS.md` #1).
+//!   C drops them (`KNOWN_C_BUGS.md` row 1).
 //! * `format=` applies to the database whose header it is in; C keeps
 //!   `print` mode for all later databases once one header selected it.
 //! * A header line without `=` is "unexpected format" (fatal); C searches
@@ -197,7 +197,7 @@ impl Input {
                 line.starts_with(name.as_bytes()) && line.get(name.len()) == Some(&b'=')
             }) {
                 // `<flag>=1`, as mdb_dump writes a set flag. C sets the flag
-                // for any value (`dupsort=0` too, KNOWN_C_BUGS.md #55).
+                // for any value (`dupsort=0` too, KNOWN_C_BUGS.md row 55).
                 let value = cstr(strip_newline(&line[name.len() + 1..]));
                 if value != b"1" {
                     self.message(&[b"invalid ", name.as_bytes(), b" ", value, b"\n"].concat());
@@ -233,7 +233,7 @@ impl Input {
     /// them with `sscanf`, which also takes a sign, blanks and trailing
     /// junk, so `maxreaders=-1` passes as four billion readers (a 256 GiB
     /// lock file) and `mapsize=-1` as a map size nothing opens again
-    /// (`KNOWN_C_BUGS.md` #53). Anything else is "invalid <what>", C's
+    /// (`KNOWN_C_BUGS.md` row 53). Anything else is "invalid <what>", C's
     /// message for a value `sscanf` cannot read at all.
     fn plain_decimal(&self, rest: &[u8], what: &str) -> Result<u64, ()> {
         let text = cstr(strip_newline(rest));
@@ -475,7 +475,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     while !loader.input.eof {
         if first {
             // The first header was read before opening the environment.
-            // C resets its flags here (KNOWN_C_BUGS.md #1); we keep them.
+            // C resets its flags here (KNOWN_C_BUGS.md row 1); we keep them.
             first = false;
         } else if !o.plain && loader.input.read_header(&mut hdr).is_err() {
             return EXIT_FAILURE;

@@ -219,7 +219,7 @@ unsafe fn put_result(
 /// returns the existing data), `MDB_RESERVE` (`data->mv_size` bytes are
 /// reserved and `data->mv_data` returns their address, valid until the
 /// next change in the transaction; not for `MDB_DUPSORT` databases, which
-/// get `EINVAL`, see `KNOWN_C_BUGS.md` #16), `MDB_APPEND`,
+/// get `EINVAL`, see `KNOWN_C_BUGS.md` row 16), `MDB_APPEND`,
 /// `MDB_APPENDDUP`. Other flags give `EINVAL`. `EACCES` in a read-only
 /// transaction.
 #[no_mangle]

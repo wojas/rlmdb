@@ -3,7 +3,7 @@
  *
  *   capi_limits <env-dir>
  *
- * - mdb_env_set_maxdbs beyond MAX_DBS_LIMIT (1 << 20) is EINVAL (#54).
+ * - mdb_env_set_maxdbs beyond MAX_DBS_LIMIT (1 << 20) is EINVAL (row 54).
  *
  * Prints "capi_limits: N checks, F failures" and exits 1 on failures.
  */

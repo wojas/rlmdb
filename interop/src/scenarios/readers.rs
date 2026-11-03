@@ -135,7 +135,7 @@ impl Clearer {
     }
 
     /// Whether the check counts a process as alive while a handle to it is
-    /// open: C's `mdb_reader_check` on Windows (`KNOWN_C_BUGS.md` #42), in
+    /// open: C's `mdb_reader_check` on Windows (`KNOWN_C_BUGS.md` row 42), in
     /// the C peers and C's `mdb_stat`. rlmdb's check (the Rust peer, the C
     /// peer on rlmdb) sees that the process has exited.
     fn needs_handles_closed(self) -> bool {
@@ -160,7 +160,7 @@ fn rewrite(pair: &Pair, env: &TestEnv, old: &DataSet, new: &DataSet) -> Result<u
 /// On Windows the harness keeps a handle to the dead reader until the check
 /// ([`PeerProcess::kill_keeping_pid`](crate::PeerProcess::kill_keeping_pid)),
 /// so that no new process gets its id. C's check sees it as alive while
-/// that handle is open (`KNOWN_C_BUGS.md` #42), and clears it once the
+/// that handle is open (`KNOWN_C_BUGS.md` row 42), and clears it once the
 /// handle is closed; rlmdb's clears it at once.
 fn stale_reader(pair: &Pair, holder: Peer, clearer: Clearer) -> Result<()> {
     let env = new_env(pair, 512 * MIB)?;
@@ -218,7 +218,7 @@ fn stale_reader(pair: &Pair, holder: Peer, clearer: Clearer) -> Result<()> {
         ensure!(
             cleared == 0,
             "{clearer} cleared {cleared} slots while a handle to the dead {holder} \
-             reader {pid} was open (C counts that as alive, KNOWN_C_BUGS.md #42)"
+             reader {pid} was open (C counts that as alive, KNOWN_C_BUGS.md row 42)"
         );
         dead.close();
         clearer.clear(&env)?

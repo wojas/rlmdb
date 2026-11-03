@@ -184,7 +184,7 @@ impl<'env> RwTxn<'env> {
 
     /// For `MDB_CURRENT` on a duplicate in a sub-DB tree: would C's
     /// replacement leave the new item `item` where searches do not look
-    /// for it (`KNOWN_C_BUGS.md` #56)?
+    /// for it (`KNOWN_C_BUGS.md` row 56)?
     ///
     /// C keeps the new item in the old one's leaf, at the old one's index
     /// (`_mdb_cursor_put`, `current:`): in place for an item of the same
@@ -275,7 +275,7 @@ impl<'env> RwTxn<'env> {
     /// delete the item under `mc`, then put `data` under `key` through
     /// `mc` (which ends on it), as `mdb_cursor_del` + `mdb_cursor_put`
     /// would. For the replacements C gets wrong in place
-    /// (`KNOWN_C_BUGS.md` #15, #38, #56). Once the delete is done a failed
+    /// (`KNOWN_C_BUGS.md` rows 15, 38 and 56). Once the delete is done a failed
     /// insert leaves the transaction half changed, so it fails.
     fn replace_current(&mut self, mc: CRef, key: &[u8], data: PutData<'_>) -> Result<()> {
         self.del_at(mc, 0)?;
@@ -381,7 +381,7 @@ impl<'env> RwTxn<'env> {
         let dupsort = u32::from(db.flags) & MDB_DUPSORT != 0;
         if !self.cur(mc).is_sub() && u32::from(db.flags) & MDB_DUPFIXED != 0 && !dupsort {
             // DUPFIXED needs DUPSORT (lmdb.h). C builds P_LEAF2 pages with a
-            // key size of 0 and corrupts them (KNOWN_C_BUGS.md #17).
+            // key size of 0 and corrupts them (KNOWN_C_BUGS.md row 17).
             return Err(MdbError::Incompatible.into());
         }
         if dupsort && data.size.wrapping_sub(1) >= max_key {
@@ -408,7 +408,7 @@ impl<'env> RwTxn<'env> {
             // duplicate put reads as inline data. Delete and insert
             // instead, before anything else, as mdb_cursor_del and
             // mdb_cursor_put would: the item goes to a sub-DB, as a new
-            // key's first item of that size does (KNOWN_C_BUGS.md #38).
+            // key's first item of that size does (KNOWN_C_BUGS.md row 38).
             self.replace_current(mc, key, data)?;
             return Ok(0);
         }
@@ -423,7 +423,7 @@ impl<'env> RwTxn<'env> {
                 // find it, and later puts would land out of order. Delete
                 // and insert instead, before anything else, as
                 // mdb_cursor_del and mdb_cursor_put would (KNOWN_C_BUGS.md
-                // #56).
+                // row 56).
                 self.replace_current(mc, key, PutData::bytes(item))?;
                 return Ok(usize::from(flags & MDB_MULTIPLE != 0));
             }
@@ -509,7 +509,7 @@ impl<'env> RwTxn<'env> {
             }
             // C does not check that the cursor is on an item and asserts
             // in mdb_node_del (or corrupts the page without assertions);
-            // KNOWN_C_BUGS.md #13.
+            // KNOWN_C_BUGS.md row 13.
             if self.cur(mc).ki_top() >= self.top_page(mc)?.num_keys() {
                 return Err(MdbError::NotFound.into());
             }
@@ -573,7 +573,7 @@ impl<'env> RwTxn<'env> {
     /// `MDB_DUPFIXED` items must all have one size. C does not check and
     /// copies `md_pad` bytes regardless (reading past a shorter item), so a
     /// mismatch would corrupt the sub-page; we fail with `MDB_BAD_VALSIZE`
-    /// before changing anything (`KNOWN_C_BUGS.md` #12).
+    /// before changing anything (`KNOWN_C_BUGS.md` row 12).
     fn check_dupfixed_size(&self, mc: CRef, size: usize) -> Result<()> {
         if self.cur(mc).is_sub() {
             return Ok(());
@@ -701,7 +701,7 @@ impl<'env> RwTxn<'env> {
                         // comparator calls equal (a C-made F_BIGDATA item,
                         // or one of another size) that does not fit a node:
                         // C would leave it on overflow pages
-                        // (KNOWN_C_BUGS.md #38). Delete and insert; an
+                        // (KNOWN_C_BUGS.md row 38). Delete and insert; an
                         // MDB_MULTIPLE batch goes on with its next item.
                         self.replace_current(mc, key, PutData::bytes(item.bytes))?;
                         let rc = (*flags & MDB_MULTIPLE == 0).then_some(Ok(()));
@@ -730,7 +730,7 @@ impl<'env> RwTxn<'env> {
                 match self.put_current(mc, key, item, *flags)? {
                     // An item equal to the key's only one: C returns here
                     // even for MDB_MULTIPLE, so the later items are never
-                    // written (and the count says so: KNOWN_C_BUGS.md #30).
+                    // written (and the count says so: KNOWN_C_BUGS.md row 30).
                     CurStep::Done if *flags & MDB_MULTIPLE != 0 => return Ok((None, false)),
                     CurStep::Done => return Ok((Some(Ok(())), insert_data)),
                     CurStep::Reinsert => {}
@@ -996,7 +996,7 @@ impl<'env> RwTxn<'env> {
                 let overflow = if n.flags() & (F_DUPDATA | F_BIGDATA) == F_BIGDATA {
                     // A single item on overflow pages, which only C's
                     // MDB_CURRENT stores in a DUPSORT DB (KNOWN_C_BUGS.md
-                    // #38). C reads the overflow reference and what follows
+                    // row 38). C reads the overflow reference and what follows
                     // it in the page as the item; read the item.
                     let pgno = n.overflow_pgno().ok_or_else(corrupted)?;
                     olddata.extend_from_slice(self.core.overflow_data(pgno, n.data_size())?);
@@ -1072,7 +1072,8 @@ impl<'env> RwTxn<'env> {
                     // C writes the new item in place and, if it does not fit,
                     // splits the sub-page as if it were a page (leaking pages
                     // and losing the item). Do what lmdb.h promises instead:
-                    // delete the old item, then insert (KNOWN_C_BUGS.md #15).
+                    // delete the old item, then insert (KNOWN_C_BUGS.md
+                    // row 15).
                     return Ok(DupStep::Replace);
                 }
                 if !fits {
@@ -1281,7 +1282,7 @@ impl<'env> RwTxn<'env> {
         };
         let mut xflags = if flags & (MDB_CURRENT | MDB_APPENDDUP) == MDB_CURRENT {
             // The sub-cursor keeps its position; make sure its record is
-            // this key's (KNOWN_C_BUGS.md #14).
+            // this key's (KNOWN_C_BUGS.md row 14).
             self.refresh_xdb(mc)?;
             MDB_CURRENT | MDB_NOSPILL
         } else {

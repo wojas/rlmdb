@@ -9,7 +9,7 @@
 //! for an LMDB 1.0 environment those of 1.0's `mdb_stat` (a `Page size` line
 //! in every database's block, `mdb_dbi_open` in the message, `-a` lists the
 //! records of named databases, whose keys end with a NUL). One deliberate
-//! difference (`KNOWN_C_BUGS.md` #2): `mdb_stat -r` without `-a`, `-s` or
+//! difference (`KNOWN_C_BUGS.md` row 2): `mdb_stat -r` without `-a`, `-s` or
 //! `-f` exits with 0 on success; C exits with 1 because it returns the
 //! value of the last `fputs` call.
 
@@ -127,7 +127,7 @@ fn stat_env(tool: &mut Tool, env: &Environment, o: &Options) -> i32 {
         }
         if !(o.subname.is_some() || o.all_dbs > 0 || o.free_info > 0) {
             // C returns the result of the last fputs here, i.e. exits with 1
-            // (KNOWN_C_BUGS.md #2). Success is 0.
+            // (KNOWN_C_BUGS.md row 2). Success is 0.
             return 0;
         }
     }

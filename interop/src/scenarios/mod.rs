@@ -298,7 +298,7 @@ fn note(msg: impl fmt::Display) {
 /// its report: it checked more than one snapshot, and only C LMDB's reader
 /// raced. That reader can copy the meta page of a later commit than the
 /// txnid it pins, and its next snapshot is then older (`KNOWN_C_BUGS.md`
-/// #31; `mdb_txn_renew0` of C 1.0 does the same); `cpeer` and `cpeer10`
+/// row 31; `mdb_txn_renew0` of C 1.0 does the same); `cpeer` and `cpeer10`
 /// tolerate a step back of `#commits` with that signature and count it in
 /// `meta_races`, noted here. `rlmdb` re-checks the meta page, so on it
 /// (`rpeer`, `cpeer_capi`) a race is an error.
@@ -319,7 +319,7 @@ fn finish_reader_loop(peer: Peer, p: PeerProcess) -> Result<ReaderLoopReport> {
             .collect();
         note(format_args!(
             "`{}`: #commits went back {} time(s) and came back at once: C's reader meta race \
-             (KNOWN_C_BUGS.md #31): {}",
+             (KNOWN_C_BUGS.md row 31): {}",
             out.label,
             r.meta_races,
             races.join("; ")
@@ -961,7 +961,7 @@ pub fn delete_verify(pair: Pair) -> Result<()> {
     Ok(())
 }
 
-/// `KNOWN_C_BUGS.md` #34: C 1.0's `mdb_env_set_pagesize` stores the page
+/// `KNOWN_C_BUGS.md` row 34: C 1.0's `mdb_env_set_pagesize` stores the page
 /// size in `me_os_psize`, so a copy by a process that called it opens the
 /// destination with `O_DIRECT` (Linux) and writes multiples of the page
 /// size, which fails with `EINVAL` on file systems that honour `O_DIRECT`
@@ -996,7 +996,7 @@ pub fn copy_or_skip(
             "with O_DIRECT"
         };
         skipped(format_args!(
-            "{scenario}: C 1.0 cannot copy {}-byte pages {how} (KNOWN_C_BUGS.md #34): {}",
+            "{scenario}: C 1.0 cannot copy {}-byte pages {how} (KNOWN_C_BUGS.md row 34): {}",
             pair.page_size.unwrap_or(0),
             out.label
         ));
@@ -1009,7 +1009,7 @@ pub fn copy_or_skip(
 /// copy target with `FILE_FLAG_NO_BUFFERING` (`MDB_O_COPY`), so copies of
 /// 1.0 environments whose pages are smaller than the disk's sectors fail
 /// with `ERROR_INVALID_PARAMETER` (87), the tool's too (`KNOWN_C_BUGS.md`
-/// #34). `None`, with a SKIPPED note, for exactly that failure.
+/// row 34). `None`, with a SKIPPED note, for exactly that failure.
 pub fn tool_copy_or_skip(pair: &Pair, out: Output, scenario: &str) -> Result<Option<Output>> {
     if cfg!(windows)
         && pair.format == Format::V10
@@ -1019,7 +1019,7 @@ pub fn tool_copy_or_skip(pair: &Pair, out: Output, scenario: &str) -> Result<Opt
     {
         skipped(format_args!(
             "{scenario}: C 1.0's mdb_copy cannot write {}-byte pages unbuffered \
-             (KNOWN_C_BUGS.md #34): {}",
+             (KNOWN_C_BUGS.md row 34): {}",
             pair.page_size.unwrap_or(0),
             out.label
         ));
@@ -1339,7 +1339,7 @@ pub fn nosubdir(pair: Pair) -> Result<()> {
 /// Upstream bug: `mdb_load` loses the flags (`dupsort=1`, …) of the *first*
 /// database in its input: `readhdr()` parses them before the load loop,
 /// whose first statement is `flags = 0;` (since ITS#8662, 2017; C 1.0's
-/// `mdb_load` too, `KNOWN_C_BUGS.md` #1). So the DB that sorts first here,
+/// `mdb_load` too, `KNOWN_C_BUGS.md` row 1). So the DB that sorts first here,
 /// `a_plain`, has no flags. The tools are those of the pair's release.
 pub fn dump_load_roundtrip(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 256 * MIB)?;

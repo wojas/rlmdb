@@ -28,9 +28,9 @@ must respect. The details live in:
   this after every scenario); a page freed in a transaction is not reused
   while a reader can still see it; the meta page, transaction id and
   reader-slot protocol are C's; sort order is C's, even where C is wrong
-  (`KNOWN_C_BUGS.md` #7). Shared state decides what to port: free-list
+  (`KNOWN_C_BUGS.md` row 7). Shared state decides what to port: free-list
   format, lock-file fields and reader slots match C even where C is wrong
-  (#21, #22).
+  (rows 21 and 22).
 * Layout exactness is a test oracle, not a product requirement. Today a
   Rust writer leaves exactly the file a C writer would (same pages in the
   same places, same free list, same spill decisions, same compacting copy)
@@ -71,6 +71,10 @@ does, interop impact). The constraint: the deviation must not change the
 files, the lock file, or what a C peer concludes about them. If it would,
 port the bug and note that too. Malformed input returns an error, never a
 panic, hang or out-of-bounds read.
+
+Cite a ledger row as `KNOWN_C_BUGS.md row nn`, or `row nn` where the file
+is clear from the context, never as `#nn`: GitHub links `#nn` to issue or
+PR nn in commit messages, docs and comments (`ITS#nnnn` is safe).
 
 ## 3. Safety and soundness
 
