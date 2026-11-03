@@ -31,11 +31,14 @@ pub struct rlmdb_version_info {
     pub rlmdb_minor: c_int,
     /// The rlmdb version: patch.
     pub rlmdb_patch: c_int,
-    /// What `mdb_version` reports: major (0, or 1 in the LMDB 1.0 stub).
+    /// What `mdb_version` reports: major (`librlmdb`: rlmdb's; 0 in the
+    /// LMDB 0.9 stub, 1 in the 1.0 stub).
     pub lmdb_major: c_int,
-    /// What `mdb_version` reports: minor (9, or 0 in the LMDB 1.0 stub).
+    /// What `mdb_version` reports: minor (`librlmdb`: rlmdb's; 9 in the
+    /// LMDB 0.9 stub, 0 in the 1.0 stub).
     pub lmdb_minor: c_int,
-    /// What `mdb_version` reports: patch (85).
+    /// What `mdb_version` reports: patch (`librlmdb`: rlmdb's; 85 in the
+    /// stubs).
     pub lmdb_patch: c_int,
     /// The C LMDB release the 0.9 format and API match: major.
     pub v09_major: c_int,
@@ -69,6 +72,20 @@ pub fn version_info(profile: Profile) -> rlmdb::VersionInfo {
     v
 }
 
+/// The string `mdb_version` of `profile` returns: in `librlmdb` the line
+/// of `rlmdb_version_string` (the [`Display`](std::fmt::Display) form of
+/// [`version_info`]), which names rlmdb and its version first; in a stub
+/// LMDB's form, `"LMDB 0.9.85: (rlmdb <version>)"`
+/// ([`rlmdb::VersionInfo::mdb_version_string`]), which programs built for C
+/// LMDB print as they print C's.
+pub fn mdb_version_string(profile: Profile) -> String {
+    let v = version_info(profile);
+    match profile {
+        Profile::Rlmdb => v.to_string(),
+        Profile::Lmdb09 | Profile::Lmdb10 => v.mdb_version_string(),
+    }
+}
+
 /// The C version information of `profile`, built on first use.
 fn c_version(profile: Profile) -> &'static CVersion {
     static VERSIONS: [OnceLock<CVersion>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
@@ -93,7 +110,7 @@ fn c_version(profile: Profile) -> &'static CVersion {
         CVersion {
             info,
             line: CString::new(v.to_string()).unwrap_or_default(),
-            lmdb_line: CString::new(v.mdb_version_string()).unwrap_or_default(),
+            lmdb_line: CString::new(mdb_version_string(profile)).unwrap_or_default(),
         }
     })
 }
@@ -101,13 +118,13 @@ fn c_version(profile: Profile) -> &'static CVersion {
 /// `mdb_version` of the library of `profile`: return the LMDB library
 /// version information.
 ///
-/// Stores the profile's version ([`Profile::lmdb_version`]: 0, 9, 85, or 1,
-/// 0, 85 in the LMDB 1.0 stub) in the non-NULL arguments and returns
-/// `"LMDB 0.9.85: (rlmdb <version>)"` (or `"LMDB 1.0.85: ..."`,
-/// [`rlmdb::VersionInfo::mdb_version_string`]), a static string. LMDB
-/// 0.9's `lmdb.h` says 0.9.37, the C release whose ABI and file format the
-/// library implements; the patch level 85, above every C release, tells
-/// rlmdb apart from C LMDB.
+/// Stores the profile's version ([`Profile::lmdb_version`]: rlmdb's own in
+/// `librlmdb`, 0, 9, 85 in the LMDB 0.9 stub, 1, 0, 85 in the 1.0 stub) in
+/// the non-NULL arguments and returns its string ([`mdb_version_string`]),
+/// a static one. A program links against `librlmdb` explicitly, so it is
+/// told which rlmdb it runs on; the stubs stand in for a C release, and
+/// their patch level 85, above every C release, tells rlmdb apart from C
+/// LMDB while the major and minor numbers stay those of the series.
 ///
 /// # Safety
 ///
@@ -204,35 +221,41 @@ mod tests {
         )
     }
 
+    /// `mdb_version` of `profile`: the numbers and the string.
+    fn mdb_version(profile: Profile) -> ((i32, i32, i32), &'static str) {
+        let (mut ma, mut mi, mut pa) = (-1, -1, -1);
+        // SAFETY: valid outputs; the string is static and NUL-terminated.
+        let s = unsafe { CStr::from_ptr(mdb_version_of(profile, &mut ma, &mut mi, &mut pa)) };
+        // SAFETY: NULL outputs are allowed.
+        let again =
+            unsafe { mdb_version_of(profile, ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) };
+        assert_eq!(again.cast_const(), s.as_ptr());
+        ((ma, mi, pa), s.to_str().unwrap())
+    }
+
     #[test]
-    fn mdb_version_reports_0_9_85_or_1_0_85() {
-        for (profile, (ma0, mi0)) in [
-            (Profile::Rlmdb, (0, 9)),
-            (Profile::Lmdb09, (0, 9)),
-            (Profile::Lmdb10, (1, 0)),
-        ] {
-            let (mut ma, mut mi, mut pa) = (-1, -1, -1);
-            // SAFETY: valid outputs; the string is static and NUL-terminated.
-            let s = unsafe { CStr::from_ptr(mdb_version_of(profile, &mut ma, &mut mi, &mut pa)) };
-            assert_eq!((ma, mi, pa), (ma0, mi0, 85));
-            let expected = format!("LMDB {ma0}.{mi0}.85: (rlmdb {})", env!("CARGO_PKG_VERSION"));
-            assert_eq!(s.to_str().unwrap(), expected);
-            // SAFETY: NULL outputs are allowed.
-            let again = unsafe {
-                mdb_version_of(profile, ptr::null_mut(), ptr::null_mut(), ptr::null_mut())
-            };
-            assert_eq!(again.cast_const(), s.as_ptr());
-        }
-        // The series of a header, a higher patch level.
-        for (profile, header) in [
-            (Profile::Rlmdb, LMDB_09_H),
-            (Profile::Lmdb09, LMDB_09_H),
-            (Profile::Lmdb10, LMDB_H),
-        ] {
+    fn librlmdb_reports_the_rlmdb_version() {
+        let ((ma, mi, pa), s) = mdb_version(Profile::Rlmdb);
+        assert_eq!(format!("{ma}.{mi}.{pa}"), env!("CARGO_PKG_VERSION"));
+        // The line of rlmdb_version_string, which names its mdb_version.
+        let line = version_info(Profile::Rlmdb).to_string();
+        assert_eq!(s, line);
+        assert!(line.starts_with(&format!(
+            "rlmdb {ma}.{mi}.{pa} (mdb_version {ma}.{mi}.{pa}; "
+        )));
+    }
+
+    #[test]
+    fn the_stubs_report_0_9_85_and_1_0_85() {
+        let rlmdb = env!("CARGO_PKG_VERSION");
+        for (profile, header) in [(Profile::Lmdb09, LMDB_09_H), (Profile::Lmdb10, LMDB_H)] {
+            let ((ma, mi, pa), s) = mdb_version(profile);
+            // The series of the release the stub stands in for, a higher
+            // patch level.
             let (hma, hmi, hpa) = header_version(header);
-            let (ma, mi, pa) = profile.lmdb_version();
-            assert_eq!((ma, mi), (hma, hmi));
+            assert_eq!((ma, mi, pa), (hma, hmi, 85));
             assert!(pa > hpa);
+            assert_eq!(s, format!("LMDB {ma}.{mi}.85: (rlmdb {rlmdb})"));
         }
     }
 
@@ -265,13 +288,15 @@ mod tests {
             let line = unsafe { CStr::from_ptr(rlmdb_version_string_of(profile)) };
             assert_eq!(line.to_str().unwrap(), version_info(profile).to_string());
         }
-        // SAFETY: as above.
-        let line10 = unsafe { CStr::from_ptr(rlmdb_version_string_of(Profile::Lmdb10)) };
-        assert!(line10.to_str().unwrap().contains("(mdb_version 1.0.85;"));
-        assert_eq!(
-            version_info(Profile::Rlmdb).to_string(),
-            rlmdb::version_info().to_string()
-        );
+        let line = |p| {
+            // SAFETY: as above.
+            let s = unsafe { CStr::from_ptr(rlmdb_version_string_of(p)) };
+            s.to_str().unwrap().to_owned()
+        };
+        assert!(line(Profile::Lmdb09).contains("(mdb_version 0.9.85;"));
+        assert!(line(Profile::Lmdb10).contains("(mdb_version 1.0.85;"));
+        // The 0.9 stub's is the Rust crate's (the tools' -V says 0.9.85).
+        assert_eq!(line(Profile::Lmdb09), rlmdb::version_info().to_string());
     }
 
     #[test]

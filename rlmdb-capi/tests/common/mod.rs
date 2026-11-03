@@ -95,8 +95,8 @@ impl Lib {
         matches!(self, Lib::Rust | Lib::RustApi | Lib::Rust10)
     }
 
-    /// `librlmdb` (built with `-DLMDB_LIBRLMDB` too): new environments
-    /// are LMDB 0.9 unless the program asks for 1.0.
+    /// `librlmdb` (built with `-DLMDB_LIBRLMDB` too): `mdb_version`
+    /// reports rlmdb's version, new environments are LMDB 0.9.
     pub fn is_librlmdb(self) -> bool {
         matches!(self, Lib::Rust | Lib::RustApi)
     }
@@ -152,10 +152,17 @@ impl Artifact {
         }
     }
 
-    /// What `mdb_version` reports.
+    /// What `mdb_version` reports: rlmdb's version in `librlmdb` (the
+    /// workspace's, `rlmdb::version_info().rlmdb`), 0.9.85 and 1.0.85 in
+    /// the stubs.
     pub fn lmdb_version(self) -> (i32, i32, i32) {
         match self {
-            Artifact::Rlmdb | Artifact::Lmdb09 => (0, 9, 85),
+            Artifact::Rlmdb => {
+                let (ma, mi, pa) = rlmdb::version_info().rlmdb;
+                let int = |n: u32| i32::try_from(n).unwrap();
+                (int(ma), int(mi), int(pa))
+            }
+            Artifact::Lmdb09 => (0, 9, 85),
             Artifact::Lmdb10 => (1, 0, 85),
         }
     }

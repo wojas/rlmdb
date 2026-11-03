@@ -184,11 +184,12 @@ pub use crate::format::Format;
 pub use crate::os::{flush_file_maps, invalidate_file};
 pub use crate::version::{version_info, VersionInfo};
 
-/// What `mdb_version` reports, `(major, minor, patch)`: `(0, 9, 85)`, the
-/// 0.9 series this crate is a drop-in for with a patch level above every
-/// real 0.9 release, so that a program can tell rlmdb from C LMDB. The C
-/// releases the formats match and the rlmdb version are in
-/// [`version_info`].
+/// What `mdb_version` reports where rlmdb stands in for C LMDB 0.9 (the
+/// tools' `-V`, the C API's LMDB 0.9 stub), `(major, minor, patch)`:
+/// `(0, 9, 85)`, the 0.9 series with a patch level above every real 0.9
+/// release, so that a program can tell rlmdb from C LMDB. (The C API's
+/// `librlmdb` reports the rlmdb version instead.) The C releases the
+/// formats match and the rlmdb version are in [`version_info`].
 pub fn lmdb_version() -> (i32, i32, i32) {
     (
         consts::MDB_VERSION_MAJOR,

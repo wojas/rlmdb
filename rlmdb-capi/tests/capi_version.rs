@@ -2,7 +2,7 @@
 //! `rlmdb_version_string`) and `mdb_version` against `librlmdb`, built
 //! with rlmdb's `lmdb.h` (LMDB 1.0's) and with LMDB 0.9's, and as C++.
 //! There is no C oracle: C LMDB has no `rlmdb.h`; the expectations come
-//! from [`rlmdb::version_info`].
+//! from [`rlmdb_capi::version`].
 
 mod common;
 
@@ -10,13 +10,18 @@ use std::path::Path;
 use std::process::Command;
 
 use common::*;
+use rlmdb_capi::version::{mdb_version_string, version_info};
+use rlmdb_capi::Profile;
 
 fn run_capi_version(exe: &Path) -> String {
-    let v = rlmdb::version_info();
+    let line = version_info(Profile::Rlmdb).to_string();
+    let lmdb_line = mdb_version_string(Profile::Rlmdb);
+    // librlmdb's mdb_version returns rlmdb's line.
+    assert_eq!(lmdb_line, line);
     let out = Command::new(exe)
         .arg(env!("CARGO_PKG_VERSION"))
-        .arg(v.to_string())
-        .arg(v.mdb_version_string())
+        .arg(line)
+        .arg(lmdb_line)
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();

@@ -155,12 +155,15 @@ int main(void)
 	CHECK(rlmdb_env_set_pagesize(NULL, 4096) == EINVAL);
 	CHECK(rlmdb_env_set_format(NULL, RLMDB_FORMAT_10) == EINVAL);
 
-	/* librlmdb reports 0.9.85, whichever header the program was built
-	 * with. */
+	/* librlmdb reports rlmdb's version from mdb_version, whichever header
+	 * the program was built with, and the same line as
+	 * rlmdb_version_string. */
 	mdb_version(&major, &minor, &patch);
-	CHECK(major == 0 && minor == 9 && patch == 85);
+	CHECK(major == info->rlmdb_major && minor == info->rlmdb_minor &&
+		patch == info->rlmdb_patch);
 	CHECK(info->lmdb_major == major && info->lmdb_minor == minor &&
 		info->lmdb_patch == patch);
+	CHECK(strcmp(mdb_version(NULL, NULL, NULL), rlmdb_version_string()) == 0);
 	CHECK(strstr(rlmdb_version_string(), "rlmdb ") == rlmdb_version_string());
 
 	printf("capi_headers (LMDB %d.%d.%d header, %s): %d checks, %d failures\n",

@@ -63,8 +63,8 @@ fn lmdb_1_0_functions_match_c_1_0() {
     assert!(c.starts_with("library: LMDB 1.0."), "{c}");
     let tc = trace(&c);
     assert!(tc.len() > 50, "{c}");
-    let librlmdb = rlmdb_capi::version::version_info(Profile::Rlmdb).mdb_version_string();
-    let stub = rlmdb_capi::version::version_info(Profile::Lmdb10).mdb_version_string();
+    let librlmdb = rlmdb_capi::version::mdb_version_string(Profile::Rlmdb);
+    let stub = rlmdb_capi::version::mdb_version_string(Profile::Lmdb10);
     assert!(stub.starts_with("LMDB 1.0.85: "), "{stub}");
     for (lib, version) in [(Lib::Rust10, stub), (Lib::RustApi, librlmdb)] {
         let (rust, scratch) = run_capi_v10(lib);

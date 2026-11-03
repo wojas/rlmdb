@@ -16,12 +16,13 @@
  *	Included without an lmdb.h before it, it includes the one next to it.
  *
  *	@section rlmdb_version_sec Which library is this?
- *	#mdb_version() reports 0.9.85 in librlmdb and the LMDB 0.9 stub, a
- *	patch level above every real LMDB 0.9 release; the LMDB 1.0 stub
- *	reports 1.0.85. A run-time patch level above the header's is normal
- *	for LMDB, and #mdb_version() is what programs are told to check.
- *	#rlmdb_version() tells the rest: the rlmdb version and the C LMDB
- *	release whose file format each supported format matches.
+ *	#mdb_version() of librlmdb reports rlmdb's own version: a program
+ *	links against librlmdb explicitly. The LMDB 0.9 stub reports 0.9.85
+ *	and the LMDB 1.0 stub 1.0.85, a patch level above every real release
+ *	of the series each stands in for, so that a program built for C LMDB
+ *	that compares the major and minor numbers with its lmdb.h's still runs
+ *	on them. #rlmdb_version() tells the rest: the rlmdb version and the C
+ *	LMDB release whose file format each supported format matches.
  *
  *	@section rlmdb_format_sec Data-file formats
  *	rlmdb reads and writes the data files of LMDB 0.9 (#RLMDB_FORMAT_09,
@@ -91,7 +92,7 @@ extern "C" {
 typedef struct rlmdb_version_info {
 	unsigned	size;		/**< sizeof(rlmdb_version_info) of the library */
 	int		rlmdb_major, rlmdb_minor, rlmdb_patch;	/**< The rlmdb version */
-	int		lmdb_major, lmdb_minor, lmdb_patch;	/**< What #mdb_version() reports: 0, 9, 85 (the LMDB 1.0 stub: 1, 0, 85) */
+	int		lmdb_major, lmdb_minor, lmdb_patch;	/**< What #mdb_version() reports: the rlmdb version in librlmdb, 0, 9, 85 in the LMDB 0.9 stub, 1, 0, 85 in the LMDB 1.0 stub */
 	int		v09_major, v09_minor, v09_patch;	/**< C release the 0.9 format and API match */
 	int		v10_major, v10_minor, v10_patch;	/**< C release the 1.0 format matches */
 } rlmdb_version_info;
@@ -105,11 +106,13 @@ const rlmdb_version_info *rlmdb_version(void);
 
 	/** @brief Return the version information as one line of text.
 	 *
-	 * For example "rlmdb 0.0.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37;
-	 * format 1.0 = LMDB 1.0.3)". Meant for logs and bug reports: programs
-	 * read the version numbers from #rlmdb_version() instead of parsing it,
-	 * and opt-in features, once there are any, will be listed by name
-	 * (rlmdb issue #2).
+	 * For example "rlmdb 0.0.0 (mdb_version 0.0.0; format 0.9 = LMDB 0.9.37;
+	 * format 1.0 = LMDB 1.0.3)" in librlmdb, whose #mdb_version() returns
+	 * the same string ("mdb_version 0.9.85" and "mdb_version 1.0.85" in the
+	 * stubs, which return LMDB's "LMDB 0.9.85: (rlmdb 0.0.0)" form there).
+	 * Meant for logs and bug reports: programs read the version numbers
+	 * from #rlmdb_version() instead of parsing it, and opt-in features, once
+	 * there are any, will be listed by name (rlmdb issue #2).
 	 * @return A static string, valid for the life of the process; it must not
 	 * be modified or freed.
 	 */

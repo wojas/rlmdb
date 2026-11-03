@@ -305,16 +305,19 @@ pub const MDB_IDL_DB_MAX: usize = MDB_IDL_DB_SIZE - 1;
 /// `MDB_IDL_UM_MAX` (midl.h): maximum number of dirty pages in one txn.
 pub const MDB_IDL_UM_MAX: usize = MDB_IDL_UM_SIZE - 1;
 
-// The version `mdb_version` reports. The one exception to the rule above:
-// the patch level is not lmdb.h's (`DUAL_FORMAT.md` §4.4).
+// The version `mdb_version` reports where rlmdb stands in for C LMDB 0.9
+// (the tools' `-V`, the C API's 0.9 stub). The one exception to the rule
+// above: the patch level is not lmdb.h's (`DUAL_FORMAT.md` §4.4).
 
-/// `MDB_VERSION_MAJOR`, as `mdb_version` reports it: 0, as in `lmdb.h`.
+/// `MDB_VERSION_MAJOR`, as rlmdb's `mdb_version` for LMDB 0.9 reports it:
+/// 0, as in 0.9's `lmdb.h`.
 pub const MDB_VERSION_MAJOR: i32 = 0;
-/// `MDB_VERSION_MINOR`, as `mdb_version` reports it: 9, as in `lmdb.h`.
+/// `MDB_VERSION_MINOR`, as rlmdb's `mdb_version` for LMDB 0.9 reports it:
+/// 9, as in 0.9's `lmdb.h`.
 pub const MDB_VERSION_MINOR: i32 = 9;
-/// `MDB_VERSION_PATCH`, as `mdb_version` reports it: 85, where the 0.9.37
-/// `lmdb.h` has 36. A patch level above every real 0.9 release lets a
-/// program tell rlmdb from C LMDB while it stays in the 0.9 series rlmdb is
-/// a drop-in for. The C release the 0.9 format matches is
-/// [`VersionInfo::v09`](crate::VersionInfo::v09).
+/// `MDB_VERSION_PATCH`, as rlmdb's `mdb_version` for LMDB 0.9 reports it:
+/// 85, where the 0.9.37 `lmdb.h` has 37. A patch level above every real
+/// 0.9 release lets a program tell rlmdb from C LMDB while it stays in the
+/// 0.9 series rlmdb is a drop-in for. The C release the 0.9 format matches
+/// is [`VersionInfo::v09`](crate::VersionInfo::v09).
 pub const MDB_VERSION_PATCH: i32 = 85;

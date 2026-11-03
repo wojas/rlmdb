@@ -700,7 +700,8 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	snprintf(scratch, sizeof(scratch), "%s", argv[1]);
-	/* The C 1.0 oracle and the 1.0 stub say 1.0.x, librlmdb 0.9.85. */
+	/* The C 1.0 oracle and the 1.0 stub say 1.0.x, librlmdb rlmdb's
+	 * version. */
 	printf("library: %s\n", mdb_version(NULL, NULL, NULL));
 
 	test_set_pagesize();

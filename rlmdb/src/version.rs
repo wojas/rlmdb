@@ -24,7 +24,8 @@ const V10_RELEASE: (i32, i32, i32) = (1, 0, 3);
 /// struct only ever gains fields, so it is `#[non_exhaustive]`.
 ///
 /// [`Display`](fmt::Display) prints the one line a bug report needs, which
-/// is also what `rlmdb_version_string()` returns:
+/// is also what `rlmdb_version_string()` returns (in the C API's LMDB 0.9
+/// stub; `librlmdb` and the 1.0 stub put their own `mdb_version` in it):
 ///
 /// ```text
 /// rlmdb 0.0.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3)
@@ -34,7 +35,11 @@ const V10_RELEASE: (i32, i32, i32) = (1, 0, 3);
 pub struct VersionInfo {
     /// The version of the rlmdb crate: `(major, minor, patch)`.
     pub rlmdb: (u32, u32, u32),
-    /// What `mdb_version` reports, [`crate::lmdb_version`]: 0.9.85.
+    /// What `mdb_version` reports where rlmdb stands in for C LMDB 0.9,
+    /// [`crate::lmdb_version`]: 0.9.85, which the tools print for `-V` and
+    /// the C API's LMDB 0.9 stub reports. (The C API's `librlmdb` reports
+    /// the rlmdb version, the 1.0 stub 1.0.85; their `rlmdb_version()`
+    /// says so here.)
     pub lmdb: (i32, i32, i32),
     /// The C LMDB release whose format and API the 0.9 format matches:
     /// 0.9.37.

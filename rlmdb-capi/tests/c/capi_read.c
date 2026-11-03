@@ -19,6 +19,9 @@
 /* pthreads, mkdir, unistd.h, dlopen; their Windows forms (tests/compat). */
 #include "../../../tests/compat/posix_compat.h"
 #include "lmdb.h"
+#ifdef LMDB_RUST
+#include "rlmdb.h"
+#endif
 #include "cmpfuncs.h"
 
 static int checks, failures;
@@ -100,15 +103,20 @@ static void test_version(void)
 	int ma = -1, mi = -1, pa = -1;
 	char *s = mdb_version(&ma, &mi, &pa), e[256];
 
-	/* Both builds use a 0.9.37 lmdb.h. C reports the header's version at
-	 * run time; rlmdb reports 0.9.85 (README.md, "Differences from C LMDB
-	 * 0.9.37"), which capi_version.c checks in detail. */
+	/* Both builds use the 0.9.37 lmdb.h. C reports the header's version at
+	 * run time; librlmdb reports rlmdb's (README.md, "Differences from C
+	 * LMDB 0.9.37"), which capi_version.c checks in detail. */
 	CHECK(MDB_VERSION_FULL == MDB_VERINT(0, 9, 37));
-	CHECK(ma == MDB_VERSION_MAJOR && mi == MDB_VERSION_MINOR);
 #ifdef LMDB_RUST
-	CHECK(pa == 85);
-	CHECK(!strncmp(s, "LMDB 0.9.85: (rlmdb ", strlen("LMDB 0.9.85: (rlmdb ")));
+	{
+		/* A 0.9 program may include rlmdb.h after its lmdb.h. */
+		const rlmdb_version_info *v = rlmdb_version();
+		CHECK(ma == v->rlmdb_major && mi == v->rlmdb_minor && pa == v->rlmdb_patch);
+		CHECK(!strcmp(s, rlmdb_version_string()));
+		CHECK(!strncmp(s, "rlmdb ", strlen("rlmdb ")));
+	}
 #else
+	CHECK(ma == MDB_VERSION_MAJOR && mi == MDB_VERSION_MINOR);
 	CHECK(pa == MDB_VERSION_PATCH);
 	CHECK(!strcmp(s, MDB_VERSION_STRING));
 #endif

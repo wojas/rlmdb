@@ -7,11 +7,12 @@
 //!   (`LoadLibrary`) and resolves each. Where `nm` runs, the exported
 //!   functions are exactly those.
 //! * Each reports its own version (`mdb_version`, `rlmdb_version`,
-//!   `rlmdb_version_string`: 0.9.85, 0.9.85, 1.0.85) and creates new
-//!   environments in its own format when nothing asks for one (0.9, 0.9,
-//!   1.0, as `rlmdb_sniff_format` tells), while `rlmdb_env_set_format`,
-//!   `rlmdb_set_default_format` and `RLMDB_DEFAULT_FORMAT` override that
-//!   in all three.
+//!   `rlmdb_version_string`: rlmdb's in `librlmdb`, whose `mdb_version`
+//!   string is the line of `rlmdb_version_string`; 0.9.85 and 1.0.85 in
+//!   the stubs) and creates new environments in its own format when
+//!   nothing asks for one (0.9, 0.9, 1.0, as `rlmdb_sniff_format` tells),
+//!   while `rlmdb_env_set_format`, `rlmdb_set_default_format` and
+//!   `RLMDB_DEFAULT_FORMAT` override that in all three.
 //! * 0.9's functions are a subset of 1.0's; `rlmdb.h` declares rlmdb's own
 //!   functions and no `mdb_*` one.
 //! * On ELF systems the SONAMEs are `librlmdb.so`, `liblmdb.so.0` and
@@ -137,16 +138,23 @@ fn every_library_exports_the_whole_api_and_reports_its_profile() {
         let (ma, mi, pa) = artifact.lmdb_version();
         let v = rlmdb_capi::version::version_info(profile(artifact));
         assert_eq!(v.lmdb, (ma, mi, pa));
+        let rlmdb = env!("CARGO_PKG_VERSION");
+        let string = match artifact {
+            // librlmdb: rlmdb's line, as rlmdb_version_string.
+            Artifact::Rlmdb => v.to_string(),
+            Artifact::Lmdb09 | Artifact::Lmdb10 => format!("LMDB {ma}.{mi}.{pa}: (rlmdb {rlmdb})"),
+        };
         assert_eq!(
             value(&r, "version"),
-            format!(
-                "{ma}.{mi}.{pa} LMDB {ma}.{mi}.{pa}: (rlmdb {})",
-                env!("CARGO_PKG_VERSION")
-            ),
+            format!("{ma}.{mi}.{pa} {string}"),
             "{artifact:?}"
         );
         assert_eq!(value(&r, "info"), format!("{ma}.{mi}.{pa}"));
         assert_eq!(value(&r, "line"), v.to_string());
+        assert!(
+            value(&r, "line").starts_with(&format!("rlmdb {rlmdb} (")),
+            "{r:?}"
+        );
         assert!(
             value(&r, "line").contains(&format!("(mdb_version {ma}.{mi}.{pa};")),
             "{r:?}"

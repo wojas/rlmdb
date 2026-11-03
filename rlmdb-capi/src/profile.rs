@@ -7,9 +7,13 @@
 //!
 //! | Library | Package | `mdb_version` | New environments |
 //! |---|---|---|---|
-//! | `librlmdb` (`-lrlmdb`) | `librlmdb` | 0.9.85 | LMDB 0.9 |
+//! | `librlmdb` (`-lrlmdb`) | `librlmdb` | rlmdb's version | LMDB 0.9 |
 //! | `liblmdb.so.0`, the 0.9 stub | `lmdb09-stub` | 0.9.85 | LMDB 0.9 |
 //! | `liblmdb.so`, the 1.0 stub | `lmdb10-stub` | 1.0.85 | LMDB 1.0 |
+//!
+//! `librlmdb` reports rlmdb's own version because programs link against
+//! it explicitly; the stubs stand in for a C release and report its
+//! series.
 //!
 //! Each artifact package (`artifacts/*` of this crate's directory) is a
 //! `cdylib` and `staticlib` that depends on this crate and expands
@@ -30,7 +34,7 @@ use rlmdb::Format;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Profile {
     /// `librlmdb`, the library programs link with `-lrlmdb`: `mdb_version`
-    /// 0.9.85, new environments LMDB 0.9.
+    /// reports the rlmdb version, new environments are LMDB 0.9.
     Rlmdb,
     /// The stub that stands in for C LMDB 0.9 (`liblmdb.so.0`):
     /// `mdb_version` 0.9.85, new environments LMDB 0.9.
@@ -44,14 +48,20 @@ impl Profile {
     /// All profiles.
     pub const ALL: [Profile; 3] = [Profile::Rlmdb, Profile::Lmdb09, Profile::Lmdb10];
 
-    /// What `mdb_version` reports: the C release series the library stands
-    /// in for, with rlmdb's patch level 85 (above every C release, so that
-    /// rlmdb can be told apart): 0.9.85 ([`rlmdb::lmdb_version`]) or
-    /// 1.0.85.
+    /// What `mdb_version` reports: in `librlmdb` the rlmdb version
+    /// ([`rlmdb::VersionInfo::rlmdb`], the workspace's); in a stub the C
+    /// release series it stands in for, with rlmdb's patch level 85 (above
+    /// every C release, so that rlmdb can be told apart): 0.9.85
+    /// ([`rlmdb::lmdb_version`]) or 1.0.85.
     pub fn lmdb_version(self) -> (c_int, c_int, c_int) {
         let (major, minor, patch) = rlmdb::lmdb_version();
         match self {
-            Profile::Rlmdb | Profile::Lmdb09 => (major, minor, patch),
+            Profile::Rlmdb => {
+                let int = |n: u32| c_int::try_from(n).unwrap_or(c_int::MAX);
+                let (major, minor, patch) = rlmdb::version_info().rlmdb;
+                (int(major), int(minor), int(patch))
+            }
+            Profile::Lmdb09 => (major, minor, patch),
             Profile::Lmdb10 => (1, 0, patch),
         }
     }
@@ -81,8 +91,7 @@ impl Profile {
 macro_rules! artifact_symbols {
     ($profile:expr) => {
         /// `mdb_version`: the version this library reports
-        /// (`rlmdb_capi::Profile::lmdb_version`) and its string,
-        /// `"LMDB <version>: (rlmdb <rlmdb version>)"`
+        /// (`rlmdb_capi::Profile::lmdb_version`) and its string
         /// (`rlmdb_capi::version::mdb_version_of`).
         ///
         /// # Safety
@@ -144,7 +153,9 @@ mod tests {
 
     #[test]
     fn versions_and_formats() {
-        assert_eq!(Profile::Rlmdb.lmdb_version(), (0, 9, 85));
+        let crate_version = env!("CARGO_PKG_VERSION");
+        let (ma, mi, pa) = Profile::Rlmdb.lmdb_version();
+        assert_eq!(format!("{ma}.{mi}.{pa}"), crate_version);
         assert_eq!(Profile::Lmdb09.lmdb_version(), (0, 9, 85));
         assert_eq!(Profile::Lmdb10.lmdb_version(), (1, 0, 85));
         assert_eq!(Profile::Rlmdb.default_format(), Format::V09);
