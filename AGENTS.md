@@ -139,8 +139,14 @@ deferred until the core has been validated through the C API.
   it measurably helps; speculative complexity is reverted.
 * Performance changes must not add `unsafe` and must keep the invariants
   of section 1; unless the task says otherwise they are also
-  layout-preserving (same file bytes). Record findings in
-  `bench/RESULTS.md` or a file under `bench/results/`.
+  layout-preserving (same file bytes). What matters is the relative
+  change: the before/after of the interleaved A/B goes into the change's
+  commit or PR message (and into the session, to decide whether the
+  change was worth it). Do not commit benchmark results at points during
+  development: a history of absolute numbers from a shifting code base on
+  shifting hardware is useless. `bench/RESULTS.md` and `bench/results/`
+  are updated near a release, when the numbers are to be compared and
+  published.
 * Linux x86-64 is the platform that matters most. Performance decisions
   are judged on real x86-64 Linux hardware first: results lead with an
   x86-64 Linux column, and a regression there outweighs a gain on macOS
