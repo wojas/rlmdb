@@ -10,11 +10,12 @@
 //!   0.9 stub (SONAME `liblmdb.so.0`) and the 1.0 stub (`liblmdb.so`),
 //!   whose new environments are LMDB 1.0.
 //!
-//! All three export the same functions: those of LMDB 0.9.37's `lmdb.h`
-//! (`include/lmdb.h`, the unmodified header), those LMDB 1.0's `lmdb.h`
-//! adds ([`v10`]; implemented where rlmdb can, `ENOTSUP` otherwise), and
-//! rlmdb's own `rlmdb_*` functions; `include/rlmdb.h` declares the latter
-//! two groups and the LMDB 1.0 constants.
+//! All three export the same functions: those of LMDB 0.9.37's `lmdb.h`,
+//! those LMDB 1.0's `lmdb.h` adds ([`v10`]; implemented where rlmdb can,
+//! `ENOTSUP` otherwise), and rlmdb's own `rlmdb_*` functions. The headers
+//! in `include` are LMDB 1.0.3's `lmdb.h`, unmodified (the API of all
+//! three, a superset of 0.9's with the same ABI), and `rlmdb.h`, which
+//! declares rlmdb's functions and also works after LMDB 0.9's `lmdb.h`.
 //!
 //! Environments of both data-file formats the core handles, LMDB 0.9 and
 //! LMDB 1.0, are opened through the same `mdb_*` functions: an existing

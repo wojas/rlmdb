@@ -7,9 +7,10 @@
 //! * the layout is the documented one, and `rlmdb.pc` says
 //!   `-I${includedir}/rlmdb` and `-lrlmdb`; on macOS each library's
 //!   install name is its installed path;
-//! * `tests/c/capi_whoami.c` compiled with the installed headers and
-//!   linked with `-lrlmdb` runs on the installed `librlmdb` (0.9.85, new
-//!   environments 0.9);
+//! * `tests/c/capi_whoami.c` compiled with the installed headers (`lmdb.h`
+//!   is LMDB 1.0's), and once with LMDB 0.9's `lmdb.h` in front of them,
+//!   and linked with `-lrlmdb` runs on the installed `librlmdb` (0.9.85,
+//!   new environments 0.9);
 //! * the same program linked against a shared C LMDB 0.9 (SONAME
 //!   `liblmdb.so.0`, as distributions ship it) runs on C, and on rlmdb's
 //!   0.9 stub when `LD_LIBRARY_PATH` (macOS: `DYLD_LIBRARY_PATH`) names
@@ -63,15 +64,17 @@ fn install(stage: &Path, from: &Path) -> PathBuf {
     stage.join(PREFIX.trim_start_matches('/'))
 }
 
-/// Compiles `capi_whoami.c` with the `lmdb.h` in `include` into `exe`,
-/// linked with `-L lib_dir -l<lib>` (a shared library: no rpath, the tests
-/// say where it is at run time).
-fn whoami(exe: &Path, include: &Path, lib_dir: &Path, lib: &str) {
+/// Compiles `capi_whoami.c` with the `lmdb.h` of the first of `includes`
+/// that has one into `exe`, linked with `-L lib_dir -l<lib>` (a shared
+/// library: no rpath, the tests say where it is at run time).
+fn whoami(exe: &Path, includes: &[&Path], lib_dir: &Path, lib: &str) {
     let dir = exe.parent().unwrap();
     fs::create_dir_all(dir).unwrap();
     let mut c = Compiler::new(dir, false).unwrap();
-    c.include(include)
-        .output(exe)
+    for include in includes {
+        c.include(include);
+    }
+    c.output(exe)
         .args([test_c_dir().join("capi_whoami.c")])
         .args([
             OsArg::from("-L"),
@@ -182,10 +185,13 @@ fn installed_libraries_and_the_stubs_standing_in_for_c() {
     for f in &expected {
         assert!(f.is_file(), "{} not installed", f.display());
     }
-    assert_eq!(
-        fs::read(inc.join("rlmdb.h")).unwrap(),
-        fs::read(crate_dir().join("include/rlmdb.h")).unwrap()
-    );
+    for h in ["lmdb.h", "rlmdb.h"] {
+        assert_eq!(
+            fs::read(inc.join(h)).unwrap(),
+            fs::read(crate_dir().join("include").join(h)).unwrap(),
+            "{h}"
+        );
+    }
     let pc = fs::read_to_string(lib.join("pkgconfig/rlmdb.pc")).unwrap();
     for line in [
         &format!("prefix={PREFIX}"),
@@ -220,19 +226,27 @@ fn installed_libraries_and_the_stubs_standing_in_for_c() {
         }
     }
 
-    // A program built with the installed headers and -lrlmdb.
+    // A program built with the installed headers and -lrlmdb, and one
+    // written for LMDB 0.9 (its lmdb.h first): librlmdb reports 0.9.85 and
+    // makes LMDB 0.9 environments.
     let path = library_path_var();
     let exe_dir = b.dir.join("install-programs");
-    let rlmdb_exe = exe_dir.join("whoami-rlmdb");
-    whoami(&rlmdb_exe, &inc, &lib, "rlmdb");
-    let (line, format) = run(&rlmdb_exe, "install-rlmdb", &[(path, &lib)]);
-    assert!(line.starts_with("0.9.85 LMDB 0.9.85: (rlmdb "), "{line}");
-    assert_eq!(format, Some(rlmdb::Format::V09));
+    let lmdb09_h = c_src();
+    for (name, includes) in [
+        ("rlmdb", vec![inc.as_path()]),
+        ("rlmdb-09", vec![lmdb09_h.as_path(), inc.as_path()]),
+    ] {
+        let exe = exe_dir.join(format!("whoami-{name}"));
+        whoami(&exe, &includes, &lib, "rlmdb");
+        let (line, format) = run(&exe, &format!("install-{name}"), &[(path, &lib)]);
+        assert!(line.starts_with("0.9.85 LMDB 0.9.85: (rlmdb "), "{line}");
+        assert_eq!(format, Some(rlmdb::Format::V09));
+    }
 
     // A program built against C LMDB 0.9, on C and on the 0.9 stub.
     let c09 = c_shared(Lib::C);
     let exe09 = exe_dir.join("whoami-c09");
-    whoami(&exe09, &c_src(), &c09, "lmdb");
+    whoami(&exe09, &[&c_src()], &c09, "lmdb");
     let (line, format) = run(&exe09, "install-c09", &[(path, &c09)]);
     assert!(line.starts_with("0.9.37 LMDB 0.9.37"), "{line}");
     assert_eq!(format, Some(rlmdb::Format::V09));
@@ -252,7 +266,7 @@ fn installed_libraries_and_the_stubs_standing_in_for_c() {
     // A program built against C LMDB 1.0, on C and on the 1.0 stub.
     let c10 = c_shared(Lib::C10);
     let exe10 = exe_dir.join("whoami-c10");
-    whoami(&exe10, &c10_src(), &c10, "lmdb");
+    whoami(&exe10, &[&c10_src()], &c10, "lmdb");
     let (line, format) = run(&exe10, "install-c10", &[(path, &c10)]);
     assert!(line.starts_with("1.0.3 LMDB 1.0.3"), "{line}");
     assert_eq!(format, Some(rlmdb::Format::V10));

@@ -1,8 +1,8 @@
 //! The plain C types of `lmdb.h`: value, statistics and info structs, and
 //! the callback function types, with the exact C layout; also the types
 //! LMDB 1.0's `lmdb.h` adds for its crypto functions (`MDB_enc_func`,
-//! `MDB_sum_func`, `MDB_str2key_func`, `MDB_crypto_funcs`; `rlmdb.h`
-//! declares them).
+//! `MDB_sum_func`, `MDB_str2key_func`, `MDB_crypto_funcs`; declared in
+//! `include/lmdb.h`, LMDB 1.0's).
 //!
 //! Callback parameters that C allows to be NULL are `Option<fn>` in the
 //! exported signatures (Rust guarantees the same representation as a

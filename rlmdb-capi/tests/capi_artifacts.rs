@@ -2,18 +2,18 @@
 //! `librlmdb`, the LMDB 0.9 stub and the LMDB 1.0 stub.
 //!
 //! * Each exports every function declared in LMDB 0.9's `lmdb.h`, in LMDB
-//!   1.0's `lmdb.h` and in `rlmdb.h` (parsed at test time):
-//!   `tests/c/capi_symbols.c` loads it with `dlopen` (`LoadLibrary`) and
-//!   resolves each. Where `nm` runs, the exported functions are exactly
-//!   those.
+//!   1.0's `lmdb.h` (rlmdb's `include/lmdb.h`) and in `rlmdb.h` (parsed at
+//!   test time): `tests/c/capi_symbols.c` loads it with `dlopen`
+//!   (`LoadLibrary`) and resolves each. Where `nm` runs, the exported
+//!   functions are exactly those.
 //! * Each reports its own version (`mdb_version`, `rlmdb_version`,
 //!   `rlmdb_version_string`: 0.9.85, 0.9.85, 1.0.85) and creates new
 //!   environments in its own format when nothing asks for one (0.9, 0.9,
 //!   1.0, as `rlmdb_sniff_format` tells), while `rlmdb_env_set_format`,
 //!   `rlmdb_set_default_format` and `RLMDB_DEFAULT_FORMAT` override that
 //!   in all three.
-//! * `rlmdb.h` declares exactly the functions 1.0's `lmdb.h` has beyond
-//!   0.9's.
+//! * 0.9's functions are a subset of 1.0's; `rlmdb.h` declares rlmdb's own
+//!   functions and no `mdb_*` one.
 //! * On ELF systems the SONAMEs are `librlmdb.so`, `liblmdb.so.0` and
 //!   `liblmdb.so`, with `DF_1_NODELETE`; on macOS the install names are
 //!   `@rpath/librlmdb.dylib` and `@rpath/liblmdb.dylib`.
@@ -37,20 +37,27 @@ fn profile(artifact: Artifact) -> Profile {
     }
 }
 
-/// The functions of LMDB 0.9's `lmdb.h`, LMDB 1.0's `lmdb.h` and
-/// `rlmdb.h`, after checking how they relate.
+/// The functions of LMDB 0.9's `lmdb.h`, LMDB 1.0's `lmdb.h` (the one in
+/// `include`) and `rlmdb.h`, after checking how they relate.
 fn api_functions() -> BTreeSet<String> {
     let set = |v: Vec<String>| v.into_iter().collect::<BTreeSet<_>>();
     let h09 = set(header_functions(&c_src().join("lmdb.h"), "mdb_"));
-    let h10 = set(header_functions(&c10_src().join("lmdb.h"), "mdb_"));
+    let h10 = set(header_functions(
+        &crate_dir().join("include/lmdb.h"),
+        "mdb_",
+    ));
+    assert_eq!(
+        h10,
+        set(header_functions(&c10_src().join("lmdb.h"), "mdb_"))
+    );
     let rlmdb_h = crate_dir().join("include/rlmdb.h");
-    let ours10 = set(header_functions(&rlmdb_h, "mdb_"));
+    let ours_mdb = set(header_functions(&rlmdb_h, "mdb_"));
     let ours = set(header_functions(&rlmdb_h, "rlmdb_"));
     assert_eq!(h09.len(), 56, "{h09:?}");
     assert!(h09.is_subset(&h10), "{:?}", h09.difference(&h10));
     let added: BTreeSet<String> = h10.difference(&h09).cloned().collect();
     assert_eq!(added.len(), 13, "{added:?}");
-    assert_eq!(ours10, added, "rlmdb.h must declare what LMDB 1.0 adds");
+    assert!(ours_mdb.is_empty(), "rlmdb.h declares {ours_mdb:?}");
     assert_eq!(
         ours,
         set([

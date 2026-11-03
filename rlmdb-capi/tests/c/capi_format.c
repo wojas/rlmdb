@@ -1,6 +1,7 @@
-/* Checks the data-file format support of the C API against the Rust
- * library: rlmdb.h's format functions and LMDB 1.0 constants, and LMDB 1.0
- * environments through the lmdb.h functions (C LMDB has no rlmdb.h, and
+/* Checks the data-file format support of the C API against librlmdb,
+ * built with its own headers (rlmdb.h, which includes the lmdb.h next to
+ * it, LMDB 1.0's): rlmdb.h's format functions, LMDB 1.0's constants, and
+ * LMDB 1.0 environments through the lmdb.h functions (C LMDB has no rlmdb.h, and
  * C 0.9 cannot open 1.0 files, so there is no C build; interop's
  * tests/capi10.rs has C 1.0 read and write what this library writes).
  *
@@ -122,7 +123,7 @@ static void test_constants(void)
 	/* The values of LMDB 1.0's lmdb.h. */
 	CHECK(MDB_ENCRYPT == 0x2000 && MDB_PREVSNAPSHOT == 0x2000000);
 	CHECK(MDB_PROBLEM == -30779 && MDB_ADDR_BUSY == -30769);
-	CHECK(MDB_PROBLEM == MDB_LAST_ERRCODE + 1);
+	CHECK(MDB_PROBLEM == MDB_BAD_DBI + 1 && MDB_LAST_ERRCODE == MDB_ADDR_BUSY);
 	for (i = 0; i < sizeof(errs) / sizeof(errs[0]); i++) {
 		CHECK(errs[i].code == MDB_PROBLEM + (int)i);
 		CHECK(!strcmp(mdb_strerror(errs[i].code), errs[i].text));

@@ -6,11 +6,12 @@
 //!   -Wno-unused-parameter`, platform-default lock mode, no `MDB_DEBUG`), so
 //!   the data and lock files are the ones a normal `make` build produces.
 //! * `cpeer`: the C implementation of the peer command protocol (`c/cpeer*.c`).
-//! * The cpeer objects once more, compiled against the Rust library's
-//!   `lmdb.h` (`../rlmdb-capi/include`): at test time they are linked with
-//!   the Rust `librlmdb.a` into `cpeer_capi`, the third peer
-//!   (`Peer::COnRust`, see `src/bins.rs`). That link cannot happen here:
-//!   the build script runs before cargo builds `librlmdb.a`.
+//! * The cpeer objects once more, compiled as a program written for LMDB
+//!   0.9 that uses rlmdb's functions: against the vendored 0.9 `lmdb.h`
+//!   and rlmdb's `rlmdb.h` (`../rlmdb-capi/include`). At test time they
+//!   are linked with the Rust `librlmdb.a` into `cpeer_capi`, the third
+//!   peer (`Peer::COnRust`, see `src/bins.rs`). That link cannot happen
+//!   here: the build script runs before cargo builds `librlmdb.a`.
 //! * `layout_dump`: prints `sizeof`/`offsetof` of the internal structs; it
 //!   `#include`s `mdb.c` to see the static definitions.
 //! * The upstream tools (`mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`) and
@@ -201,17 +202,21 @@ fn main() {
         link(&bin_dir, "writeops", &objs, &lib_objs),
     ));
 
-    // cpeer against the Rust library's headers, linked at test time.
-    // `LMDB_RUST` lets it use `rlmdb.h` (`--format`, both page layouts).
+    // cpeer for the Rust library, linked at test time: LMDB 0.9's lmdb.h
+    // (the peer is a 0.9 program: its MDB_VERSION_MAJOR decides), then
+    // rlmdb.h, which `LMDB_RUST` lets it use (`--format`, both page
+    // layouts).
     let capi_include = manifest_dir.join("../rlmdb-capi/include");
     let capi_include = canonical(capi_include);
-    for h in ["lmdb.h", "rlmdb.h"] {
-        println!("cargo:rerun-if-changed={}", capi_include.join(h).display());
-    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        capi_include.join("rlmdb.h").display()
+    );
     let capi_objs = compile_with(
         &out_dir,
         "cpeer_capi",
-        &capi_include,
+        &lmdb_dir,
+        &[&capi_include],
         &peer_srcs,
         &["LMDB_RUST"],
     );
@@ -338,6 +343,7 @@ fn build_lmdb10(
         out_dir,
         "lmdb10_mdb_ndebug",
         lmdb10_dir,
+        &[],
         &[src("mdb.c")],
         &["NDEBUG"],
     );
@@ -451,14 +457,16 @@ fn c_build(lmdb_dir: &Path) -> cc::Build {
 
 /// Compiles `srcs` into object files under `$OUT_DIR/obj/<tag>`.
 fn compile(out_dir: &Path, tag: &str, lmdb_dir: &Path, srcs: &[PathBuf]) -> Vec<PathBuf> {
-    compile_with(out_dir, tag, lmdb_dir, srcs, &[])
+    compile_with(out_dir, tag, lmdb_dir, &[], srcs, &[])
 }
 
-/// [`compile`] with preprocessor macros defined (`-D<name>`).
+/// [`compile`] with the include directories `includes` after `lmdb_dir`
+/// and preprocessor macros defined (`-D<name>`).
 fn compile_with(
     out_dir: &Path,
     tag: &str,
     lmdb_dir: &Path,
+    includes: &[&Path],
     srcs: &[PathBuf],
     defines: &[&str],
 ) -> Vec<PathBuf> {
@@ -468,6 +476,9 @@ fn compile_with(
     let obj_dir = out_dir.join("obj").join(tag);
     std::fs::create_dir_all(&obj_dir).expect("create obj dir");
     let mut b = c_build(lmdb_dir);
+    for dir in includes {
+        b.include(dir);
+    }
     for d in defines {
         b.define(d, None);
     }

@@ -22,7 +22,7 @@ use common::*;
 
 #[test]
 fn rlmdb_h_format_functions() {
-    let exe = builder().test_program("capi_format", Lib::Rust);
+    let exe = builder().test_program("capi_format", Lib::RustApi);
     let scratch = builder().scratch("capi_format");
     let out = Command::new(&exe)
         .arg(&scratch)

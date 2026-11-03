@@ -347,7 +347,8 @@ fn link_cpeer_capi() -> Result<PathBuf> {
 
 /// The C peer linked against the Rust `librlmdb.a` of `rlmdb-capi`
 /// ([`crate::Peer::COnRust`]): the same C program as [`cpeer`], compiled
-/// against `rlmdb-capi/include/lmdb.h`, with the library swapped.
+/// against the same LMDB 0.9 `lmdb.h` and rlmdb's `rlmdb.h`, with the
+/// library swapped.
 ///
 /// Linked once per test process (the first call), so it always uses the
 /// `librlmdb.a` the tests were built with.

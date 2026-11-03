@@ -4,6 +4,7 @@
 # commits into a temporary repository, extract the listed files of
 # libraries/liblmdb, apply the patches of tests/lmdb-c/patches/<version>/
 # in name order, and report whether the result differs from the tree.
+# rlmdb-capi/include/lmdb.h is the 1.0 lmdb.h with a comment in front.
 #
 # Usage: scripts/update-c-sources.sh [--check]
 #   --check  only compare, do not write; exit status 1 if the tree differs
@@ -36,7 +37,7 @@ check=0
 for arg in "$@"; do
   case $arg in
     --check) check=1 ;;
-    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "update-c-sources.sh: unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -84,4 +85,34 @@ for v in 0.9 1.0; do
     fi
   fi
 done
+
+# rlmdb-capi/include/lmdb.h, the public header of the rlmdb libraries: the
+# 1.0 lmdb.h with this comment in front, generated here so that the two
+# cannot drift (rlmdb-capi's tests check it too).
+capi_h=$top/rlmdb-capi/include/lmdb.h
+{
+  cat <<'EOF'
+/* lmdb.h of the rlmdb libraries (rlmdb-capi/include).
+ *
+ * Everything below this comment is the unmodified lmdb.h of LMDB 1.0
+ * (tests/lmdb-c/1.0/lmdb.h, the pinned mdb.RE/1.0 release), copied by
+ * scripts/update-c-sources.sh. librlmdb and the liblmdb stubs implement
+ * this API; rlmdb.h declares rlmdb's own functions, and
+ * rlmdb-capi/README.md lists the differences from C LMDB. A program
+ * written for LMDB 0.9 may compile against 0.9's lmdb.h instead: the
+ * libraries export its functions, with the same ABI.
+ */
+EOF
+  cat "$tmp/out/1.0/lmdb.h"
+} > "$tmp/capi-lmdb.h"
+if cmp -s "$capi_h" "$tmp/capi-lmdb.h"; then
+  echo "rlmdb-capi/include/lmdb.h: the 1.0 lmdb.h with its comment"
+else
+  differs=1
+  echo "rlmdb-capi/include/lmdb.h: DIFFERS from the 1.0 lmdb.h with its comment"
+  if [ "$check" = 0 ]; then
+    cp "$tmp/capi-lmdb.h" "$capi_h"
+    echo "rlmdb-capi/include/lmdb.h: re-created"
+  fi
+fi
 if [ "$check" = 1 ]; then exit "$differs"; fi

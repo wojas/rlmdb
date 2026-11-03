@@ -3,11 +3,21 @@
 //! * [`Lib::C`]: the C LMDB 0.9.37 sources in `tests/lmdb-c/0.9`, compiled
 //!   here into `liblmdbc.a` (the oracle);
 //! * [`Lib::Rust`]: `librlmdb.a`, built by cargo from the `librlmdb`
-//!   package (`artifacts/rlmdb`) with rlmdb's 0.9 `lmdb.h`;
+//!   package (`artifacts/rlmdb`), with the vendored LMDB 0.9 `lmdb.h`
+//!   (`tests/lmdb-c/0.9`) and `rlmdb.h`: a program written for LMDB 0.9 on
+//!   librlmdb, the counterpart of [`Lib::C`];
+//! * [`Lib::RustApi`]: `librlmdb.a` with its own headers alone
+//!   (`include`: LMDB 1.0's `lmdb.h` and `rlmdb.h`), as a program written
+//!   for librlmdb's API is built;
 //! * [`Lib::C10`]: the C LMDB 1.0 sources in `tests/lmdb-c/1.0`, compiled
 //!   into `liblmdbc10.a` (the 1.0 oracle), with 1.0's `lmdb.h`;
 //! * [`Lib::Rust10`]: the LMDB 1.0 stub `liblmdb10.a` (`artifacts/lmdb10`)
-//!   with 1.0's `lmdb.h`, as a program built for C LMDB 1.0 uses it.
+//!   with `include` (whose `lmdb.h` is 1.0's), as a program built for C
+//!   LMDB 1.0 uses it.
+//!
+//! An upstream program includes the `lmdb.h` next to it (`#include "..."`
+//! looks in the source's directory first), which for the 1.0 builds is
+//! byte for byte the one in `include` (`src/version.rs` checks it).
 //!
 //! The libraries of the three artifact packages ([`Artifact`]) are
 //! dev-dependencies of this crate, so cargo builds them (static and
@@ -51,16 +61,21 @@ use std::process::{Command, Output};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
-/// Which LMDB a program is linked against.
+/// Which LMDB a program is linked against, and with which headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lib {
     /// The C library (oracle).
     C,
-    /// The Rust library (`librlmdb.a`), with rlmdb's `lmdb.h`.
+    /// The Rust library (`librlmdb.a`), with LMDB 0.9's `lmdb.h` and
+    /// `rlmdb.h`.
     Rust,
+    /// The Rust library (`librlmdb.a`) with its headers (`include`: LMDB
+    /// 1.0's `lmdb.h` and `rlmdb.h`).
+    RustApi,
     /// The C library of LMDB 1.0 (the 1.0 oracle), with its `lmdb.h`.
     C10,
-    /// The Rust LMDB 1.0 stub (`liblmdb10.a`) with LMDB 1.0's `lmdb.h`.
+    /// The Rust LMDB 1.0 stub (`liblmdb10.a`) with LMDB 1.0's `lmdb.h`
+    /// (`include`'s).
     Rust10,
 }
 
@@ -69,6 +84,7 @@ impl Lib {
         match self {
             Lib::C => "c",
             Lib::Rust => "rust",
+            Lib::RustApi => "rust-api",
             Lib::C10 => "c10",
             Lib::Rust10 => "rust10",
         }
@@ -76,12 +92,30 @@ impl Lib {
 
     /// One of the Rust libraries (built with `-DLMDB_RUST`)?
     pub fn is_rust(self) -> bool {
-        matches!(self, Lib::Rust | Lib::Rust10)
+        matches!(self, Lib::Rust | Lib::RustApi | Lib::Rust10)
+    }
+
+    /// `librlmdb` (built with `-DLMDB_LIBRLMDB` too): new environments
+    /// are LMDB 0.9 unless the program asks for 1.0.
+    pub fn is_librlmdb(self) -> bool {
+        matches!(self, Lib::Rust | Lib::RustApi)
     }
 
     /// Built with LMDB 1.0's `lmdb.h`?
     pub fn is_v10(self) -> bool {
-        matches!(self, Lib::C10 | Lib::Rust10)
+        matches!(self, Lib::RustApi | Lib::C10 | Lib::Rust10)
+    }
+
+    /// The include directories, in this order: the `lmdb.h` (and for the
+    /// Rust libraries `rlmdb.h`) a program built against this library
+    /// sees.
+    pub fn includes(self) -> Vec<PathBuf> {
+        match self {
+            Lib::C => vec![c_src()],
+            Lib::Rust => vec![c_src(), crate_dir().join("include")],
+            Lib::RustApi | Lib::Rust10 => vec![crate_dir().join("include")],
+            Lib::C10 => vec![c10_src()],
+        }
     }
 
     /// The directory of the upstream sources and programs of this
@@ -628,8 +662,10 @@ impl Builder {
     }
 
     /// Builds program `name` from `sources` against `lib` (once per test
-    /// process) and returns its path. The Rust-linked builds are compiled
-    /// with `-DLMDB_RUST` (see `GAP()` in the test programs).
+    /// process), with the include directories of [`Lib::includes`], and
+    /// returns its path. The Rust-linked builds are compiled with
+    /// `-DLMDB_RUST` (see `GAP()` in the test programs), those against
+    /// `librlmdb` also with `-DLMDB_LIBRLMDB`.
     pub fn program(&self, name: &str, sources: &[PathBuf], lib: Lib) -> PathBuf {
         self.program_with(name, sources, lib, &[])
     }
@@ -650,11 +686,11 @@ impl Builder {
         let out_dir = self.dir.join(lib.name());
         fs::create_dir_all(&out_dir).unwrap();
         let exe = out_dir.join(name);
-        let (include, archive) = match lib {
-            Lib::C => (c_src(), self.c_lib().to_path_buf()),
-            Lib::Rust => (crate_dir().join("include"), rust_staticlib()),
-            Lib::C10 => (c10_src(), self.c10_lib().to_path_buf()),
-            Lib::Rust10 => (c10_src(), artifact_staticlib(Artifact::Lmdb10)),
+        let archive = match lib {
+            Lib::C => self.c_lib().to_path_buf(),
+            Lib::Rust | Lib::RustApi => rust_staticlib(),
+            Lib::C10 => self.c10_lib().to_path_buf(),
+            Lib::Rust10 => artifact_staticlib(Artifact::Lmdb10),
         };
         // Where `cl` puts the objects (one directory per program, as
         // programs share source names).
@@ -663,7 +699,10 @@ impl Builder {
             fs::create_dir_all(&obj_dir).unwrap();
         }
         let mut c = Compiler::new(&obj_dir, false).unwrap();
-        c.include(&include).include(&test_c_dir());
+        for dir in lib.includes() {
+            c.include(&dir);
+        }
+        c.include(&test_c_dir());
         if !sources
             .iter()
             .any(|s| s.starts_with(c_src()) || s.starts_with(c10_src()))
@@ -672,6 +711,9 @@ impl Builder {
         }
         if lib.is_rust() {
             c.args(["-DLMDB_RUST"]);
+        }
+        if lib.is_librlmdb() {
+            c.args(["-DLMDB_LIBRLMDB"]);
         }
         c.args(extra)
             .output(&exe)
@@ -790,31 +832,39 @@ impl Builder {
     }
 
     /// Program `name` from `tests/c/<name>.c` compiled as C++ (with the C++
-    /// compiler, `-x c++`) and linked against the Rust library as
+    /// compiler, `-x c++`) and linked against `lib` (a Rust library) as
     /// `<name>_cxx`: a C++ program sees the C symbols only if the headers'
     /// `extern "C"` guards are right. The program must not need the C++
     /// runtime (the C compiler driver links it). `None`, with a note on
     /// stderr, when the C++ compiler (`CXX`, else the `cc` crate's default
     /// such as `c++`) cannot be run: a machine with only a C compiler
     /// skips the test instead of failing it.
-    pub fn cxx_test_program(&self, name: &str) -> Option<PathBuf> {
-        let includes = [crate_dir().join("include"), test_c_dir()];
+    pub fn cxx_test_program(&self, name: &str, lib: Lib) -> Option<PathBuf> {
+        assert!(lib.is_rust(), "{lib:?}");
+        let mut includes = lib.includes();
+        includes.push(test_c_dir());
         let source = test_c_dir().join(format!("{name}.c"));
-        let obj = self.strict_object(name, &source, &includes, true)?;
-        Some(self.program(&format!("{name}_cxx"), &[obj], Lib::Rust))
+        let obj_name = format!("{name}-{}", lib.name());
+        let mut defines = vec!["LMDB_RUST"];
+        if lib.is_librlmdb() {
+            defines.push("LMDB_LIBRLMDB");
+        }
+        let obj = self.strict_object(&obj_name, &source, &includes, &defines, true)?;
+        Some(self.program(&format!("{name}_cxx"), &[obj], lib))
     }
 
     /// `source` compiled with warnings as errors into an object named
     /// after `name`, with the include directories `includes` in that
-    /// order and `-DLMDB_RUST`; as C++ with `cpp` (no exceptions, no RTTI:
-    /// the object must not need the C++ runtime). `None`, with a note on
-    /// stderr, when the C++ compiler cannot be run (see
-    /// [`Builder::cxx_test_program`]).
+    /// order and the macros `defines` (`-D<name>`); as C++ with `cpp` (no
+    /// exceptions, no RTTI: the object must not need the C++ runtime).
+    /// `None`, with a note on stderr, when the C++ compiler cannot be run
+    /// (see [`Builder::cxx_test_program`]).
     pub fn strict_object(
         &self,
         name: &str,
         source: &Path,
         includes: &[PathBuf],
+        defines: &[&str],
         cpp: bool,
     ) -> Option<PathBuf> {
         let out_dir = self.dir.join(if cpp { "cxx" } else { "strict" });
@@ -849,7 +899,9 @@ impl Builder {
         for dir in includes {
             cmd.arg("-I").arg(dir);
         }
-        cmd.arg("-DLMDB_RUST");
+        for d in defines {
+            cmd.arg(format!("-D{d}"));
+        }
         if compiler.is_like_msvc() {
             cmd.args(["-nologo", "-W3", "-WX", "-c"]);
             if cpp {

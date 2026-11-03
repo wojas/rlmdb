@@ -3,11 +3,11 @@
  *   capi_v10 <scratch-dir>
  *
  * Built three times: against C LMDB 1.0 with its lmdb.h (the oracle),
- * against rlmdb's LMDB 1.0 stub with the same header (-DLMDB_RUST; a
- * program built for C 1.0), and against librlmdb with rlmdb's 0.9 lmdb.h
- * and rlmdb.h (-DLMDB_RUST; rlmdb.h declares the 13 functions), which
- * asks for LMDB 1.0 environments with rlmdb_env_set_format. Every
- * environment is LMDB 1.0.
+ * against rlmdb's LMDB 1.0 stub with rlmdb's lmdb.h, which is 1.0's
+ * (-DLMDB_RUST; a program built for C 1.0), and against librlmdb with
+ * rlmdb's lmdb.h and rlmdb.h (-DLMDB_RUST -DLMDB_LIBRLMDB), which asks
+ * for LMDB 1.0 environments with rlmdb_env_set_format (librlmdb's new
+ * environments are 0.9). Every environment is LMDB 1.0.
  *
  * mdb_env_set_pagesize, mdb_txn_flags and mdb_cursor_is_db are
  * implemented: every build must pass the same checks and print the same
@@ -29,8 +29,8 @@
 /* mkdir, open, file handles; their Windows forms (tests/compat). */
 #include "../../../tests/compat/posix_compat.h"
 #include "lmdb.h"
-#if MDB_VERSION_MAJOR < 1
-/* rlmdb's 0.9 lmdb.h: the 1.0 functions come from rlmdb.h. */
+#ifdef LMDB_RUST
+/* rlmdb_env_set_format, rlmdb_env_set_pagesize. */
 #include "rlmdb.h"
 #endif
 
@@ -90,12 +90,12 @@ static void env_path(char *path, size_t size, const char *name)
 }
 
 /* An environment handle that will be LMDB 1.0: the 1.0 libraries create
- * 1.0 environments; librlmdb (0.9 header) is asked for one. */
+ * 1.0 environments; librlmdb is asked for one. */
 static MDB_env *create_env(void)
 {
 	MDB_env *env;
 	OK(mdb_env_create(&env));
-#if MDB_VERSION_MAJOR < 1
+#ifdef LMDB_LIBRLMDB
 	OK(rlmdb_env_set_format(env, RLMDB_FORMAT_10));
 #endif
 	return env;
@@ -192,7 +192,7 @@ static void test_set_pagesize(void)
 		mdb_env_close(env);
 	}
 
-#if defined(LMDB_RUST) && MDB_VERSION_MAJOR < 1
+#ifdef LMDB_LIBRLMDB
 	/* librlmdb without a request for 1.0: a new environment is 0.9,
 	 * which has no page-size setting. */
 	OK(mdb_env_create(&env));
@@ -695,15 +695,13 @@ static void test_modules(void)
 
 int main(int argc, char **argv)
 {
-	int major, minor, patch;
 	if (argc != 2) {
 		fprintf(stderr, "usage: capi_v10 <scratch-dir>\n");
 		return 2;
 	}
 	snprintf(scratch, sizeof(scratch), "%s", argv[1]);
-	mdb_version(&major, &minor, &patch);
 	/* The C 1.0 oracle and the 1.0 stub say 1.0.x, librlmdb 0.9.85. */
-	printf("library: LMDB %d.%d.%d\n", major, minor, patch);
+	printf("library: %s\n", mdb_version(NULL, NULL, NULL));
 
 	test_set_pagesize();
 	test_txn_flags();

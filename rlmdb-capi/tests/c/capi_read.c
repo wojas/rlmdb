@@ -122,7 +122,7 @@ static void test_version(void)
 		"MDB_BAD_DBI: The specified DBI handle was closed/changed unexpectedly"));
 #ifdef LMDB_RUST
 	/* rlmdb also knows the codes LMDB 1.0 adds after MDB_BAD_DBI
-	 * (MDB_PROBLEM .. MDB_ADDR_BUSY, declared in rlmdb.h). */
+	 * (MDB_PROBLEM .. MDB_ADDR_BUSY, in 1.0's lmdb.h). */
 	CHECK(!strcmp(mdb_strerror(MDB_LAST_ERRCODE + 1),
 		"MDB_PROBLEM: Unexpected problem - txn should abort"));
 #elif defined(_WIN32)

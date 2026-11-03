@@ -1,24 +1,33 @@
-/* rlmdb.h with either lmdb.h in front of it.
+/* rlmdb.h after either lmdb.h, and LMDB 1.0's API from rlmdb's headers.
  *
  *   capi_headers
  *
- * Compiled with warnings as errors, as C and as C++, once with rlmdb's
- * lmdb.h (LMDB 0.9.37's) and once with LMDB 1.0's own lmdb.h included
- * before rlmdb.h, as a program written for C LMDB 1.0 may do: the types
- * rlmdb.h adds for the LMDB 1.0 functions must not be defined twice, and
- * its declarations of those functions must agree with 1.0's (a
- * conflicting redeclaration does not compile). The program takes the
- * address of every function rlmdb.h declares, uses the types and
- * constants, and calls some of the functions; the test links it against
- * librlmdb (0.9 header) or the LMDB 1.0 stub (1.0 header).
+ * Compiled with warnings as errors, as C and as C++, in three ways, and
+ * linked against librlmdb:
  *
- * Prints "capi_headers (<header>, <language>): N checks, F failures" and
- * exits 1 on failures.
+ *  - with rlmdb-capi/include alone, whose lmdb.h is LMDB 1.0's: the API
+ *    of librlmdb, as a program written for LMDB 1.0 that also uses
+ *    rlmdb's functions is built;
+ *  - the same with RLMDB_H_ONLY defined: rlmdb.h without an lmdb.h
+ *    before it, which then includes the one next to it;
+ *  - with the vendored LMDB 0.9 lmdb.h (tests/lmdb-c/0.9) first on the
+ *    include path: a program written for LMDB 0.9 that also uses rlmdb's
+ *    functions.
+ *
+ * rlmdb.h must compile after either lmdb.h without defining anything
+ * twice. The program takes the address of every function rlmdb.h
+ * declares and, with LMDB 1.0's lmdb.h, of the 13 functions 1.0 adds,
+ * uses 1.0's types and constants, and calls some of the functions.
+ *
+ * Prints "capi_headers (LMDB <version> header, <language>): N checks, F
+ * failures" and exits 1 on failures.
  */
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#ifndef RLMDB_H_ONLY
 #include "lmdb.h"
+#endif
 #include "rlmdb.h"
 
 static int checks, failures;
@@ -28,8 +37,17 @@ static int checks, failures;
 
 typedef void (*any_func)(void);
 
-/* Every function of rlmdb.h: the 13 of LMDB 1.0 and rlmdb's own. */
+/* Every function of rlmdb.h, and with LMDB 1.0's lmdb.h the 13 it adds
+ * to 0.9's. */
 static const any_func functions[] = {
+	(any_func)rlmdb_version,
+	(any_func)rlmdb_version_string,
+	(any_func)rlmdb_env_set_format,
+	(any_func)rlmdb_env_get_format,
+	(any_func)rlmdb_sniff_format,
+	(any_func)rlmdb_set_default_format,
+	(any_func)rlmdb_env_set_pagesize,
+#if MDB_VERSION_MAJOR >= 1
 	(any_func)mdb_env_set_pagesize,
 	(any_func)mdb_txn_flags,
 	(any_func)mdb_cursor_is_db,
@@ -43,16 +61,11 @@ static const any_func functions[] = {
 	(any_func)mdb_modload,
 	(any_func)mdb_modunload,
 	(any_func)mdb_modsetup,
-	(any_func)rlmdb_version,
-	(any_func)rlmdb_version_string,
-	(any_func)rlmdb_env_set_format,
-	(any_func)rlmdb_env_get_format,
-	(any_func)rlmdb_sniff_format,
-	(any_func)rlmdb_set_default_format,
-	(any_func)rlmdb_env_set_pagesize,
+#endif
 };
 
-/* The callback types, with their 1.0 signatures. */
+#if MDB_VERSION_MAJOR >= 1
+/* The callback types of LMDB 1.0. */
 static int enc(const MDB_val *src, MDB_val *dst, const MDB_val *key, int encdec)
 {
 	(void)src; (void)dst; (void)key; (void)encdec;
@@ -76,7 +89,8 @@ static MDB_crypto_funcs *hooks(void)
 	return &funcs;
 }
 
-int main(void)
+/* LMDB 1.0's types, constants and functions, with rlmdb's lmdb.h alone. */
+static void test_v10_api(void)
 {
 	MDB_enc_func *encp = enc;
 	MDB_sum_func *sump = sum;
@@ -85,25 +99,22 @@ int main(void)
 	mdb_size_t count = 42;
 	char buf[64];
 	char *errmsg = NULL;
-	unsigned flags = 7, format = 0;
-	const rlmdb_version_info *info = rlmdb_version();
-	int major, minor, patch;
+	unsigned flags = 7;
 	size_t i;
 	unsigned long long remap = MDB_REMAP_CHUNKS;
 	int codes[] = { MDB_PROBLEM, MDB_BAD_CHECKSUM, MDB_CRYPTO_FAIL, MDB_ENV_ENCRYPTION,
 		MDB_TXN_PENDING, MDB_CANT_ROLLBACK, MDB_DBIS_BUSY, MDB_SHORT_WRITE,
 		MDB_ENV_BUSY, MDB_IS_READONLY, MDB_ADDR_BUSY };
 
-	for (i = 0; i < sizeof(functions) / sizeof(functions[0]); i++)
-		CHECK(functions[i] != NULL);
 	CHECK(sizeof(mdb_size_t) == sizeof(size_t));
 	CHECK(MDB_SIZE_MAX == SIZE_MAX);
 	/* Not passed to printf: MinGW's format checking does not know the
-	 * "I" of Windows' MDB_FMT_Z (C 1.0's). */
+	 * "I" of Windows' MDB_FMT_Z. */
 	snprintf(buf, sizeof(buf), "%s|%s", MDB_PRIy(u), MDB_SCNy(x));
 	CHECK(strcmp(buf, MDB_FMT_Z "u|" MDB_FMT_Z "x") == 0 && count == MDB_SIZE_MAX - MDB_SIZE_MAX + 42);
 	CHECK(mcf->mcf_encfunc == encp && mcf->mcf_sumfunc == sump && mcf->mcf_keysize == 32);
 	CHECK(remap == 0x4000000 && MDB_PREVSNAPSHOT == 0x2000000 && MDB_ENCRYPT == 0x2000);
+	CHECK(MDB_LAST_ERRCODE == MDB_ADDR_BUSY);
 	for (i = 0; i < sizeof(codes) / sizeof(codes[0]); i++)
 		CHECK(codes[i] == -30779 + (int)i && strncmp(mdb_strerror(codes[i]), "MDB_", 4) == 0);
 
@@ -119,15 +130,37 @@ int main(void)
 	CHECK(mdb_modload("no-such-module", NULL, &mcf, &errmsg) == NULL && errmsg != NULL);
 	mdb_modunload(NULL);
 	mdb_modsetup(NULL, mcf, NULL);
+}
+#endif
+
+int main(void)
+{
+	const rlmdb_version_info *info = rlmdb_version();
+	unsigned format = 0;
+	int major = -1, minor = -1, patch = -1;
+	size_t i;
+
+	for (i = 0; i < sizeof(functions) / sizeof(functions[0]); i++)
+		CHECK(functions[i] != NULL);
+#if MDB_VERSION_MAJOR >= 1
+	test_v10_api();
+#else
+	/* LMDB 1.0's codes have no names in 0.9's lmdb.h; rlmdb knows them. */
+	CHECK(MDB_LAST_ERRCODE == MDB_BAD_DBI);
+	CHECK(strcmp(mdb_strerror(MDB_LAST_ERRCODE + 1),
+		"MDB_PROBLEM: Unexpected problem - txn should abort") == 0);
+#endif
 	CHECK(rlmdb_sniff_format("no-such-directory", 0, &format) == 0 &&
 		format == RLMDB_FORMAT_UNKNOWN);
 	CHECK(rlmdb_env_set_pagesize(NULL, 4096) == EINVAL);
+	CHECK(rlmdb_env_set_format(NULL, RLMDB_FORMAT_10) == EINVAL);
 
-	/* The library: librlmdb (0.9.85) with rlmdb's lmdb.h, the 1.0 stub
-	 * (1.0.85) with LMDB 1.0's. */
+	/* librlmdb reports 0.9.85, whichever header the program was built
+	 * with. */
 	mdb_version(&major, &minor, &patch);
-	CHECK(major == MDB_VERSION_MAJOR && minor == MDB_VERSION_MINOR && patch == 85);
-	CHECK(info->lmdb_major == major && info->lmdb_minor == minor && info->lmdb_patch == 85);
+	CHECK(major == 0 && minor == 9 && patch == 85);
+	CHECK(info->lmdb_major == major && info->lmdb_minor == minor &&
+		info->lmdb_patch == patch);
 	CHECK(strstr(rlmdb_version_string(), "rlmdb ") == rlmdb_version_string());
 
 	printf("capi_headers (LMDB %d.%d.%d header, %s): %d checks, %d failures\n",

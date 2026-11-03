@@ -104,10 +104,10 @@ fn c_version(profile: Profile) -> &'static CVersion {
 /// Stores the profile's version ([`Profile::lmdb_version`]: 0, 9, 85, or 1,
 /// 0, 85 in the LMDB 1.0 stub) in the non-NULL arguments and returns
 /// `"LMDB 0.9.85: (rlmdb <version>)"` (or `"LMDB 1.0.85: ..."`,
-/// [`rlmdb::VersionInfo::mdb_version_string`]), a static string. The
-/// shipped `lmdb.h` says 0.9.37, the C release whose ABI and file formats
-/// the library implements; the patch level 85, above every C release,
-/// tells rlmdb apart from C LMDB.
+/// [`rlmdb::VersionInfo::mdb_version_string`]), a static string. LMDB
+/// 0.9's `lmdb.h` says 0.9.37, the C release whose ABI and file format the
+/// library implements; the patch level 85, above every C release, tells
+/// rlmdb apart from C LMDB.
 ///
 /// # Safety
 ///
@@ -143,7 +143,7 @@ pub fn rlmdb_version_string_of(profile: Profile) -> *const c_char {
 
 /// The messages of LMDB's own codes as static C strings: those of LMDB 0.9
 /// (`MDB_KEYEXIST..=MDB_BAD_DBI`) and those LMDB 1.0 adds (`MDB_PROBLEM
-/// ..=MDB_ADDR_BUSY`, declared in `rlmdb.h`), with the texts of
+/// ..=MDB_ADDR_BUSY`, in LMDB 1.0's `lmdb.h`), with the texts of
 /// [`rlmdb::strerror`], identical to C 0.9's and C 1.0's.
 fn lmdb_messages() -> &'static [CString] {
     static MESSAGES: OnceLock<Vec<CString>> = OnceLock::new();
@@ -156,7 +156,7 @@ fn lmdb_messages() -> &'static [CString] {
 
 /// `mdb_strerror`: return a string describing a given error code.
 ///
-/// LMDB's codes map to static strings, LMDB 1.0's codes (`rlmdb.h`)
+/// LMDB's codes map to static strings, LMDB 1.0's codes (its `lmdb.h`)
 /// included, where C 0.9 says "Invalid error code" (on Windows, where C
 /// asks the system for any other code, the empty string); other positive values
 /// are passed to the C library's `strerror`, as C LMDB does on Unix (on
@@ -182,9 +182,12 @@ mod tests {
 
     use super::*;
 
-    /// The `MDB_VERSION_*` numbers of the shipped `lmdb.h`.
-    fn header_version() -> (i32, i32, i32) {
-        let header = include_str!("../include/lmdb.h");
+    /// The shipped `lmdb.h` (LMDB 1.0's) and the vendored LMDB 0.9 one.
+    const LMDB_H: &str = include_str!("../include/lmdb.h");
+    const LMDB_09_H: &str = include_str!("../../tests/lmdb-c/0.9/lmdb.h");
+
+    /// The `MDB_VERSION_*` numbers of `header`.
+    fn header_version(header: &str) -> (i32, i32, i32) {
         let field = |name: &str| -> i32 {
             header
                 .lines()
@@ -220,16 +223,17 @@ mod tests {
             };
             assert_eq!(again.cast_const(), s.as_ptr());
         }
-        // librlmdb: the same series as the header, a higher patch level.
-        let (hma, hmi, hpa) = header_version();
-        let (ma, mi, pa) = Profile::Rlmdb.lmdb_version();
-        assert_eq!((ma, mi), (hma, hmi));
-        assert!(pa > hpa);
-        // The 1.0 stub: above the C 1.0 release whose format it matches.
-        let v10 = rlmdb::version_info().v10;
-        let (ma, mi, pa) = Profile::Lmdb10.lmdb_version();
-        assert_eq!((ma, mi), (v10.0, v10.1));
-        assert!(pa > v10.2);
+        // The series of a header, a higher patch level.
+        for (profile, header) in [
+            (Profile::Rlmdb, LMDB_09_H),
+            (Profile::Lmdb09, LMDB_09_H),
+            (Profile::Lmdb10, LMDB_H),
+        ] {
+            let (hma, hmi, hpa) = header_version(header);
+            let (ma, mi, pa) = profile.lmdb_version();
+            assert_eq!((ma, mi), (hma, hmi));
+            assert!(pa > hpa);
+        }
     }
 
     #[test]
@@ -247,10 +251,14 @@ mod tests {
                 (info.lmdb_major, info.lmdb_minor, info.lmdb_patch),
                 profile.lmdb_version()
             );
-            // The 0.9 format matches the release of the shipped header.
+            // The formats match the releases of the two headers.
             assert_eq!(
                 (info.v09_major, info.v09_minor, info.v09_patch),
-                header_version()
+                header_version(LMDB_09_H)
+            );
+            assert_eq!(
+                (info.v10_major, info.v10_minor, info.v10_patch),
+                header_version(LMDB_H)
             );
             assert_eq!((info.v10_major, info.v10_minor, info.v10_patch), v.v10);
             // SAFETY: a static NUL-terminated string.
@@ -267,13 +275,15 @@ mod tests {
     }
 
     #[test]
-    fn shipped_header_is_the_unmodified_c_header() {
-        let ours = include_str!("../include/lmdb.h");
-        let c = include_str!("../../tests/lmdb-c/0.9/lmdb.h");
-        // Our copy starts with one comment block, then the C header.
-        let (prefix, rest) = ours.split_once(" */\n").unwrap();
-        assert!(prefix.starts_with("/* lmdb.h for the Rust implementation"));
-        assert_eq!(rest, c);
+    fn shipped_header_is_the_unmodified_lmdb_1_0_header() {
+        let c10 = include_str!("../../tests/lmdb-c/1.0/lmdb.h");
+        // Our copy starts with one comment block (written by
+        // scripts/update-c-sources.sh), then the C 1.0 header.
+        let (prefix, rest) = LMDB_H.split_once(" */\n").unwrap();
+        assert!(prefix.starts_with("/* lmdb.h of the rlmdb libraries"));
+        assert!(prefix.contains("scripts/update-c-sources.sh"));
+        assert_eq!(rest, c10);
+        assert_eq!(header_version(LMDB_H), rlmdb::version_info().v10);
     }
 
     #[test]

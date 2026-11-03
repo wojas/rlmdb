@@ -2,8 +2,9 @@
 //! and 0.9's does not, on LMDB 1.0 environments.
 //!
 //! The program runs against C LMDB 1.0 (the oracle, with 1.0's `lmdb.h`),
-//! against the LMDB 1.0 stub with the same header (a program built for C
-//! 1.0), and against `librlmdb` with rlmdb's `lmdb.h` and `rlmdb.h`. All
+//! against the LMDB 1.0 stub with rlmdb's `lmdb.h`, which is 1.0's (a
+//! program built for C 1.0), and against `librlmdb` with rlmdb's `lmdb.h`
+//! and `rlmdb.h`, asking for 1.0 environments. All
 //! must report no failures and print the same trace (`T ...` lines) of
 //! what `mdb_env_set_pagesize`, `mdb_txn_flags` and `mdb_cursor_is_db`
 //! do; the Rust builds also check that the unimplemented functions return
@@ -16,6 +17,7 @@ use std::path::Path;
 use std::process::Command;
 
 use common::*;
+use rlmdb_capi::Profile;
 
 fn run_capi_v10(lib: Lib) -> (String, std::path::PathBuf) {
     let b = builder();
@@ -61,12 +63,12 @@ fn lmdb_1_0_functions_match_c_1_0() {
     assert!(c.starts_with("library: LMDB 1.0."), "{c}");
     let tc = trace(&c);
     assert!(tc.len() > 50, "{c}");
-    for (lib, version) in [(Lib::Rust10, "1.0.85"), (Lib::Rust, "0.9.85")] {
+    let librlmdb = rlmdb_capi::version::version_info(Profile::Rlmdb).mdb_version_string();
+    let stub = rlmdb_capi::version::version_info(Profile::Lmdb10).mdb_version_string();
+    assert!(stub.starts_with("LMDB 1.0.85: "), "{stub}");
+    for (lib, version) in [(Lib::Rust10, stub), (Lib::RustApi, librlmdb)] {
         let (rust, scratch) = run_capi_v10(lib);
-        assert!(
-            rust.starts_with(&format!("library: LMDB {version}\n")),
-            "{rust}"
-        );
+        assert!(rust.starts_with(&format!("library: {version}\n")), "{rust}");
         let tr = trace(&rust);
         for (i, (a, b)) in tc.iter().zip(&tr).enumerate() {
             assert_eq!(

@@ -1,7 +1,7 @@
 //! The 13 functions LMDB 1.0's `lmdb.h` declares and 0.9's does not
 //! (`tests/lmdb-c/1.0/lmdb.h`, `mdb.c` and `module.c`), so that a program
-//! built for C LMDB 1.0 links against every rlmdb library; `rlmdb.h`
-//! declares them for programs that include rlmdb's 0.9 `lmdb.h`.
+//! built for C LMDB 1.0 links against every rlmdb library; rlmdb's
+//! `include/lmdb.h`, LMDB 1.0's, declares them.
 //!
 //! Implemented, as in C 1.0:
 //!
