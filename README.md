@@ -36,8 +36,8 @@ Implemented and tested against the C library on macOS (arm64) and Linux
   compacting environment copies (byte-identical to `mdb_copy` and
   `mdb_copy -c`). Custom comparators.
 * **`rlmdb-capi`**: all 56 functions of `lmdb.h`, and the 13 that LMDB
-  1.0's `lmdb.h` adds (page size, transaction flags and `mdb_cursor_is_db`
-  implemented; two-phase commit, encryption, checksums, incremental
+  1.0's `lmdb.h` adds (page size, transaction flags, `mdb_cursor_is_db`
+  and two-phase commit implemented; encryption, checksums, incremental
   backups and crypto modules return `ENOTSUP`). The unmodified upstream
   `mtest.c` .. `mtest6.c`, `mdb_stat.c`, `mdb_dump.c`, `mdb_load.c` and
   `mdb_copy.c` run against it and give the same results as against C,
@@ -90,8 +90,9 @@ Deliberately out of scope:
   unaffected.
 * LMDB 1.0 features beyond its data file: `MDB_VL32`, encryption,
   checksums, `MDB_PREVSNAPSHOT` (rejected with `EINVAL`, as 0.9 does, for
-  1.0 environments too), two-phase commit; the format-converting copy
-  (`DUAL_FORMAT.md` §4.3) is planned.
+  1.0 environments too); the format-converting copy (`DUAL_FORMAT.md`
+  §4.3) is planned. (Two-phase commit, `mdb_txn_prepare` and
+  `mdb_env_rollback`, is implemented, for 0.9 environments too.)
 * The `heed`-compatible typed API described in `DESIGN.md` is deferred:
   the byte-level API is validated through the C API first.
   Performance work against C (benchmarks) has not started.

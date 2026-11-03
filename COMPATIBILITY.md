@@ -367,11 +367,14 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
   `lmdb.h` and `rlmdb.h` and has all but 1.0's 13 functions): keys and
   `MDB_DUPSORT` items up to the environment's `mdb_env_get_maxkeysize`,
   1.0's page sizes (`mdb_env_set_pagesize`), `mdb_txn_flags`,
-  `mdb_cursor_is_db`, `mdb_strerror` of 1.0's codes. Every C library
-  (`librlmdb` and the two stubs) exports all 13 functions LMDB 1.0's
-  `lmdb.h` adds; those of 1.0's two-phase commit, encryption, checksums,
-  incremental backups and crypto modules make C 1.0's argument checks
-  and return `ENOTSUP` (rlmdb implements none of them). The LMDB 1.0
+  `mdb_cursor_is_db`, `mdb_strerror` of 1.0's codes, two-phase commit
+  (`mdb_txn_prepare`, `mdb_env_rollback`, in both formats; the
+  differences, `KNOWN_C_BUGS.md` rows 61 to 64, are in
+  `rlmdb-capi/README.md`). Every C library (`librlmdb` and the two stubs)
+  exports all 13 functions LMDB 1.0's `lmdb.h` adds; those of 1.0's
+  encryption, checksums, incremental backups and crypto modules make C
+  1.0's argument checks and return `ENOTSUP` (rlmdb implements none of
+  them). The LMDB 1.0
   stub creates 1.0 environments unless asked otherwise, so a program
   built for C 1.0 gets what C 1.0 would give it. What a C
   program writes through it is what C 1.0 writes, and C 1.0 reads it; what

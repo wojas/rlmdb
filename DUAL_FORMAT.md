@@ -10,7 +10,7 @@ peers on 1.0 environments, also at 256 B, 1 KiB and 64 KiB pages, and one
 process has environments of both formats open next to C peers of both
 releases. §4.2–§4.5 describe what was built, §7 what each stage needed.
 Open: the format-converting copy (§4.3) and the 1.0 features beyond its
-data file (stage 7).
+data file (stage 7) but two-phase commit, which is done.
 
 Question: can rlmdb read and write both the LMDB 0.9 (`MDB_DATA_VERSION 1`)
 and the LMDB 1.0 (`MDB_DATA_VERSION 3`) formats from one code base, picking
@@ -97,11 +97,12 @@ These are invariants C 1.0 peers rely on, so they are not optional:
    be added later behind the same `Format` descriptor.)
 
 Features of 1.0 that are API, not format, and can come later without
-touching the layout work: `mdb_txn_prepare` / `mdb_env_rollback` (2PC),
-`MDB_PREVSNAPSHOT` (pick the older meta, mdb10.c 4783), read-only child
-transactions of a write transaction, `mdb_env_incr_dump*` (walks `mp_txnid`),
-`mdb_cursor_is_db`, `mdb_txn_flags`, `MDB_REMAP_CHUNKS` and the reader page
-cache (`MDB_RPAGE_CACHE`, in-memory only; the source of lmdb-go#45).
+touching the layout work: `mdb_txn_prepare` / `mdb_env_rollback` (2PC,
+done: stage 7), `MDB_PREVSNAPSHOT` (pick the older meta, mdb10.c 4783),
+read-only child transactions of a write transaction, `mdb_env_incr_dump*`
+(walks `mp_txnid`), `mdb_cursor_is_db`, `mdb_txn_flags`, `MDB_REMAP_CHUNKS`
+and the reader page cache (`MDB_RPAGE_CACHE`, in-memory only; the source of
+lmdb-go#45).
 
 ## 3. How far the 0.9 layout reaches into rlmdb today
 
@@ -361,9 +362,10 @@ setting, no load-time code). All three export the same functions: 0.9's
 `lmdb.h`'s, the 13 that LMDB 1.0's `lmdb.h` adds, and `rlmdb.h`'s. (At
 first `rlmdb.h` declared the 13 too, for rlmdb's 0.9 `lmdb.h`; with 1.0's
 `lmdb.h` shipped instead, it holds only the `rlmdb_*` functions.)
-`mdb_env_set_pagesize`, `mdb_txn_flags` and `mdb_cursor_is_db` are
-implemented; the functions of the features of stage 7 (`mdb_txn_prepare`,
-`mdb_env_rollback`, `mdb_env_set_encrypt`, `mdb_env_set_checksum`), the
+`mdb_env_set_pagesize`, `mdb_txn_flags`, `mdb_cursor_is_db` and
+two-phase commit (`mdb_txn_prepare`, `mdb_env_rollback`, stage 7) are
+implemented; the functions of the other features of stage 7
+(`mdb_env_set_encrypt`, `mdb_env_set_checksum`), the
 incremental backups (`mdb_env_incr_dump`, `mdb_env_incr_dumpfd`,
 `mdb_env_incr_loadfd`) and the crypto modules (`mdb_modload`,
 `mdb_modunload`, `mdb_modsetup`) make C 1.0's argument checks and return
@@ -591,7 +593,19 @@ Later decisions (owner, 2026-11-03), for the three C libraries:
    1.0 and rlmdb.
 6. Soon after: the format-converting copy (`convert-copy`), replacing
    `lmdbconvert`.
-7. Later: `MDB_PREVSNAPSHOT`, 2PC, checksums, encryption. Their C
-   functions are exported already and return `ENOTSUP` until then
-   (§4.4); so do the incremental backups and the crypto modules, which
-   are not planned.
+7. Later: `MDB_PREVSNAPSHOT`, checksums, encryption. Their C functions
+   are exported already and return `ENOTSUP` until then (§4.4); so do the
+   incremental backups and the crypto modules, which are not planned.
+   Done: two-phase commit, in both formats: `RwTxn::prepare` and
+   `PreparedTxn` (`mdb_txn_prepare`: the commit split before its meta
+   page write, which `PreparedTxn::commit` does) and
+   `Environment::rollback` (`mdb_env_rollback`: the newest meta page
+   overwritten with C 1.0's page without a snapshot). A prepared commit
+   writes exactly what a plain commit writes, so 0.9 files are what C 0.9
+   writes and 1.0 files what C 1.0 writes (`write_differential.rs`,
+   `interop/tests/write_differential10.rs`); the rolled-back page is C
+   1.0's byte for byte, which C 0.9 reads as no snapshot. Differences
+   from C 1.0, all where C breaks the environment or its own memory:
+   `KNOWN_C_BUGS.md` rows 61 to 64 (a reader of the snapshot stops a
+   rollback; a rollback leaves no second one; a prepare that ends the
+   transaction).

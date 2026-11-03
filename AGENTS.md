@@ -249,8 +249,8 @@ deferred until the core has been validated through the C API.
   Windows decision. Keep every OS specific behind `rlmdb/src/os/`.
 * Possible later: `MDB_WRITEMAP` (dirty pages are owned buffers today;
   keep the page backing replaceable), the typed Rust API, LMDB 1.0
-  features beyond its data file (`MDB_PREVSNAPSHOT`, two-phase commit,
-  checksums, encryption; `DUAL_FORMAT.md` §7) and the format-converting
+  features beyond its data file (`MDB_PREVSNAPSHOT`, checksums,
+  encryption; `DUAL_FORMAT.md` §7) and the format-converting
   copy (`convert-copy`, §4.3). The C API and the tools handle both formats
   (stage 4), the interop matrix covers both (stage 5); new environments
   are 0.9 unless 1.0 is asked for, and the
