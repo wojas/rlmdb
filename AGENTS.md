@@ -122,10 +122,12 @@ deferred until the core has been validated through the C API.
   named `liblmdb` that stand in for C LMDB 0.9 (SONAME `liblmdb.so.0`)
   and 1.0 (SONAME `liblmdb.so`), built as `liblmdb09.*` / `liblmdb10.*`
   and renamed by `scripts/install-libs.sh`. They differ only in their
-  names, in `mdb_version` (0.9.85, 0.9.85, 1.0.85) and in the format of
-  new environments that ask for none (0.9, 0.9, 1.0); everything else is
-  common code, and the profile is a build-time property
-  (`rlmdb-capi/src/profile.rs`: no cargo feature, no load-time code).
+  names, in `mdb_version` (`librlmdb` rlmdb's own version, programs link
+  against it explicitly; the stubs 0.9.85 and 1.0.85) and in the format
+  of new environments that ask for none (0.9, 0.9, 1.0: almost all
+  programs are written for 0.9 today); everything else is common code,
+  and the profile is a build-time property (`rlmdb-capi/src/profile.rs`:
+  no cargo feature, no load-time code).
 * Every artifact exports the full symbol set: every function of LMDB
   0.9.37's `lmdb.h`, of LMDB 1.0's `lmdb.h` (what rlmdb does not
   implement makes C 1.0's argument checks, then returns `ENOTSUP`) and of
@@ -142,11 +144,17 @@ deferred until the core has been validated through the C API.
 * The tools in `rlmdb-tools` match the C tools' options, output, messages
   and exit codes; the C tools are their test oracle, each release for its
   own format (C 1.0's for 1.0 files, in `interop/tests/tools10.rs`).
-* `include/rlmdb.h` holds rlmdb's own functions (`rlmdb_*`), the LMDB 1.0
-  constants (each under `#ifndef`, values copied from 1.0's `lmdb.h` with
-  a comment naming it) and the declarations of 1.0's functions, whose
-  types are defined only after a 0.9 `lmdb.h` (it must compile after
-  either `lmdb.h`); `lmdb.h` stays the pristine 0.9.37 header.
+* The public C API of `librlmdb` is LMDB 1.0's plus rlmdb's own
+  functions: `include/lmdb.h` is the pristine LMDB 1.0.3 header (byte for
+  byte `tests/lmdb-c/1.0/lmdb.h` after one comment block;
+  `scripts/update-c-sources.sh` writes it and a test compares the two),
+  and `include/rlmdb.h` holds only rlmdb's own functions (`rlmdb_*`). It
+  must compile after either `lmdb.h`, 1.0's or 0.9's (it needs only
+  `MDB_env` and plain C types, and includes the `lmdb.h` next to it only
+  when none came before). Programs written for 0.9 (the tests' 0.9
+  programs, `cpeer_capi`) compile against the vendored 0.9 header
+  (`tests/lmdb-c/0.9/lmdb.h`), with `rlmdb.h` after it where they use
+  rlmdb's functions, and link against the same symbols.
 
 ## 6. Performance
 

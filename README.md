@@ -42,8 +42,9 @@ Implemented and tested against the C library on macOS (arm64) and Linux
   `mtest.c` .. `mtest6.c`, `mdb_stat.c`, `mdb_dump.c`, `mdb_load.c` and
   `mdb_copy.c` run against it and give the same results as against C,
   down to the page numbers on the free list, and so do 1.0's `mtest.c` ..
-  `mtest5.c` against C 1.0. `mdb_version()` reports 0.9.85 (1.0.85 in the
-  1.0 stub), so programs can tell it from C LMDB; `rlmdb.h` adds
+  `mtest5.c` against C 1.0. `mdb_version()` reports rlmdb's own version
+  (0.9.85 and 1.0.85 in the stubs), so programs can tell it from C LMDB;
+  `rlmdb.h` adds
   `rlmdb_version()` and `rlmdb_version_string()` (rlmdb's version and the
   C release each format matches), which `rlmdb::version_info()` provides
   on the Rust side, and the data-file format functions
@@ -146,9 +147,10 @@ cargo build --release -p librlmdb -p lmdb09-stub -p lmdb10-stub
 scripts/install-libs.sh     # or build and install, PREFIX=/usr/local
 ```
 
-Compile against the shipped headers (`lmdb.h`, the unmodified 0.9.37
-header, and `rlmdb.h`, which also declares LMDB 1.0's functions) and link
-with `-lrlmdb` instead of `-llmdb`:
+Compile against the shipped headers (`lmdb.h`, LMDB 1.0's unmodified, and
+`rlmdb.h`, rlmdb's own functions) and link with `-lrlmdb` instead of
+`-llmdb`; a program written for LMDB 0.9 can keep 0.9's `lmdb.h` (as
+`mtest.c` below, which includes the one next to it) and links the same way:
 
 ```sh
 # from the repository root; shared library, macOS and Linux
@@ -165,20 +167,22 @@ gcc -I rlmdb-capi/include -o mtest tests/lmdb-c/0.9/mtest.c target/release/librl
 With the shared library from the build directory, the loader must find
 it at run time (`LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS,
 `rlmdb.dll` next to the program on Windows). `mdb_version()` reports
-0.9.85, and new environments are LMDB 0.9 unless the program asks for 1.0.
+rlmdb's version, and new environments are LMDB 0.9 unless the program
+asks for 1.0: almost all programs are written for LMDB 0.9 today (this
+default may change in a later release).
 
 Two stubs stand in for C LMDB under its own name, for programs that were
 built against it: the 0.9 stub with C 0.9's SONAME `liblmdb.so.0`, and
 the 1.0 stub (`liblmdb.so`; `mdb_version()` says 1.0.85, and new
-environments are LMDB 1.0). Both export everything `librlmdb` exports. `scripts/install-libs.sh`
-puts them into `$libdir/rlmdb/lmdb-0.9` and `$libdir/rlmdb/lmdb-1.0`, off
+environments are LMDB 1.0). Both export everything `librlmdb` exports.
+`scripts/install-libs.sh` puts them into `$libdir/rlmdb/lmdb-0.9` and `$libdir/rlmdb/lmdb-1.0`, off
 the default library path, so that they never replace a C `liblmdb` by
 accident: a program uses one when `LD_LIBRARY_PATH`, `LD_PRELOAD` or its
 rpath names it (`DYLD_LIBRARY_PATH` on macOS; on Windows, as `lmdb.dll`
 next to the program). Behaviour, the deviations from C, the thread rule
 for write transactions, the install layout and `rlmdb.h` (rlmdb's version
-and data-file format functions, LMDB 1.0's functions, next to `lmdb.h`)
-are in [`rlmdb-capi/README.md`](rlmdb-capi/README.md).
+and data-file format functions, next to `lmdb.h`) are in
+[`rlmdb-capi/README.md`](rlmdb-capi/README.md).
 
 ### `rlmdb-tools`
 

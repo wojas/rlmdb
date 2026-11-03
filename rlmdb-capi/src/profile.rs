@@ -13,7 +13,8 @@
 //!
 //! `librlmdb` reports rlmdb's own version because programs link against
 //! it explicitly; the stubs stand in for a C release and report its
-//! series.
+//! series. New environments are LMDB 0.9 except in the 1.0 stub because
+//! almost all programs are written for LMDB 0.9 today (this may change).
 //!
 //! Each artifact package (`artifacts/*` of this crate's directory) is a
 //! `cdylib` and `staticlib` that depends on this crate and expands

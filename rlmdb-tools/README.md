@@ -142,7 +142,8 @@ Other differences:
 
 * **`-V`** prints `LMDB 0.9.85: (rlmdb 0.0.0)` (the rlmdb version in the
   parentheses) where C prints `LMDB 0.9.37: (Oct 21, 2026)`: the string
-  rlmdb's `mdb_version()` returns. Its patch level is above every C 0.9
+  `mdb_version()` of rlmdb's LMDB 0.9 stub returns (`librlmdb` returns
+  rlmdb's own version line). Its patch level is above every C 0.9
   release so that rlmdb can be told apart (`../rlmdb-capi/README.md`,
   "`rlmdb.h`", "Version").
 * **`mdb_drop`** is not part of LMDB 0.9.37. This one is LMDB's own

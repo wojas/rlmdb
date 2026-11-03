@@ -11,10 +11,11 @@ environment and checking what each sees.
 * `rpeer` (Rust, `src/bin/rpeer/`, on the `rlmdb` crate) speaks the same
   protocol, with the same LMDB calls in the same order and the same output
   (see "Peer status" below).
-* `cpeer_capi` is the C peer compiled against `../rlmdb-capi/include/lmdb.h`
-  (and `rlmdb.h`, with `-DLMDB_RUST`) and linked against the Rust
-  `librlmdb.a` of `rlmdb-capi` instead of the C library: the same C program
-  on the Rust implementation (`Peer::COnRust`).
+* `cpeer_capi` is the C peer compiled against the vendored LMDB 0.9
+  `lmdb.h` and `../rlmdb-capi/include/rlmdb.h` (with `-DLMDB_RUST`), as a
+  program written for LMDB 0.9 that uses rlmdb's functions, and linked
+  against the Rust `librlmdb.a` of `rlmdb-capi` instead of the C library:
+  the same C program on the Rust implementation (`Peer::COnRust`).
   `build.rs` compiles its objects; `interop::bins::cpeer_capi()` links them
   at test time (once per test process), because cargo builds `librlmdb.a`
   (its package, `librlmdb`, is a dev-dependency of this crate) only after

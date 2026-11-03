@@ -36,8 +36,10 @@
  *	<li>the process default of #rlmdb_set_default_format(), else
  *	<li>the format the environment variable RLMDB_DEFAULT_FORMAT names
  *		("0.9" or "1.0"; any other value is ignored), else
- *	<li>the library's: LMDB 0.9, which every C LMDB release reads, in
- *		librlmdb and the LMDB 0.9 stub; LMDB 1.0 in the LMDB 1.0 stub.
+ *	<li>the library's: LMDB 0.9 in librlmdb and the LMDB 0.9 stub, as
+ *		almost all programs are written for LMDB 0.9 today (and every C
+ *		LMDB release reads its files; this may change in a later release);
+ *		LMDB 1.0 in the LMDB 1.0 stub.
  *	</ol>
  *	RLMDB_DEFAULT_FORMAT is experimental: it may be removed or restricted in
  *	a later release, so programs should use the functions. Requesting the other

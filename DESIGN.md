@@ -54,7 +54,8 @@ Out of scope for now (leave the door open, do not design it away):
   references in this document refer to that file at upstream commit
   `ff3f48f` (the vendored version, `tests/lmdb-c/README.md`).
 * `tests/lmdb-c/0.9/lmdb.h` is the public C API and documents the
-  semantics of every flag and function. The C API crate ships a copy of it.
+  semantics of every flag and function. The C API crate ships LMDB 1.0's
+  (`tests/lmdb-c/1.0/lmdb.h`), a superset with the same ABI.
 * `tests/lmdb-c/0.9/midl.c` / `midl.h`: the ID lists (`MDB_IDL`,
   `MDB_ID2L`) used for free lists and dirty lists.
 * `tests/lmdb-c/0.9/mtest*.c`: small C test programs; they must run
@@ -400,7 +401,7 @@ side either way.
                       update-c-sources.sh (re-creates tests/lmdb-c)
   tests/lmdb-c/       the C reference sources (LMDB 0.9 and 1.0), vendored
   rlmdb/          the library (package `rlmdb`, lib `rlmdb`)
-  rlmdb-capi/          cdylib+staticlib `lmdb` exporting the C ABI, ships include/lmdb.h
+  rlmdb-capi/          the C ABI (artifacts/: librlmdb, the liblmdb stubs); include/lmdb.h (1.0's), rlmdb.h
   rlmdb-tools/         mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop in Rust
   interop/            cross-process compatibility tests (builds the C library)
 ```
