@@ -611,6 +611,6 @@ Later decisions (owner, 2026-11-03), for the three C libraries:
    rollback; a rollback leaves no second one; a prepare that ends the
    transaction).
    Done too: `MDB_PREVSNAPSHOT`, for both formats, as C 1.0 has it but for
-   three bugs (`KNOWN_C_BUGS.md` rows 67 to 69):
+   four bugs (`KNOWN_C_BUGS.md` rows 67 to 70):
    `EnvironmentFlags::PREV_SNAPSHOT`, `mdb_env_open`, the tools' `-v`, the
    interop scenario `prev_snapshot`.

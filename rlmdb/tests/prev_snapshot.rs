@@ -5,8 +5,8 @@
 //! `NO_LOCK` handles, and copies. The other process is this test binary
 //! run again ([`Peer`]). C 0.9 reads and audits the 0.9 files the tests
 //! leave (C 1.0 does the same for 1.0 files in `rlmdb-capi/tests` and
-//! `interop`); C 1.0 behaves differently in three places, which the tests
-//! name (`KNOWN_C_BUGS.md` rows 67 to 69).
+//! `interop`); C 1.0 behaves differently in four places, which the tests
+//! name (`KNOWN_C_BUGS.md` rows 67 to 70).
 
 mod common;
 
@@ -508,7 +508,9 @@ fn writer_must_be_alone_reader_need_not() {
 /// first commit: another process that opens the environment waits until
 /// then, and then sees that commit (C 1.0 publishes the previous
 /// snapshot's txnid at that point, so it sees the snapshot before it, and
-/// its next commit overwrites it: row 67).
+/// its next commit overwrites it: row 67). A handle that closes holding
+/// the lock leaves the latest snapshot to the process that waited (row
+/// 70).
 #[test]
 fn others_wait_for_the_first_commit() {
     for format in FORMATS {
@@ -537,15 +539,37 @@ fn others_wait_for_the_first_commit() {
         drop(env);
         c_reads(dir.path(), format, "a=1 c=3 d=4 e=5");
 
-        // A read-only handle that is alone keeps it until it is closed.
+        // A read-only handle that is alone keeps it until it is closed,
+        // and so does a writer that never commits. The process that waited
+        // for it then reads, and builds on, the latest snapshot: the handle
+        // published it when it closed (C 1.0 leaves the previous one in the
+        // lock file, which the waiting process attaches to where the
+        // closing one does not remove the shared locks, as on Linux; its
+        // next commit then overwrites the latest one: row 70).
         let ro = EnvironmentFlags::READ_ONLY | EnvironmentFlags::PREV_SNAPSHOT;
         let env = open(dir.path(), format, ro).unwrap();
         let mut peer = Peer::start(dir.path(), format);
-        peer.send(&format!("open {}", EnvironmentFlags::READ_ONLY.bits()));
+        peer.send(&format!("open {}", EnvironmentFlags::empty().bits()));
         assert!(peer.waits());
         assert_eq!(contents(&env), ("a=1 c=3 d=4".into(), 3));
         drop(env);
         assert_eq!(peer.wait(), "ok");
         assert_eq!(peer.ask("get"), "a=1 c=3 d=4 e=5 @4");
+        assert_eq!(peer.ask("put f 6"), "ok");
+        assert_eq!(peer.ask("close"), "ok");
+
+        let env = open(dir.path(), format, EnvironmentFlags::PREV_SNAPSHOT).unwrap();
+        assert_eq!(contents(&env), ("a=1 c=3 d=4 e=5".into(), 4));
+        peer.send(&format!("open {}", EnvironmentFlags::empty().bits()));
+        assert!(peer.waits());
+        env.begin_rw_txn().unwrap().abort();
+        drop(env);
+        assert_eq!(peer.wait(), "ok");
+        assert_eq!(peer.ask("get"), "a=1 c=3 d=4 e=5 f=6 @5");
+        assert_eq!(peer.ask("put g 7"), "ok");
+        assert_eq!(peer.ask("get"), "a=1 c=3 d=4 e=5 f=6 g=7 @6");
+        assert_eq!(peer.ask("close"), "ok");
+        drop(peer);
+        c_reads(dir.path(), format, "a=1 c=3 d=4 e=5 f=6 g=7");
     }
 }

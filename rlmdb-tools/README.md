@@ -98,7 +98,11 @@ Each C release's tools are the oracle for their own format: for an LMDB
 * `-v` next to other processes: C 1.0's tools publish the previous
   snapshot in the lock file that the other processes use, so the next
   commit of one of them overwrites the latest one; the Rust tools leave
-  the lock file alone (`../KNOWN_C_BUGS.md` row 68). And `mdb_copy -v`
+  the lock file alone (`../KNOWN_C_BUGS.md` row 68). Alone, a tool with
+  `-v` keeps other processes from opening the environment until it exits,
+  as C 1.0's does; they then see the latest snapshot, where after C 1.0's
+  they see the previous one and their next commit overwrites the latest
+  (row 70). And `mdb_copy -v`
   without `-c` is a copy of the previous snapshot, where C 1.0's keeps the
   latest commit's meta page and lacks pages it names (row 69).
 * Not reproduced from C 1.0: its `mdb_env_info` reports the process's map

@@ -88,10 +88,13 @@ bitflags::bitflags! {
         /// until it is closed, as C does; otherwise its read transactions
         /// take the older meta page while holding the writer lock for a
         /// moment, and leave the lock file as it is (`KNOWN_C_BUGS.md` row
-        /// 68). With [`NO_LOCK`](Self::NO_LOCK) the handle has the data
-        /// file to itself in this process until then: the open fails with
-        /// `EBUSY` if the process has it open, and other opens of it fail
-        /// with `EBUSY` meanwhile.
+        /// 68). A handle that is closed holding the exclusive lock (also a
+        /// writer that never committed) publishes the latest snapshot for
+        /// the processes that waited, where C leaves them the previous one
+        /// (row 70). With [`NO_LOCK`](Self::NO_LOCK) the handle has the
+        /// data file to itself in this process until then: the open fails
+        /// with `EBUSY` if the process has it open, and other opens of it
+        /// fail with `EBUSY` meanwhile.
         ///
         /// [`Environment::flags`]: crate::Environment::flags
         const PREV_SNAPSHOT = MDB_PREVSNAPSHOT;

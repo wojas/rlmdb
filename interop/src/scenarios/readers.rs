@@ -6,13 +6,15 @@
 //! its first commit.
 
 use std::fmt;
+use std::time::Duration;
 
 use super::{
     audit, finish_reader_loop, hold_secs, log, loop_secs, new_env, reader_check, readers, stat,
     DataSet, Pair, MIB,
 };
 use crate::report::{HoldReady, WriterLoopReport};
-use crate::{ensure, tools, Error, Peer, Result, TestEnv};
+use crate::{ensure, tools, Error, Format, Peer, Result, TestEnv};
+use rlmdb::format::lockfile::{LOCK_V09, LOCK_V10};
 
 /// Reader slots are visible across processes and implementations; the
 /// lock table works whoever opened it first.
@@ -481,8 +483,15 @@ pub fn notls_readers(pair: Pair) -> Result<()> {
 ///    peer.)
 /// 4. With the environment to itself, a writer with the flag fills the
 ///    data set to 450 keys in one transaction, on top of the 300: the
-///    600-key commit is gone. Every verifier finds 450 keys, the auditors
-///    audit the file.
+///    600-key commit is gone. Every verifier finds 450 keys.
+/// 5. A read-only peer holds the environment with the flag, alone (so it
+///    keeps the exclusive lock until it closes), while the other peer's
+///    writer waits to open it; that writer then commits on top of the
+///    latest snapshot, which the holder published when it closed: it
+///    deletes every second of the 450 keys. (C 1.0 leaves the previous snapshot in the lock
+///    file, and the waiting writer overwrites the latest one,
+///    `KNOWN_C_BUGS.md` row 70: not run with `cpeer10` as the holder.) The
+///    auditors audit the file.
 pub fn prev_snapshot(pair: Pair) -> Result<()> {
     let first = |peers: [Peer; 2]| peers.into_iter().find(Peer::opens_prev_snapshot);
     let (Some(reader), Some(writer)) = (
@@ -539,6 +548,47 @@ pub fn prev_snapshot(pair: Pair) -> Result<()> {
     ds(450).fill(writer, &env, &["--prevsnapshot"])?;
     for peer in pair.verifiers() {
         ds(450).verify(peer, &env)?;
+    }
+
+    if reader == Peer::C10 {
+        log(
+            "prev_snapshot: cpeer10 does not hold the environment with MDB_PREVSNAPSHOT \
+             while another process waits (it would leave the previous snapshot in the lock \
+             file, KNOWN_C_BUGS.md row 70)",
+        );
+    } else {
+        let mut holder = reader
+            .on("hold-env", &env)
+            .args([hold_secs().as_str(), "--until-stdin", "--prevsnapshot"])
+            .spawn()?;
+        holder.wait_ready()?;
+        // Where the last user removes the shared locks (semaphores), a C
+        // peer that waited fails its open once the holder is gone
+        // (KNOWN_C_BUGS.md row 47; rlmdb probes again): an rlmdb peer
+        // waits there.
+        let lock = match pair.format {
+            Format::V09 => &LOCK_V09,
+            Format::V10 => &LOCK_V10,
+        };
+        let mut waiter_peer = pair.other(reader);
+        if lock.objects.removed_by_last_user() && !waiter_peer.is_rust() {
+            waiter_peer = reader;
+        }
+        // Deleting keys of the 450 fails outright on the 300-key snapshot.
+        let waiter = waiter_peer
+            .on("delete", &env)
+            .args(ds(450).args())
+            .args(["--every", "2"])
+            .spawn()?;
+        // Long enough for the waiter to wait for the holder's lock (if it
+        // is late, it opens alone afterwards: the check passes vacuously).
+        std::thread::sleep(Duration::from_millis(300));
+        holder.release()?;
+        holder.finish()?.ok()?;
+        waiter.finish()?.ok()?;
+        for peer in pair.verifiers() {
+            ds(450).after_delete(2).verify(peer, &env)?;
+        }
     }
     audit(&pair, &env)?;
     Ok(())

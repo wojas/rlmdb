@@ -62,7 +62,10 @@
 //!
 //! Dropping an [`Environment`] mirrors `mdb_env_close0`: unmap the data
 //! file, close the descriptors, clear any reader slots this process still
-//! owns, close the shared locks, unmap and close the lock file. Only then is
+//! owns, close the shared locks, unmap and close the lock file. A handle
+//! that still has `PREV_SNAPSHOT` and the exclusive lock first publishes
+//! the newest meta page's txnid in place of the previous snapshot's (see
+//! the `Drop` implementation). Only then is
 //! the environment removed from the process-wide registry of open
 //! environments (`registry`), which refuses a second open of an environment
 //! with a lock file and lets `NO_LOCK` handles of one data file share their
@@ -315,6 +318,29 @@ pub(crate) enum Pick {
     /// The older one, as `MDB_PREVSNAPSHOT` does (the smaller txnid; meta
     /// page 1 on a tie, as `mdb_env_pick_meta`).
     Previous,
+}
+
+impl Drop for Environment {
+    /// A handle that still has `PREV_SNAPSHOT` and the exclusive lock (a
+    /// read-only one, or a writer that did not commit) published the
+    /// previous snapshot's txnid in `mti_txnid` at the open. A process
+    /// that waited for the lock meanwhile gets a shared lock once it is
+    /// released and attaches to the table as it is, so publish the newest
+    /// meta page's txnid first, as the open of an exclusive opener would.
+    /// C leaves the previous snapshot's there: the waiting process reads
+    /// that snapshot, and its next commit overwrites the latest one
+    /// (`KNOWN_C_BUGS.md` row 70). The fields are dropped afterwards, in
+    /// their order.
+    fn drop(&mut self) {
+        if !self.has_prev_snapshot() {
+            return;
+        }
+        if let Some(lock) = self.lock_region().filter(|l| l.is_exclusive()) {
+            if let Ok(newest) = self.newest_meta() {
+                lock.set_txnid(newest.txnid);
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for Environment {
