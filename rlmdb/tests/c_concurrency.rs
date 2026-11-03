@@ -67,17 +67,25 @@ fn rust_creates_environment_c_uses_it() {
     assert!(text.contains("  0 stale readers cleared."), "{text}");
 
     // A C writer commits into the Rust-created files while we hold an old
-    // snapshot.
-    c.run("mtest", &[], Some(dir.path()));
+    // snapshot. A bounded one: while a reader pins snapshot 0 no page can
+    // be reused, and mtest's loop of one delete per transaction can then
+    // outgrow its 10 MiB map on 16 KiB pages.
+    c_put(c, &path, None, b"k1", b"v1");
     assert_eq!(txn.id(), 0);
     assert_eq!(walk_forward(&txn, Dbi::MAIN), vec![]);
     let txn2 = env.begin_ro_txn().unwrap();
-    assert!(txn2.id() > 0);
+    assert_eq!(txn2.id(), 1);
+    assert_eq!(walk_forward(&txn2, Dbi::MAIN), vec![pair(b"k1", b"v1")]);
+    drop((txn, txn2));
+    // With the snapshot released, mtest's full run.
+    c.run("mtest", &[], Some(dir.path()));
+    let txn3 = env.begin_ro_txn().unwrap();
+    assert!(txn3.id() > 1);
     // (mtest seeds rand() with the time; with few values its deletes can
     // leave the DB empty, which is a valid outcome to compare too.)
     let expected = c.dump(&path, None);
-    assert_eq!(walk_forward(&txn2, Dbi::MAIN), expected);
-    drop((txn, txn2));
+    assert_eq!(walk_forward(&txn3, Dbi::MAIN), expected);
+    drop(txn3);
     verify_db(&env, Dbi::MAIN, &expected);
     // Our slots are gone from C's view after the txns end.
     assert_eq!(parse_readers(&c.stat_text(&path, &["-r"])), vec![]);
@@ -132,18 +140,60 @@ fn c_creates_environment_rust_attaches() {
     assert_eq!(c_readers, want);
 
     // A C writer commits (it needs the writer lock C created) while both
-    // readers pin snapshot 0.
-    c.run("mtest2", &[], Some(dir.path()));
+    // readers pin snapshot 0: a bounded one, see
+    // `rust_creates_environment_c_uses_it`.
+    c_put(c, &path, Some("id1"), b"k1", b"v1");
     let mut holder = holder;
     let renewed = holder.renew();
-    assert!(renewed > 0);
+    assert_eq!(renewed, 1);
     let txn2 = env.begin_ro_txn().unwrap();
     assert_eq!(txn2.id(), renewed);
     let db = txn2.open_db(Some("id1")).unwrap();
-    assert_eq!(walk_forward(&txn2, db), c.dump(&path, Some("id1")));
+    assert_eq!(walk_forward(&txn2, db), vec![pair(b"k1", b"v1")]);
     drop((txn, txn2));
     holder.quit();
     assert!(env.reader_list().unwrap().is_empty());
+    // With the snapshots released, mtest2's full run on the same files.
+    c.run("mtest2", &[], Some(dir.path()));
+    let txn3 = env.begin_ro_txn().unwrap();
+    assert!(txn3.id() > 1);
+    let db = txn3.open_db(Some("id1")).unwrap();
+    assert_eq!(walk_forward(&txn3, db), c.dump(&path, Some("id1")));
+}
+
+/// One C write transaction: `mdb_put` of `key`/`data` into `db` (`None`:
+/// the main DB) of `path`, committed (`tests/c/writeops.c`, one op).
+fn c_put(c: &CTools, path: &Path, db: Option<&str>, key: &[u8], data: &[u8]) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let mut child = Command::new(c.bin("writeops"))
+        .arg(path)
+        .arg(db.unwrap_or("-"))
+        .args(["0", "0", "10485760"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        child.stdin.take().unwrap(),
+        "p:{}:{}:0",
+        hex(key),
+        hex(data)
+    )
+    .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && text.contains("p rc=0") && text.contains("commit rc=0"),
+        "writeops: {text}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn pair(k: &[u8], v: &[u8]) -> Pair {
+    (k.to_vec(), v.to_vec())
 }
 
 #[test]
