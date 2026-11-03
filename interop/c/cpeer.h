@@ -114,6 +114,7 @@ struct opts {
 	uint32_t	every;		/* delete --every */
 	int		append, reserve, compact, all, until_stdin, check;
 	int		del;		/* drop --delete */
+	int		abort_txn;	/* prepare --abort */
 	uint32_t	keys;		/* writer-loop key space */
 	uint64_t	max_commits;	/* writer-loop: stop after this many, 0 = no limit */
 };
@@ -169,12 +170,25 @@ int cmd_reader_check(struct opts *o);
 int cmd_hold_reader(struct opts *o);
 int cmd_hold_env(struct opts *o);
 int cmd_hold_writer(struct opts *o);
+int cmd_prepare(struct opts *o);
+int cmd_rollback(struct opts *o);
+/* Whether the library has LMDB 1.0's two-phase commit (mdb_txn_prepare,
+ * mdb_env_rollback): cpeer10 and cpeer_capi, not cpeer (LMDB 0.9). */
+#if MDB_VERSION_MAJOR >= 1 || defined(LMDB_RUST)
+#define HAVE_TWO_PHASE_COMMIT 1
+#else
+#define HAVE_TWO_PHASE_COMMIT 0
+#endif
 int cmd_writer_loop(struct opts *o);
 int cmd_reader_loop(struct opts *o);
 int cmd_check_freelist(struct opts *o);
 int cmd_nested_test(struct opts *o);
 int cmd_copy(struct opts *o);
 int cmd_gen(struct opts *o);
+
+/* Put the data set o->ds into DB dbi in the write transaction txn, in index
+ * order (fill without its options). */
+void fill_in_txn(MDB_txn *txn, MDB_dbi dbi, const struct opts *o);
 
 /* Verify the data set `ds` inside an existing transaction (shared by verify
  * and hold-reader --verify). Returns 0, or EXIT_MISMATCH after printing the

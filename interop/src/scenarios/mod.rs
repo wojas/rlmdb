@@ -4,7 +4,8 @@
 //! [`Pair::writer`] peer creates environments and writes, the
 //! [`Pair::reader`] peer reads, checks and audits (as does the C peer, the
 //! reference); the scenarios in [`bidir`] let the reader write too, those
-//! in [`readers`](mod@readers) are about the reader table and the lock file.
+//! in [`readers`](mod@readers) are about the reader table and the lock file,
+//! the one in [`two_phase`] about LMDB 1.0's two-phase commit.
 //! [`scenario_tests!`](crate::scenario_tests) turns all of them into
 //! `#[test]`s for one pair; `tests/` has one file per ordered pair of the
 //! three peers of each format (`c_vs_c.rs`, `rust_writes_c_reads.rs`, ...,
@@ -37,9 +38,11 @@ pub mod all_peers;
 pub mod bidir;
 pub mod mixed;
 pub mod readers;
+pub mod two_phase;
 
 pub use bidir::*;
 pub use readers::*;
+pub use two_phase::*;
 
 use std::fmt;
 use std::io::Write;
@@ -1539,6 +1542,7 @@ macro_rules! __scenario_list {
             reader_creates_lock_file
             reader_loop_during_nested
             notls_readers
+            two_phase_commit
         }
     };
 }

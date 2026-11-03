@@ -32,10 +32,12 @@ fn run(name: &str, format: Format, test: impl FnOnce() -> interop::Result<()>) {
     }
 }
 
-/// `<peer> commands` lists every command of the C peer and no other; the
-/// commands it lists as not implemented where C implements them are
-/// reported as skipped (the scenarios that need them run them on another
-/// peer or are skipped).
+/// `<peer> commands` lists every command the C peer implements, and no
+/// command the C peer does not know; the commands it lists as not
+/// implemented where C implements them are reported as skipped (the
+/// scenarios that need them run them on another peer or are skipped). (C
+/// 0.9 lists `prepare` and `rollback` as not implemented, LMDB 0.9 having
+/// no two-phase commit: a peer of a 0.9 implementation may leave them out.)
 #[test]
 fn external_peer_knows_every_command() {
     run("external_peer_knows_every_command", Format::V09, || {
@@ -53,14 +55,21 @@ fn external_peer_knows_every_command() {
         };
         let c = commands(Peer::C)?;
         let external = commands(Peer::External)?;
-        let names = |v: &[(String, bool)]| v.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
-        assert_eq!(names(&c), names(&external));
-        for ((name, in_c), (_, in_external)) in c.iter().zip(&external) {
-            if *in_c && !*in_external {
-                interop::skipped(format_args!(
+        for (name, _) in &external {
+            assert!(
+                c.iter().any(|(n, _)| n == name),
+                "{} knows `{name}`, which the C peer does not",
+                Peer::External
+            );
+        }
+        for (name, in_c) in c.iter().filter(|(_, in_c)| *in_c) {
+            match external.iter().find(|(n, _)| n == name) {
+                None => panic!("{} does not know `{name}`", Peer::External),
+                Some((_, false)) if *in_c => interop::skipped(format_args!(
                     "{} does not implement `{name}`",
                     Peer::External
-                ));
+                )),
+                Some(_) => {}
             }
         }
         Ok(())

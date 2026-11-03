@@ -99,7 +99,7 @@ INTEROP_PEER=/path/to/peer cargo test -p rlmdb-interop \
 | `tests/layout.rs` | the C struct layout against DESIGN.md, and every `layout_dump` value against `lmdb::consts`/`lmdb::format::layout` |
 | `tests/oracle10.rs` | the LMDB 1.0 build: tool versions, the `layout_dump10` numbers (page header, `MDB_ovpage`, lock-file header, the `MDB_LOCK_FORMAT` formula, maximum key size), the two dumps lining up, 0.9 and 1.0 refusing each other's environments, `cpeer10`, every 1.0 `mtest*` |
 | `tests/audit10.rs` | `cpeer10 check-freelist` and `pagecmp` on 1.0 files written by the C 1.0 programs (page sizes 256 to 65536, copies, `mtest*`): good files pass, broken copies (leaked page, page used twice, bad `mp_txnid`, `MDB_ovpage`, sub-page flags) fail; `pagecmp` refuses 0.9 against 1.0 |
-| `tests/write_differential10.rs` | the write path of the 1.0 format against C 1.0: the lock-step harness of `rlmdb/tests/common/differential.rs` with `writeops10` at 1, 4, 16 and 64 KiB pages (plain, integer, reverse, DUPSORT, DUPFIXED (items of 1 to 3 bytes also at 256 and 512 B pages; with `writeops10_ndebug`, 1-byte items whose `P_LEAF2` page's `mp_upper` wraps at 64 KiB), deep trees, overwrites, nested transactions, drops, Rust-side spills; `diff10_spill_full_size` `#[ignore]`d), every step compared, then `mdb_dump10`, `cpeer10 check-freelist` and `pagecmp` (page by page, `mp_txnid` included) |
+| `tests/write_differential10.rs` | the write path of the 1.0 format against C 1.0: the lock-step harness of `rlmdb/tests/common/differential.rs` with `writeops10` at 1, 4, 16 and 64 KiB pages (plain, integer, reverse, DUPSORT, DUPFIXED (items of 1 to 3 bytes also at 256 and 512 B pages; with `writeops10_ndebug`, 1-byte items whose `P_LEAF2` page's `mp_upper` wraps at 64 KiB), deep trees, overwrites, nested transactions, drops, Rust-side spills; `diff10_spill_full_size` `#[ignore]`d), every step compared, then `mdb_dump10`, `cpeer10 check-freelist` and `pagecmp` (page by page, `mp_txnid` included); two-phase commit (`diff10_two_phase_commit`, 256 B to 64 KiB pages): transactions ended by prepare and commit, prepare and abort, commit and rollback, compared page by page after every prepared commit, and the file between the phases checked against each side's committed file |
 | `tests/capi10.rs` | the C API with 1.0 environments against C 1.0: `cpeer_capi` creates one with `RLMDB_DEFAULT_FORMAT=1.0` (and a 0.9 one without), fills 1.0 files of 1 KiB and 64 KiB pages that `mdb_load10` created (opened without a format request; inline values of 20000 bytes on 64 KiB pages), and `cpeer10 verify`, the C 1.0 page audit, `mdb_dump10` and `mdb_stat10` agree; the reverse with `cpeer10` writing and `cpeer_capi verify`/`dump` reading, keys over 511 bytes from `mdb_load10` included |
 | `tests/tools10.rs` | the Rust tools (`rtools`) on 1.0 files against `mdb_load10` (`-F 1.0` and `RLMDB_DEFAULT_FORMAT=1.0`: same messages, same pages; empty keys), `mdb_stat10` and `mdb_dump10` (every option both have, on `mdb_load10` files at 1, 4, 64 KiB pages and on `mtest*10` environments), `mdb_drop10` (same files, also emptying the main DB), `mdb_copy10` (byte-identical copies); C 1.0's process map address is normalised (`KNOWN_C_BUGS.md`, "LMDB 1.0") |
 | `tests/format10.rs` | rlmdb reading C 1.0's files (`mdb_load10` at 512 B to 64 KiB pages, `mtest*10`) against `mdb_dump10`/`mdb_stat10`; rlmdb loading what `mdb_load10` loads (same pages); copies byte-identical to `mdb_copy10 [-c]`; C 1.0 and rlmdb writing one environment in turns; a C 1.0 reader pinning pages against an rlmdb writer and the reverse, both writing an environment both keep open |
@@ -533,6 +533,20 @@ DB without committing, print `READY txnid=<txnid> pid=<pid>`, wait like
 `hold-reader`, then abort: `released txnid=<n> held=<seconds>`. Tests kill
 it with SIGKILL to leave the writer lock held by a dead process.
 
+**`prepare <env> <seconds> <db|-> <count> <seed> [data options] [--until-stdin] [--abort]`**
+— LMDB 1.0's two-phase commit: put the data set into `<db>` in one write
+transaction (as `fill` without its options), `mdb_txn_prepare` it (its
+pages are written, its meta page is not), print `READY txnid=<txnid>
+pid=<pid>`, wait like `hold-reader`, then commit it (`committed
+txnid=<n>`), or with `--abort` abort it (`aborted txnid=<n>`). Tests kill
+it between the phases. `cpeer` lists it as not implemented (LMDB 0.9 has
+no two-phase commit; exit status 4).
+
+**`rollback <env> <txnid|last>`** — `mdb_env_rollback` of `<txnid>`, or
+of the last committed transaction (`me_last_txnid` of `mdb_env_info`):
+`rolled-back txnid=<n>`; a refused one exits 3 (`MDB_CANT_ROLLBACK`). Not
+in `cpeer`, as `prepare`.
+
 **`writer-loop <env> <db|-> <seconds> <seed> [--keys N] [--max-commits N]`**
 — commit small random write transactions until `<seconds>` pass (at least
 one; `0` just initialises the DBs) or `N` commits; prints `READY` after the
@@ -734,6 +748,7 @@ gen 3 4 --intdup --dups 3   value0=000000005e89d359 value1=010000005f89d359 valu
 | `copy_cross` | plain and compacting copies of one snapshot by the writer, the reader and C, each verified, dumped and audited by the other implementations; plain copies byte-identical up to the last page, compacted copies too |
 | `map_full` | a 4 MiB map: a fill too big fails with `MDB_MAP_FULL` in both peers and leaves nothing behind; committed batches of a `--per-txn` fill stay; a writer loop on the full map fails cleanly or not at all; the reader grows the map with `--mapsize`, the writer then opens with the size recorded in the meta page |
 | `killed_writer` | `hold-writer` and writer loops of the writer SIGKILLed inside write transactions; the reader must get the writer lock and write (Linux: robust mutex, `EOWNERDEAD` recovery while another process keeps the env open; macOS: the next writer provably waits on the non-robust semaphore, then an exclusive re-open re-creates it); nothing of the killed transactions is visible; data, counters and pages consistent |
+| `two_phase_commit` | one peer (the writer, or the reader if the writer is C 0.9, which has no two-phase commit) prepares a transaction (`prepare`) and waits: the other peer and C read the snapshot before it, the audit passes; it commits and they read the new one. A prepared transaction aborted changes nothing; one whose process is SIGKILLed between the phases leaves the snapshot before, with no page lost; a commit rolled back (`rollback`) leaves the snapshot before, the audit passes and the other peer writes on it (rlmdb refuses a second rollback in a row). C 0.9 on both sides: skipped |
 | `same_writes_same_pages` | writer and reader run the same script of writes (every fill variant, deletes, drops, a commit-bounded writer loop with nested transactions, `nested-test`) on environments of their own; after every step both files hold the same pages (`pagecmp`) |
 | `three_writers` (`tests/three_peers.rs`, `tests/three_peers10.rs`) | writer loops of C (C 1.0 on a 1.0 environment), Rust and COnRust at once, reader loops of all three; `#commits` = 1 + the sum of their commits; audited by all three |
 | `formats_in_one_process` (`tests/mixed_formats.rs`) | `rpeer formats-loop` on a 0.9 and a 1.0 environment (a writer thread on each, snapshot checks of both) while C 0.9 runs a writer loop on the first and C 1.0 on the second, with reader loops of the C peer and COnRust on each; per environment `#commits` = 1 + the C and the Rust commits, the file keeps its format, audited by its C release, Rust and COnRust |

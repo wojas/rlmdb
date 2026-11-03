@@ -303,6 +303,9 @@ static const struct command commands[] = {
 		"hold-reader <env> <seconds> [--until-stdin] [<db|-> <count> <seed> [data options]]" },
 	{ "hold-env", cmd_hold_env, 2, 2, "hold-env <env> <seconds> [--until-stdin]" },
 	{ "hold-writer", cmd_hold_writer, 2, 2, "hold-writer <env> <seconds> [--until-stdin]" },
+	{ "prepare", cmd_prepare, 5, 5,
+		"prepare <env> <seconds> <db|-> <count> <seed> [data options] [--until-stdin] [--abort]" },
+	{ "rollback", cmd_rollback, 2, 2, "rollback <env> <txnid|last>" },
 	{ "writer-loop", cmd_writer_loop, 4, 4, "writer-loop <env> <db|-> <seconds> <seed> [--keys N] [--max-commits N]" },
 	{ "reader-loop", cmd_reader_loop, 3, 3, "reader-loop <env> <db|-> <seconds>" },
 	{ "formats-loop", cmd_formats_loop, 5, 5, "formats-loop <env 0.9> <env 1.0> <db|-> <seconds>"
@@ -322,8 +325,11 @@ cmd_commands(struct opts *o)
 {
 	const struct command *c;
 
-	for (c = commands; c->name; c++)
-		printf("command=%s implemented=%d\n", c->name, c->run != cmd_formats_loop);
+	for (c = commands; c->name; c++) {
+		int two_phase = c->run == cmd_prepare || c->run == cmd_rollback;
+		printf("command=%s implemented=%d\n", c->name,
+			c->run != cmd_formats_loop && (HAVE_TWO_PHASE_COMMIT || !two_phase));
+	}
 	return 0;
 }
 
@@ -413,6 +419,7 @@ parse_args(int argc, char **argv, struct opts *o)
 		else if (!strcmp(a, "--until-stdin")) o->until_stdin = 1;
 		else if (!strcmp(a, "--check")) o->check = 1;
 		else if (!strcmp(a, "--delete")) o->del = 1;
+		else if (!strcmp(a, "--abort")) o->abort_txn = 1;
 		else die(EXIT_USAGE, "unknown option %s", a);
 	}
 }

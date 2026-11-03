@@ -191,6 +191,8 @@ pub struct Opts {
     pub check: bool,
     /// `--delete` (drop).
     pub delete: bool,
+    /// `--abort` (prepare).
+    pub abort: bool,
     /// `--keys N` (writer-loop; default 500).
     pub keys: u32,
     /// `--max-commits N` (writer-loop; 0 = no limit).
@@ -259,6 +261,7 @@ impl Opts {
                 "--compact" => o.compact = true,
                 "--all" => o.all = true,
                 "--until-stdin" => o.until_stdin = true,
+                "--abort" => o.abort = true,
                 "--check" => o.check = true,
                 "--delete" => o.delete = true,
                 _ => return Err(Fail::usage(format!("unknown option {a}"))),

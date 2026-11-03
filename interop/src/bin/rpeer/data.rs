@@ -65,6 +65,20 @@ fn put_item(
     Ok(())
 }
 
+/// `fill_in_txn`: put the data set into `dbi` in `txn`, in index order
+/// (fill without its options; the C peer's `prepare` uses it).
+pub fn fill_in_txn(txn: &mut RwTxn<'_>, dbi: Dbi, o: &Opts, ds: &DataSet) -> CmdResult {
+    for i in 0..ds.count {
+        let key = ds.key(i);
+        for d in 0..ds.ndups(i) {
+            if ds.present(i, d) {
+                put_item(txn, dbi, o, ds, &key, i, d)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `fill <env> <db|-> <count> <seed> [data options] [--per-txn N] [--append]
 /// [--reserve]`: write the data set into `<db>`, creating it with the data
 /// flags. Items in index order with `mdb_put` (random order for the
