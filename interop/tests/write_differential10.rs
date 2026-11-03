@@ -717,3 +717,30 @@ fn diff10_spill_full_size() {
         Round::Same
     );
 }
+
+/// LMDB 1.0's two-phase commit against C 1.0: transactions ended by
+/// `mdb_txn_prepare` and then `mdb_txn_commit` (`tp`) or `mdb_txn_abort`
+/// (`ta`), and by a commit that `mdb_env_rollback` takes back (`rb:0`; a
+/// refused one, `rb:1`), at 256 B to 64 KiB pages. Every step agrees; at
+/// every `tp` each side's file between the phases is its committed file
+/// with the meta pages from before (`differential::check_between`), and
+/// the committed files are the same page by page (`pagecmp`), as they are
+/// at the end. Also when the Rust side spills.
+#[test]
+fn diff10_two_phase_commit() {
+    for ps in [256, 1024, 4096, 65536] {
+        for (dbflags, dirty_limit) in [(0, None), (MDB_DUPSORT, None), (0, Some(64))] {
+            let o = C10 {
+                dirty_limit,
+                ..C10::new(ps)
+            };
+            let p = for_page_size(Profile::new(dbflags, 300), ps);
+            let tag = format!("2pc-{ps}-{dbflags}-{dirty_limit:?}");
+            let ops = differential::two_phase_script(true);
+            assert_eq!(
+                differential::run_round(&o, &p, 2, Ops::List(ops), &tag),
+                Round::Same
+            );
+        }
+    }
+}

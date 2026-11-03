@@ -741,3 +741,28 @@ fn diff_spill_full_size() {
     );
     eprintln!("spill differential took {:?}", started.elapsed());
 }
+
+/// LMDB 1.0's two-phase commit on 0.9 files, against C 0.9's plain
+/// commits: transactions ended by `tp` (prepare, then commit) leave the
+/// pages C 0.9's `mdb_txn_commit` leaves (compared page by page at every
+/// `tp`), and the file between the two phases is the committed one with
+/// the meta pages from before (`differential::check_between`). Also when
+/// the Rust side spills.
+#[test]
+fn diff_two_phase_commit() {
+    let c = require_c!();
+    let ps = common::os_page_size();
+    for (dbflags, dirty_limit) in [(0, None), (MDB_DUPSORT, None), (0, Some(64))] {
+        let o = C09 {
+            dirty_limit,
+            ..C09::with_page_size(c, ps)
+        };
+        let p = Profile::new(dbflags, 300);
+        let tag = format!("2pc-{dbflags}-{dirty_limit:?}");
+        let ops = differential::two_phase_script(false);
+        assert_eq!(
+            differential::run_round(&o, &p, 2, Ops::List(ops), &tag),
+            Round::Same
+        );
+    }
+}

@@ -47,6 +47,19 @@
  *                            from a SplitMix64 stream (see bulk_put); rc is
  *                            the first failure
  *
+ * Ops that end the top-level transaction (depth 0 only) and begin the
+ * next one, with the database and <ncursors> cursors opened again; rc is
+ * the first failure:
+ *
+ *   tc                       mdb_txn_commit
+ *   tp                       mdb_txn_prepare, a copy of the data file to
+ *                            prepared.mdb next to it, mdb_txn_commit; built
+ *                            against LMDB 0.9 (no two-phase commit): a
+ *                            plain commit, no copy
+ *   ta                       mdb_txn_prepare, then mdb_txn_abort (LMDB 1.0)
+ *   rb:<delta>               mdb_txn_commit, then mdb_env_rollback of the
+ *                            committed txnid plus <delta> (LMDB 1.0)
+ *
  * Finally commits and prints "commit rc=<rc>".
  */
 #include <stdio.h>
@@ -112,6 +125,79 @@ static int set_pagesize(MDB_env *env, int size)
 	(void)env;
 	return EINVAL;
 #endif
+}
+
+/* Copies <env>/data.mdb to <env>/prepared.mdb. */
+static int copy_data_file(const char *env)
+{
+	static char buf[1 << 16];
+	char src[4096], dst[4096];
+	FILE *in, *out;
+	size_t n;
+	int rc = 0;
+	snprintf(src, sizeof(src), "%s/data.mdb", env);
+	snprintf(dst, sizeof(dst), "%s/prepared.mdb", env);
+	if (!(in = fopen(src, "rb")))
+		return errno;
+	if (!(out = fopen(dst, "wb"))) {
+		rc = errno;
+		fclose(in);
+		return rc;
+	}
+	while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+		if (fwrite(buf, 1, n, out) != n) {
+			rc = EIO;
+			break;
+		}
+	}
+	fclose(in);
+	if (fclose(out) && !rc)
+		rc = EIO;
+	return rc;
+}
+
+/* Ends the top-level transaction txn as the op <op> ("tc", "tp", "ta",
+ * "rb" with <delta>) asks, <path> being the environment; returns the
+ * first failure, or -1 for an op this library cannot do. */
+static int end_top(MDB_env *env, MDB_txn *txn, const char *op, long long delta,
+	const char *path)
+{
+	int rc;
+	if (!strcmp(op, "tc"))
+		return mdb_txn_commit(txn);
+#if MDB_VERSION_MAJOR >= 1
+	if (!strcmp(op, "tp")) {
+		if ((rc = mdb_txn_prepare(txn))) {
+			mdb_txn_abort(txn);
+			return rc;
+		}
+		if ((rc = copy_data_file(path))) {
+			mdb_txn_abort(txn);
+			return rc;
+		}
+		return mdb_txn_commit(txn);
+	}
+	if (!strcmp(op, "ta")) {
+		rc = mdb_txn_prepare(txn);
+		mdb_txn_abort(txn);
+		return rc;
+	}
+	if (!strcmp(op, "rb")) {
+		mdb_size_t id = mdb_txn_id(txn);
+		if ((rc = mdb_txn_commit(txn)))
+			return rc;
+		return mdb_env_rollback(env, id + (mdb_size_t)delta);
+	}
+#else
+	(void)env;
+	(void)delta;
+	(void)path;
+	if (!strcmp(op, "tp"))
+		return mdb_txn_commit(txn);
+#endif
+	(void)rc;
+	mdb_txn_abort(txn);
+	return -1;
 }
 
 static int open_cursors(MDB_txn *txn, MDB_dbi dbi, MDB_cursor **cur, int ncur)
@@ -293,6 +379,25 @@ int main(int argc, char **argv)
 					return 2;
 				}
 			}
+		} else if ((!strcmp(f[0], "tc") || !strcmp(f[0], "tp") || !strcmp(f[0], "ta")
+				|| !strcmp(f[0], "rb")) && nf == (f[0][0] == 'r' ? 2 : 1)) {
+			if (depth) { fprintf(stderr, "%s nested\n", f[0]); return 2; }
+			close_cursors(cur, ncur);
+			rc = end_top(env, txn, f[0], nf == 2 ? strtoll(f[1], NULL, 10) : 0, argv[1]);
+			if (rc == -1) { fprintf(stderr, "%s: not in this library\n", f[0]); return 2; }
+			{
+				int rc2 = mdb_txn_begin(env, NULL, 0, &txns[0]);
+				if (!rc2)
+					rc2 = mdb_dbi_open(txns[0], dbname, dbflags | MDB_CREATE, &dbi);
+				if (!rc2)
+					rc2 = open_cursors(txns[0], dbi, curs[0], ncur);
+				if (rc2) {
+					fprintf(stderr, "next txn: %s\n", mdb_strerror(rc2));
+					return 2;
+				}
+			}
+			txn = txns[0];
+			cur = curs[0];
 		} else if (!strcmp(f[0], "b") && nf == 4) {
 			rc = bulk_put(txn, dbi, strtoul(f[1], NULL, 10),
 				(uint64_t)strtoull(f[2], NULL, 10), (size_t)strtoul(f[3], NULL, 10));

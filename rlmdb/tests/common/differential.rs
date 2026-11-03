@@ -1465,6 +1465,9 @@ enum LevelEnd {
     Abort(String),
     /// C stopped (see [`Round::CStopped`]).
     Stopped,
+    /// An op that ends the top-level transaction (`tc`, `tp`, `ta`,
+    /// `rb:<delta>`) and C's output for it.
+    Top(String, String),
 }
 
 /// The state of a round: the C process, the op source and what the checks
@@ -1486,6 +1489,13 @@ struct Driver<'a> {
     i: usize,
     /// C's output for an `nb` op, compared once Rust's child exists.
     pending_c_line: Option<String>,
+    /// The environments of C and Rust.
+    c_dir: std::path::PathBuf,
+    r_dir: std::path::PathBuf,
+    /// The page size of both.
+    page_size: usize,
+    /// The meta pages of C's and Rust's data files before a `tp` op.
+    metas_before: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Driver<'_> {
@@ -1650,7 +1660,7 @@ impl Driver<'_> {
         let (name, cl, commit) = match end {
             LevelEnd::Commit(cl) => ("nc", cl, true),
             LevelEnd::Abort(cl) => ("na", cl, false),
-            LevelEnd::Done => unreachable!(),
+            LevelEnd::Done | LevelEnd::Top(..) => unreachable!(),
             LevelEnd::Stopped => return Ok(None),
         };
         for &id in &ccur[..self.ncur] {
@@ -1694,6 +1704,13 @@ impl Driver<'_> {
                     return LevelEnd::Stopped;
                 }
             }
+            let top = depth == 0 && is_top_op(&op);
+            if top && op == "tp" {
+                self.metas_before = Some((
+                    meta_pages(&self.c_dir, self.page_size),
+                    meta_pages(&self.r_dir, self.page_size),
+                ));
+            }
             let Some(cl) = self.crun.as_mut().and_then(|c| c.step(&op)) else {
                 let (_, err) = self.crun.take().expect("C running").finish();
                 assert!(
@@ -1713,6 +1730,9 @@ impl Driver<'_> {
             };
             if op == "nb" {
                 self.pending_c_line = Some(cl.clone());
+            }
+            if top {
+                return LevelEnd::Top(op, cl);
             }
             let rl_raw = match op.as_str() {
                 "nc" if depth > 0 => return LevelEnd::Commit(cl),
@@ -1799,6 +1819,145 @@ fn bulk_put(
     Ok(())
 }
 
+/// A script of several write transactions ended by the top-level ops,
+/// most of them committed in two phases (`tp`): puts, deletes, values on
+/// overflow pages (with pages up to 4 KiB), a nested transaction, cursor
+/// moves, a cleared database. With `v10` (C 1.0, which has two-phase
+/// commit), also a prepared transaction that is aborted (`ta`) and a
+/// commit rolled back (`rb:0`) and a rollback refused (`rb:1`). No
+/// transaction ended by `tp` is empty (C 1.0's commit then fails,
+/// `KNOWN_C_BUGS.md` row 61).
+pub fn two_phase_script(v10: bool) -> Vec<String> {
+    let key = |i: usize| hex(format!("k{i:05}").as_bytes());
+    let val = |i: usize, len: usize| hex(&vec![b'a' + (i % 26) as u8; len]);
+    let puts = |ops: &mut Vec<String>, range: std::ops::Range<usize>, len: usize| {
+        ops.extend(range.map(|i| format!("p:{}:{}:0", key(i), val(i, len))));
+    };
+    let mut ops = Vec::new();
+    // Ends the transaction with `op`, after a few small puts, which every
+    // database takes (the large values are too large for MDB_DUPSORT
+    // items): no transaction ends empty.
+    let end = |ops: &mut Vec<String>, op: &str| {
+        let n = ops.len();
+        puts(ops, 2000 + n..2003 + n, 8);
+        ops.push(op.into());
+    };
+    puts(&mut ops, 0..200, 50);
+    end(&mut ops, "tp");
+    ops.extend((0..200).step_by(3).map(|i| format!("d:{}", key(i))));
+    puts(&mut ops, 300..330, 5000);
+    ops.push(format!("g:0:{MDB_FIRST}"));
+    ops.push(format!("g:1:{MDB_LAST}"));
+    end(&mut ops, "tp");
+    ops.push("nb".into());
+    puts(&mut ops, 400..430, 100);
+    ops.push("nc".into());
+    ops.extend((300..320).map(|i| format!("d:{}", key(i))));
+    end(&mut ops, "tc");
+    if v10 {
+        puts(&mut ops, 500..540, 3000);
+        end(&mut ops, "ta");
+    }
+    puts(&mut ops, 600..640, 80);
+    ops.push(format!("g:0:{MDB_SET}:{}", key(610)));
+    end(&mut ops, "tp");
+    if v10 {
+        puts(&mut ops, 700..710, 6000);
+        end(&mut ops, "rb:0");
+        puts(&mut ops, 710..720, 20);
+        end(&mut ops, "rb:1");
+    }
+    puts(&mut ops, 800..830, 40);
+    end(&mut ops, "tp");
+    ops.push("dr:0".into());
+    puts(&mut ops, 900..905, 10);
+    end(&mut ops, "tp");
+    puts(&mut ops, 1000..1020, 10);
+    ops
+}
+
+/// The ops that end the top-level transaction and begin the next one.
+fn is_top_op(op: &str) -> bool {
+    matches!(op, "tc" | "tp" | "ta") || op.starts_with("rb:")
+}
+
+/// The two meta pages of the data file in `dir` (pages of `ps` bytes).
+fn meta_pages(dir: &Path, ps: usize) -> Vec<u8> {
+    let mut file = std::fs::read(dir.join("data.mdb")).unwrap();
+    file.truncate(2 * ps);
+    file
+}
+
+/// Checks the file `dir` held between the phases of a `tp` op
+/// (`prepared.mdb`) against what it held before (`metas_before`, its meta
+/// pages) and after the commit (`data.mdb`): the meta pages from before,
+/// the data pages from after (a commit is a prepare and a meta page
+/// write). Returns the file between the phases, `None` if there is none
+/// (C 0.9 has no two-phase commit). The copy is removed.
+fn check_between(dir: &Path, metas_before: &[u8], ps: usize, tag: &str) -> Option<Vec<u8>> {
+    let between = std::fs::read(dir.join("prepared.mdb")).ok()?;
+    let after = std::fs::read(dir.join("data.mdb")).unwrap();
+    assert_eq!(
+        &between[..2 * ps],
+        metas_before,
+        "{tag}: meta pages after the prepare"
+    );
+    assert_eq!(
+        between.len(),
+        after.len(),
+        "{tag}: file length after the prepare"
+    );
+    let differ: Vec<usize> = (2..between.len() / ps)
+        .filter(|&p| between[p * ps..(p + 1) * ps] != after[p * ps..(p + 1) * ps])
+        .collect();
+    assert!(
+        differ.is_empty(),
+        "{tag}: data pages {differ:?} changed after the prepare"
+    );
+    std::fs::remove_file(dir.join("prepared.mdb")).unwrap();
+    Some(between)
+}
+
+/// Ends the Rust side's top-level transaction `txn` (whose cursors `cur`
+/// are closed first) as the top-level op `op` asks, as `writeops.c`'s
+/// `end_top` does; returns the first failure's code (0 if none).
+fn rust_end_top(
+    env: &Environment,
+    mut txn: RwTxn<'_>,
+    cur: &mut Vec<CursorId>,
+    op: &str,
+    dir: &Path,
+) -> i32 {
+    for id in cur.drain(..) {
+        txn.close_cursor(id);
+    }
+    match op {
+        "tc" => code(&txn.commit()),
+        "tp" => match txn.prepare() {
+            Ok(prepared) => {
+                std::fs::copy(dir.join("data.mdb"), dir.join("prepared.mdb")).unwrap();
+                code(&prepared.commit())
+            }
+            Err(e) => e.to_err_code(),
+        },
+        "ta" => match txn.prepare() {
+            Ok(prepared) => {
+                prepared.abort();
+                0
+            }
+            Err(e) => e.to_err_code(),
+        },
+        _ => {
+            let delta: i64 = op["rb:".len()..].parse().unwrap();
+            let id = txn.id();
+            match txn.commit() {
+                Ok(()) => code(&env.rollback(id.wrapping_add_signed(delta))),
+                Err(e) => e.to_err_code(),
+            }
+        }
+    }
+}
+
 /// Runs one round in lock step: each op goes to C, then to Rust, and the
 /// two outputs must be equal.
 pub fn run_round(o: &dyn Oracle, p: &Profile, ncur: usize, ops: Ops<'_>, tag: &str) -> Round {
@@ -1835,13 +1994,9 @@ pub fn run_round_sized(
     if let Some(n) = o.dirty_limit() {
         env.set_dirty_limit(n);
     }
+    let db_flags = DatabaseFlags::from_bits_retain(p.dbflags) | DatabaseFlags::CREATE;
     let mut txn = env.begin_rw_txn().unwrap();
-    let mut db = txn
-        .create_db(
-            Some("t"),
-            DatabaseFlags::from_bits_retain(p.dbflags) | DatabaseFlags::CREATE,
-        )
-        .unwrap();
+    let mut db = txn.create_db(Some("t"), db_flags).unwrap();
     let mut cur: Vec<CursorId> = (0..ncur).map(|_| txn.open_cursor(db).unwrap()).collect();
     let crun = CRun::start(o, cdir.path(), "t", p.dbflags, ncur, map_size);
     let mut drv = Driver {
@@ -1858,13 +2013,52 @@ pub fn run_round_sized(
         heal: Default::default(),
         i: 0,
         pending_c_line: None,
+        c_dir: cdir.path().to_path_buf(),
+        r_dir: rdir.path().to_path_buf(),
+        page_size: env.page_size(),
+        metas_before: None,
     };
-    match drv.level(&mut txn, &mut db, 0, &mut cur) {
-        LevelEnd::Done => {}
-        LevelEnd::Stopped => return Round::CStopped(drv.i),
-        LevelEnd::Commit(_) | LevelEnd::Abort(_) => unreachable!(),
+    let mut txn = Some(txn);
+    loop {
+        let level = drv.level(txn.as_mut().expect("a transaction"), &mut db, 0, &mut cur);
+        match level {
+            LevelEnd::Done => break,
+            LevelEnd::Stopped => return Round::CStopped(drv.i),
+            LevelEnd::Commit(_) | LevelEnd::Abort(_) => unreachable!(),
+            LevelEnd::Top(op, cl) => {
+                // End the transaction as the op says, begin the next.
+                let ended = txn.take().expect("a transaction");
+                let rc = rust_end_top(&env, ended, &mut cur, &op, rdir.path());
+                let next = txn.insert(env.begin_rw_txn().unwrap());
+                db = next.create_db(Some("t"), db_flags).unwrap();
+                cur.extend((0..ncur).map(|_| next.open_cursor(db).unwrap()));
+                let name = op.split(':').next().unwrap_or("").to_owned();
+                let rl = drv.line(next, &cur, &name, rc);
+                if !drv.compare(op.clone(), cl, rl) {
+                    return Round::CStopped(drv.i);
+                }
+                if op == "tp" {
+                    // Each side's file between the phases is its committed
+                    // file with the meta pages from before; those are the
+                    // same on both sides, and so are (as the oracle
+                    // compares files) the committed files: so the prepare
+                    // wrote the same pages on both. (Byte for byte the
+                    // files differ where neither side reads: the gap
+                    // between the nodes and their pointers holds what the
+                    // page held before, which `pagecmp` leaves out too.)
+                    let (cm, rm) = drv.metas_before.take().expect("metas before tp");
+                    let step = format!("{tag}: step {} tp", drv.i);
+                    check_between(rdir.path(), &rm, drv.page_size, &format!("{step}, Rust"))
+                        .expect("Rust's file between the phases");
+                    check_between(cdir.path(), &cm, drv.page_size, &format!("{step}, C"));
+                    assert!(cm == rm, "{step}: the meta pages before differ");
+                    o.after_round(cdir.path(), rdir.path(), &step);
+                }
+            }
+        }
     }
     let (c_commit, err) = drv.crun.take().expect("C running").finish();
+    let mut txn = txn.expect("a transaction");
     for id in cur {
         txn.close_cursor(id);
     }
