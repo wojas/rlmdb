@@ -1,5 +1,5 @@
 //! Every interop scenario on LMDB 1.0 environments with the Rust peer (`rpeer` on `rlmdb`) writing
-//! and the C peer linked against the Rust `liblmdb.a` (`rlmdb-capi`) reading (and, in the bidirectional
+//! and the C peer linked against the Rust `librlmdb.a` (`rlmdb-capi`) reading (and, in the bidirectional
 //! scenarios, writing too).
 //!
 //! C 1.0 (`cpeer10`) verifies and audits as the reference, as C does in the

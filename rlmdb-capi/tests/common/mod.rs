@@ -2,9 +2,16 @@
 //!
 //! * [`Lib::C`]: the C LMDB 0.9.37 sources in `tests/lmdb-c/0.9`, compiled
 //!   here into `liblmdbc.a` (the oracle);
-//! * [`Lib::Rust`]: `liblmdb.a` built by cargo from this crate (cargo builds
-//!   the crate's lib, all crate types at once, before the integration tests,
-//!   because the lib has an `rlib` crate type).
+//! * [`Lib::Rust`]: `librlmdb.a`, built by cargo from the `librlmdb`
+//!   package (`artifacts/rlmdb`) with rlmdb's 0.9 `lmdb.h`;
+//! * [`Lib::C10`]: the C LMDB 1.0 sources in `tests/lmdb-c/1.0`, compiled
+//!   into `liblmdbc10.a` (the 1.0 oracle), with 1.0's `lmdb.h`;
+//! * [`Lib::Rust10`]: the LMDB 1.0 stub `liblmdb10.a` (`artifacts/lmdb10`)
+//!   with 1.0's `lmdb.h`, as a program built for C LMDB 1.0 uses it.
+//!
+//! The libraries of the three artifact packages ([`Artifact`]) are
+//! dev-dependencies of this crate, so cargo builds them (static and
+//! shared) before the integration tests.
 //!
 //! Programs that load LMDB with `dlopen` ([`Builder::dl_program`]) use the
 //! shared builds instead: [`Builder::c_shared_lib`] and [`rust_cdylib`].
@@ -29,8 +36,9 @@
 //! tests build them with `tests/c/mtest_shim.h`, which makes the seed
 //! `$MTEST_SEED` (default 20261030), so their data is deterministic.
 //!
-//! On Windows the libraries are `liblmdb.a` (MinGW) or `lmdb.lib` (MSVC),
-//! `lmdb.dll` with its import library `liblmdb.dll.a` or `lmdb.dll.lib`;
+//! On Windows the libraries are `librlmdb.a` (MinGW) or `rlmdb.lib`
+//! (MSVC), `rlmdb.dll` with its import library `librlmdb.dll.a` or
+//! `rlmdb.dll.lib` (the stubs likewise, `lmdb09` and `lmdb10`);
 //! programs are built with MinGW's `gcc` or MSVC's `cl` ([`Compiler`]),
 //! and the test programs' POSIX calls come from `tests/compat`.
 
@@ -48,8 +56,12 @@ use std::time::{Duration, SystemTime};
 pub enum Lib {
     /// The C library (oracle).
     C,
-    /// The Rust library (`liblmdb.a` from this crate).
+    /// The Rust library (`librlmdb.a`), with rlmdb's `lmdb.h`.
     Rust,
+    /// The C library of LMDB 1.0 (the 1.0 oracle), with its `lmdb.h`.
+    C10,
+    /// The Rust LMDB 1.0 stub (`liblmdb10.a`) with LMDB 1.0's `lmdb.h`.
+    Rust10,
 }
 
 impl Lib {
@@ -57,6 +69,79 @@ impl Lib {
         match self {
             Lib::C => "c",
             Lib::Rust => "rust",
+            Lib::C10 => "c10",
+            Lib::Rust10 => "rust10",
+        }
+    }
+
+    /// One of the Rust libraries (built with `-DLMDB_RUST`)?
+    pub fn is_rust(self) -> bool {
+        matches!(self, Lib::Rust | Lib::Rust10)
+    }
+
+    /// Built with LMDB 1.0's `lmdb.h`?
+    pub fn is_v10(self) -> bool {
+        matches!(self, Lib::C10 | Lib::Rust10)
+    }
+
+    /// The directory of the upstream sources and programs of this
+    /// library's release (`tests/lmdb-c/0.9` or `1.0`).
+    pub fn src(self) -> PathBuf {
+        if self.is_v10() {
+            c10_src()
+        } else {
+            c_src()
+        }
+    }
+}
+
+/// The three libraries built from this crate (see `src/profile.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Artifact {
+    /// `librlmdb` (package `librlmdb`).
+    Rlmdb,
+    /// The LMDB 0.9 stub (package `lmdb09-stub`, built as `liblmdb09`).
+    Lmdb09,
+    /// The LMDB 1.0 stub (package `lmdb10-stub`, built as `liblmdb10`).
+    Lmdb10,
+}
+
+impl Artifact {
+    pub const ALL: [Artifact; 3] = [Artifact::Rlmdb, Artifact::Lmdb09, Artifact::Lmdb10];
+
+    /// The cargo lib name: the files are `lib<name>.a`, `lib<name>.so`, ...
+    pub fn lib_name(self) -> &'static str {
+        match self {
+            Artifact::Rlmdb => "rlmdb",
+            Artifact::Lmdb09 => "lmdb09",
+            Artifact::Lmdb10 => "lmdb10",
+        }
+    }
+
+    /// What `mdb_version` reports.
+    pub fn lmdb_version(self) -> (i32, i32, i32) {
+        match self {
+            Artifact::Rlmdb | Artifact::Lmdb09 => (0, 9, 85),
+            Artifact::Lmdb10 => (1, 0, 85),
+        }
+    }
+
+    /// The format of new environments that ask for none (`rlmdb.h`'s
+    /// number: 9 or 10).
+    pub fn default_format(self) -> u32 {
+        match self {
+            Artifact::Rlmdb | Artifact::Lmdb09 => 9,
+            Artifact::Lmdb10 => 10,
+        }
+    }
+
+    /// The SONAME on ELF systems (the 1.0 stub's with the build's
+    /// `RLMDB_LMDB10_SONAME`, which the tests do not set).
+    pub fn soname(self) -> &'static str {
+        match self {
+            Artifact::Rlmdb => "librlmdb.so",
+            Artifact::Lmdb09 => "liblmdb.so.0",
+            Artifact::Lmdb10 => "liblmdb.so",
         }
     }
 }
@@ -69,6 +154,11 @@ pub fn crate_dir() -> PathBuf {
 /// `tests/lmdb-c/0.9`: the C sources and tools.
 pub fn c_src() -> PathBuf {
     crate_dir().join("../tests/lmdb-c/0.9")
+}
+
+/// `tests/lmdb-c/1.0`: the C sources and tools of LMDB 1.0.
+pub fn c10_src() -> PathBuf {
+    crate_dir().join("../tests/lmdb-c/1.0")
 }
 
 /// `tests/c`: our own C test programs.
@@ -92,14 +182,13 @@ pub fn static_lib_name(name: &str) -> String {
     }
 }
 
-/// The Rust static library: next to the test executable (`deps/`), where
-/// cargo puts it when building the lib for the tests, else one level up.
-pub fn rust_staticlib() -> PathBuf {
+/// The file `name` that cargo built for a dev-dependency of this crate:
+/// next to the test executable (`deps/`), else one level up.
+fn built_file(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("test executable path");
     let deps = exe.parent().expect("deps dir");
-    let name = static_lib_name("lmdb");
     for dir in [deps, deps.parent().unwrap_or(deps)] {
-        let lib = dir.join(&name);
+        let lib = dir.join(name);
         if lib.exists() {
             return lib;
         }
@@ -108,6 +197,23 @@ pub fn rust_staticlib() -> PathBuf {
         "{name} not found next to {}; build with `cargo test -p rlmdb-capi`",
         exe.display()
     );
+}
+
+/// The static library of `artifact` (`librlmdb.a`, `liblmdb09.a`, ...;
+/// `rlmdb.lib` & co. with MSVC).
+pub fn artifact_staticlib(artifact: Artifact) -> PathBuf {
+    built_file(&static_lib_name(artifact.lib_name()))
+}
+
+/// The shared library of `artifact` (`librlmdb.so`, `librlmdb.dylib`,
+/// `rlmdb.dll`, ...).
+pub fn artifact_cdylib(artifact: Artifact) -> PathBuf {
+    built_file(&shared_lib_name(artifact.lib_name()))
+}
+
+/// The Rust static library programs link: `librlmdb.a`.
+pub fn rust_staticlib() -> PathBuf {
+    artifact_staticlib(Artifact::Rlmdb)
 }
 
 /// The file name of a shared library `lib<name>` on this platform
@@ -125,21 +231,30 @@ pub fn shared_lib_name(name: &str) -> String {
 /// The functions `lmdb.h` declares (`mdb_*`, one declaration per line,
 /// starting in the first column).
 pub fn lmdb_h_functions() -> Vec<String> {
-    let header = fs::read_to_string(c_src().join("lmdb.h")).unwrap();
-    let names: Vec<String> = header
-        .lines()
-        .filter(|l| l.starts_with(|c: char| c.is_ascii_alphabetic()) && !l.starts_with("typedef"))
-        .filter_map(|l| {
-            let name = &l[l.find("mdb_")?..];
-            let name = &name[..name.find('(')?];
-            name.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                .then(|| name.to_owned())
-        })
-        .collect();
+    let names = header_functions(&c_src().join("lmdb.h"), "mdb_");
     // 0.9.37 declares 56; a change of style would show here.
     assert!(names.len() > 50, "lmdb.h declares only {names:?}");
     names
+}
+
+/// The functions whose names start with `prefix` that the C header at
+/// `path` declares: declarations start in the first column, with the
+/// name before the first `(` of the line (`int mdb_env_open(`, `void
+/// *mdb_modload(`, `const rlmdb_version_info *rlmdb_version(void);`).
+pub fn header_functions(path: &Path, prefix: &str) -> Vec<String> {
+    let header = fs::read_to_string(path).unwrap();
+    header
+        .lines()
+        .filter(|l| l.starts_with(|c: char| c.is_ascii_alphabetic()) && !l.starts_with("typedef"))
+        .filter_map(|l| {
+            let name = &l[..l.find('(')?];
+            let start = name.rfind([' ', '*', '\t'])? + 1;
+            let name = &name[start..];
+            (name.starts_with(prefix)
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+            .then(|| name.to_owned())
+        })
+        .collect()
 }
 
 /// A module-definition file (`.def`) for DLL `name` exporting `functions`.
@@ -151,38 +266,26 @@ pub fn module_definition(name: &str, functions: &[String]) -> String {
     def
 }
 
-/// The import library of the Rust DLL (Windows): `liblmdb.dll.a` (MinGW)
-/// or `lmdb.dll.lib` (MSVC), next to `lmdb.dll`.
+/// The import library of the Rust DLL (Windows): `librlmdb.dll.a`
+/// (MinGW) or `rlmdb.dll.lib` (MSVC), next to `rlmdb.dll`.
 pub fn rust_import_lib() -> PathBuf {
     let dll = rust_cdylib();
     let name = if cfg!(target_env = "msvc") {
-        "lmdb.dll.lib"
+        "rlmdb.dll.lib"
     } else {
-        "liblmdb.dll.a"
+        "librlmdb.dll.a"
     };
     dll.with_file_name(name)
 }
 
-/// The Rust shared library (`liblmdb.so` / `liblmdb.dylib`), found like
-/// [`rust_staticlib`].
+/// The Rust shared library (`librlmdb.so` / `librlmdb.dylib`,
+/// `rlmdb.dll`).
 pub fn rust_cdylib() -> PathBuf {
-    let exe = std::env::current_exe().expect("test executable path");
-    let deps = exe.parent().expect("deps dir");
-    let name = shared_lib_name("lmdb");
-    for dir in [deps, deps.parent().unwrap_or(deps)] {
-        let lib = dir.join(&name);
-        if lib.exists() {
-            return lib;
-        }
-    }
-    panic!(
-        "{name} not found next to {}; build with `cargo test -p rlmdb-capi`",
-        exe.display()
-    );
+    artifact_cdylib(Artifact::Rlmdb)
 }
 
-/// System libraries a C program needs when linking Rust's `liblmdb.a`
-/// (`cargo rustc -p rlmdb-capi --lib --crate-type staticlib -- --print
+/// System libraries a C program needs when linking Rust's `librlmdb.a`
+/// (`cargo rustc -p librlmdb --lib --crate-type staticlib -- --print
 /// native-static-libs`; see README.md).
 pub fn rust_native_libs() -> &'static [&'static str] {
     if cfg!(all(windows, target_env = "msvc")) {
@@ -260,6 +363,20 @@ pub fn rust_native_libs() -> &'static [&'static str] {
         ]
     } else {
         // macOS: -lSystem -lc -lm, all implied by the compiler driver.
+        &[]
+    }
+}
+
+/// The library of `dlopen` that C LMDB 1.0's `module.c` needs, where it is
+/// one of its own (`-ldl` on Linux and FreeBSD).
+pub fn dl_libs() -> &'static [&'static str] {
+    if cfg!(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly"
+    )) {
+        &["-ldl"]
+    } else {
         &[]
     }
 }
@@ -428,6 +545,7 @@ pub struct Builder {
     pub dir: PathBuf,
     built: Mutex<HashMap<(String, Lib), PathBuf>>,
     c_lib: OnceLock<PathBuf>,
+    c10_lib: OnceLock<PathBuf>,
 }
 
 /// The builder for this test process.
@@ -450,6 +568,7 @@ pub fn builder() -> &'static Builder {
             dir,
             built: Mutex::new(HashMap::new()),
             c_lib: OnceLock::new(),
+            c10_lib: OnceLock::new(),
         }
     })
 }
@@ -490,9 +609,27 @@ impl Builder {
         })
     }
 
+    /// `liblmdbc10.a` from `tests/lmdb-c/1.0/mdb.c`, `midl.c` and
+    /// `module.c` (1.0's `liblmdb.a`; programs linked with it need
+    /// [`dl_libs`] for `module.c`'s `dlopen`).
+    fn c10_lib(&self) -> &Path {
+        self.c10_lib.get_or_init(|| {
+            let out = self.dir.join("clib10");
+            fs::create_dir_all(&out).unwrap();
+            cc_build(&out)
+                .file(c10_src().join("mdb.c"))
+                .file(c10_src().join("midl.c"))
+                .file(c10_src().join("module.c"))
+                .include(c10_src())
+                .try_compile("lmdbc10")
+                .unwrap_or_else(|e| panic!("building the C 1.0 library: {e}"));
+            out.join(static_lib_name("lmdbc10"))
+        })
+    }
+
     /// Builds program `name` from `sources` against `lib` (once per test
-    /// process) and returns its path. The Rust-linked build is compiled with
-    /// `-DLMDB_RUST` (see `GAP()` in the test programs).
+    /// process) and returns its path. The Rust-linked builds are compiled
+    /// with `-DLMDB_RUST` (see `GAP()` in the test programs).
     pub fn program(&self, name: &str, sources: &[PathBuf], lib: Lib) -> PathBuf {
         self.program_with(name, sources, lib, &[])
     }
@@ -516,6 +653,8 @@ impl Builder {
         let (include, archive) = match lib {
             Lib::C => (c_src(), self.c_lib().to_path_buf()),
             Lib::Rust => (crate_dir().join("include"), rust_staticlib()),
+            Lib::C10 => (c10_src(), self.c10_lib().to_path_buf()),
+            Lib::Rust10 => (c10_src(), artifact_staticlib(Artifact::Lmdb10)),
         };
         // Where `cl` puts the objects (one directory per program, as
         // programs share source names).
@@ -525,10 +664,13 @@ impl Builder {
         }
         let mut c = Compiler::new(&obj_dir, false).unwrap();
         c.include(&include).include(&test_c_dir());
-        if !sources.iter().any(|s| s.starts_with(c_src())) {
+        if !sources
+            .iter()
+            .any(|s| s.starts_with(c_src()) || s.starts_with(c10_src()))
+        {
             c.test_program();
         }
-        if lib == Lib::Rust {
+        if lib.is_rust() {
             c.args(["-DLMDB_RUST"]);
         }
         c.args(extra)
@@ -536,10 +678,13 @@ impl Builder {
             .args(sources)
             .args([&archive])
             .pthread();
-        if lib == Lib::Rust {
+        if lib.is_rust() {
             c.args(rust_native_libs());
         } else {
             c.lmdb_system_libs();
+        }
+        if lib == Lib::C10 {
+            c.args(dl_libs());
         }
         let cmd = c.command();
         let out = cmd
@@ -556,9 +701,10 @@ impl Builder {
     }
 
     /// One of the C tools or test programs in `tests/lmdb-c/0.9`
-    /// (`mdb_stat`, `mdb_dump`, `mdb_load`, `mtest`, …).
+    /// (`mdb_stat`, `mdb_dump`, `mdb_load`, `mtest`, …), or in
+    /// `tests/lmdb-c/1.0` for the 1.0 libraries.
     pub fn tool(&self, name: &str, lib: Lib) -> PathBuf {
-        self.program(name, &[c_src().join(format!("{name}.c"))], lib)
+        self.program(name, &[lib.src().join(format!("{name}.c"))], lib)
     }
 
     /// One of our programs in `tests/c`.
@@ -652,15 +798,35 @@ impl Builder {
     /// such as `c++`) cannot be run: a machine with only a C compiler
     /// skips the test instead of failing it.
     pub fn cxx_test_program(&self, name: &str) -> Option<PathBuf> {
-        let out_dir = self.dir.join("cxx");
+        let includes = [crate_dir().join("include"), test_c_dir()];
+        let source = test_c_dir().join(format!("{name}.c"));
+        let obj = self.strict_object(name, &source, &includes, true)?;
+        Some(self.program(&format!("{name}_cxx"), &[obj], Lib::Rust))
+    }
+
+    /// `source` compiled with warnings as errors into an object named
+    /// after `name`, with the include directories `includes` in that
+    /// order and `-DLMDB_RUST`; as C++ with `cpp` (no exceptions, no RTTI:
+    /// the object must not need the C++ runtime). `None`, with a note on
+    /// stderr, when the C++ compiler cannot be run (see
+    /// [`Builder::cxx_test_program`]).
+    pub fn strict_object(
+        &self,
+        name: &str,
+        source: &Path,
+        includes: &[PathBuf],
+        cpp: bool,
+    ) -> Option<PathBuf> {
+        let out_dir = self.dir.join(if cpp { "cxx" } else { "strict" });
         fs::create_dir_all(&out_dir).unwrap();
         let obj = out_dir.join(format!("{name}.o"));
-        let compiler = match cc_build(&out_dir).cpp(true).try_get_compiler() {
+        let compiler = match cc_build(&out_dir).cpp(cpp).try_get_compiler() {
             Ok(c) => c,
-            Err(e) => {
+            Err(e) if cpp => {
                 eprintln!("skipped: no C++ compiler ({e})");
                 return None;
             }
+            Err(e) => panic!("no C compiler: {e}"),
         };
         let probe = if compiler.is_like_msvc() {
             "-?"
@@ -668,6 +834,11 @@ impl Builder {
             "--version"
         };
         if let Err(e) = compiler.to_command().arg(probe).output() {
+            assert!(
+                cpp,
+                "C compiler {} cannot be run: {e}",
+                compiler.path().display()
+            );
             eprintln!(
                 "skipped: C++ compiler {} cannot be run: {e}",
                 compiler.path().display()
@@ -675,23 +846,26 @@ impl Builder {
             return None;
         }
         let mut cmd = compiler.to_command();
-        cmd.arg("-I")
-            .arg(crate_dir().join("include"))
-            .arg("-I")
-            .arg(test_c_dir())
-            .arg("-DLMDB_RUST");
-        if compiler.is_like_msvc() {
-            // C++ without exceptions or RTTI, warnings as errors.
-            cmd.args(["-nologo", "-EHs-c-", "-GR-", "-W3", "-WX", "-TP", "-c"])
-                .arg(format!("-Fo{}", obj.display()));
-        } else {
-            cmd.args(["-fno-exceptions", "-fno-rtti", "-Wall", "-Werror"])
-                .args(["-x", "c++", "-c", "-o"])
-                .arg(&obj);
+        for dir in includes {
+            cmd.arg("-I").arg(dir);
         }
-        cmd.arg(test_c_dir().join(format!("{name}.c")));
+        cmd.arg("-DLMDB_RUST");
+        if compiler.is_like_msvc() {
+            cmd.args(["-nologo", "-W3", "-WX", "-c"]);
+            if cpp {
+                cmd.args(["-EHs-c-", "-GR-", "-TP"]);
+            }
+            cmd.arg(format!("-Fo{}", obj.display()));
+        } else {
+            cmd.args(["-Wall", "-Werror"]);
+            if cpp {
+                cmd.args(["-fno-exceptions", "-fno-rtti", "-x", "c++"]);
+            }
+            cmd.args(["-c", "-o"]).arg(&obj);
+        }
+        cmd.arg(source);
         run_ok(&mut cmd);
-        Some(self.program(&format!("{name}_cxx"), &[obj], Lib::Rust))
+        Some(obj)
     }
 
     /// One of the upstream `mtest*.c` programs, unmodified, built with
@@ -709,7 +883,7 @@ impl Builder {
         self.program_with(
             name,
             &[
-                c_src().join(format!("{name}.c")),
+                lib.src().join(format!("{name}.c")),
                 test_c_dir().join("mtest_shim.c"),
             ],
             lib,

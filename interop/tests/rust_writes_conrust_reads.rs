@@ -1,5 +1,5 @@
 //! Every interop scenario with the Rust peer (`rpeer` on `rlmdb`) writing and
-//! the C peer linked against the Rust `liblmdb.a` (`rlmdb-capi`) reading (and, in the bidirectional scenarios,
+//! the C peer linked against the Rust `librlmdb.a` (`rlmdb-capi`) reading (and, in the bidirectional scenarios,
 //! writing too).
 //!
 //! See `src/scenarios` for the scenarios and README.md for the matrix; steps

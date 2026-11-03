@@ -8,9 +8,9 @@
 //! * `cpeer`: the C implementation of the peer command protocol (`c/cpeer*.c`).
 //! * The cpeer objects once more, compiled against the Rust library's
 //!   `lmdb.h` (`../rlmdb-capi/include`): at test time they are linked with
-//!   the Rust `liblmdb.a` into `cpeer_capi`, the third peer
+//!   the Rust `librlmdb.a` into `cpeer_capi`, the third peer
 //!   (`Peer::COnRust`, see `src/bins.rs`). That link cannot happen here:
-//!   the build script runs before cargo builds `liblmdb.a`.
+//!   the build script runs before cargo builds `librlmdb.a`.
 //! * `layout_dump`: prints `sizeof`/`offsetof` of the internal structs; it
 //!   `#include`s `mdb.c` to see the static definitions.
 //! * The upstream tools (`mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`) and

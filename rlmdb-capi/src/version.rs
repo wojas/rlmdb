@@ -1,7 +1,14 @@
 //! Version information and error messages: `mdb_version` and
 //! `mdb_strerror` (`lmdb.h` sections "Version Macros" and "Return Codes"),
 //! and rlmdb's own `rlmdb_version` and `rlmdb_version_string`
-//! (`include/rlmdb.h`), both filled from [`rlmdb::version_info`].
+//! (`include/rlmdb.h`), filled from [`rlmdb::version_info`].
+//!
+//! `mdb_version`, `rlmdb_version` and `rlmdb_version_string` report the
+//! version of the library they are in ([`Profile`]): this module has them
+//! as [`mdb_version_of`], [`rlmdb_version_of`] and
+//! [`rlmdb_version_string_of`], which each artifact exports under the C
+//! names ([`artifact_symbols!`](crate::artifact_symbols)).
+//! `mdb_strerror` is the same in all of them.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint};
@@ -9,7 +16,9 @@ use std::sync::OnceLock;
 
 use rlmdb::consts::{MDB_KEYEXIST, MDB_LAST_ERRCODE_V10};
 
-/// `rlmdb_version_info` of `rlmdb.h`: what [`rlmdb_version`] returns, the
+use crate::Profile;
+
+/// `rlmdb_version_info` of `rlmdb.h`: what `rlmdb_version` returns, the
 /// C form of [`rlmdb::VersionInfo`]. Fields are only ever appended.
 #[repr(C)]
 #[derive(Debug)]
@@ -22,9 +31,9 @@ pub struct rlmdb_version_info {
     pub rlmdb_minor: c_int,
     /// The rlmdb version: patch.
     pub rlmdb_patch: c_int,
-    /// What `mdb_version` reports: major (0).
+    /// What `mdb_version` reports: major (0, or 1 in the LMDB 1.0 stub).
     pub lmdb_major: c_int,
-    /// What `mdb_version` reports: minor (9).
+    /// What `mdb_version` reports: minor (9, or 0 in the LMDB 1.0 stub).
     pub lmdb_minor: c_int,
     /// What `mdb_version` reports: patch (85).
     pub lmdb_patch: c_int,
@@ -42,7 +51,7 @@ pub struct rlmdb_version_info {
     pub v10_patch: c_int,
 }
 
-/// The C view of [`rlmdb::version_info`], built once.
+/// The C view of [`rlmdb::version_info`] for one [`Profile`], built once.
 struct CVersion {
     /// What `rlmdb_version` returns.
     info: rlmdb_version_info,
@@ -52,11 +61,19 @@ struct CVersion {
     lmdb_line: CString,
 }
 
-/// The C version information, built on first use.
-fn c_version() -> &'static CVersion {
-    static VERSION: OnceLock<CVersion> = OnceLock::new();
-    VERSION.get_or_init(|| {
-        let v = rlmdb::version_info();
+/// The version information of `profile`: [`rlmdb::version_info`] with
+/// the profile's `mdb_version` ([`Profile::lmdb_version`]).
+pub fn version_info(profile: Profile) -> rlmdb::VersionInfo {
+    let mut v = *rlmdb::version_info();
+    v.lmdb = profile.lmdb_version();
+    v
+}
+
+/// The C version information of `profile`, built on first use.
+fn c_version(profile: Profile) -> &'static CVersion {
+    static VERSIONS: [OnceLock<CVersion>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    VERSIONS[profile.index()].get_or_init(|| {
+        let v = version_info(profile);
         let int = |n: u32| c_int::try_from(n).unwrap_or(c_int::MAX);
         let info = rlmdb_version_info {
             size: size_of::<rlmdb_version_info>() as c_uint,
@@ -81,42 +98,47 @@ fn c_version() -> &'static CVersion {
     })
 }
 
-/// `mdb_version`: return the LMDB library version information.
+/// `mdb_version` of the library of `profile`: return the LMDB library
+/// version information.
 ///
-/// Stores 0, 9, 85 in the non-NULL arguments and returns
-/// `"LMDB 0.9.85: (rlmdb <version>)"` ([`rlmdb::lmdb_version`],
-/// [`rlmdb::VersionInfo::mdb_version_string`]). The shipped `lmdb.h` says
-/// 0.9.37, the C release whose ABI and file formats the library implements;
-/// the higher patch level tells rlmdb apart from C LMDB.
-#[no_mangle]
-pub unsafe extern "C" fn mdb_version(
+/// Stores the profile's version ([`Profile::lmdb_version`]: 0, 9, 85, or 1,
+/// 0, 85 in the LMDB 1.0 stub) in the non-NULL arguments and returns
+/// `"LMDB 0.9.85: (rlmdb <version>)"` (or `"LMDB 1.0.85: ..."`,
+/// [`rlmdb::VersionInfo::mdb_version_string`]), a static string. The
+/// shipped `lmdb.h` says 0.9.37, the C release whose ABI and file formats
+/// the library implements; the patch level 85, above every C release,
+/// tells rlmdb apart from C LMDB.
+///
+/// # Safety
+///
+/// Each argument is NULL or writable.
+pub unsafe fn mdb_version_of(
+    profile: Profile,
     major: *mut c_int,
     minor: *mut c_int,
     patch: *mut c_int,
 ) -> *mut c_char {
-    let (ma, mi, pa) = rlmdb::lmdb_version();
+    let (ma, mi, pa) = profile.lmdb_version();
     for (out, value) in [(major, ma), (minor, mi), (patch, pa)] {
         // SAFETY: NULL or writable, per lmdb.h.
         if let Some(out) = unsafe { out.as_mut() } {
             *out = value;
         }
     }
-    c_version().lmdb_line.as_ptr().cast_mut()
+    c_version(profile).lmdb_line.as_ptr().cast_mut()
 }
 
-/// `rlmdb_version` (`rlmdb.h`): the version information of the library,
-/// a static structure.
-#[no_mangle]
-pub unsafe extern "C" fn rlmdb_version() -> *const rlmdb_version_info {
-    &c_version().info
+/// `rlmdb_version` (`rlmdb.h`) of the library of `profile`: its version
+/// information, a static structure.
+pub fn rlmdb_version_of(profile: Profile) -> *const rlmdb_version_info {
+    &c_version(profile).info
 }
 
-/// `rlmdb_version_string` (`rlmdb.h`): the version information as one
-/// line, the [`Display`](std::fmt::Display) form of
-/// [`rlmdb::VersionInfo`]; a static string.
-#[no_mangle]
-pub unsafe extern "C" fn rlmdb_version_string() -> *const c_char {
-    c_version().line.as_ptr()
+/// `rlmdb_version_string` (`rlmdb.h`) of the library of `profile`: the
+/// version information as one line, the [`Display`](std::fmt::Display)
+/// form of [`version_info`]; a static string.
+pub fn rlmdb_version_string_of(profile: Profile) -> *const c_char {
+    c_version(profile).line.as_ptr()
 }
 
 /// The messages of LMDB's own codes as static C strings: those of LMDB 0.9
@@ -180,45 +202,68 @@ mod tests {
     }
 
     #[test]
-    fn mdb_version_reports_0_9_85() {
-        let (mut ma, mut mi, mut pa) = (-1, -1, -1);
-        // SAFETY: valid outputs; the string is static and NUL-terminated.
-        let s = unsafe { CStr::from_ptr(mdb_version(&mut ma, &mut mi, &mut pa)) };
-        assert_eq!((ma, mi, pa), (0, 9, 85));
-        let expected = format!("LMDB 0.9.85: (rlmdb {})", env!("CARGO_PKG_VERSION"));
-        assert_eq!(s.to_str().unwrap(), expected);
-        // SAFETY: NULL outputs are allowed.
-        let again = unsafe { mdb_version(ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) };
-        assert_eq!(again.cast_const(), s.as_ptr());
-        // Same series as the header, a higher patch level.
+    fn mdb_version_reports_0_9_85_or_1_0_85() {
+        for (profile, (ma0, mi0)) in [
+            (Profile::Rlmdb, (0, 9)),
+            (Profile::Lmdb09, (0, 9)),
+            (Profile::Lmdb10, (1, 0)),
+        ] {
+            let (mut ma, mut mi, mut pa) = (-1, -1, -1);
+            // SAFETY: valid outputs; the string is static and NUL-terminated.
+            let s = unsafe { CStr::from_ptr(mdb_version_of(profile, &mut ma, &mut mi, &mut pa)) };
+            assert_eq!((ma, mi, pa), (ma0, mi0, 85));
+            let expected = format!("LMDB {ma0}.{mi0}.85: (rlmdb {})", env!("CARGO_PKG_VERSION"));
+            assert_eq!(s.to_str().unwrap(), expected);
+            // SAFETY: NULL outputs are allowed.
+            let again = unsafe {
+                mdb_version_of(profile, ptr::null_mut(), ptr::null_mut(), ptr::null_mut())
+            };
+            assert_eq!(again.cast_const(), s.as_ptr());
+        }
+        // librlmdb: the same series as the header, a higher patch level.
         let (hma, hmi, hpa) = header_version();
+        let (ma, mi, pa) = Profile::Rlmdb.lmdb_version();
         assert_eq!((ma, mi), (hma, hmi));
         assert!(pa > hpa);
+        // The 1.0 stub: above the C 1.0 release whose format it matches.
+        let v10 = rlmdb::version_info().v10;
+        let (ma, mi, pa) = Profile::Lmdb10.lmdb_version();
+        assert_eq!((ma, mi), (v10.0, v10.1));
+        assert!(pa > v10.2);
     }
 
     #[test]
     fn version_info_struct() {
-        // SAFETY: rlmdb_version returns a pointer to a static structure.
-        let info = unsafe { &*rlmdb_version() };
-        let v = rlmdb::version_info();
-        assert_eq!(info.size as usize, size_of::<rlmdb_version_info>());
+        for profile in Profile::ALL {
+            // SAFETY: rlmdb_version_of returns a pointer to a static structure.
+            let info = unsafe { &*rlmdb_version_of(profile) };
+            let v = rlmdb::version_info();
+            assert_eq!(info.size as usize, size_of::<rlmdb_version_info>());
+            assert_eq!(
+                (info.rlmdb_major, info.rlmdb_minor, info.rlmdb_patch),
+                (v.rlmdb.0 as c_int, v.rlmdb.1 as c_int, v.rlmdb.2 as c_int)
+            );
+            assert_eq!(
+                (info.lmdb_major, info.lmdb_minor, info.lmdb_patch),
+                profile.lmdb_version()
+            );
+            // The 0.9 format matches the release of the shipped header.
+            assert_eq!(
+                (info.v09_major, info.v09_minor, info.v09_patch),
+                header_version()
+            );
+            assert_eq!((info.v10_major, info.v10_minor, info.v10_patch), v.v10);
+            // SAFETY: a static NUL-terminated string.
+            let line = unsafe { CStr::from_ptr(rlmdb_version_string_of(profile)) };
+            assert_eq!(line.to_str().unwrap(), version_info(profile).to_string());
+        }
+        // SAFETY: as above.
+        let line10 = unsafe { CStr::from_ptr(rlmdb_version_string_of(Profile::Lmdb10)) };
+        assert!(line10.to_str().unwrap().contains("(mdb_version 1.0.85;"));
         assert_eq!(
-            (info.rlmdb_major, info.rlmdb_minor, info.rlmdb_patch),
-            (v.rlmdb.0 as c_int, v.rlmdb.1 as c_int, v.rlmdb.2 as c_int)
+            version_info(Profile::Rlmdb).to_string(),
+            rlmdb::version_info().to_string()
         );
-        assert_eq!(
-            (info.lmdb_major, info.lmdb_minor, info.lmdb_patch),
-            rlmdb::lmdb_version()
-        );
-        // The 0.9 format matches the release of the shipped header.
-        assert_eq!(
-            (info.v09_major, info.v09_minor, info.v09_patch),
-            header_version()
-        );
-        assert_eq!((info.v10_major, info.v10_minor, info.v10_patch), v.v10);
-        // SAFETY: a static NUL-terminated string.
-        let line = unsafe { CStr::from_ptr(rlmdb_version_string()) };
-        assert_eq!(line.to_str().unwrap(), v.to_string());
     }
 
     #[test]

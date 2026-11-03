@@ -1,5 +1,5 @@
 //! Robustness of the C API's handle rules, called from Rust through the
-//! `lmdb` rlib (the same functions C programs link against).
+//! `rlmdb_capi` rlib (the same functions C programs link against).
 //!
 //! * A read cursor outlives its transaction safely: after commit/abort it
 //!   is detached (`EINVAL`, `mdb_cursor_txn` NULL) until renewed or
@@ -22,13 +22,13 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 
-use lmdb::cursor::*;
-use lmdb::dbi::*;
-use lmdb::env::*;
-use lmdb::txn::*;
-use lmdb::write::*;
-use lmdb::{MDB_cursor, MDB_env, MDB_txn, MDB_val};
 use rlmdb::consts::*;
+use rlmdb_capi::cursor::*;
+use rlmdb_capi::dbi::*;
+use rlmdb_capi::env::*;
+use rlmdb_capi::txn::*;
+use rlmdb_capi::write::*;
+use rlmdb_capi::{MDB_cursor, MDB_env, MDB_txn, MDB_val, Profile};
 
 fn scratch(name: &str) -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
@@ -72,7 +72,7 @@ impl Fixture {
         let mut dbi = 0;
         // SAFETY: the lmdb.h contract: valid output pointers, live handles.
         unsafe {
-            assert_eq!(mdb_env_create(&mut env), 0);
+            assert_eq!(env_create(Profile::Rlmdb, &mut env), 0);
             assert_eq!(mdb_env_set_maxdbs(env, 4), 0);
             assert_eq!(mdb_env_open(env, path.as_ptr(), MDB_NOSYNC, 0o644), 0);
             assert_eq!(mdb_txn_begin(env, ptr::null_mut(), 0, &mut txn), 0);

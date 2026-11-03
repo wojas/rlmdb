@@ -64,10 +64,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
+name = "librlmdb"
+version = "0.0.0"
+dependencies = [
+ "rlmdb-capi",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
+name = "lmdb09-stub"
+version = "0.0.0"
+dependencies = [
+ "rlmdb-capi",
+]
+
+[[package]]
+name = "lmdb10-stub"
+version = "0.0.0"
+dependencies = [
+ "rlmdb-capi",
+]
 
 [[package]]
 name = "once_cell"
@@ -106,6 +127,9 @@ version = "0.0.0"
 dependencies = [
  "cc",
  "libc",
+ "librlmdb",
+ "lmdb09-stub",
+ "lmdb10-stub",
  "rlmdb",
  "windows-sys",
 ]
@@ -116,8 +140,8 @@ version = "0.0.0"
 dependencies = [
  "cc",
  "libc",
+ "librlmdb",
  "rlmdb",
- "rlmdb-capi",
  "rlmdb-tools",
  "tempfile",
 ]

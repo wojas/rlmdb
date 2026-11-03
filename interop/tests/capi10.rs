@@ -1,6 +1,6 @@
 //! The C API of rlmdb (`rlmdb-capi`) with LMDB 1.0 environments, against C
 //! LMDB 1.0. The C program on rlmdb's side is `cpeer_capi`: the C peer
-//! (`c/cpeer*.c`, an `lmdb.h` client) linked against the Rust `liblmdb.a`.
+//! (`c/cpeer*.c`, an `lmdb.h` client) linked against the Rust `librlmdb.a`.
 //! On C 1.0's side are `cpeer10` (the same peer built against C 1.0),
 //! `mdb_load10`, `mdb_dump10`, `mdb_stat10` and the page audit (`cpeer10
 //! check-freelist`).

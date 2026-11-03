@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "rlmdb",
     "rlmdb-capi",
+    "rlmdb-capi/artifacts/rlmdb",
+    "rlmdb-capi/artifacts/lmdb09",
+    "rlmdb-capi/artifacts/lmdb10",
     "rlmdb-tools",
     "interop",
     "bench",

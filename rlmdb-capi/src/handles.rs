@@ -66,6 +66,10 @@ pub(crate) struct EnvConfig {
     pub(crate) flags: c_uint,
     /// `rlmdb_env_set_format`: the format requested for the open.
     pub(crate) format: Option<Format>,
+    /// The format of a new environment that asks for none, after the
+    /// process default and the variable: the library's
+    /// ([`crate::Profile::default_format`], set by `mdb_env_create`).
+    pub(crate) fallback_format: Format,
     /// `rlmdb_env_set_pagesize`: the page size of a new 1.0 environment.
     pub(crate) page_size: Option<usize>,
 }
@@ -84,8 +88,9 @@ pub struct MDB_env {
 }
 
 impl MDB_env {
-    /// A new, unopened environment handle (`mdb_env_create`).
-    pub(crate) fn new() -> MDB_env {
+    /// A new, unopened environment handle (`mdb_env_create`) whose new
+    /// environments fall back to `fallback_format`.
+    pub(crate) fn new(fallback_format: Format) -> MDB_env {
         MDB_env {
             config: Mutex::new(EnvConfig {
                 map_size: 0,
@@ -93,6 +98,7 @@ impl MDB_env {
                 max_dbs: 0,
                 flags: 0,
                 format: None,
+                fallback_format,
                 page_size: None,
             }),
             env: OnceLock::new(),

@@ -23,7 +23,7 @@ pub enum Peer {
     /// formats.
     Rust,
     /// `cpeer_capi`: the same C program as [`Peer::C`], linked against the
-    /// Rust `liblmdb.a` of `rlmdb-capi` instead of the C library (see
+    /// Rust `librlmdb.a` of `rlmdb-capi` instead of the C library (see
     /// [`bins::cpeer_capi`]). Both formats (`rlmdb_env_set_format`).
     COnRust,
     /// `cpeer10`: the same C program as [`Peer::C`], linked against the C

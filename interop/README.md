@@ -13,12 +13,12 @@ environment and checking what each sees.
   (see "Peer status" below).
 * `cpeer_capi` is the C peer compiled against `../rlmdb-capi/include/lmdb.h`
   (and `rlmdb.h`, with `-DLMDB_RUST`) and linked against the Rust
-  `liblmdb.a` of `rlmdb-capi` instead of the C library: the same C program
+  `librlmdb.a` of `rlmdb-capi` instead of the C library: the same C program
   on the Rust implementation (`Peer::COnRust`).
   `build.rs` compiles its objects; `interop::bins::cpeer_capi()` links them
-  at test time (once per test process), because cargo builds `liblmdb.a`
-  (`rlmdb-capi` is a dev-dependency of this crate) only after build scripts
-  run.
+  at test time (once per test process), because cargo builds `librlmdb.a`
+  (its package, `librlmdb`, is a dev-dependency of this crate) only after
+  build scripts run.
 * `layout_dump` (`c/layout_dump.c`) `#include`s `mdb.c` and prints
   `sizeof`/`offsetof`/`alignof` of every on-disk and lock-file struct.
 * The upstream tools `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` and

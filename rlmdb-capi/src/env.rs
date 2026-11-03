@@ -15,7 +15,7 @@ use rlmdb::{Environment, EnvironmentFlags};
 
 use crate::handles::{lock, MDB_env};
 use crate::types::*;
-use crate::{rc, SUCCESS};
+use crate::{rc, Profile, SUCCESS};
 
 const EINVAL: c_int = libc::EINVAL;
 
@@ -36,13 +36,21 @@ fn code(r: Result<(), c_int>) -> c_int {
     r.err().unwrap_or(SUCCESS)
 }
 
-/// `mdb_env_create`: create an LMDB environment handle.
-#[no_mangle]
-pub unsafe extern "C" fn mdb_env_create(env: *mut *mut MDB_env) -> c_int {
+/// `mdb_env_create` of the library of `profile`: create an LMDB
+/// environment handle. A new environment opened through it that asks for
+/// no format, with neither a process default nor `RLMDB_DEFAULT_FORMAT`,
+/// gets the profile's format ([`Profile::default_format`]: LMDB 1.0 in
+/// the LMDB 1.0 stub, else 0.9). Each artifact exports it as
+/// `mdb_env_create` ([`artifact_symbols!`](crate::artifact_symbols)).
+///
+/// # Safety
+///
+/// `env` is NULL or writable.
+pub unsafe fn env_create(profile: Profile, env: *mut *mut MDB_env) -> c_int {
     if env.is_null() {
         return EINVAL;
     }
-    let handle = Box::into_raw(Box::new(MDB_env::new()));
+    let handle = Box::into_raw(Box::new(MDB_env::new(profile.default_format())));
     // SAFETY: env is non-NULL and writable (lmdb.h).
     unsafe { *env = handle };
     SUCCESS
@@ -66,9 +74,11 @@ pub unsafe extern "C" fn mdb_env_create(env: *mut *mut MDB_env) -> c_int {
 /// format requested with `rlmdb_env_set_format` that differs from it gives
 /// `MDB_VERSION_MISMATCH`. A new one is created in the requested format,
 /// else in the process default (`rlmdb_set_default_format`), else in the
-/// one the experimental `RLMDB_DEFAULT_FORMAT` variable names, else as
-/// LMDB 0.9; a page size set with `rlmdb_env_set_pagesize` applies to a
-/// new 1.0 environment ([`rlmdb::EnvironmentBuilder::format`],
+/// one the experimental `RLMDB_DEFAULT_FORMAT` variable names, else in the
+/// library's ([`env_create`]: LMDB 1.0 in the LMDB 1.0 stub, else 0.9); a
+/// page size set with `rlmdb_env_set_pagesize` applies to a new 1.0
+/// environment ([`rlmdb::EnvironmentBuilder::format`],
+/// [`rlmdb::EnvironmentBuilder::fallback_format`],
 /// [`rlmdb::EnvironmentBuilder::page_size`]).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_env_open(
@@ -95,7 +105,8 @@ pub unsafe extern "C" fn mdb_env_open(
         .map_size(config.map_size)
         .max_readers(config.max_readers)
         .max_dbs(config.max_dbs)
-        .flags(EnvironmentFlags::from_bits_retain(flags | config.flags));
+        .flags(EnvironmentFlags::from_bits_retain(flags | config.flags))
+        .fallback_format(config.fallback_format);
     if let Some(format) = config.format {
         builder.format(format);
     }
@@ -348,10 +359,13 @@ pub unsafe extern "C" fn mdb_env_set_maxdbs(env: *mut MDB_env, dbs: MDB_dbi) -> 
 /// data. For an open environment its own limit
 /// ([`rlmdb::Environment::max_key_size`]): 511 for LMDB 0.9, for 1.0 a
 /// value that follows from the page size (1978 on 4 KiB pages). Before
-/// the open 511, unless LMDB 1.0 was requested with
-/// `rlmdb_env_set_format`: then the 1.0 limit for the page size a new
-/// environment would get (`rlmdb_env_set_pagesize`, else the OS page
-/// size), which an existing file with another page size changes at the
+/// the open, the limit of a new environment as it would be created now:
+/// 511 if it would be LMDB 0.9; if it would be 1.0 (requested with
+/// `rlmdb_env_set_format`, else the process default, the
+/// `RLMDB_DEFAULT_FORMAT` variable or the library's format,
+/// [`rlmdb::default_format_or`]), the 1.0 limit for the page size it would
+/// get (`rlmdb_env_set_pagesize`, else the OS page size). An existing file
+/// of the other format or with another page size changes that at the
 /// open. (C 1.0 returns 0 before the open: it only computes the limit in
 /// `mdb_env_open`.) 511 for a NULL handle, as C 0.9.
 #[no_mangle]
@@ -362,11 +376,14 @@ pub unsafe extern "C" fn mdb_env_get_maxkeysize(env: *mut MDB_env) -> c_int {
             Some(open) => open.max_key_size(),
             None => {
                 let config = *e.config();
-                match config.format {
-                    Some(f @ rlmdb::Format::V10) => f
+                let format = config
+                    .format
+                    .unwrap_or_else(|| rlmdb::default_format_or(config.fallback_format));
+                match format {
+                    rlmdb::Format::V10 => format
                         .layout()
-                        .max_key_size(crate::format::new_page_size(f, config.page_size)),
-                    _ => rlmdb::consts::MDB_MAXKEYSIZE,
+                        .max_key_size(crate::format::new_page_size(format, config.page_size)),
+                    rlmdb::Format::V09 => rlmdb::consts::MDB_MAXKEYSIZE,
                 }
             }
         },
