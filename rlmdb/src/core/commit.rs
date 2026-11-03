@@ -19,10 +19,12 @@
 //!    exist on disk. If the write or the sync fails, the old txnid is
 //!    written back and the environment is unusable (`MDB_FATAL_ERROR`);
 //! 6. publish the txnid in the lock file, so new readers pick it up
-//!    (without one, in the state the file's `NO_LOCK` handles share).
+//!    (without one, in the state the file's `NO_LOCK` handles share);
+//! 7. with `MDB_PREVSNAPSHOT`, share the exclusive lock and clear the flag
+//!    (`Environment::end_prev_snapshot`).
 //!
 //! Steps 1 to 4 are the prepare phase (`RwTxn::prepare0`, what
-//! `mdb_txn_prepare` does), 5 and 6 the meta phase (`RwTxn::write_meta`,
+//! `mdb_txn_prepare` does), 5 to 7 the meta phase (`RwTxn::write_meta`,
 //! what `mdb_txn_commit` of a prepared transaction does); a plain commit
 //! runs both. Between them the transaction keeps the writer lock, and the
 //! file holds what a commit that stopped before its meta page write
@@ -276,7 +278,9 @@ impl<'env> RwTxn<'env> {
         if let Some(local) = local {
             local.set_txnid(txnid);
         }
-        Ok(())
+        // C reaches this after a plain commit's meta page write and after a
+        // prepared transaction's (`prepared:` in `_mdb_txn_commit`).
+        env.end_prev_snapshot(txnid)
     }
 
     /// `mdb_txn_prepare` (LMDB 1.0's two-phase commit): write everything

@@ -26,6 +26,17 @@
 //! If the snapshot's pages extend past our map (another process grew the
 //! database beyond our `map_size`), begin fails with `MDB_MAP_RESIZED`.
 //!
+//! With `MDB_PREVSNAPSHOT` the snapshot is the previous one, the older of
+//! the two meta pages. Where the environment holds the lock file
+//! exclusively (it opened it with the flag, as a writer must and a
+//! read-only handle that is alone does), it published that snapshot's
+//! txnid in `mti_txnid` at the open, so the steps above find it. A
+//! read-only handle that shares the environment with other processes does
+//! not touch `mti_txnid`, which they use (`KNOWN_C_BUGS.md` row 68): it
+//! copies the older meta page holding the writer lock, since the next
+//! commit rewrites that page, and pins its txnid
+//! (`RoTxn::take_previous`).
+//!
 //! Without a lock file there is no `mti_txnid` and C does not track readers
 //! (`mdb_txn_renew0` just takes the newest meta page, and may copy a page a
 //! writer of the process is rewriting). Here the transaction takes an entry
@@ -44,7 +55,7 @@ use crate::consts::*;
 use crate::core::cursor::{self, Cursor, RoCursor};
 use crate::core::dbi::{init_txn_dbs, Dbi, TxnDb, DB_USRVALID, DB_VALID};
 use crate::core::dirty::{DirtyPages, Layer, PageSlot, SpillSet};
-use crate::core::env::Environment;
+use crate::core::env::{pick_index, Environment, Pick, WriterMutex};
 use crate::core::reader::{LocalSlot, LockRegion, ReaderTable};
 use crate::core::registry::LocalShared;
 use crate::core::Stat;
@@ -549,6 +560,45 @@ fn newer_commit_on_file(env: &Environment, txnid: u64, meta: &Meta) -> bool {
     meta.txnid != txnid || env.meta_ids(other).is_some_and(|(_, t)| t > txnid)
 }
 
+/// The snapshot of a read transaction of a read-only environment with
+/// `MDB_PREVSNAPSHOT` that shares the environment with other processes
+/// ([`Environment::reads_prev_shared`]), in lock-file slot `index`: the
+/// older meta page, as `mdb_env_pick_meta` picks it with the flag.
+///
+/// The next commit rewrites that page, without the protection a reader
+/// slot gives the page of `mti_txnid`, so it is copied holding the writer
+/// lock (`lock_writer`, unless the caller holds it: `writer_held`), as a
+/// plain copy snapshots the meta pages (`mdb_env_copyfd0`). Holding it,
+/// nothing changes either meta page or `mti_txnid`. The slot pins the
+/// snapshot's txnid, or `mti_txnid` if that is older (after damage, or a
+/// lock file reset by an opener that failed): every page of the older
+/// snapshot is in the newer one or on the free list under a later txnid,
+/// which no writer reuses while a reader pins this one.
+///
+/// C instead publishes the older snapshot's txnid in `mti_txnid` at the
+/// open, and so moves every other process back a snapshot
+/// (`KNOWN_C_BUGS.md` row 68).
+fn take_previous(
+    env: &Environment,
+    lock: &LockRegion,
+    index: usize,
+    writer_held: bool,
+    mut copy_meta: impl FnMut(&Environment, usize) -> Result<Meta>,
+) -> Result<(u64, Meta)> {
+    let _writer = if writer_held {
+        None
+    } else {
+        lock.lock_writer(|| env.published_meta().map(|m| m.txnid))?;
+        Some(WriterMutex(lock))
+    };
+    let metas = [copy_meta(env, 0)?, copy_meta(env, 1)?];
+    let meta = metas[pick_index(&metas, Pick::Previous)];
+    lock.set_slot_txnid(index, meta.txnid.min(lock.txnid()));
+    // Seen by every writer that locks the writer mutex after we unlock it.
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    Ok((meta.txnid, meta))
+}
+
 /// How many copies of a meta page that fail validation one
 /// [`RoTxn::take_snapshot`] makes before it gives up (see [`TornCopies`]).
 const MAX_TORN_COPIES: u32 = 16;
@@ -634,20 +684,25 @@ impl<'env> RoTxn<'env> {
             core: TxnCore::new_read_only(env, Vec::new()),
             slot,
         };
-        txn.take_snapshot(copy_meta)?;
+        txn.take_snapshot(copy_meta, false)?;
         Ok(txn)
     }
 
     /// The read-only branch of `mdb_txn_renew0`. `copy_meta` copies and
     /// validates a meta page (`Environment::read_meta`; tests pass one that
-    /// fails as a torn copy would).
+    /// fails as a torn copy would). `writer_held`: the caller holds the
+    /// lock file's writer mutex (a plain copy).
     fn take_snapshot(
         &mut self,
         mut copy_meta: impl FnMut(&Environment, usize) -> Result<Meta>,
+        writer_held: bool,
     ) -> Result<()> {
         let env = self.core.env;
         let mut torn = TornCopies::default();
         let (txnid, meta) = match &self.slot {
+            ReaderSlot::Shared { lock, index } if env.reads_prev_shared() => {
+                take_previous(env, lock, *index, writer_held, copy_meta)?
+            }
             ReaderSlot::Shared { lock, index } => loop {
                 // The snapshot `mti_txnid` names, also while it is 0, where
                 // C's read-only handles take the newest meta page instead:
@@ -818,7 +873,17 @@ impl<'env> InactiveTxn<'env> {
     /// `mdb_txn_renew`: start reading the latest snapshot again, reusing the
     /// reader slot. `MdbError::BadRslot` if the slot was taken from us (e.g.
     /// cleared by a reader check in another process).
-    pub fn renew(mut self) -> Result<RoTxn<'env>> {
+    pub fn renew(self) -> Result<RoTxn<'env>> {
+        self.renew_with(false)
+    }
+
+    /// [`InactiveTxn::renew`] by a caller that holds the lock file's writer
+    /// mutex (a plain copy, which snapshots the meta pages under it).
+    pub(crate) fn renew_holding_writer(self) -> Result<RoTxn<'env>> {
+        self.renew_with(true)
+    }
+
+    fn renew_with(mut self, writer_held: bool) -> Result<RoTxn<'env>> {
         let slot = std::mem::replace(&mut self.slot, ReaderSlot::None);
         let dbs = std::mem::take(&mut self.dbs);
         let mut txn = RoTxn {
@@ -832,7 +897,7 @@ impl<'env> InactiveTxn<'env> {
                 return Err(MdbError::BadRslot.into());
             }
         }
-        txn.take_snapshot(Environment::read_meta)?;
+        txn.take_snapshot(Environment::read_meta, writer_held)?;
         Ok(txn)
     }
 

@@ -243,12 +243,6 @@ fn info_and_lock_files() {
         assert!(env.reader_list().unwrap().is_empty());
     }
     assert!(!dir2.path().join("lock.mdb").exists());
-    // PREV_SNAPSHOT is an LMDB 1.0 flag; 0.9 refuses it like C.
-    let e = Environment::builder()
-        .flags(EnvironmentFlags::PREV_SNAPSHOT)
-        .open(dir.path())
-        .unwrap_err();
-    assert_eq!(e.to_err_code(), libc::EINVAL);
 }
 
 #[test]

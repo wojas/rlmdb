@@ -22,7 +22,9 @@
 //!    file.
 //! 4. Unless read-only or `NO_LOCK`, set up the lock file *first*
 //!    (`LockRegion::open`, `mdb_env_setup_locks`; it claims the lock file in
-//!    the registry before it locks it). Read-only environments open the
+//!    the registry before it locks it); with `PREV_SNAPSHOT` the open fails
+//!    with `MDB_ENV_BUSY` unless that got the exclusive lock (another
+//!    process has the environment open). Read-only environments open the
 //!    data file first (it must exist) and the lock file second. Without a
 //!    lock file (`NO_LOCK`, or read-only on a read-only file system) the
 //!    environment tracks its read transactions in an in-memory table
@@ -31,7 +33,8 @@
 //! 5. Open the data file (`O_RDWR|O_CREAT`; read-only, the descriptor of
 //!    step 2) and claim it, unless it is the file claimed in step 2.
 //! 6. `mdb_env_open2`: read both meta pages with `pread`
-//!    (`mdb_env_read_header`); an empty file is a new environment whose two
+//!    (`mdb_env_read_header`) and take the newer one, with `PREV_SNAPSHOT`
+//!    the older one; an empty file is a new environment whose two
 //!    meta pages are written immediately (`mdb_env_init_meta`), with the OS
 //!    page size (1.0: or the one set with `mdb_env_set_pagesize`) capped at
 //!    the format's `MAX_PAGESIZE` (32 KiB for LMDB 0.9, 64 KiB for 1.0).
@@ -41,7 +44,14 @@
 //!    Then map the file read-only.
 //! 7. Open the `O_DSYNC` descriptor used for meta-page writes (`me_mfd`).
 //! 8. If we initialised the lock table, publish the current txnid and
-//!    downgrade to a shared lock (`mdb_env_share_locks`).
+//!    downgrade to a shared lock (`mdb_env_share_locks`). With
+//!    `PREV_SNAPSHOT`, publish the previous snapshot's txnid instead and
+//!    keep the exclusive lock: a writer shares it after its first commit
+//!    (`Environment::end_prev_snapshot`), a read-only environment keeps it
+//!    until it is closed. A read-only environment that got a shared lock
+//!    leaves the lock file alone and takes the previous snapshot in each
+//!    read transaction (`RoTxn::take_snapshot`), where C publishes it in
+//!    the lock file every other process uses (`KNOWN_C_BUGS.md` row 68).
 //!
 //! The data-file format of the environment ([`Format`]) decides the page
 //! layout; the environment keeps its [`Layout`] and every transaction reads
@@ -264,11 +274,16 @@ pub struct Environment {
     max_readers: u32,
     /// The page layout of the environment's data-file format.
     layout: &'static Layout,
+    /// Opened read-only with `PREV_SNAPSHOT` next to other processes (a
+    /// shared lock on the lock file): read transactions take the older
+    /// meta page under the writer lock (`RoTxn::take_snapshot`), and the
+    /// lock file's `mti_txnid` is never touched.
+    prev_shared: bool,
     node_max: usize,
     /// `me_maxkey` / `ENV_MAXKEY`: checked on every put.
     max_key: usize,
     path: PathBuf,
-    _registration: Registration,
+    registration: Registration,
 }
 
 /// Per-environment state of the (single) write transaction.
@@ -290,6 +305,16 @@ pub(crate) struct WriterState {
     /// (see `RwTxn::dup_prepare`). State, not a container: it is kept here
     /// whatever happens to `spare`.
     pub(crate) pbuf_pad: u16,
+}
+
+/// Which meta page [`Environment::meta_by`] picks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pick {
+    /// The newer one (the larger txnid; meta page 0 on a tie).
+    Newest,
+    /// The older one, as `MDB_PREVSNAPSHOT` does (the smaller txnid; meta
+    /// page 1 on a tie, as `mdb_env_pick_meta`).
+    Previous,
 }
 
 impl std::fmt::Debug for Environment {
@@ -320,6 +345,7 @@ impl Environment {
             return Err(Error::einval());
         }
         let read_only = flags & MDB_RDONLY != 0;
+        let prev = flags & MDB_PREVSNAPSHOT != 0;
         if read_only {
             // Silently ignore WRITEMAP when we're only getting read access.
             flags &= !MDB_WRITEMAP;
@@ -334,8 +360,10 @@ impl Environment {
 
         // Declared first so that it is dropped last on every error path.
         // With a lock file this refuses a second open before the lock file
-        // is touched (closing it would drop the first handle's locks).
-        let mut registration = Registration::claim_path(path, no_sub_dir, no_lock)?;
+        // is touched (closing it would drop the first handle's locks). A
+        // NO_LOCK handle with PREV_SNAPSHOT claims the files for itself
+        // until its first commit, as a handle with a lock file does.
+        let mut registration = Registration::claim_path(path, no_sub_dir, no_lock && !prev)?;
 
         // The same for the data file under another name: claim it before
         // the lock file is touched. A lock file this process holds already
@@ -379,6 +407,10 @@ impl Environment {
                 lock_layout,
                 &mut registration,
             )?;
+            // A writer on the previous snapshot must be the only user.
+            if prev && lock.as_ref().is_some_and(|l| !l.is_exclusive()) {
+                return Err(MdbError::EnvBusy.into());
+            }
         }
         let data_file = match existing {
             Some(file) if read_only => file,
@@ -413,7 +445,8 @@ impl Environment {
         }
 
         // mdb_env_open2
-        let mut header = read_header(&data_file, layout);
+        let pick = if prev { Pick::Previous } else { Pick::Newest };
+        let mut header = read_header(&data_file, layout, pick);
         // Another NO_LOCK handle of the process may be setting up the same
         // new file (its size grows while the meta pages are written). If
         // there is no complete header yet, wait for that under the file's
@@ -424,7 +457,7 @@ impl Environment {
         let setup = match local.as_deref() {
             Some(local) if !matches!(header, Ok(Some(_))) => {
                 let guard = local.lock_writer();
-                header = read_header(&data_file, layout);
+                header = read_header(&data_file, layout, pick);
                 Some(guard)
             }
             _ => None,
@@ -475,7 +508,8 @@ impl Environment {
 
         if !read_only {
             extend_for_map(&data_file, map_size, layout.format, lock.as_ref(), || {
-                let newest = read_header(&data_file, layout)?.ok_or(MdbError::Invalid)?;
+                let newest =
+                    read_header(&data_file, layout, Pick::Newest)?.ok_or(MdbError::Invalid)?;
                 Ok(newest.0.txnid)
             })?;
         }
@@ -495,6 +529,7 @@ impl Environment {
         };
 
         let max_readers = lock.as_ref().map_or(opts.max_readers, |l| l.max_readers());
+        let prev_shared = prev && lock.as_ref().is_some_and(|l| !l.is_exclusive());
         let readers = match (lock, local) {
             (Some(lock), _) => ReaderTable::Shared(lock),
             (None, local) => {
@@ -527,14 +562,21 @@ impl Environment {
             dirty_limit: AtomicUsize::new(MDB_IDL_UM_MAX),
             max_readers,
             layout,
+            prev_shared,
             node_max: layout.node_max(page_size),
             max_key: layout.max_key_size(page_size),
             path: path.to_path_buf(),
-            _registration: registration,
+            registration,
         };
 
         if let Some(lock) = env.lock_region() {
-            if lock.is_exclusive() {
+            if prev && lock.is_exclusive() {
+                // The previous snapshot is the current one for everyone
+                // until the first commit, and everyone is us: we keep the
+                // exclusive lock until then (a read-only environment until
+                // it is closed).
+                lock.set_txnid(meta.txnid);
+            } else if lock.is_exclusive() {
                 lock.downgrade(env.pick_meta()?.txnid)?;
             }
         }
@@ -574,10 +616,84 @@ impl Environment {
         Some((get_u64(&buf, 0)?, get_u64(&buf, 8)?))
     }
 
-    /// `mdb_env_pick_meta`: the newer of the two meta pages.
+    /// `mdb_env_pick_meta`: the newer of the two meta pages, or while the
+    /// environment has `PREV_SNAPSHOT` the older one.
     pub(crate) fn pick_meta(&self) -> Result<Meta> {
+        self.meta_by(if self.has_prev_snapshot() {
+            Pick::Previous
+        } else {
+            Pick::Newest
+        })
+    }
+
+    /// The newer of the two meta pages, whatever the environment's flags.
+    pub(crate) fn newest_meta(&self) -> Result<Meta> {
+        self.meta_by(Pick::Newest)
+    }
+
+    /// The meta page whose txnid belongs in the lock file's `mti_txnid`,
+    /// which the repair of a writer lock whose owner died publishes
+    /// (`mdb_mutex_failed` with `mdb_env_pick_meta`): the newer one, or
+    /// while this handle holds the environment for itself with
+    /// `PREV_SNAPSHOT` the older one, which it published at the open. A
+    /// read-only handle with `PREV_SNAPSHOT` that shares the environment
+    /// publishes the newer one, where C publishes the older one
+    /// (`KNOWN_C_BUGS.md` row 68).
+    pub(crate) fn published_meta(&self) -> Result<Meta> {
+        if self.prev_shared {
+            self.newest_meta()
+        } else {
+            self.pick_meta()
+        }
+    }
+
+    /// The meta page `pick` picks of the two.
+    fn meta_by(&self, pick: Pick) -> Result<Meta> {
         let metas = [self.read_meta(0)?, self.read_meta(1)?];
-        Ok(metas[pick_newest(&metas)])
+        Ok(metas[pick_index(&metas, pick)])
+    }
+
+    /// `true` while the environment has `PREV_SNAPSHOT`: until its first
+    /// commit of a write transaction, read-only until it is closed.
+    pub(crate) fn has_prev_snapshot(&self) -> bool {
+        self.raw_flags() & MDB_PREVSNAPSHOT != 0
+    }
+
+    /// Opened read-only with `PREV_SNAPSHOT` while other processes have the
+    /// environment open (see the field).
+    pub(crate) fn reads_prev_shared(&self) -> bool {
+        self.prev_shared
+    }
+
+    /// The end of `PREV_SNAPSHOT` after the first commit of a write
+    /// transaction (txnid `txnid`, its meta page written and published),
+    /// the end of `_mdb_txn_commit`: share the lock file's lock
+    /// (`mdb_env_share_locks`), letting other processes in, and clear the
+    /// flag. Without a lock file (`NO_LOCK`), share the data file with the
+    /// process's other handles instead ([`Registration::share`]). Nothing
+    /// without the flag.
+    ///
+    /// C publishes the older meta page's txnid in `mti_txnid` here, as
+    /// `mdb_env_share_locks` picks the meta page before the flag is
+    /// cleared: the commit is then invisible to readers, and the next
+    /// write transaction, which begins from `mti_txnid`, overwrites it
+    /// (`KNOWN_C_BUGS.md` row 67). This publishes the commit's txnid, as
+    /// `mdb_env_write_meta` did a moment before.
+    pub(crate) fn end_prev_snapshot(&self, txnid: u64) -> Result<()> {
+        if !self.has_prev_snapshot() {
+            return Ok(());
+        }
+        match &self.readers {
+            ReaderTable::Shared(lock) => {
+                if lock.is_exclusive() {
+                    // C fails the commit if this fails, and keeps the flag.
+                    lock.downgrade(txnid)?;
+                }
+            }
+            ReaderTable::Local(local) => self.registration.share(local),
+        }
+        self.flags.fetch_and(!MDB_PREVSNAPSHOT, Ordering::SeqCst);
+        Ok(())
     }
 
     // --- internals used by transactions --------------------------------------
@@ -786,7 +902,8 @@ impl Environment {
     }
 
     /// `mdb_txn_begin(MDB_RDONLY)`: start a read transaction on the latest
-    /// snapshot.
+    /// snapshot (with [`EnvironmentFlags::PREV_SNAPSHOT`], while the
+    /// environment has it, the previous one).
     pub fn begin_ro_txn(&self) -> Result<RoTxn<'_>> {
         RoTxn::begin(self)
     }
@@ -795,7 +912,9 @@ impl Environment {
     /// for the writer lock (held by another thread or process). `EACCES`
     /// for a read-only environment. The transaction is bound to the calling
     /// thread (`!Send`), because the Linux writer mutex is owned by the
-    /// thread that locked it.
+    /// thread that locked it. With [`EnvironmentFlags::PREV_SNAPSHOT`] the
+    /// first one begins from the previous snapshot; its commit discards the
+    /// latest one and ends the flag.
     pub fn begin_rw_txn(&self) -> Result<RwTxn<'_>> {
         RwTxn::begin(self)
     }
@@ -824,14 +943,18 @@ impl Environment {
         Ok(())
     }
 
-    /// `mdb_env_stat`: statistics of the main DB in the latest snapshot.
+    /// `mdb_env_stat`: statistics of the main DB in the latest snapshot
+    /// (the previous one while the environment has
+    /// [`EnvironmentFlags::PREV_SNAPSHOT`]).
     pub fn stat(&self) -> Result<Stat> {
         let meta = self.pick_meta()?;
         Ok(Stat::from_db(self.page_size, &meta.dbs[MAIN_DBI as usize]))
     }
 
     /// `mdb_env_info`. Without a lock file `num_readers` is 0, as in C
-    /// (see [`Environment::in_memory_readers`]).
+    /// (see [`Environment::in_memory_readers`]). The last page and txnid
+    /// are those of the latest snapshot, or as in C of the previous one
+    /// while the environment has [`EnvironmentFlags::PREV_SNAPSHOT`].
     pub fn info(&self) -> Result<Info> {
         let meta = self.pick_meta()?;
         Ok(Info {
@@ -863,7 +986,8 @@ impl Environment {
         Ok(pages)
     }
 
-    /// `mdb_env_get_flags`.
+    /// `mdb_env_get_flags`. [`EnvironmentFlags::PREV_SNAPSHOT`] is among
+    /// them until the first commit of a write transaction.
     pub fn flags(&self) -> EnvironmentFlags {
         EnvironmentFlags::from_bits_retain(
             self.flags.load(Ordering::Relaxed) & (CHANGEABLE | CHANGELESS),
@@ -920,8 +1044,9 @@ impl Environment {
     }
 
     /// `mdb_env_set_mapsize` on an open environment: map the data file
-    /// with `size` bytes (`0` = the size recorded in the newest meta page),
-    /// raised to cover all pages in use. The value is persisted by the next
+    /// with `size` bytes (`0` = the size recorded in the newest meta page,
+    /// with [`EnvironmentFlags::PREV_SNAPSHOT`] the previous one's, as in
+    /// C), raised to cover all pages in use. The value is persisted by the next
     /// commit (`mdb_env_write_meta` keeps the larger of the old and the new
     /// size).
     ///
@@ -955,7 +1080,7 @@ impl Environment {
                 size,
                 self.layout.format,
                 self.lock_region(),
-                || self.pick_meta().map(|m| m.txnid),
+                || self.published_meta().map(|m| m.txnid),
             )?;
         }
         let random = self.raw_flags() & MDB_NORDAHEAD != 0;
@@ -1203,9 +1328,11 @@ fn check_v10_features(file: &File, page_size: usize, meta0_flags: u16) -> Result
 }
 
 /// `mdb_env_read_header`: read both meta pages of the format `layout`
-/// describes with `pread` and return the newer valid one and the one of page
-/// 0, or `None` for an empty file (a new environment).
-fn read_header(file: &File, layout: &Layout) -> Result<Option<(Meta, Meta)>> {
+/// describes with `pread` and return the one `pick` picks (the newer one,
+/// or with `MDB_PREVSNAPSHOT` the older one; page 0 on a tie either way, as
+/// C's `prev` argument) and the one of page 0, or `None` for an empty file
+/// (a new environment).
+fn read_header(file: &File, layout: &Layout, pick: Pick) -> Result<Option<(Meta, Meta)>> {
     // sizeof(MDB_metabuf): the page header and the meta. The buffer is
     // sized for the largest header (1.0's).
     let size = layout.meta_offset() + META_SIZE;
@@ -1224,14 +1351,24 @@ fn read_header(file: &File, layout: &Layout) -> Result<Option<(Meta, Meta)>> {
         }
         let meta = Meta::read_page_with_layout(buf, layout).map_err(MdbError::from)?;
         first.get_or_insert(meta);
-        match best {
-            Some(b) if meta.txnid <= b.txnid => {}
+        match (best, pick) {
+            (Some(b), Pick::Newest) if meta.txnid <= b.txnid => {}
+            (Some(b), Pick::Previous) if meta.txnid >= b.txnid => {}
             _ => best = Some(meta),
         }
         // As C: the second meta page is at the first one's page size.
         off += u64::from(best.map_or(0, |b| b.page_size()));
     }
     Ok(best.zip(first))
+}
+
+/// The index (0 or 1) of the meta page `pick` picks of `metas`, as
+/// `mdb_env_pick_meta`: `metas[(metas[0].txnid < metas[1].txnid) ^ prev]`.
+pub(crate) fn pick_index(metas: &[Meta; 2], pick: Pick) -> usize {
+    match pick {
+        Pick::Newest => pick_newest(metas),
+        Pick::Previous => pick_newest(metas) ^ 1,
+    }
 }
 
 /// Makes the data file as long as a writable map of `len` bytes needs
@@ -1280,7 +1417,7 @@ fn extend_under<G>(file: &File, len: u64, lock: impl FnOnce() -> Result<G>) -> R
 }
 
 /// The lock file's writer mutex, held until dropped.
-struct WriterMutex<'a>(&'a LockRegion);
+pub(crate) struct WriterMutex<'a>(pub(crate) &'a LockRegion);
 
 impl Drop for WriterMutex<'_> {
     fn drop(&mut self) {
