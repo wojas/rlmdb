@@ -13,9 +13,11 @@
 //! 3. Decide the data-file format ([`sniff_format`] of that descriptor: the
 //!    magic and version of the first meta page; not in C, which handles one
 //!    format only). An existing file keeps its format, a new one gets the
-//!    requested format or the [`default_format`] (the process default of
-//!    [`set_default_format`], the experimental `RLMDB_DEFAULT_FORMAT`
-//!    variable, LMDB 0.9). This happens before the lock file is touched, so
+//!    requested format or the [`default_format_or`] the builder's fallback
+//!    (the process default of [`set_default_format`], the experimental
+//!    `RLMDB_DEFAULT_FORMAT` variable, the fallback: LMDB 0.9 unless
+//!    [`EnvironmentBuilder::fallback_format`] says otherwise). This
+//!    happens before the lock file is touched, so
 //!    opening a file of the other format never re-initialises a peer's lock
 //!    file.
 //! 4. Unless read-only or `NO_LOCK`, set up the lock file *first*
@@ -105,6 +107,7 @@ pub struct EnvironmentBuilder {
     max_dbs: u32,
     flags: EnvironmentFlags,
     format: Option<Format>,
+    fallback_format: Format,
     page_size: Option<usize>,
 }
 
@@ -116,6 +119,7 @@ impl Default for EnvironmentBuilder {
             max_dbs: 0,
             flags: EnvironmentFlags::empty(),
             format: None,
+            fallback_format: Format::V09,
             page_size: None,
         }
     }
@@ -169,11 +173,24 @@ impl EnvironmentBuilder {
     /// keeps its format: opening it fails with `MDB_VERSION_MISMATCH` if
     /// this asks for the other one ([`sniff_format`] tells which it is).
     /// Without a request an existing file is opened in its format and a new
-    /// one is created in the [`default_format`]: the process default
-    /// ([`set_default_format`]), else the experimental `RLMDB_DEFAULT_FORMAT`
-    /// variable ([`DEFAULT_FORMAT_ENV`]), else LMDB 0.9.
+    /// one is created in the process default ([`set_default_format`]),
+    /// else the format the experimental `RLMDB_DEFAULT_FORMAT` variable
+    /// ([`DEFAULT_FORMAT_ENV`]) names, else the
+    /// [`fallback_format`](Self::fallback_format), LMDB 0.9 unless set.
     pub fn format(&mut self, format: Format) -> &mut Self {
         self.format = Some(format);
+        self
+    }
+
+    /// The format of a new environment when nothing asks for one: neither
+    /// [`format`](Self::format), nor the process default, nor the
+    /// experimental variable ([`default_format_or`]). LMDB 0.9 unless set.
+    /// Unlike [`format`](Self::format) it never applies to an existing
+    /// file. The C API's LMDB 1.0 stub library sets it to [`Format::V10`]
+    /// (its `mdb_env_create`), so that a program built for C LMDB 1.0
+    /// creates 1.0 files.
+    pub fn fallback_format(&mut self, format: Format) -> &mut Self {
+        self.fallback_format = format;
         self
     }
 
@@ -341,7 +358,7 @@ impl Environment {
             Some(file) => sniff_file(file)?,
             None => None,
         };
-        let layout = choose_format(found, opts.format)?.layout();
+        let layout = choose_format(found, opts.format, opts.fallback_format)?.layout();
         let new_page_size = match opts.page_size {
             None => None,
             Some(ps) if layout.format == Format::V10 && valid_set_pagesize(ps, layout) => Some(ps),
@@ -1076,12 +1093,17 @@ fn open_existing(data_path: &Path, mode: u32) -> Result<Option<File>> {
 /// The format to open with: the existing file's (`found`), which must be
 /// the one `requested` if any (`MDB_VERSION_MISMATCH` otherwise: there is
 /// no conversion in place), else the requested one, else
-/// [`default_format`]. The defaults never apply to an existing file.
-fn choose_format(found: Option<Format>, requested: Option<Format>) -> Result<Format> {
+/// [`default_format_or`] `fallback`. The defaults never apply to an
+/// existing file.
+fn choose_format(
+    found: Option<Format>,
+    requested: Option<Format>,
+    fallback: Format,
+) -> Result<Format> {
     match (found, requested) {
         (Some(f), Some(r)) if f != r => Err(MdbError::VersionMismatch.into()),
         (Some(f), _) | (None, Some(f)) => Ok(f),
-        (None, None) => Ok(default_format()),
+        (None, None) => Ok(default_format_or(fallback)),
     }
 }
 
@@ -1139,9 +1161,17 @@ pub fn process_default_format() -> Option<Format> {
 /// [`DEFAULT_FORMAT_ENV`] variable if it names a format, else
 /// [`Format::V09`], so that new files stay readable by every C LMDB 0.9.
 pub fn default_format() -> Format {
+    default_format_or(Format::V09)
+}
+
+/// [`default_format`] with `fallback` in place of LMDB 0.9 as the last
+/// resort: the format a new environment opened with
+/// [`EnvironmentBuilder::fallback_format`] `fallback` and no
+/// [`EnvironmentBuilder::format`] gets, as things stand now.
+pub fn default_format_or(fallback: Format) -> Format {
     process_default_format()
         .or_else(env_default_format)
-        .unwrap_or(Format::V09)
+        .unwrap_or(fallback)
 }
 
 /// The format [`DEFAULT_FORMAT_ENV`] names, read now; `None` if it is unset

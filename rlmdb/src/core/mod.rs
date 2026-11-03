@@ -94,8 +94,8 @@ pub use crate::error::{Error, MdbError, Result};
 pub use crate::flags::{DatabaseFlags, EnvironmentFlags, WriteFlags};
 pub use dbi::Dbi;
 pub use env::{
-    default_format, process_default_format, set_default_format, sniff_format, Environment,
-    EnvironmentBuilder, DEFAULT_FORMAT_ENV,
+    default_format, default_format_or, process_default_format, set_default_format, sniff_format,
+    Environment, EnvironmentBuilder, DEFAULT_FORMAT_ENV,
 };
 pub use reader::{format_reader_list, ReaderInfo};
 pub use ro_cursor::{CursorOp, Entry, RoCursor};
