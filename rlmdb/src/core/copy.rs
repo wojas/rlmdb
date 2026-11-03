@@ -202,7 +202,7 @@ impl Environment {
             let mut prev = None;
             while let Some((key, data)) = c.next()? {
                 // Records read twice would be counted twice
-                // (KNOWN_C_BUGS.md row 49).
+                // (KNOWN_C_BUGS.md row 50).
                 prev = Some(next_txnid_key(prev, key)?);
                 freecount =
                     freecount.wrapping_add(Idl::encoded_len(data).ok_or(MdbError::Corrupted)?);
