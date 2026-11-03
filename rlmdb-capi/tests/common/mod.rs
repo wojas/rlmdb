@@ -382,7 +382,7 @@ pub fn dl_libs() -> &'static [&'static str] {
 }
 
 /// The host's target triple, as the `cc` crate expects it.
-fn target_triple() -> String {
+pub fn target_triple() -> String {
     let arch = std::env::consts::ARCH;
     match std::env::consts::OS {
         "macos" => format!("{arch}-apple-darwin"),
