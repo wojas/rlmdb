@@ -4,8 +4,9 @@
 //! The Rust tools run as `rtools <tool>` (`src/bin/rtools.rs`); both sides
 //! run with `argv[0]` set to the tool's name, so messages that name the
 //! program compare byte for byte. The tools' options and usage lines are
-//! those of 0.9 (`rlmdb-tools/tests` compares them with C 0.9's) and 1.0's
-//! `-v`, so only those options are compared here.
+//! those of 0.9 (`rlmdb-tools/tests` compares them with C 0.9's), 1.0's
+//! `-v` and 1.0's `-i` of `mdb_dump` and `mdb_load` (incremental dumps,
+//! compared here byte for byte), so only those options are compared here.
 //!
 //! One difference is not ported (`KNOWN_C_BUGS.md`, section "LMDB 1.0"):
 //! C 1.0's `mdb_env_info` reports the process's own map address when the
@@ -600,4 +601,297 @@ fn dash_v_matches_c10() {
             }
         }
     }
+}
+
+/// What a tool with binary output (`-i`) produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BinRun {
+    code: i32,
+    stdout: Vec<u8>,
+    stderr: String,
+}
+
+fn run_bin(mut cmd: Command, stdin: &[u8]) -> BinRun {
+    cmd.env_remove("RLMDB_DEFAULT_FORMAT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn a tool");
+    let mut input = child.stdin.take().unwrap();
+    let data = stdin.to_vec();
+    let feeder = std::thread::spawn(move || {
+        let _ = input.write_all(&data);
+    });
+    let out = child.wait_with_output().unwrap();
+    let _ = feeder.join();
+    BinRun {
+        code: out.status.code().unwrap_or(-1),
+        stdout: out.stdout,
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+/// C 1.0's `tool`, as `argv[0] = tool`, binary output.
+fn c10_bin_run(tool: &str, args: &[&str], stdin: &[u8]) -> BinRun {
+    let mut cmd = interop::os::command_as(c10_bin(tool), tool);
+    cmd.args(args);
+    run_bin(cmd, stdin)
+}
+
+/// rlmdb's `tool`, binary output.
+fn rust_bin_run(tool: &str, args: &[&str], stdin: &[u8]) -> BinRun {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtools"));
+    cmd.arg(tool).args(args);
+    run_bin(cmd, stdin)
+}
+
+/// The newest txnid of the environment at `env`.
+fn last_txnid(env: &Path) -> u64 {
+    let e = rlmdb::Environment::builder()
+        .flags(EnvironmentFlags::READ_ONLY | EnvironmentFlags::NO_LOCK)
+        .open(env)
+        .expect("open read-only");
+    e.info().unwrap().last_txnid as u64
+}
+
+/// The page size of a new 1.0 environment that asks for none (the OS
+/// page size, as in C 1.0).
+fn default_page_size10() -> usize {
+    let dir = tmp();
+    let e = rlmdb::Environment::builder()
+        .format(Format::V10)
+        .open(dir.path())
+        .unwrap();
+    e.page_size()
+}
+
+/// A copy of `src`'s data file in the new environment directory `name`.
+fn copy_env(src: &Path, dir: &Path, name: &str) -> PathBuf {
+    let dst = new_env(dir, name);
+    std::fs::copy(src.join("data.mdb"), dst.join("data.mdb")).unwrap();
+    dst
+}
+
+/// `mdb_dump -i` against `mdb_dump10 -i`: the same incremental dumps on
+/// standard output and in `-f` files, and the same messages and exit
+/// codes for the txnids `sscanf("%zu")` reads or refuses, for a missing
+/// environment and for `-f` files that exist or cannot be created.
+#[test]
+fn mdb_dump_i_matches_mdb_dump10() {
+    let dir = tmp();
+    let env = c10_env(dir.path(), 4096);
+    let e = s(&env);
+    let last = last_txnid(&env);
+    let (mid, last_s) = ((last / 2).to_string(), last.to_string());
+    let data = env.join("data.mdb");
+    let missing = dir.path().join("missing");
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["-i", "1", e],
+        vec!["-i", &mid, e],
+        vec!["-i", &last_s, e],
+        vec!["-i", "5x", e],
+        vec!["-i", "+2", e],
+        vec!["-i", "-1", e],
+        vec!["-i", "99999999999999999999", e],
+        vec!["-a", "-p", "-i", "2", e],
+        vec!["-n", "-i", "1", s(&data)],
+        vec!["-i", "0", e],
+        vec!["-i", "abc", e],
+        vec!["-i", "", e],
+        vec!["-i", "0x10", e],
+        vec!["-i", "99999999999999999999", "-i", "0", e],
+        vec!["-i", "1", s(&missing)],
+    ];
+    for args in &cases {
+        let c = c10_bin_run("mdb_dump", args, b"");
+        let r = rust_bin_run("mdb_dump", args, b"");
+        assert_eq!(r, c, "mdb_dump {args:?}");
+    }
+    let since_mid = c10_bin_run("mdb_dump", &["-i", &mid, e], b"");
+    assert!(since_mid.code == 0 && !since_mid.stdout.is_empty());
+
+    // -f before or after -i: a new file with the dump, which must not
+    // exist yet; the same in a directory that does not exist.
+    for (i, f_first) in [true, false].into_iter().enumerate() {
+        let (out_c, out_r) = (
+            dir.path().join(format!("c{i}.incr")),
+            dir.path().join(format!("r{i}.incr")),
+        );
+        let args = |out: &Path| -> Vec<String> {
+            let mut a = vec!["-i".to_string(), mid.clone()];
+            let f = ["-f".to_string(), s(out).to_string()];
+            if f_first {
+                a.splice(0..0, f);
+            } else {
+                a.extend(f);
+            }
+            a.push(e.to_string());
+            a
+        };
+        for _ in 0..2 {
+            let (ac, ar) = (args(&out_c), args(&out_r));
+            let ac: Vec<&str> = ac.iter().map(String::as_str).collect();
+            let ar: Vec<&str> = ar.iter().map(String::as_str).collect();
+            let c = c10_bin_run("mdb_dump", &ac, b"");
+            let r = rust_bin_run("mdb_dump", &ar, b"");
+            assert_eq!(r, c, "mdb_dump {ar:?}");
+        }
+        assert_eq!(
+            std::fs::read(&out_r).unwrap(),
+            std::fs::read(&out_c).unwrap()
+        );
+        assert_eq!(std::fs::read(&out_c).unwrap(), since_mid.stdout);
+    }
+    let (in_missing_c, in_missing_r) = (missing.join("c.incr"), missing.join("r.incr"));
+    let c = c10_bin_run("mdb_dump", &["-i", "1", "-f", s(&in_missing_c), e], b"");
+    let r = rust_bin_run("mdb_dump", &["-i", "1", "-f", s(&in_missing_r), e], b"");
+    assert_eq!(r, c);
+    assert_eq!(c.code, 1, "{c:?}");
+}
+
+/// `mdb_load -i` against `mdb_load10 -i`: the dump of a C 1.0 environment
+/// since a copy of it, from standard input and with `-f`, makes copies of
+/// that copy the same file with both; a new environment (1.0 in both, the
+/// OS page size) gets the same pages; a missing directory and a missing
+/// `-f` file give the same messages.
+#[test]
+fn mdb_load_i_matches_mdb_load10() {
+    let dir = tmp();
+    let src = c10_env(dir.path(), default_page_size10());
+    let base = new_env(dir.path(), "base");
+    let c = c10("mdb_copy", &[s(&src), s(&base)], b"");
+    assert_eq!(c.code, 0, "{c:?}");
+    let t0 = last_txnid(&src);
+    let c = c10(
+        "mdb_load",
+        &["-T", "-s", "dup", s(&src)],
+        b"d999\nnew\nd998\nnewer\n",
+    );
+    assert_eq!(c.code, 0, "{c:?}");
+    let c = c10("mdb_drop", &["-s", "fix", s(&src)], b"");
+    assert_eq!(c.code, 0, "{c:?}");
+    let dump = c10_bin_run("mdb_dump", &["-i", &t0.to_string(), s(&src)], b"");
+    assert_eq!(dump.code, 0, "{dump:?}");
+    let dump_file = dir.path().join("dump.incr");
+    std::fs::write(&dump_file, &dump.stdout).unwrap();
+
+    for (i, with_f) in [false, true].into_iter().enumerate() {
+        let (tc, tr) = (
+            copy_env(&base, dir.path(), &format!("c{i}")),
+            copy_env(&base, dir.path(), &format!("r{i}")),
+        );
+        let (input, f): (&[u8], Vec<&str>) = if with_f {
+            (b"", vec!["-f", s(&dump_file)])
+        } else {
+            (&dump.stdout, vec![])
+        };
+        let (ac, ar) = (
+            [&f[..], &["-i", s(&tc)]].concat(),
+            [&f[..], &["-i", s(&tr)]].concat(),
+        );
+        let c = c10_bin_run("mdb_load", &ac, input);
+        let r = rust_bin_run("mdb_load", &ar, input);
+        assert_eq!(r, c, "-f: {with_f}");
+        assert_eq!(c.code, 0, "{c:?}");
+        assert_eq!(
+            std::fs::read(tr.join("data.mdb")).unwrap(),
+            std::fs::read(tc.join("data.mdb")).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(tc.join("data.mdb")).unwrap(),
+            std::fs::read(src.join("data.mdb")).unwrap()
+        );
+        if let Err(e) = audit10(&tr) {
+            panic!("-f: {with_f}: {e}");
+        }
+    }
+
+    // A new environment.
+    let full = c10_bin_run("mdb_dump", &["-i", "1", s(&src)], b"");
+    let (nc, nr) = (new_env(dir.path(), "new-c"), new_env(dir.path(), "new-r"));
+    let c = c10_bin_run("mdb_load", &["-i", s(&nc)], &full.stdout);
+    let r = rust_bin_run("mdb_load", &["-i", s(&nr)], &full.stdout);
+    assert_eq!(r, c);
+    assert_eq!(format_of(&nr), Some(Format::V10));
+    assert_eq!(
+        std::fs::read(nr.join("data.mdb")).unwrap(),
+        std::fs::read(nc.join("data.mdb")).unwrap()
+    );
+
+    // Errors.
+    let missing = dir.path().join("missing");
+    let in_missing = missing.join("env");
+    for args in [
+        vec!["-i", s(&in_missing)],
+        vec!["-f", s(&missing), "-i", s(&base)],
+    ] {
+        let c = c10_bin_run("mdb_load", &args, &dump.stdout);
+        let r = rust_bin_run("mdb_load", &args, &dump.stdout);
+        assert_eq!(r, c, "mdb_load {args:?}");
+        assert_eq!(c.code, 1, "{c:?}");
+    }
+}
+
+/// Where rlmdb's tools differ from C 1.0's on purpose (rlmdb only): a dump
+/// cut inside a header or a page is an error (`KNOWN_C_BUGS.md` row 66;
+/// C 1.0 reports success, or reads for ever); an LMDB 0.9 environment
+/// cannot be dumped or loaded incrementally (C 1.0 does not open it);
+/// `mdb_load -i` of a new environment makes a 1.0 one unless `-F 0.9`.
+#[test]
+fn incremental_tools_beyond_c10() {
+    let dir = tmp();
+    let src = c10_env(dir.path(), 4096);
+    let base = copy_env(&src, dir.path(), "base");
+    let t0 = last_txnid(&src);
+    let c = c10("mdb_drop", &["-s", "fix", s(&src)], b"");
+    assert_eq!(c.code, 0, "{c:?}");
+    let dump = rust_bin_run("mdb_dump", &["-i", &t0.to_string(), s(&src)], b"").stdout;
+    assert!(dump.len() > 4096);
+    let eio = format!(
+        "mdb_env_incr_load failed, error {} {}\n",
+        libc::EIO,
+        rlmdb::strerror(libc::EIO)
+    );
+    for cut in [10, dump.len() - 100] {
+        let t = copy_env(&base, dir.path(), &format!("cut{cut}"));
+        let r = rust_bin_run("mdb_load", &["-i", s(&t)], &dump[..cut]);
+        assert_eq!(
+            (r.code, r.stderr.as_str()),
+            (1, eio.as_str()),
+            "cut at {cut}"
+        );
+    }
+
+    // LMDB 0.9.
+    let v09 = new_env(dir.path(), "v09");
+    let r = rust_bin_run("mdb_load", &["-T", s(&v09)], b"k\nv\n");
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(format_of(&v09), Some(Format::V09));
+    let enotsup = |what: &str| {
+        format!(
+            "{what} failed, error {} {}\n",
+            libc::ENOTSUP,
+            rlmdb::strerror(libc::ENOTSUP)
+        )
+    };
+    let r = rust_bin_run("mdb_dump", &["-i", "1", s(&v09)], b"");
+    assert_eq!((r.code, r.stderr), (1, enotsup("mdb_env_incr_dump")));
+    let r = rust_bin_run("mdb_load", &["-i", s(&v09)], &dump);
+    assert_eq!((r.code, r.stderr), (1, enotsup("mdb_env_incr_load")));
+    let new09 = new_env(dir.path(), "new09");
+    let r = rust_bin_run("mdb_load", &["-F", "0.9", "-i", s(&new09)], &dump);
+    assert_eq!((r.code, r.stderr), (1, enotsup("mdb_env_incr_load")));
+    assert_eq!(format_of(&new09), Some(Format::V09));
+    // Without -F a new environment is 1.0, unless the experimental
+    // variable asks for 0.9.
+    let new10 = new_env(dir.path(), "new10");
+    let r = rust_bin_run("mdb_load", &["-i", s(&new10)], b"");
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(format_of(&new10), Some(Format::V10));
+    let var09 = new_env(dir.path(), "var09");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtools"));
+    cmd.args(["mdb_load", "-i", s(&var09)]);
+    let r = run_cmd(cmd, b"", Some("0.9"));
+    assert_eq!(r.code, 1, "{r:?}");
+    assert_eq!(format_of(&var09), Some(Format::V09));
 }
