@@ -662,6 +662,7 @@ pub(crate) fn write_back(arena: &mut Arena, c: CRef, mc: &Cursor<'_>, mx: Option
 /// `mdb_put` keeps them from put to put, and consecutive operations mostly
 /// pass the same root and branch pages), and the slot found is stored, so
 /// the `mdb_page_touch` that follows needs no search either.
+#[inline(always)]
 fn descend<'t>(
     core: &'t TxnCore<'_>,
     w: &mut WCursor,
