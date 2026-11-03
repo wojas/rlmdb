@@ -141,8 +141,9 @@ tests give `cl` the `tests/compat/msvc/unistd.h` of this repository.
 ## Installing
 
 `scripts/install-libs.sh` builds the three libraries (or, with `--from
-<dir>`, takes those built before) and installs them with the headers and a
-pkg-config file. `PREFIX` (default `/usr/local`), `LIBDIR`
+<dir>`, takes those built before: all three, `cargo build --release -p
+librlmdb -p lmdb09-stub -p lmdb10-stub`; it installs nothing if one is
+missing) and installs them with the headers and a pkg-config file. `PREFIX` (default `/usr/local`), `LIBDIR`
 (`$PREFIX/lib`), `INCLUDEDIR` (`$PREFIX/include`) and `DESTDIR` (a
 staging directory in front of every path written) work as with `make
 install`; `--target <triple>` installs a cross build. The layout:
@@ -727,7 +728,10 @@ environments.
   reports rlmdb's version and line. `src/version.rs` checks that
   `include/lmdb.h` is `../tests/lmdb-c/1.0/lmdb.h` after its comment.
 * `tests/install.rs` (Unix): `scripts/install-libs.sh` into a `DESTDIR`,
-  and the uses "Installing" describes (see there).
+  and the uses "Installing" describes (see there); also under a prefix of
+  more than 400 characters (the installed path must fit the Mach-O
+  header's padding on macOS), and `--from` a directory with only
+  `librlmdb`, which installs nothing.
 * `tests/capi_version.rs`: `tests/c/capi_version.c` checks `rlmdb.h`
   against `librlmdb` (there is no C oracle), built with either `lmdb.h`:
   the structure's `size` and numbers, `mdb_version`'s numbers and string

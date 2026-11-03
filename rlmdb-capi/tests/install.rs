@@ -44,9 +44,9 @@ fn dylib(name: &str) -> String {
     shared_lib_name(name)
 }
 
-/// Runs the install script with `DESTDIR` `stage` on the libraries in
-/// `from` and returns `stage` + [`PREFIX`].
-fn install(stage: &Path, from: &Path) -> PathBuf {
+/// The install script, run with `DESTDIR` `stage` and `PREFIX` `prefix`
+/// on the libraries in `from`.
+fn install_command(stage: &Path, from: &Path, prefix: &str) -> Command {
     let script = crate_dir().join("../scripts/install-libs.sh");
     let mut cmd = Command::new("sh");
     cmd.arg(script)
@@ -55,13 +55,32 @@ fn install(stage: &Path, from: &Path) -> PathBuf {
         .arg("--target")
         .arg(target_triple())
         .env("DESTDIR", stage)
-        .env("PREFIX", PREFIX)
+        .env("PREFIX", prefix)
         .env_remove("LIBDIR")
         .env_remove("INCLUDEDIR")
         .env_remove("RLMDB_LMDB10_SONAME");
-    let out = run_ok(&mut cmd);
+    cmd
+}
+
+/// Runs the install script with `DESTDIR` `stage` on the libraries in
+/// `from` and returns `stage` + `prefix`.
+fn install_under(stage: &Path, from: &Path, prefix: &str) -> PathBuf {
+    let out = run_ok(&mut install_command(stage, from, prefix));
     eprintln!("{}", String::from_utf8_lossy(&out.stdout));
-    stage.join(PREFIX.trim_start_matches('/'))
+    stage.join(prefix.trim_start_matches('/'))
+}
+
+/// [`install_under`] with [`PREFIX`].
+fn install(stage: &Path, from: &Path) -> PathBuf {
+    install_under(stage, from, PREFIX)
+}
+
+/// The directory cargo built the three libraries in.
+fn built_dir() -> PathBuf {
+    artifact_cdylib(Artifact::Rlmdb)
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 /// Compiles `capi_whoami.c` with the `lmdb.h` of the first of `includes`
@@ -155,10 +174,7 @@ fn run(exe: &Path, name: &str, envs: &[(&str, &Path)]) -> (String, Option<rlmdb:
 fn installed_libraries_and_the_stubs_standing_in_for_c() {
     let b = builder();
     let base = b.scratch("install");
-    let from = artifact_cdylib(Artifact::Rlmdb)
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    let from = built_dir();
     let root = install(&base.join("stage"), &from);
     let (lib, inc) = (root.join("lib"), root.join("include/rlmdb"));
     let (v09, v10) = (lib.join("rlmdb/lmdb-0.9"), lib.join("rlmdb/lmdb-1.0"));
@@ -278,4 +294,78 @@ fn installed_libraries_and_the_stubs_standing_in_for_c() {
     let (line, format) = run(&exe10, "install-c10-on-stub", &[(path, &v10)]);
     assert!(line.starts_with("1.0.85 LMDB 1.0.85: (rlmdb "), "{line}");
     assert_eq!(format, Some(rlmdb::Format::V10));
+}
+
+/// A long prefix: the installed path must fit where the linker left the
+/// `@rpath` install name (macOS links with `-headerpad_max_install_names`;
+/// without it `install_name_tool` fails with "larger updated load
+/// commands do not fit"). Elsewhere the prefix is just a long path.
+#[test]
+fn a_long_prefix_fits_the_install_name() {
+    let b = builder();
+    let base = b.scratch("install-long");
+    let prefix = format!(
+        "/opt/{}/rlmdb-test",
+        (0..12)
+            .map(|i| format!("a-directory-name-of-some-length-{i:02}"))
+            .collect::<Vec<_>>()
+            .join("/")
+    );
+    assert!(prefix.len() > 400, "{}", prefix.len());
+    let root = install_under(&base.join("stage"), &built_dir(), &prefix);
+    let lib = root.join("lib");
+    for f in [
+        lib.join(dylib("rlmdb")),
+        lib.join("rlmdb/lmdb-0.9").join(dylib("lmdb")),
+        lib.join("rlmdb/lmdb-1.0").join(dylib("lmdb")),
+        lib.join("pkgconfig/rlmdb.pc"),
+    ] {
+        assert!(f.is_file(), "{} not installed", f.display());
+    }
+    if cfg!(target_os = "macos") {
+        let out = run_ok(
+            Command::new("otool")
+                .arg("-D")
+                .arg(lib.join("librlmdb.dylib")),
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            text.lines().nth(1),
+            Some(format!("{prefix}/lib/librlmdb.dylib").as_str()),
+            "{text}"
+        );
+    }
+}
+
+/// `--from` a directory where only `librlmdb` was built: the script
+/// refuses before it installs anything, naming what is missing.
+#[test]
+fn an_incomplete_from_directory_installs_nothing() {
+    let b = builder();
+    let base = b.scratch("install-incomplete");
+    let from = base.join("only-rlmdb");
+    fs::create_dir_all(&from).unwrap();
+    for name in ["librlmdb.a", &dylib("rlmdb")] {
+        fs::copy(built_dir().join(name), from.join(name)).unwrap();
+    }
+    let stage = base.join("stage");
+    let out = install_command(&stage, &from, PREFIX).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    let missing = err
+        .lines()
+        .find(|l| l.contains("not built in"))
+        .unwrap_or_else(|| panic!("{err}"));
+    let missing = missing.rsplit_once(':').unwrap().1;
+    assert!(missing.contains("liblmdb09"), "{err}");
+    assert!(missing.contains("liblmdb10"), "{err}");
+    assert!(
+        !missing.contains("librlmdb"),
+        "only the missing ones: {err}"
+    );
+    assert!(
+        !stage.exists(),
+        "nothing may be installed: {}",
+        stage.display()
+    );
 }

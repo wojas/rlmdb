@@ -124,6 +124,27 @@ set_id() {
 
 v09=$libdir/rlmdb/lmdb-0.9
 v10=$libdir/rlmdb/lmdb-1.0
+
+# Every library must be there before anything is installed: a --from
+# directory where only librlmdb was built would otherwise stop the install
+# halfway through the prefix.
+case $kind in
+  elf)   need="librlmdb.a librlmdb.so liblmdb09.a liblmdb09.so liblmdb10.a liblmdb10.so" ;;
+  macos) need="librlmdb.a librlmdb.dylib liblmdb09.a liblmdb09.dylib liblmdb10.a liblmdb10.dylib" ;;
+  msvc)  need="rlmdb.dll rlmdb.dll.lib rlmdb.lib lmdb09.dll lmdb09.lib lmdb10.dll lmdb10.lib" ;;
+  mingw) need="rlmdb.dll librlmdb.dll.a librlmdb.a lmdb09.dll liblmdb09.a lmdb10.dll liblmdb10.a" ;;
+esac
+missing=
+for f in $need; do
+  [ -f "$out/$f" ] || missing="$missing $f"
+done
+if [ -n "$missing" ]; then
+  echo "install-libs.sh: not built in $out:$missing" >&2
+  echo "install-libs.sh: all three libraries are installed together:" \
+    "cargo build --release -p librlmdb -p lmdb09-stub -p lmdb10-stub" >&2
+  exit 1
+fi
+
 case $kind in
   elf)
     put 644 "$out/librlmdb.a" "$destdir$libdir/librlmdb.a"

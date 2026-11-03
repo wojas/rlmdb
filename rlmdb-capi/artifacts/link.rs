@@ -32,6 +32,11 @@ fn link_options(soname: &str, dylib: &str) {
         }
         "macos" => {
             println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/{dylib}");
+            // Room in the Mach-O header for the installed path, which
+            // `install_name_tool -id` writes over the short `@rpath` one:
+            // without it, a long prefix fails with "larger updated load
+            // commands do not fit".
+            println!("cargo:rustc-cdylib-link-arg=-Wl,-headerpad_max_install_names");
         }
         _ => {}
     }
