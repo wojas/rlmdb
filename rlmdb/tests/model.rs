@@ -14,7 +14,10 @@
 //!   transaction, each is checked against the model: a cursor stays on its
 //!   item, and a cursor whose item was deleted sits before the item's
 //!   successor (`MDB_NEXT` returns the successor, `MDB_PREV` the
-//!   predecessor);
+//!   predecessor); a cursor left by a failed exact search sits before the
+//!   next key, also after other cursors added items to that key's
+//!   duplicates, and every move from there is checked
+//!   (`KNOWN_C_BUGS.md` row 59);
 //! * nested transactions up to three deep, committed or aborted, aborted
 //!   top-level transactions, `clear_db`/`drop_db` and re-creation;
 //! * small maps that fill up (`MDB_MAP_FULL`: the transaction must then
@@ -524,6 +527,19 @@ enum Pos {
     /// Its item was deleted by the change numbered `epoch`; it now sits
     /// before the item's successor.
     Parked(Vec<u8>, Vec<u8>, u64),
+    /// Left by an exact search for a missing key (or a `MDB_SET_RANGE`
+    /// past the last one) right before `next`, the first key after the
+    /// one searched (`None`: there is none): on the node of `next`
+    /// (`on_node`; `dups`: a node with duplicates, the sub-cursor reset by
+    /// the search) or past the end of the leaf before it. Kept while items
+    /// are only added to keys outside the gap before `next`, which leaves
+    /// the cursor there (`KNOWN_C_BUGS.md` row 59: also when they are
+    /// duplicates of `next`).
+    Missed {
+        next: Option<Vec<u8>>,
+        on_node: bool,
+        dups: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -559,6 +575,8 @@ struct Stats {
     txn_full: u64,
     cursor_checks: u64,
     parked_checks: u64,
+    missed: u64,
+    missed_moves: u64,
     reopens: u64,
     c_checks: u64,
 }
@@ -713,6 +731,7 @@ fn full<T>(t: &RwTxn<'_>, cx: &mut Cx, what: &str, e: Error) -> Result<T, Full> 
 /// After storing `(k, d)` in database `i`.
 fn model_put(st: &mut St, i: usize, k: &[u8], d: &[u8]) {
     let m = &mut st.dbs[i];
+    let old = m.dups(k).map(|s| (s.len(), first_of(&m.ok(k), s).1));
     m.insert(k, d);
     if !m.dupsort {
         // Cursors on the key see the new value.
@@ -722,6 +741,34 @@ fn model_put(st: &mut St, i: usize, k: &[u8], d: &[u8]) {
                     *cd = d.to_vec();
                 }
             }
+        }
+    }
+    let grew = old
+        .as_ref()
+        .is_some_and(|(n, _)| m.dups(k).unwrap().len() > *n);
+    for c in st.curs.iter_mut().filter(|c| c.db == i) {
+        let Pos::Missed {
+            next,
+            on_node,
+            dups,
+        } = &c.pos
+        else {
+            continue;
+        };
+        let is_next = next
+            .as_deref()
+            .is_some_and(|x| m.kc.compare(x, k) == Ordering::Equal);
+        match &old {
+            // A new key in the gap before `next`: it may land where the
+            // cursor is.
+            None if m.next_key_first(k).map(|(x, _)| x) == *next => c.pos = Pos::Unknown,
+            // The single item of `next` becomes a duplicate: the fixup
+            // (mdb_xcursor_init2 with new_dupdata) puts the sub-cursor on
+            // it, as on a cursor on the item.
+            Some((_, item)) if is_next && grew && *on_node && !*dups => {
+                c.pos = Pos::On(k.to_vec(), item.clone());
+            }
+            _ => {}
         }
     }
     st.epoch += 1;
@@ -756,6 +803,10 @@ fn model_del(st: &mut St, i: usize, k: &[u8], d: Option<&[u8]>) {
     };
     let (kc, dc, dupsort) = (m.kc, m.dc, m.dupsort);
     for c in st.curs.iter_mut().filter(|c| c.db == i && !c.dead) {
+        if matches!(c.pos, Pos::Missed { .. }) {
+            // Rebalancing may move it anywhere around the gap.
+            c.pos = Pos::Unknown;
+        }
         if let Pos::On(ck, cd) = &c.pos {
             let hit = kc.compare(ck, k) == Ordering::Equal
                 && (!dupsort || gone.iter().any(|g| dc.compare(g, cd) == Ordering::Equal));
@@ -1048,10 +1099,20 @@ fn put_flags(
     }
 }
 
-fn op_put(t: &mut RwTxn<'_>, st: &mut St, i: usize, db: Dbi, cx: &mut Cx) -> Result<(), Full> {
+/// `put` of a random item, or one of key `key`, compared with the model.
+fn op_put(
+    t: &mut RwTxn<'_>,
+    st: &mut St,
+    i: usize,
+    db: Dbi,
+    cx: &mut Cx,
+    key: Option<Vec<u8>>,
+) -> Result<(), Full> {
     let cfg = &cx.cfgs[i];
     let m = &st.dbs[i];
-    let mut k = cx.key_existing(cfg, m, 15);
+    let mut k = key
+        .or_else(|| missed_key(st, i, cx))
+        .unwrap_or_else(|| cx.key_existing(cfg, m, 15));
     let mut d = cx.val_existing(cfg, m, &k, 15);
     let (flags, ok) = put_flags(cx, cfg, m, &mut k, &mut d);
     let reserve = !cfg.dupsort() && cx.rng.below(6) == 0;
@@ -1110,6 +1171,20 @@ fn op_del(t: &mut RwTxn<'_>, st: &mut St, i: usize, db: Dbi, cx: &mut Cx) -> Res
     Ok(())
 }
 
+/// Now and then, in a `DUP_SORT` database, the key a cursor of `st` was
+/// left before by a failed search (`Pos::Missed`): duplicates added there
+/// must not lose it (`KNOWN_C_BUGS.md` row 59).
+fn missed_key(st: &St, i: usize, cx: &mut Cx) -> Option<Vec<u8>> {
+    if !cx.cfgs[i].dupsort() {
+        return None;
+    }
+    let next = st.curs.iter().find_map(|c| match &c.pos {
+        Pos::Missed { next: Some(x), .. } if c.db == i && !c.dead => Some(x.clone()),
+        _ => None,
+    })?;
+    (cx.rng.below(3) == 0).then_some(next)
+}
+
 /// A cursor on database `i`: an existing one or a new one.
 fn pick_cursor(
     t: &mut RwTxn<'_>,
@@ -1152,7 +1227,8 @@ enum Want {
     Code(i32),
 }
 
-/// Moves a cursor with a random operation and checks the result.
+/// Moves a cursor (`force`, or a random one) with a random operation and
+/// checks the result.
 fn op_cursor_move(
     t: &mut RwTxn<'_>,
     st: &mut St,
@@ -1160,9 +1236,10 @@ fn op_cursor_move(
     db: Dbi,
     depth: usize,
     cx: &mut Cx,
+    force: Option<usize>,
 ) -> Result<(), Full> {
     let cfg = &cx.cfgs[i];
-    let j = pick_cursor(t, st, i, db, depth, cx);
+    let j = force.unwrap_or_else(|| pick_cursor(t, st, i, db, depth, cx));
     if matches!(st.curs[j].pos, Pos::Parked(_, _, e) if e == st.epoch) {
         check_parked(t, st, j, cx);
         return Ok(());
@@ -1171,15 +1248,20 @@ fn op_cursor_move(
     let dupsort = cfg.dupsort();
     let cur = st.curs[j].clone();
     let incompatible = MdbError::Incompatible.to_err_code();
-    let mut ops = vec![
-        CursorOp::First,
-        CursorOp::Last,
-        CursorOp::Set,
-        CursorOp::SetKey,
-        CursorOp::SetRange,
-        CursorOp::GetBoth,
-        CursorOp::GetBothRange,
-    ];
+    // A cursor moved at once after a failed search only moves on.
+    let mut ops = if force.is_some() {
+        vec![]
+    } else {
+        vec![
+            CursorOp::First,
+            CursorOp::Last,
+            CursorOp::Set,
+            CursorOp::SetKey,
+            CursorOp::SetRange,
+            CursorOp::GetBoth,
+            CursorOp::GetBothRange,
+        ]
+    };
     match &cur.pos {
         Pos::On(..) => {
             ops.extend([
@@ -1206,17 +1288,39 @@ fn op_cursor_move(
             CursorOp::NextNoDup,
             CursorOp::PrevNoDup,
         ]),
+        Pos::Missed { .. } => {
+            ops.extend([
+                CursorOp::GetCurrent,
+                CursorOp::Next,
+                CursorOp::Next,
+                CursorOp::Prev,
+                CursorOp::Prev,
+                CursorOp::NextNoDup,
+                CursorOp::PrevNoDup,
+                CursorOp::FirstDup,
+                CursorOp::LastDup,
+            ]);
+            if dupsort {
+                ops.extend([
+                    CursorOp::NextDup,
+                    CursorOp::NextDup,
+                    CursorOp::PrevDup,
+                    CursorOp::PrevDup,
+                ]);
+            }
+        }
         _ => {}
     }
     // mdb_cursor_count, now and then.
-    if matches!(cur.pos, Pos::On(..)) && cx.rng.below(10) == 0 {
-        let Pos::On(k, _) = &cur.pos else {
-            unreachable!()
-        };
-        let want = if dupsort {
-            Ok(m.dups(k).map_or(0, BTreeSet::len) as u64)
-        } else {
-            Err(incompatible)
+    if matches!(cur.pos, Pos::On(..) | Pos::Missed { .. }) && cx.rng.below(10) == 0 {
+        let want = match &cur.pos {
+            _ if !dupsort => Err(incompatible),
+            Pos::On(k, _) => Ok(m.dups(k).map_or(0, BTreeSet::len) as u64),
+            // C's EINVAL for the reset sub-cursor; past the end of a leaf
+            // MDB_NOTFOUND (KNOWN_C_BUGS.md row 5).
+            Pos::Missed { on_node: false, .. } => Err(MdbError::NotFound.to_err_code()),
+            Pos::Missed { dups: true, .. } => Err(EINVAL),
+            _ => Ok(1),
         };
         let got = t.cursor_count(cur.id).map_err(|e| e.to_err_code());
         if got != want {
@@ -1247,6 +1351,39 @@ fn op_cursor_move(
         (Pos::Unset, CursorOp::GetCurrent) => Want::Code(EINVAL),
         (Pos::Unset, CursorOp::Next | CursorOp::NextNoDup) => one(m.first()),
         (Pos::Unset, CursorOp::Prev | CursorOp::PrevNoDup) => one(m.last()),
+        (
+            Pos::Missed {
+                next,
+                on_node,
+                dups,
+            },
+            op,
+        ) => {
+            // As C moves with a right record: entering the duplicates of
+            // `next` from its node, or moving on from the end of the leaf
+            // before it (KNOWN_C_BUGS.md rows 4 and 59).
+            use CursorOp as O;
+            cx.stats.missed_moves += 1;
+            let s = next.as_deref();
+            let first = s.and_then(|x| m.key_first(x));
+            let last = s.and_then(|x| m.key_last(x));
+            let before = s.map_or_else(|| m.last(), |x| m.prev_key_last(x));
+            let after = s.and_then(|x| m.next_key_first(x));
+            match (op, *on_node, *dups) {
+                (O::FirstDup | O::LastDup, ..) if !dupsort => Want::Code(incompatible),
+                (O::GetCurrent | O::FirstDup | O::LastDup, false, _) => one(None),
+                (O::GetCurrent | O::FirstDup | O::LastDup, true, true) => Want::Code(EINVAL),
+                (O::GetCurrent | O::FirstDup | O::LastDup, true, false) => one(first),
+                (O::Next | O::NextDup, true, true) => one(first),
+                (O::Prev | O::PrevDup, true, true) => one(last),
+                (O::Next | O::NextNoDup, false, _) => one(first),
+                (O::Next | O::NextNoDup, true, _) => one(after),
+                (O::Prev | O::PrevNoDup, ..) => one(before),
+                (O::PrevDup, false, _) => one(before),
+                (O::NextDup | O::PrevDup, ..) => one(None),
+                _ => unreachable!("{op:?} from {:?}", cur.pos),
+            }
+        }
         (Pos::On(k, d), op) => {
             let here = m.at(k, d);
             let w = match op {
@@ -1297,17 +1434,95 @@ fn op_cursor_move(
             show_res(&got)
         ));
     }
-    let c = &mut st.curs[j];
     match got {
         Ok(Some((k, d))) => {
-            c.pos = Pos::On(k, d);
+            // Where a move from a failed search entered duplicates, their
+            // count (KNOWN_C_BUGS.md row 59).
+            if matches!(cur.pos, Pos::Missed { .. }) && dupsort && cx.rng.below(2) == 0 {
+                let want = m.dups(&k).map_or(0, BTreeSet::len) as u64;
+                let got = t.cursor_count(cur.id).map_err(|e| e.to_err_code());
+                if got != Ok(want) {
+                    cx.fail(format!(
+                        "cursor {j} (db {}): count {got:?} after {op:?} from {:?}, model {want}",
+                        cfg.name, cur.pos
+                    ));
+                }
+            }
+            st.curs[j].pos = Pos::On(k, d);
         }
         Ok(None) => {
-            c.pos = Pos::Unknown;
+            let missed = match op {
+                CursorOp::Set | CursorOp::SetKey | CursorOp::GetBoth => !m.has_key(&probe_k),
+                CursorOp::SetRange => true,
+                _ => false,
+            };
+            if !missed || m.map.is_empty() {
+                st.curs[j].pos = Pos::Unknown;
+                return Ok(());
+            }
+            st.curs[j].pos = missed_pos(t, m, cur.id, &probe_k, j, cx);
+            // Often moved at once, half of the time after a put of a new
+            // duplicate of the next key (KNOWN_C_BUGS.md row 59).
+            if cx.rng.below(2) == 0 {
+                if dupsort && cx.rng.below(2) == 0 {
+                    if let Pos::Missed {
+                        next: Some(next), ..
+                    } = &st.curs[j].pos
+                    {
+                        let next = next.clone();
+                        op_put(t, st, i, db, cx, Some(next))?;
+                    }
+                }
+                return op_cursor_move(t, st, i, db, depth, cx, Some(j));
+            }
         }
         Err(_) => {}
     }
     Ok(())
+}
+
+/// Where a cursor is after an exact search for the missing key `probe`
+/// (or a `MDB_SET_RANGE` past the last key) in the non-empty database of
+/// `m` ([`Pos::Missed`]), told apart with `MDB_GET_CURRENT`: on the node of
+/// the next key it returns its item, or `EINVAL` for a node with
+/// duplicates (the search reset its sub-cursor); past the end of a leaf
+/// `MDB_NOTFOUND`.
+fn missed_pos(
+    t: &mut RwTxn<'_>,
+    m: &DbModel,
+    id: CursorId,
+    probe: &[u8],
+    j: usize,
+    cx: &mut Cx,
+) -> Pos {
+    cx.stats.missed += 1;
+    let next = m.set_range(probe).map(|(k, _)| k);
+    let got = cget(t, id, None, None, CursorOp::GetCurrent);
+    cx.note(format!(
+        "  cursor {j} after the failed search: GetCurrent -> {}",
+        show_res(&got)
+    ));
+    let single = next.as_deref().and_then(|x| m.dups(x)).map(BTreeSet::len) == Some(1);
+    let (on_node, dups) = match &got {
+        Ok(None) => (false, false),
+        Ok(Some(p))
+            if single && next.as_deref().and_then(|x| m.key_first(x)).as_ref() == Some(p) =>
+        {
+            (true, false)
+        }
+        Err(e) if m.dupsort && next.is_some() && e.to_err_code() == EINVAL => (true, true),
+        _ => cx.fail(format!(
+            "cursor {j} after a failed search for {}: GetCurrent gives {}, the next key is {}",
+            hexs(probe),
+            show_res(&got),
+            next.as_deref().map_or("none".into(), hexs)
+        )),
+    };
+    Pos::Missed {
+        next,
+        on_node,
+        dups,
+    }
 }
 
 /// `MDB_GET_MULTIPLE` / `MDB_NEXT_MULTIPLE` (`DUP_FIXED`): a page's worth
@@ -1483,7 +1698,7 @@ fn op_cursor_write(
     } else if cfg.dupfixed() && r < 70 {
         // MDB_MULTIPLE.
         let m = &st.dbs[i];
-        let k = cx.key_existing(cfg, m, 50);
+        let k = missed_key(st, i, cx).unwrap_or_else(|| cx.key_existing(cfg, m, 50));
         let n = 1 + cx.rng.below(40);
         let items: Vec<Vec<u8>> = (0..n).map(|_| cx.val_existing(cfg, m, &k, 20)).collect();
         let size = items[0].len();
@@ -1532,7 +1747,7 @@ fn op_cursor_write(
     } else {
         // A put through the cursor.
         let m = &st.dbs[i];
-        let mut k = cx.key_existing(cfg, m, 15);
+        let mut k = missed_key(st, i, cx).unwrap_or_else(|| cx.key_existing(cfg, m, 15));
         let mut d = cx.val_existing(cfg, m, &k, 15);
         let (flags, ok) = put_flags(cx, cfg, m, &mut k, &mut d);
         let reserve = !cfg.dupsort() && cx.rng.below(6) == 0;
@@ -1690,11 +1905,11 @@ fn run_txn(t: &mut RwTxn<'_>, st: &mut St, depth: usize, cx: &mut Cx) -> Result<
         };
         let r = cx.rng.below(1000);
         if r < p_put * 10 {
-            op_put(t, st, i, db, cx)?;
+            op_put(t, st, i, db, cx, None)?;
         } else if r < (p_put + p_del) * 10 {
             op_del(t, st, i, db, cx)?;
         } else if r < 820 {
-            op_cursor_move(t, st, i, db, depth, cx)?;
+            op_cursor_move(t, st, i, db, depth, cx, None)?;
         } else if r < 950 {
             op_cursor_write(t, st, i, db, depth, cx)?;
         } else if r < 975 {
@@ -1890,6 +2105,8 @@ fn run_seed(
     total.txn_full += s.txn_full;
     total.cursor_checks += s.cursor_checks;
     total.parked_checks += s.parked_checks;
+    total.missed += s.missed;
+    total.missed_moves += s.missed_moves;
     total.reopens += s.reopens;
     total.c_checks += s.c_checks;
 }
