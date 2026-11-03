@@ -251,8 +251,8 @@ deferred until the core has been validated through the C API.
   with C's API limits, refused for writing on OpenBSD; dirty pages are
   owned buffers today; keep the page backing replaceable), the typed Rust
   API, LMDB 1.0
-  features beyond its data file (`MDB_PREVSNAPSHOT`, checksums,
-  encryption; `DUAL_FORMAT.md` §7) and the format-converting
+  features beyond its data file (checksums, encryption;
+  `DUAL_FORMAT.md` §7) and the format-converting
   copy (`convert-copy`, §4.3). The C API and the tools handle both formats
   (stage 4), the interop matrix covers both (stage 5); new environments
   are 0.9 unless 1.0 is asked for, and the

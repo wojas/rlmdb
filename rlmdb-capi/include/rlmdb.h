@@ -52,14 +52,14 @@
  *	(LMDB 1.0's mdb_env_set_pagesize(), or #rlmdb_env_set_pagesize() with
  *	0.9's lmdb.h), and named databases are stored under their name with its
  *	terminating NUL, as C 1.0 does. Two-phase commit (mdb_txn_prepare(),
- *	mdb_env_rollback()) works in both formats. The other 1.0 features
- *	beyond its data file are not implemented: MDB_PREVSNAPSHOT, MDB_ENCRYPT
- *	and MDB_REMAP_CHUNKS give EINVAL, opening an encrypted or checksummed
- *	1.0 file fails with MDB_ENV_ENCRYPTION or MDB_BAD_CHECKSUM, and the
- *	functions of encryption, checksums, incremental backups and crypto
- *	modules return ENOTSUP (rlmdb-capi/README.md lists them). With 0.9's
- *	lmdb.h, LMDB 1.0's error codes are numbers without names;
- *	#mdb_strerror() knows their texts.
+ *	mdb_env_rollback()) and MDB_PREVSNAPSHOT work in both formats. The
+ *	other 1.0 features beyond its data file are not implemented:
+ *	MDB_ENCRYPT and MDB_REMAP_CHUNKS give EINVAL, opening an encrypted or
+ *	checksummed 1.0 file fails with MDB_ENV_ENCRYPTION or
+ *	MDB_BAD_CHECKSUM, and the functions of encryption, checksums,
+ *	incremental backups and crypto modules return ENOTSUP
+ *	(rlmdb-capi/README.md lists them). With 0.9's lmdb.h, LMDB 1.0's error
+ *	codes are numbers without names; #mdb_strerror() knows their texts.
  *
  *	@copyright See COPYRIGHT in the top-level directory of rlmdb.
  *	Redistribution and use in source and binary forms, with or without

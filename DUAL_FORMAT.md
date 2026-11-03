@@ -340,8 +340,9 @@ Behaviour of existing functions:
   page size); after open the environment's value. (C 1.0 returns 0 before the open: `me_maxkey` is
   only computed in `mdb_env_open2`; 1.0 documents it as only valid after
   open.)
-* `mdb_env_open` refuses `MDB_PREVSNAPSHOT` with `EINVAL` for both formats
-  until it is implemented.
+* `mdb_env_open` takes `MDB_PREVSNAPSHOT` for both formats (§7): a
+  per-process choice, whose commit leaves what a writer on the previous
+  snapshot leaves in either format.
 * `mdb_env_set_flags` rejects `MDB_ENCRYPT` until encryption exists.
 * The key and data copies of `write.rs` (a caller's pointer may alias the
   page the put changes) are sized per environment: keys up to its maximum
@@ -593,9 +594,9 @@ Later decisions (owner, 2026-11-03), for the three C libraries:
    1.0 and rlmdb.
 6. Soon after: the format-converting copy (`convert-copy`), replacing
    `lmdbconvert`.
-7. Later: `MDB_PREVSNAPSHOT`, checksums, encryption. Their C functions
-   are exported already and return `ENOTSUP` until then (§4.4); so do the
-   incremental backups and the crypto modules, which are not planned.
+7. Later: checksums, encryption. Their C functions are exported already
+   and return `ENOTSUP` until then (§4.4); so do the incremental backups
+   and the crypto modules, which are not planned.
    Done: two-phase commit, in both formats: `RwTxn::prepare` and
    `PreparedTxn` (`mdb_txn_prepare`: the commit split before its meta
    page write, which `PreparedTxn::commit` does) and
@@ -609,3 +610,7 @@ Later decisions (owner, 2026-11-03), for the three C libraries:
    `KNOWN_C_BUGS.md` rows 61 to 64 (a reader of the snapshot stops a
    rollback; a rollback leaves no second one; a prepare that ends the
    transaction).
+   Done too: `MDB_PREVSNAPSHOT`, for both formats, as C 1.0 has it but for
+   three bugs (`KNOWN_C_BUGS.md` rows 67 to 69):
+   `EnvironmentFlags::PREV_SNAPSHOT`, `mdb_env_open`, the tools' `-v`, the
+   interop scenario `prev_snapshot`.

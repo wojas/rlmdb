@@ -77,7 +77,8 @@ tools handle both formats: an existing file in its format, a new one as
 or the **experimental**
 environment variable `RLMDB_DEFAULT_FORMAT=1.0`, which may be removed or
 restricted later); for a 1.0 file the tools print what C 1.0's tools
-print.
+print. LMDB 1.0's `MDB_PREVSNAPSHOT` (open the previous snapshot, as the
+tools' `-v` do) works for environments of both formats.
 
 Deliberately out of scope:
 
@@ -92,10 +93,9 @@ Deliberately out of scope:
   OpenBSD, whose maps do not see what is written to the file, an open for
   writing with it is refused (`ENOTSUP`); see `COMPATIBILITY.md`.
 * LMDB 1.0 features beyond its data file: `MDB_VL32`, encryption,
-  checksums, `MDB_PREVSNAPSHOT` (rejected with `EINVAL`, as 0.9 does, for
-  1.0 environments too); the format-converting copy (`DUAL_FORMAT.md`
-  §4.3) is planned. (Two-phase commit, `mdb_txn_prepare` and
-  `mdb_env_rollback`, is implemented, for 0.9 environments too.)
+  checksums; the format-converting copy (`DUAL_FORMAT.md` §4.3) is
+  planned. (Two-phase commit, `mdb_txn_prepare` and `mdb_env_rollback`,
+  is implemented, for 0.9 environments too.)
 * The `heed`-compatible typed API described in `DESIGN.md` is deferred:
   the byte-level API is validated through the C API first.
   Performance work against C (benchmarks) has not started.

@@ -612,7 +612,7 @@ bit values; the heed layer re-exports them under heed's names (`EnvFlags`,
 `DatabaseFlags`, `PutFlags`). Unsupported env flags (`FIXED_MAP`,
 `MAP_ASYNC`, `NO_MEM_INIT`) are accepted and ignored, `WRITE_MAP` is
 accepted with C's limits and refused for writing on OpenBSD (`flags.rs`
-documents each); `PREV_SNAPSHOT` (1.0 only) is `EINVAL`.
+documents each); `PREV_SNAPSHOT` (LMDB 1.0's) works for both formats.
 
 Footgun rules: `put`/`del` take `&mut self` so no `&[u8]` borrowed from a
 write txn can be alive across a mutation; a `Dbi` is `Copy` and borrows
