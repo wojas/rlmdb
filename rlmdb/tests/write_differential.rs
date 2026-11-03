@@ -29,6 +29,8 @@ struct C09 {
     /// `ps`-byte pages ([`empty_data_file`]), and after a round the files
     /// must also agree page for page ([`C09::same_pages`]).
     file_page_size: Option<usize>,
+    /// Rust side's dirty-page limit ([`Oracle::dirty_limit`]).
+    dirty_limit: Option<usize>,
 }
 
 impl C09 {
@@ -37,6 +39,7 @@ impl C09 {
             tools,
             writeops: tools.bin("writeops"),
             file_page_size: None,
+            dirty_limit: None,
         }
     }
 
@@ -162,6 +165,10 @@ impl Oracle for C09 {
 
     fn page_size(&self) -> Option<usize> {
         None
+    }
+
+    fn dirty_limit(&self) -> Option<usize> {
+        self.dirty_limit
     }
 
     fn dump(&self, env: &Path, db: &str) -> String {
@@ -362,6 +369,45 @@ fn diff_current_single_item() {
     assert!(ops.iter().any(|op| op.starts_with("cr:")));
     let r = differential::run_round(&o, &p, 2, Ops::List(ops), "current-2k");
     assert_eq!(r, Round::Same);
+}
+
+/// `KNOWN_C_BUGS.md` #56: `MDB_CURRENT` replacing a duplicate in a sub-DB
+/// tree where C's in-place replacement leaves the new item in a leaf
+/// searches do not look in
+/// ([`differential::current_dup_outside_leaf_script`], 320 items of up to
+/// 510 bytes, a 24th of the page). rlmdb deletes and inserts there and must
+/// leave the file C's `mdb_cursor_del` + `mdb_cursor_put` leave; every
+/// other replacement is C's `MDB_CURRENT` in place. At the OS page size,
+/// page for page but for the bytes C 0.9 leaves uninitialised
+/// ([`C09::same_pages`]), in an `MDB_DUPSORT` and an `MDB_DUPFIXED` DB,
+/// also with a dirty limit of 16 pages on the Rust side (spilling must not
+/// change what is written).
+#[test]
+fn diff_current_dup_outside_leaf() {
+    let c = require_c!();
+    let ps = common::os_page_size();
+    for dbflags in [MDB_DUPSORT, MDB_DUPSORT | MDB_DUPFIXED] {
+        let p = Profile::new(dbflags, 0);
+        for dirty_limit in [None, Some(16)] {
+            let o = C09 {
+                dirty_limit,
+                ..C09::with_page_size(c, ps)
+            };
+            let item_len = (ps / 24).min(MDB_MAXKEYSIZE - 1);
+            let ops =
+                differential::current_dup_outside_leaf_script(&o, dbflags, item_len, 320, true);
+            assert!(
+                ops.iter().filter(|op| op.starts_with("cr:")).count() >= 3,
+                "flags {dbflags:#x}"
+            );
+            let tag = format!("current-outside-{dbflags:#x}-dirty{dirty_limit:?}");
+            assert_eq!(
+                differential::run_round(&o, &p, 2, Ops::List(ops), &tag),
+                Round::Same,
+                "{tag}"
+            );
+        }
+    }
 }
 
 /// The 0.9 side of `KNOWN_C_BUGS.md` #38

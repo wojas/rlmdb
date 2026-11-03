@@ -5,8 +5,8 @@ mod common;
 
 use rlmdb::consts::*;
 use rlmdb::{
-    CursorOp, DatabaseFlags, Dbi, Environment, EnvironmentFlags, Error, MdbError, Transaction,
-    WriteFlags,
+    CursorOp, DatabaseFlags, Dbi, Environment, EnvironmentFlags, Error, Format, MdbError,
+    Transaction, WriteFlags,
 };
 
 fn env_at(path: &std::path::Path, map: usize) -> Environment {
@@ -560,4 +560,210 @@ fn dupfixed_without_dupsort_is_refused() {
     );
     // The transaction is still fine.
     txn.commit().unwrap();
+}
+
+/// `KNOWN_C_BUGS.md` #56: `MDB_CURRENT` replacing a duplicate in a sub-DB
+/// tree by an item that sorts where the old one is. C keeps the new item
+/// in the old one's leaf at its index and does not look at the branch keys
+/// around the leaf, which need not be its items (deleting a leaf's first
+/// item leaves the key above it): the first item of a leaf other than the
+/// leftmost, replaced by one of another size that sorts before the branch
+/// key above the leaf, and the last item of a leaf other than the
+/// rightmost, replaced by one at or after the next leaf's branch key, end
+/// up where searches do not look. rlmdb deletes and inserts there.
+///
+/// Every item of a key whose duplicates span several leaves is replaced in
+/// turn by items between it and its neighbours (the same size, and without
+/// `MDB_DUPFIXED` shorter and longer), also after deleting the item after
+/// it, then an item between the new one and the old ones is put: the
+/// cursor is on the new item, `MDB_GET_BOTH` finds it, and the duplicates
+/// stay in order. In 0.9 and 1.0 (256-byte and 1 KiB pages), with
+/// `MDB_DUPSORT`, `MDB_REVERSEDUP` and `MDB_DUPFIXED` (there also
+/// `MDB_MULTIPLE` with one item).
+/// `rlmdb/tests/write_differential.rs` and
+/// `interop/tests/write_differential10.rs` compare the files with C's.
+#[test]
+fn current_dup_outside_its_leaf() {
+    let shapes = [
+        (
+            Format::V09,
+            None,
+            160,
+            (common::os_page_size() / 24).min(509),
+        ),
+        (Format::V10, Some(256), 60, 10),
+        (Format::V10, Some(1024), 60, 42),
+    ];
+    for (format, ps, n, sz) in shapes {
+        for flags in [
+            DatabaseFlags::DUP_SORT,
+            DatabaseFlags::DUP_SORT | DatabaseFlags::REVERSE_DUP,
+            DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED,
+        ] {
+            current_outside_leaf(format, ps, n, sz, flags);
+        }
+    }
+}
+
+/// One shape of [`current_dup_outside_its_leaf`]: `n` items of `sz` bytes
+/// under one key of a DB with `flags`.
+fn current_outside_leaf(
+    format: Format,
+    ps: Option<usize>,
+    n: usize,
+    sz: usize,
+    flags: DatabaseFlags,
+) {
+    let shape = format!("{format:?}, page size {ps:?}, flags {flags:?}");
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Environment::builder();
+    b.format(format)
+        .max_dbs(4)
+        .map_size(64 << 20)
+        .flags(EnvironmentFlags::NO_SYNC);
+    if let Some(ps) = ps {
+        b.page_size(ps);
+    }
+    let env = b.open(dir.path()).unwrap();
+    let fixed = flags.contains(DatabaseFlags::DUP_FIXED);
+    let reverse = flags.contains(DatabaseFlags::REVERSE_DUP);
+    // Stored so that the duplicate order is the byte order of the plain
+    // item (MDB_REVERSEDUP compares from the end); `dec` undoes it.
+    let enc = |s: &[u8]| -> Vec<u8> {
+        let mut b = s.to_vec();
+        if reverse {
+            b.reverse();
+        }
+        b
+    };
+    let dec = enc;
+    let item = |j: usize| -> Vec<u8> {
+        let mut s = format!("b{j:04}").into_bytes();
+        s.resize(sz, b'p');
+        s
+    };
+    let cat = |s: &[u8], t: &str| [s, t.as_bytes()].concat();
+    let last = |s: &[u8], c: u8| {
+        let mut s = s.to_vec();
+        *s.last_mut().unwrap() = c;
+        s
+    };
+    let key = b"k";
+    let mut txn = env.begin_rw_txn().unwrap();
+    let db = txn
+        .create_db(Some("d"), flags | DatabaseFlags::CREATE)
+        .unwrap();
+    for j in 0..n {
+        txn.put(db, key, &enc(&item(j)), WriteFlags::empty())
+            .unwrap();
+    }
+    txn.commit().unwrap();
+    let mut count = n;
+    // Replaces item j by `nw` (after deleting item `del`, if any), puts
+    // `between` (if any) and checks the duplicates; commits if `commit`.
+    let mut attempt =
+        |j: usize, del: Option<usize>, nw: &[u8], between: Option<&[u8]>, commit: bool| {
+            let what = format!(
+                "{shape}: item {j} -> {:?}.. of {} bytes (deleted {del:?})",
+                String::from_utf8_lossy(&nw[..nw.len().min(6)]),
+                nw.len()
+            );
+            let mut txn = env.begin_rw_txn().unwrap();
+            let c = txn.open_cursor(db).unwrap();
+            let mut want = count;
+            if let Some(del) = del {
+                txn.cursor_get(c, Some(key), Some(&enc(&item(del))), CursorOp::GetBoth)
+                    .unwrap()
+                    .unwrap();
+                txn.cursor_del(c, WriteFlags::empty()).unwrap();
+                want -= 1;
+            }
+            txn.cursor_get(c, Some(key), Some(&enc(&item(j))), CursorOp::GetBoth)
+                .unwrap()
+                .unwrap();
+            if fixed && j % 2 == 1 {
+                // MDB_MULTIPLE with one item replaces it the same way.
+                let stored = txn
+                    .cursor_put_multiple(c, key, &enc(nw), nw.len(), WriteFlags::CURRENT)
+                    .unwrap();
+                assert_eq!(stored, 1, "{what}: items stored");
+            } else {
+                txn.cursor_put(c, key, &enc(nw), WriteFlags::CURRENT)
+                    .unwrap();
+            }
+            let cur = txn
+                .cursor_get(c, None, None, CursorOp::GetCurrent)
+                .unwrap()
+                .map(|(_, d)| d.to_vec());
+            assert_eq!(cur, Some(enc(nw)), "{what}: the cursor");
+            let found = txn
+                .cursor_get(c, Some(key), Some(&enc(nw)), CursorOp::GetBoth)
+                .unwrap()
+                .is_some();
+            assert!(found, "{what}: MDB_GET_BOTH");
+            if let Some(between) = between {
+                txn.put(db, key, &enc(between), WriteFlags::empty())
+                    .unwrap();
+                want += 1;
+            }
+            let mut got = Vec::new();
+            let mut op = CursorOp::Set;
+            while let Some((_, d)) = txn
+                .cursor_get(c, (op == CursorOp::Set).then_some(&key[..]), None, op)
+                .unwrap()
+            {
+                got.push(dec(d));
+                op = CursorOp::NextDup;
+            }
+            assert_eq!(got.len(), want, "{what}: items");
+            assert!(got.is_sorted(), "{what}: not in order");
+            txn.close_cursor(c);
+            if commit {
+                txn.commit().unwrap();
+                count = want;
+            }
+        };
+    for j in 1..n - 1 {
+        let prev = item(j - 1);
+        // Between item j-1 and item j: the same size, and (without
+        // MDB_DUPFIXED) shorter and longer.
+        attempt(j, None, &last(&item(j), b'o'), None, false);
+        if !fixed {
+            let (s, b) = (cat(&prev[..5], "q"), cat(&prev[..5], "r"));
+            attempt(j, None, &s, Some(&b), false);
+            let (s, b) = (cat(&prev, "q"), cat(&prev, "r"));
+            attempt(j, None, &s, Some(&b), false);
+        }
+        // Item j-1 after deleting item j, by items between item j-2 and
+        // item j+1, at or after the old item j (the stale branch key where
+        // item j was the first of its leaf); then item j put back.
+        let next = item(j);
+        attempt(j - 1, Some(j), &next, None, false);
+        attempt(j - 1, Some(j), &last(&next, b'q'), Some(&next), false);
+        if !fixed {
+            attempt(j - 1, Some(j), &cat(&next[..5], "q"), Some(&next), false);
+            attempt(j - 1, Some(j), &cat(&next, "q"), Some(&next), false);
+        }
+    }
+    // One of each, committed.
+    attempt(n / 2, Some(n / 2 + 1), &item(n / 2 + 1), None, true);
+    if !fixed {
+        attempt(n / 3, None, &cat(&item(n / 3 - 1)[..5], "q"), None, true);
+    }
+    // A fresh read transaction sees every item, in order.
+    let txn = env.begin_ro_txn().unwrap();
+    let mut c = txn.cursor(db).unwrap();
+    let mut got = Vec::new();
+    while let Some((_, d)) = c.next().unwrap() {
+        got.push(dec(d));
+    }
+    assert_eq!(got.len(), count, "{shape}: committed items");
+    assert!(got.is_sorted(), "{shape}: committed items not in order");
+    for d in &got {
+        let found = c
+            .get(Some(key), Some(&enc(d)), CursorOp::GetBoth)
+            .unwrap()
+            .is_some();
+        assert!(found, "{shape}: {:?} not found", String::from_utf8_lossy(d));
+    }
 }

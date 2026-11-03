@@ -718,6 +718,255 @@ pub fn current_single_item_script(
     ops
 }
 
+/// Puts `items` under `key` in a DB `t` with `dbflags` of a fresh
+/// environment of `o`'s shape (written by rlmdb, which writes C's pages),
+/// commits, and returns the index in `items` of the first item of every
+/// leaf of `key`'s sub-DB but the leftmost whose leaf and the one before it
+/// hold as many items as the leftmost (not the rightmost, which is fuller
+/// or emptier: a delete there may rebalance), read from the data file.
+fn sub_db_leaf_firsts(o: &dyn Oracle, dbflags: u32, key: &[u8], items: &[Vec<u8>]) -> Vec<usize> {
+    use rlmdb::format::meta::pick_newest;
+    use rlmdb::format::{Db, Meta, NodeRef, PageRef};
+    let dir = tempfile::tempdir().unwrap();
+    if let Some(file) = o.data_file() {
+        std::fs::write(dir.path().join("data.mdb"), &file).unwrap();
+    }
+    let mut builder = Environment::builder();
+    builder
+        .format(o.format())
+        .map_size(64 << 20)
+        .max_dbs(8)
+        .flags(EnvironmentFlags::NO_SYNC);
+    if let Some(ps) = o.page_size() {
+        builder.page_size(ps);
+    }
+    let env = builder.open(dir.path()).unwrap();
+    let ps = env.page_size();
+    let mut txn = env.begin_rw_txn().unwrap();
+    let flags = DatabaseFlags::from_bits_retain(dbflags) | DatabaseFlags::CREATE;
+    let db = txn.create_db(Some("t"), flags).unwrap();
+    for d in items {
+        txn.put(db, key, d, WriteFlags::empty()).unwrap();
+    }
+    txn.commit().unwrap();
+    drop(env);
+    let file = std::fs::read(dir.path().join("data.mdb")).unwrap();
+    let l = o.format().layout();
+    let page = |pgno: u64| {
+        let start = usize::try_from(pgno).unwrap() * ps;
+        PageRef::with_layout(file.get(start..start + ps).expect("page in the file"), l).unwrap()
+    };
+    let metas = [0, 1].map(|i| Meta::read_page_with_layout(page(i).bytes(), l).unwrap());
+    // The node of `key` in the tree at `root` (keys in byte order).
+    let find = |root: u64, key: &[u8]| -> NodeRef<'_> {
+        let mut p = page(root);
+        while p.is_branch() {
+            let mut next = None;
+            for i in 0..p.num_keys() {
+                let n = p.node(i).unwrap();
+                if i > 0 && n.key().unwrap() > key {
+                    break;
+                }
+                next = Some(n.child_pgno());
+            }
+            p = page(next.unwrap());
+        }
+        (0..p.num_keys())
+            .map(|i| p.node(i).unwrap())
+            .find(|n| n.key() == Some(key))
+            .expect("key in the tree")
+    };
+    let sub_db = |n: NodeRef<'_>| {
+        assert!(n.is_subdata(), "not a DB record");
+        Db::read(n.inline_data().unwrap()).unwrap()
+    };
+    let name: &[u8] = if l.db_name_nul { b"t\0" } else { b"t" };
+    let named = sub_db(find(metas[pick_newest(&metas)].dbs[1].root, name));
+    let sub = sub_db(find(named.root, key));
+    // The first item and the item count of every leaf, left to right.
+    let mut leaves = Vec::new();
+    let mut stack = vec![sub.root];
+    while let Some(pgno) = stack.pop() {
+        let p = page(pgno);
+        if p.is_branch() {
+            stack.extend(
+                (0..p.num_keys())
+                    .rev()
+                    .map(|i| p.node(i).unwrap().child_pgno()),
+            );
+            continue;
+        }
+        let first = if p.is_leaf2() {
+            p.leaf2_key(0, usize::from(p.pad())).unwrap()
+        } else {
+            p.node(0).unwrap().key().unwrap()
+        };
+        let index = items.iter().position(|d| d == first).expect("an item");
+        leaves.push((index, p.num_keys()));
+    }
+    let firsts: Vec<usize> = (1..leaves.len())
+        .filter(|&i| leaves[i].1 == leaves[0].1 && leaves[i - 1].1 == leaves[0].1)
+        .map(|i| leaves[i].0)
+        .collect();
+    assert!(firsts.len() >= 4, "the sub-DB's leaves: {leaves:?}");
+    firsts
+}
+
+/// A script (for [`Ops::List`], two cursors, an `MDB_DUPSORT` DB with
+/// `dbflags`, `KNOWN_C_BUGS.md` #56) that puts `n` items of `item_len`
+/// bytes under one key, then, from the right, at one boundary between two
+/// leaves of the sub-DB at a time ([`sub_db_leaf_firsts`]), replaces an
+/// item with `MDB_CURRENT`, the other cursor on the item after the next
+/// one, or on the item itself where it is replaced in place (the two
+/// rightmost boundaries in a committed and an aborted nested
+/// transaction): the leaf's first item by a shorter and a longer item that
+/// sort before it, below the branch key above the leaf (`cr`), by one of
+/// the same size before it and a shorter one after it, or the leaf's
+/// second item (`cp`); or, after deleting the leaf's first item, the
+/// previous leaf's last item by the deleted item itself, by items after it
+/// of the same size and shorter, at or after the branch key the delete
+/// left (`cr`), or by one of the same size before it (`cp`). With
+/// `MDB_DUPFIXED` only items of the same size. Then the leftmost leaf's
+/// first item, shorter (`cp`). Then every new item is looked up, items
+/// between new ones and the old ones are put, and the database is walked.
+///
+/// Where C's `MDB_CURRENT` leaves the new item in a leaf searches do not
+/// look in, the op is `cr`: C deletes the item and puts the new one, which
+/// is what rlmdb's `MDB_CURRENT` must write there. Elsewhere both sides
+/// put with `MDB_CURRENT` in place. `in_place_other_size`: keep the `cp`
+/// ops with items of another size (C 1.0 lacks ITS#8447 and writes those
+/// over the old key, see the 1.0 section of `KNOWN_C_BUGS.md`).
+pub fn current_dup_outside_leaf_script(
+    o: &dyn Oracle,
+    dbflags: u32,
+    item_len: usize,
+    n: usize,
+    in_place_other_size: bool,
+) -> Vec<String> {
+    let fixed = dbflags & MDB_DUPFIXED != 0;
+    let key = b"k";
+    let item = |j: usize| {
+        let mut d = format!("b{j:04}").into_bytes();
+        d.resize(item_len.max(d.len()), b'p');
+        d
+    };
+    let items: Vec<Vec<u8>> = (0..n).map(item).collect();
+    let cat = |b: &[u8], s: &str| [b, s.as_bytes()].concat();
+    let last = |b: &[u8], c: u8| {
+        let mut d = b.to_vec();
+        *d.last_mut().unwrap() = c;
+        d
+    };
+    let firsts = sub_db_leaf_firsts(o, dbflags, key, &items);
+    let k = hex(key);
+    let mut ops: Vec<String> = items
+        .iter()
+        .map(|d| format!("p:{k}:{}:0", hex(d)))
+        .collect();
+    let mut added = Vec::new();
+    let mut between = Vec::new();
+    let mut replace = |ops: &mut Vec<String>, j: usize, d: Vec<u8>, routed: bool| {
+        if !routed && !in_place_other_size && d.len() != item_len {
+            return;
+        }
+        ops.push(format!("g:0:{MDB_GET_BOTH}:{k}:{}", hex(&items[j])));
+        // The other cursor: on the item itself for a replacement in place,
+        // which a delete and insert would move it off.
+        let other = if routed { j + 2 } else { j };
+        if other < n {
+            ops.push(format!("g:1:{MDB_GET_BOTH}:{k}:{}", hex(&items[other])));
+        }
+        if routed {
+            ops.push(format!("cr:0:{k}:{}", hex(&d)));
+        } else {
+            ops.push(format!("cp:0:{k}:{}:{MDB_CURRENT}", hex(&d)));
+        }
+        ops.push(format!("g:0:{MDB_GET_CURRENT}"));
+        added.push(d);
+    };
+    let del = |ops: &mut Vec<String>, j: usize| {
+        ops.push(format!("g:0:{MDB_GET_BOTH}:{k}:{}", hex(&items[j])));
+        ops.push("cd:0:0".into());
+    };
+    let cases: &[usize] = if fixed {
+        &[2, 5, 6, 8]
+    } else {
+        &[0, 1, 2, 3, 4, 5, 6, 7, 8]
+    };
+    for c in (0..firsts.len()).rev() {
+        let f = firsts[c];
+        let prev = &items[f - 1];
+        let end = match firsts.len() - 1 - c {
+            0 => Some("nc"),
+            1 => Some("na"),
+            _ => None,
+        };
+        if end.is_some() {
+            ops.push("nb".into());
+        }
+        match cases[c % cases.len()] {
+            // The first item, by a shorter one before it: below the key.
+            0 => {
+                replace(&mut ops, f, cat(&prev[..5], "q"), true);
+                between.push(cat(&prev[..5], "r"));
+            }
+            // The first item, by a longer one before it: below the key.
+            1 => replace(&mut ops, f, cat(prev, "q"), true),
+            // The first item, by one of the same size before it.
+            2 => replace(&mut ops, f, last(&items[f], b'o'), false),
+            // The first item, by a shorter one after it.
+            3 => replace(&mut ops, f, cat(&items[f][..5], "q"), false),
+            // The second item, shorter.
+            4 => {
+                if f + 2 < n {
+                    replace(&mut ops, f + 1, cat(&items[f][..5], "q"), false);
+                }
+            }
+            // The previous leaf's last item, by the deleted first item.
+            5 => {
+                del(&mut ops, f);
+                replace(&mut ops, f - 1, items[f].clone(), true);
+            }
+            // ... by one of the same size after it.
+            6 => {
+                del(&mut ops, f);
+                replace(&mut ops, f - 1, last(&items[f], b'q'), true);
+                between.push(items[f].clone());
+            }
+            // ... by a shorter one after it.
+            7 => {
+                del(&mut ops, f);
+                replace(&mut ops, f - 1, cat(&items[f][..5], "q"), true);
+            }
+            // ... by one of the same size before it.
+            _ => {
+                del(&mut ops, f);
+                replace(&mut ops, f - 1, last(prev, b'q'), false);
+            }
+        }
+        if let Some(end) = end {
+            ops.push(end.into());
+            ops.push(format!("g:0:{MDB_GET_CURRENT}"));
+        }
+    }
+    if !fixed {
+        // The leftmost leaf's first item, shorter.
+        replace(&mut ops, 0, items[0][..4].to_vec(), false);
+    }
+    for d in &added {
+        ops.push(format!("g:1:{MDB_GET_BOTH}:{k}:{}", hex(d)));
+    }
+    for d in &between {
+        ops.push(format!("p:{k}:{}:0", hex(d)));
+    }
+    ops.push(format!("g:0:{MDB_FIRST}"));
+    ops.extend(std::iter::repeat_n(
+        format!("g:0:{MDB_NEXT}"),
+        n + between.len(),
+    ));
+    ops
+}
+
 /// What one case of [`single_item_on_overflow_pages`] does to the key
 /// `k` in a write transaction: an op on `db` (cursor `c` is on `k`'s item)
 /// and its result.

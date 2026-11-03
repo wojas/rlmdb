@@ -389,6 +389,47 @@ fn c10_single_item_on_overflow_pages() {
     }
 }
 
+/// `KNOWN_C_BUGS.md` #56: `MDB_CURRENT` replacing a duplicate in a sub-DB
+/// tree where C's in-place replacement leaves the new item in a leaf
+/// searches do not look in
+/// ([`differential::current_dup_outside_leaf_script`], 320 items of a 24th
+/// of the page, at least 8 bytes). rlmdb deletes and inserts there and
+/// must leave the file C 1.0's `mdb_cursor_del` + `mdb_cursor_put` leave,
+/// page for page; the other replacements are C's `MDB_CURRENT` in place,
+/// only with items of the same size (C 1.0 writes others over the old key,
+/// ITS#8447 in the 1.0 section of `KNOWN_C_BUGS.md`). At 256 B, 1 KiB,
+/// 4 KiB and 64 KiB pages, in an `MDB_DUPSORT` and an `MDB_DUPFIXED` DB,
+/// also with a dirty limit of 16 pages on the Rust side.
+#[test]
+fn diff10_current_dup_outside_leaf() {
+    for ps in [256, 1024, 4096, 65536] {
+        let maxkey = nodemax(ps) - 56;
+        let item_len = (ps / 24).min(maxkey - 1).max(8);
+        for dbflags in [MDB_DUPSORT, MDB_DUPSORT | MDB_DUPFIXED] {
+            let p = Profile::new(dbflags, 0);
+            for dirty_limit in [None, Some(16)] {
+                let o = C10 {
+                    dirty_limit,
+                    ..C10::new(ps)
+                };
+                let ops = differential::current_dup_outside_leaf_script(
+                    &o, dbflags, item_len, 320, false,
+                );
+                assert!(
+                    ops.iter().filter(|op| op.starts_with("cr:")).count() >= 3,
+                    "page size {ps}, flags {dbflags:#x}"
+                );
+                let tag = format!("current-outside-{ps}-{dbflags:#x}-dirty{dirty_limit:?}");
+                assert_eq!(
+                    differential::run_round(&o, &p, 2, Ops::List(ops), &tag),
+                    Round::Same,
+                    "{tag}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn diff10_intdup() {
     run_profiles(

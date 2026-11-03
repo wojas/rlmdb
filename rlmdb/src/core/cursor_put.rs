@@ -13,8 +13,10 @@
 //!    ([`RwTxn::put_current`]), or for `MDB_DUPSORT` prepare the node that
 //!    will hold the duplicates ([`RwTxn::dup_prepare`]): convert a single
 //!    item into a sub-page, grow a sub-page, or promote it to a sub-DB;
-//!    where C's in-place replacement goes wrong, delete the item and
-//!    insert the new one instead ([`RwTxn::replace_current`]);
+//!    where C's in-place replacement goes wrong (also a duplicate that
+//!    would end up in the wrong leaf of a sub-DB,
+//!    [`RwTxn::current_dup_outside_leaf`]), delete the item and insert the
+//!    new one instead ([`RwTxn::replace_current`]);
 //! 4. insert the node, splitting the leaf if it is full
 //!    ([`RwTxn::insert_leaf_node`]), and fix up the other cursors;
 //! 5. for duplicates, store the data item(s) through the sub-cursor
@@ -180,11 +182,100 @@ impl<'env> RwTxn<'env> {
         Ok(!node.is_dupdata())
     }
 
+    /// For `MDB_CURRENT` on a duplicate in a sub-DB tree: would C's
+    /// replacement leave the new item `item` where searches do not look
+    /// for it (`KNOWN_C_BUGS.md` #56)?
+    ///
+    /// C keeps the new item in the old one's leaf, at the old one's index
+    /// (`_mdb_cursor_put`, `current:`): in place for an item of the same
+    /// size, then `fix_parent`, which makes it the branch key above the
+    /// leaf if it is the leaf's first; for one of another size (0.9's
+    /// ITS#8447 path, `new_ksize`) by `mdb_node_del` and `mdb_node_add` at
+    /// the same index, without `fix_parent`. The branch keys around a leaf
+    /// need not be its items (deleting a leaf's first item leaves the key
+    /// above it), so the new item can sort before the branch key above its
+    /// leaf (the leaf's first item replaced by one of another size), or at
+    /// or after the next leaf's branch key (the leaf's last item, any size,
+    /// `MDB_DUPFIXED` too). Searches then go to the neighbouring leaf. The
+    /// keys are compared as `mdb_node_search` compares them, with the
+    /// sub-DB's (duplicate) comparator.
+    fn current_dup_outside_leaf(&self, mc: CRef, item: &[u8]) -> Result<bool> {
+        if mc.sub {
+            return Ok(false);
+        }
+        let main = self.top_page(mc)?;
+        if main.is_leaf2() {
+            return Ok(false);
+        }
+        let Some(node) = main.node(self.cur(mc).ki_top()) else {
+            return Ok(false);
+        };
+        if !node.is_dupdata() || !node.is_subdata() {
+            return Ok(false); // a single item or a sub-page: one leaf
+        }
+        let mx = CRef::sub(mc.slot);
+        let x = self.cur(mx);
+        if !x.is_init() || x.subp || x.top == 0 {
+            return Ok(false); // a single leaf: no branch keys
+        }
+        let leaf = self.top_page(mx)?;
+        let (ki, num_keys) = (x.ki_top(), leaf.num_keys());
+        if ki >= num_keys {
+            return Ok(false);
+        }
+        let cmp = self.cmp_of(mx);
+        if ki == 0 && !leaf.is_leaf2() {
+            let old = leaf.node(0).ok_or_else(corrupted)?;
+            if old.key_size() != item.len() {
+                // The branch key above the leaf: slot 0 of a branch page
+                // has none, so it is that of the nearest level not on
+                // slot 0 (as `fix_parent` finds it).
+                if let Some(level) = (0..x.top).rev().find(|&l| x.ki[l] != 0) {
+                    let i = usize::from(x.ki[level]);
+                    if self.cmp_branch_key(mx, level, i, item, cmp)? == Ordering::Less {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        if ki + 1 == num_keys {
+            // The branch key of the next leaf: the nearest one right of the
+            // cursor's path.
+            for level in (0..x.top).rev() {
+                let next = usize::from(x.ki[level]) + 1;
+                if next < self.page_of(mx, level)?.num_keys() {
+                    let ord = self.cmp_branch_key(mx, level, next, item, cmp)?;
+                    return Ok(ord != Ordering::Less);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Compares `key` with the key of node `i` of the branch page of `c` at
+    /// `level`, as `mdb_node_search` does.
+    fn cmp_branch_key(
+        &self,
+        c: CRef,
+        level: usize,
+        i: usize,
+        key: &[u8],
+        cmp: Comparator,
+    ) -> Result<Ordering> {
+        let branch = self.page_of(c, level)?;
+        if !branch.is_branch() {
+            return Err(corrupted());
+        }
+        let node = branch.node(i).ok_or_else(corrupted)?;
+        let k = node.key().ok_or_else(corrupted)?;
+        Ok(cmp.compare_in_page(key, k, node.key_tail()))
+    }
+
     /// `MDB_CURRENT` as `lmdb.h` describes it for an item of another size:
     /// delete the item under `mc`, then put `data` under `key` through
     /// `mc` (which ends on it), as `mdb_cursor_del` + `mdb_cursor_put`
     /// would. For the replacements C gets wrong in place
-    /// (`KNOWN_C_BUGS.md` #15, #38). Once the delete is done a failed
+    /// (`KNOWN_C_BUGS.md` #15, #38, #56). Once the delete is done a failed
     /// insert leaves the transaction half changed, so it fails.
     fn replace_current(&mut self, mc: CRef, key: &[u8], data: PutData<'_>) -> Result<()> {
         self.del_at(mc, 0)?;
@@ -320,6 +411,22 @@ impl<'env> RwTxn<'env> {
             // key's first item of that size does (KNOWN_C_BUGS.md #38).
             self.replace_current(mc, key, data)?;
             return Ok(0);
+        }
+        // C's sub-cursor put with MDB_CURRENT, of one item (MDB_MULTIPLE
+        // with one item too; not MDB_RESERVE, which has no bytes).
+        let current = dupsort && flags & (MDB_CURRENT | MDB_APPENDDUP) == MDB_CURRENT;
+        let item = data.bytes.get(..data.size);
+        if let Some(item) = item.filter(|_| current && data.count == 1) {
+            if self.current_dup_outside_leaf(mc, item)? {
+                // C would keep the new duplicate in a leaf of the sub-DB
+                // where searches do not look for it: MDB_GET_BOTH would not
+                // find it, and later puts would land out of order. Delete
+                // and insert instead, before anything else, as
+                // mdb_cursor_del and mdb_cursor_put would (KNOWN_C_BUGS.md
+                // #56).
+                self.replace_current(mc, key, PutData::bytes(item))?;
+                return Ok(usize::from(flags & MDB_MULTIPLE != 0));
+            }
         }
 
         // Cursor is positioned, check for room in the dirty list.
