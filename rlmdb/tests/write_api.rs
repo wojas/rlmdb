@@ -767,3 +767,213 @@ fn current_outside_leaf(
         assert!(found, "{shape}: {:?} not found", String::from_utf8_lossy(d));
     }
 }
+
+/// `KNOWN_C_BUGS.md` row 58: `MDB_CURRENT` with a key other than the
+/// cursor's. C writes the caller's key over the node where it rewrites it
+/// (data of another size, or too large for the overflow pages in place),
+/// leaving the leaf unsorted, and keeps the old key where it overwrites the
+/// data in place; rlmdb keeps the cursor's key for every size. Wrong keys
+/// that sort before and after every key, next to the item, equal to a
+/// neighbour's and longer than any; data of the same size, larger, smaller,
+/// on overflow pages (in place and not) and reserved; then puts of keys
+/// between the items, which C would place by the unsorted leaf. Both
+/// formats, small 1.0 pages too.
+#[test]
+fn current_with_another_key() {
+    let shapes = [
+        (Format::V09, None),
+        (Format::V10, None),
+        (Format::V10, Some(256)),
+        (Format::V10, Some(1024)),
+    ];
+    for (format, ps) in shapes {
+        for flags in [DatabaseFlags::empty(), DatabaseFlags::DUP_SORT] {
+            current_other_key(format, ps, flags);
+        }
+    }
+}
+
+/// One shape of [`current_with_another_key`].
+fn current_other_key(format: Format, ps: Option<usize>, flags: DatabaseFlags) {
+    use std::collections::BTreeMap;
+    let shape = format!("{format:?}, page size {ps:?}, flags {flags:?}");
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Environment::builder();
+    b.format(format)
+        .max_dbs(4)
+        .map_size(64 << 20)
+        .flags(EnvironmentFlags::NO_SYNC);
+    if let Some(ps) = ps {
+        b.page_size(ps);
+    }
+    let env = b.open(dir.path()).unwrap();
+    let psize = env.stat().unwrap().page_size as usize;
+    let maxkey = env.max_key_size();
+    let dupsort = flags.contains(DatabaseFlags::DUP_SORT);
+    let key = |i: usize| format!("k{i:04}").into_bytes();
+    let val = |len: usize, seed: usize| -> Vec<u8> {
+        (0..len).map(|b| (b * 7 + seed * 13 + 1) as u8).collect()
+    };
+    // Enough keys of 8-byte values for several full leaves.
+    let n = (4 * psize / 24).max(60);
+    let mut model: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
+    let mut txn = env.begin_rw_txn().unwrap();
+    let db = txn
+        .create_db(Some("d"), flags | DatabaseFlags::CREATE)
+        .unwrap();
+    for i in 0..n {
+        txn.put(db, &key(i), &val(8, i), WriteFlags::empty())
+            .unwrap();
+        model.insert(key(i), vec![val(8, i)]);
+    }
+    // Every seventh key gets duplicates (on a sub-page) in a DUPSORT DB.
+    let dup_items = |i: usize| -> Vec<Vec<u8>> {
+        [10u8, 20, 30]
+            .iter()
+            .map(|&d| [&[b'd', d][..], &val(6, i)].concat())
+            .collect()
+    };
+    if dupsort {
+        for i in (3..n).step_by(7) {
+            txn.del(db, &key(i), None).unwrap();
+            for d in dup_items(i) {
+                txn.put(db, &key(i), &d, WriteFlags::empty()).unwrap();
+            }
+            model.insert(key(i), dup_items(i));
+        }
+    }
+    let c = txn.open_cursor(db).unwrap();
+    // An empty key fails as in C (the size check comes first).
+    txn.cursor_get(c, Some(&key(1)), None, CursorOp::Set)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mdb(txn
+            .cursor_put(c, b"", &val(8, 0), WriteFlags::CURRENT)
+            .unwrap_err()),
+        MdbError::BadValSize,
+        "{shape}"
+    );
+    let wrong_keys = |i: usize| -> Vec<Vec<u8>> {
+        let mut between = key(i);
+        between.push(b'x');
+        vec![
+            b"a".to_vec(),
+            b"zz".to_vec(),
+            between,
+            key(i + 1),
+            key(i - 1),
+            vec![b'w'; maxkey],
+        ]
+    };
+    // Data sizes: the same, larger, smaller, then (plain DB) on overflow
+    // pages, overwritten there in place, and back inline; for DUPSORT the
+    // largest item (it does not fit a node with 256-byte pages,
+    // KNOWN_C_BUGS.md row 38).
+    let sizes: Vec<usize> = if dupsort {
+        vec![8, 40, 2, maxkey, 8]
+    } else {
+        vec![8, 60, 2, 3 * psize, 3 * psize - 100, 8]
+    };
+    let mut step = 0;
+    let mut replace =
+        |txn: &mut rlmdb::RwTxn<'_>, i: usize, wrong: &[u8], data: &[u8], reserve: bool| {
+            step += 1;
+            let what = format!(
+                "{shape}: key {i} by {:?}.. ({} bytes), {} bytes of data, step {step}",
+                String::from_utf8_lossy(&wrong[..wrong.len().min(6)]),
+                wrong.len(),
+                data.len()
+            );
+            if reserve {
+                let buf = txn
+                    .cursor_reserve(c, wrong, data.len(), WriteFlags::CURRENT)
+                    .unwrap();
+                buf.copy_from_slice(data);
+            } else {
+                txn.cursor_put(c, wrong, data, WriteFlags::CURRENT).unwrap();
+            }
+            let cur = txn
+                .cursor_get(c, None, None, CursorOp::GetCurrent)
+                .unwrap()
+                .map(|(k, d)| (k.to_vec(), d.to_vec()));
+            assert_eq!(cur, Some((key(i), data.to_vec())), "{what}: the cursor");
+            what
+        };
+    for i in (1..n - 1).step_by(n / 9) {
+        if model[&key(i)].len() > 1 {
+            continue; // duplicates: below
+        }
+        for wrong in wrong_keys(i) {
+            for (s, &len) in sizes.iter().enumerate() {
+                let data = val(len, i + s);
+                txn.cursor_get(c, Some(&key(i)), None, CursorOp::Set)
+                    .unwrap()
+                    .unwrap();
+                let reserve = !dupsort && s == 0;
+                let what = replace(&mut txn, i, &wrong, &data, reserve);
+                model.insert(key(i), vec![data.clone()]);
+                assert_eq!(
+                    txn.get(db, &key(i)).unwrap(),
+                    Some(&data[..]),
+                    "{what}: get"
+                );
+                let other = model.get(&wrong).map(|v| v[0].clone());
+                assert_eq!(
+                    txn.get(db, &wrong).unwrap().map(<[u8]>::to_vec),
+                    other,
+                    "{what}: get of the other key"
+                );
+            }
+        }
+    }
+    if dupsort {
+        // A duplicate replaced through a wrong key: the key stays, also
+        // where the sub-page is rebuilt (an item of another size).
+        // The middle one of the three is replaced by items between the
+        // other two: of the same size, larger and smaller.
+        for i in (3..n).step_by(7).take(4) {
+            let news = [
+                (&b"a"[..], [&[b'd', 20][..], &val(6, i + 50)].concat()),
+                (b"zz", [&[b'd', 21][..], &val(12, i)].concat()),
+                (b"k", vec![b'd', 22]),
+            ];
+            for (wrong, nw) in news {
+                let mid = model[&key(i)][1].clone();
+                txn.cursor_get(c, Some(&key(i)), Some(&mid), CursorOp::GetBoth)
+                    .unwrap()
+                    .unwrap();
+                let what = replace(&mut txn, i, wrong, &nw, false);
+                let dups = model.get_mut(&key(i)).unwrap();
+                dups[1] = nw;
+                assert!(dups.is_sorted(), "{what}: the test's items");
+                assert_eq!(txn.get(db, wrong).unwrap(), None, "{what}: get");
+            }
+        }
+    }
+    txn.close_cursor(c);
+    txn.commit().unwrap();
+    let pairs = |m: &BTreeMap<Vec<u8>, Vec<Vec<u8>>>| -> Vec<common::Pair> {
+        m.iter()
+            .flat_map(|(k, vs)| vs.iter().map(move |v| (k.clone(), v.clone())))
+            .collect()
+    };
+    common::verify_db(&env, db, &pairs(&model));
+    // Keys between the items land in order (C's unsorted leaf would send
+    // them elsewhere).
+    let mut txn = env.begin_rw_txn().unwrap();
+    for i in (0..n).step_by(3) {
+        let mut k = key(i);
+        k.push(b'm');
+        txn.put(db, &k, &val(8, i), WriteFlags::empty()).unwrap();
+        model.insert(k, vec![val(8, i)]);
+    }
+    txn.commit().unwrap();
+    common::verify_db(&env, db, &pairs(&model));
+    if format == Format::V09 {
+        if let Some(c) = common::c_tools() {
+            let out = c.peer(&["check-freelist", dir.path().to_str().unwrap()]);
+            assert_eq!(out.code, 0, "{shape}: {}\n{}", out.stdout, out.stderr);
+        }
+    }
+}

@@ -146,6 +146,14 @@ fn rust_step(
             &unhex(f[3]),
             WriteFlags::CURRENT,
         )),
+        // C puts with the cursor's key, Rust with another one, which rlmdb's
+        // MDB_CURRENT replaces by the cursor's (KNOWN_C_BUGS.md row 58).
+        "cw" => code(&txn.cursor_put(
+            cur[f[1].parse::<usize>().unwrap()],
+            &unhex(f[3]),
+            &unhex(f[4]),
+            WriteFlags::CURRENT,
+        )),
         "g" => {
             let key = f.get(3).map(|k| unhex(k));
             let data = f.get(4).map(|d| unhex(d));
@@ -446,9 +454,23 @@ impl Gen<'_> {
         // corrupts otherwise (KNOWN_C_BUGS.md row 13).
         let f: Vec<&str> = op.split(':').collect();
         if f[0] == "cp" && f[4] == MDB_CURRENT.to_string() {
-            let on_item = prev.is_some_and(|(_, l)| l.contains(&format!("| c{} rc=0 ", f[1])));
-            if !on_item {
+            let current = prev
+                .filter(|(_, l)| l.contains(&format!("| c{} rc=0 ", f[1])))
+                .and_then(|(_, l)| item_of(l, f[1].parse().ok()?));
+            let Some((ck, _)) = current else {
                 return format!("{}:0", f[..4].join(":"));
+            };
+            // The generated key, of the length of the cursor's: where it is
+            // another key, C puts the cursor's (C would write the other over
+            // the node where it rewrites it), Rust the other one, which
+            // rlmdb's MDB_CURRENT replaces by the cursor's (KNOWN_C_BUGS.md
+            // row 58). Of that length, the spill estimates (C counts the
+            // caller's key) are the same.
+            let mut w = unhex(f[2]);
+            w.resize(ck.len() / 2, b'w');
+            let w = hex(&w);
+            if w != ck {
+                return format!("cw:{}:{ck}:{w}:{}", f[1], f[3]);
             }
         }
         op
@@ -964,6 +986,188 @@ pub fn current_dup_outside_leaf_script(
         format!("g:0:{MDB_NEXT}"),
         n + between.len(),
     ));
+    ops
+}
+
+/// A script (for [`Ops::List`], two cursors, a DB with `dbflags`,
+/// `KNOWN_C_BUGS.md` row 58) of `MDB_CURRENT` puts with a key that is not
+/// the cursor's, for an oracle of `ps`-byte pages with `me_nodemax`
+/// `nodemax` and maximum key (and duplicate) size `maxkey`, keys padded
+/// to an even length in nodes if `even_keys` (1.0).
+///
+/// Where C keeps the old key, both sides put with the other key (`cp`):
+/// data of the same size in the node; data on overflow pages that fits the
+/// pages it replaces (overwritten in place, as they are this
+/// transaction's); a duplicate of the same size on a sub-page or in a
+/// sub-DB of one leaf (C does not touch the key there). Where C would write
+/// the other key over the node (data of another size, to or from overflow
+/// pages, onto more overflow pages; another size for a key's only
+/// `MDB_DUPSORT` item), C puts with the cursor's key and Rust with the
+/// other one (`cw`): rlmdb must write what C writes for a caller that
+/// passes the right key. The other keys sort before and after every key,
+/// right after the cursor's, are a neighbour's, or as long as keys may be;
+/// the other cursor is on the same item or the next key, and looks the
+/// other key up afterwards. Two keys are replaced in nested transactions,
+/// one committed, one aborted; then keys between the old ones are put and
+/// the database is walked.
+pub fn current_other_key_script(
+    dbflags: u32,
+    ps: usize,
+    nodemax: usize,
+    maxkey: usize,
+    even_keys: bool,
+) -> Vec<String> {
+    const N: usize = 120;
+    const KLEN: usize = 12;
+    let dupsort = dbflags & MDB_DUPSORT != 0;
+    let fixed = dbflags & MDB_DUPFIXED != 0;
+    let knode = if even_keys { (KLEN + 1) & !1 } else { KLEN };
+    let key = |i: usize| {
+        let mut k = format!("k{i:04}").into_bytes();
+        k.resize(KLEN, b'q');
+        k
+    };
+    let val = |len: usize, seed: usize| -> Vec<u8> {
+        (0..len).map(|b| (b * 7 + seed * 13 + 1) as u8).collect()
+    };
+    // Items of a 40th of the page: a few dozen in a leaf.
+    let vs = (ps / 40).clamp(4, maxkey - 2);
+    // A larger item for a key's only MDB_DUPSORT item: within the maximum
+    // item size and a node with the key (KNOWN_C_BUGS.md row 38 otherwise).
+    let larger_dup = (2 * vs).min(maxkey).min(nodemax - 8 - knode);
+    // Duplicates: `tag` and `j` (2 bytes) first, so that other filler bytes
+    // keep their place.
+    let dup = |tag: u8, j: usize, seed: usize| -> Vec<u8> {
+        [&[tag, (j >> 8) as u8, j as u8][..], &val(vs - 3, seed)].concat()
+    };
+    let subpage_key = |i: usize| dupsort && i % 5 == 2;
+    // A sub-DB of one leaf: past the sub-page's limit (about half a page),
+    // three quarters of a leaf.
+    let hdr = if even_keys { 24 } else { 16 };
+    let item_space = if fixed { vs } else { ((8 + vs + 1) & !1) + 2 };
+    let n_sub = 3 * (ps - hdr) / 4 / item_space;
+    let sub_key = |i: usize| dupsort && i == N / 2 + 1;
+    let k = |i: usize| hex(&key(i));
+    let mut ops = Vec::new();
+    for i in 0..N {
+        if sub_key(i) {
+            for j in 0..n_sub {
+                ops.push(format!("p:{}:{}:0", k(i), hex(&dup(b'e', j, j))));
+            }
+        } else if subpage_key(i) {
+            for j in [10, 20, 30] {
+                ops.push(format!("p:{}:{}:0", k(i), hex(&dup(b'd', j, i))));
+            }
+        } else {
+            ops.push(format!("p:{}:{}:0", k(i), hex(&val(vs, i))));
+        }
+    }
+    let mut wrong_n = 0;
+    let mut wrong = |i: usize| -> String {
+        wrong_n += 1;
+        let mut between = key(i);
+        between.push(b'x');
+        let neighbour = if i + 1 < N { key(i + 1) } else { key(i - 1) };
+        hex(&match wrong_n % 5 {
+            0 => b"a".to_vec(),
+            1 => b"zz".to_vec(),
+            2 => between,
+            3 => neighbour,
+            _ => vec![b'w'; maxkey],
+        })
+    };
+    // Replaces the item of key i the cursors are positioned on (`pos`: the
+    // `g` op's tail) by `d`, with the other key in both (`cp`) or on the
+    // Rust side only (`cw`); the other cursor on the same item or the next
+    // key.
+    let mut n = 0;
+    let mut replace = |ops: &mut Vec<String>, i: usize, pos: &str, d: &[u8], in_place: bool| {
+        n += 1;
+        ops.push(format!("g:0:{pos}"));
+        if n % 2 == 0 && i + 1 < N {
+            ops.push(format!("g:1:{MDB_SET}:{}", k(i + 1)));
+        } else {
+            ops.push(format!("g:1:{pos}"));
+        }
+        let w = wrong(i);
+        if in_place {
+            ops.push(format!("cp:0:{w}:{}:{MDB_CURRENT}", hex(d)));
+        } else {
+            ops.push(format!("cw:0:{}:{w}:{}", k(i), hex(d)));
+        }
+        ops.push(format!("g:0:{MDB_GET_CURRENT}"));
+        ops.push(format!("g:1:{MDB_SET}:{w}"));
+    };
+    // Keys across the DB (in a DUPSORT DB a third of them with a sub-page),
+    // the last one, the sub-DB's.
+    let picks: Vec<usize> = (0..12)
+        .map(|c| c * N / 12 + c % 3)
+        .chain([N - 1, N / 2 + 1])
+        .collect();
+    for (c, &i) in picks.iter().enumerate() {
+        let end = match picks.len() - c {
+            3 => Some("nc"),
+            4 => Some("na"),
+            _ => None,
+        };
+        if end.is_some() {
+            ops.push("nb".into());
+        }
+        let set = format!("{MDB_SET}:{}", k(i));
+        if sub_key(i) {
+            for j in [0, n_sub / 2, n_sub - 1] {
+                let pos = format!("{MDB_GET_BOTH}:{}:{}", k(i), hex(&dup(b'e', j, j)));
+                replace(&mut ops, i, &pos, &dup(b'e', j, 900 + j), true);
+            }
+        } else if subpage_key(i) {
+            for j in [20, 10, 30] {
+                let pos = format!("{MDB_GET_BOTH}:{}:{}", k(i), hex(&dup(b'd', j, i)));
+                replace(&mut ops, i, &pos, &dup(b'd', j, 500 + i), true);
+            }
+        } else if dupsort {
+            replace(&mut ops, i, &set, &val(vs, i + 1), true);
+            if !fixed {
+                if larger_dup > vs {
+                    replace(&mut ops, i, &set, &val(larger_dup, i + 2), false);
+                    replace(&mut ops, i, &set, &val(larger_dup, i + 3), true);
+                }
+                replace(&mut ops, i, &set, &val(vs / 2, i + 4), false);
+            }
+        } else {
+            let steps = [
+                (vs, true),
+                (2 * vs, false),
+                (2 * vs, true),
+                (vs / 2, false),
+                // To overflow pages, three of them.
+                (2 * ps + 50, false),
+                // In place on them: as many pages, fewer.
+                (2 * ps + 10, true),
+                (ps + 100, true),
+                // More pages: new ones.
+                (4 * ps, false),
+                // Back into the node.
+                (vs, false),
+            ];
+            for (s, (len, in_place)) in steps.into_iter().enumerate() {
+                replace(&mut ops, i, &set, &val(len, i + s), in_place);
+            }
+        }
+        if let Some(end) = end {
+            ops.push(end.into());
+            ops.push(format!("g:0:{MDB_GET_CURRENT}"));
+        }
+    }
+    let mut more = 0;
+    for i in (0..N).step_by(3) {
+        let mut b = key(i);
+        b.push(b'm');
+        ops.push(format!("p:{}:{}:0", hex(&b), hex(&val(vs, i))));
+        more += 1;
+    }
+    ops.push(format!("g:0:{MDB_FIRST}"));
+    let items = N + more + if dupsort { n_sub + 2 * (N / 5) } else { 0 };
+    ops.extend(std::iter::repeat_n(format!("g:0:{MDB_NEXT}"), items));
     ops
 }
 
@@ -1869,7 +2073,7 @@ pub fn run_profile(o: &dyn Oracle, p: Profile, seed: u64, rounds: usize, n: usiz
 fn cursor_of(op: &str) -> Option<usize> {
     let f: Vec<&str> = op.split(':').collect();
     match f[0] {
-        "g" | "cp" | "cd" | "cr" => f[1].parse().ok(),
+        "g" | "cp" | "cd" | "cr" | "cw" => f[1].parse().ok(),
         _ => None,
     }
 }

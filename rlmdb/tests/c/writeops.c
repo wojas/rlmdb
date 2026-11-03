@@ -28,6 +28,12 @@
  *                            on it: what rlmdb's MDB_CURRENT does where C's
  *                            in-place replacement goes wrong (the Rust side
  *                            of the harness runs it as one MDB_CURRENT put)
+ *   cw:<n>:<k>:<w>:<d>       mdb_cursor_put of k/d with MDB_CURRENT on cursor
+ *                            n, k being its current key; <w> is ignored: the
+ *                            Rust side of the harness puts with key w, which
+ *                            rlmdb's MDB_CURRENT replaces by the cursor's
+ *                            (KNOWN_C_BUGS.md row 58; C writes w where it
+ *                            rewrites the node)
  *   g:<n>:<opnum>[:<k>[:<d>]] mdb_cursor_get on cursor n (MDB_cursor_op number)
  *   nb                       begin a nested txn of the current one and open
  *                            <ncursors> cursors in it (they become current)
@@ -241,6 +247,10 @@ int main(int argc, char **argv)
 			rc = mdb_cursor_del(CUR(atoi(f[1])), 0);
 			if (!rc)
 				rc = mdb_cursor_put(CUR(atoi(f[1])), &key, &data, 0);
+		} else if (!strcmp(f[0], "cw") && nf == 5) {
+			key.mv_data = kbuf; key.mv_size = unhex(f[2], kbuf);
+			data.mv_data = dbuf; data.mv_size = unhex(f[4], dbuf);
+			rc = mdb_cursor_put(CUR(atoi(f[1])), &key, &data, MDB_CURRENT);
 		} else if (!strcmp(f[0], "g") && nf >= 3) {
 			if (nf >= 4) { key.mv_data = kbuf; key.mv_size = unhex(f[3], kbuf); }
 			if (nf >= 5) { data.mv_data = dbuf; data.mv_size = unhex(f[4], dbuf); }

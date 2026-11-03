@@ -1378,8 +1378,9 @@ impl RwCursor<'_> {
     /// `mdb_cursor_put`: store `data` under `key` and leave the cursor on
     /// the new item. Flags as [`RwTxn::put`], plus
     /// [`WriteFlags::CURRENT`]: replace the item at the cursor position
-    /// (the key must match; for `DUP_SORT` the new data must sort like the
-    /// old).
+    /// (the key must match, and one that does not is ignored: the item
+    /// keeps the cursor's key, `KNOWN_C_BUGS.md` row 58; for `DUP_SORT` the
+    /// new data must sort like the old).
     pub fn put(&mut self, key: &[u8], data: &[u8], flags: WriteFlags) -> Result<()> {
         self.txn.put(self.id, key, data, flags)
     }

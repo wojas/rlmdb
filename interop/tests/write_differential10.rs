@@ -430,6 +430,47 @@ fn diff10_current_dup_outside_leaf() {
     }
 }
 
+/// `KNOWN_C_BUGS.md` row 58: `MDB_CURRENT` with a key that is not the
+/// cursor's ([`differential::current_other_key_script`]). Where C 1.0 keeps
+/// the old key (data of the same size, overflow pages overwritten in
+/// place, duplicates of the same size) both sides put with the other key;
+/// where it would write it over the node, C puts with the cursor's key and
+/// Rust with the other one: rlmdb keeps the cursor's key and must leave
+/// the file C 1.0 leaves for the right key, page for page. At 256 B, 1 KiB,
+/// 4 KiB and 64 KiB pages, in a plain, an `MDB_DUPSORT` and an
+/// `MDB_DUPFIXED` DB, also with a dirty limit of 16 pages on the Rust side.
+#[test]
+fn diff10_current_other_key() {
+    for ps in [256, 1024, 4096, 65536] {
+        let maxkey = nodemax(ps) - 56;
+        for dbflags in [0, MDB_DUPSORT, MDB_DUPSORT | MDB_DUPFIXED] {
+            let p = Profile::new(dbflags, 0);
+            let ops =
+                differential::current_other_key_script(dbflags, ps, nodemax(ps), maxkey, true);
+            let current = format!(":{MDB_CURRENT}");
+            assert!(
+                ops.iter()
+                    .filter(|op| op.starts_with("cp:") && op.ends_with(&current))
+                    .count()
+                    >= 10,
+                "page size {ps}, flags {dbflags:#x}"
+            );
+            for dirty_limit in [None, Some(16)] {
+                let o = C10 {
+                    dirty_limit,
+                    ..C10::new(ps)
+                };
+                let tag = format!("current-other-key-{ps}-{dbflags:#x}-dirty{dirty_limit:?}");
+                assert_eq!(
+                    differential::run_round(&o, &p, 2, Ops::List(ops.clone()), &tag),
+                    Round::Same,
+                    "{tag}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn diff10_intdup() {
     run_profiles(
