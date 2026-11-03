@@ -5,8 +5,9 @@
 //! `NO_LOCK` handles, and copies. The other process is this test binary
 //! run again ([`Peer`]). C 0.9 reads and audits the 0.9 files the tests
 //! leave (C 1.0 does the same for 1.0 files in `rlmdb-capi/tests` and
-//! `interop`); C 1.0 behaves differently in four places, which the tests
-//! name (`KNOWN_C_BUGS.md` rows 67 to 70).
+//! `interop`); C 1.0 behaves differently in five places, which the tests
+//! name (`KNOWN_C_BUGS.md` rows 67 to 71). Two-phase commit: a prepared
+//! transaction's commit ends the flag as a plain commit does.
 
 mod common;
 
@@ -571,5 +572,95 @@ fn others_wait_for_the_first_commit() {
         assert_eq!(peer.ask("close"), "ok");
         drop(peer);
         c_reads(dir.path(), format, "a=1 c=3 d=4 e=5 f=6 g=7");
+    }
+}
+
+/// Two-phase commit (`RwTxn::prepare`, `PreparedTxn::commit`): the
+/// prepared commit is the first commit, which ends the flag and shares the
+/// lock as a plain commit does (C reaches the same code from
+/// `mdb_txn_commit` of a prepared transaction); the prepare alone ends
+/// nothing, and a prepared transaction that is aborted keeps the flag.
+/// The prepared commit can then be rolled back, back to the snapshot the
+/// flag stepped back to.
+#[test]
+fn prepared_commit_ends_the_flag() {
+    for format in FORMATS {
+        let dir = tempfile::tempdir().unwrap();
+        two_commits(dir.path(), format);
+        let env = open(dir.path(), format, EnvironmentFlags::PREV_SNAPSHOT).unwrap();
+        let mut peer = Peer::start(dir.path(), format);
+        peer.send(&format!("open {}", EnvironmentFlags::empty().bits()));
+        assert!(peer.waits());
+
+        let mut txn = env.begin_rw_txn().unwrap();
+        txn.put(Dbi::MAIN, b"x", b"y", WriteFlags::empty()).unwrap();
+        txn.prepare().unwrap().abort();
+        assert!(has_prev(&env));
+        assert!(peer.waits());
+
+        let mut txn = env.begin_rw_txn().unwrap();
+        txn.put(Dbi::MAIN, b"c", b"3", WriteFlags::empty()).unwrap();
+        let prepared = txn.prepare().unwrap();
+        assert_eq!(prepared.id(), 2);
+        assert!(has_prev(&env));
+        assert!(
+            peer.waits(),
+            "{format:?}: the peer opened after the prepare"
+        );
+        prepared.commit().unwrap();
+        assert!(!has_prev(&env));
+        assert_eq!(peer.wait(), "ok");
+        assert_eq!(peer.ask("get"), "a=1 c=3 @2");
+        assert_eq!(contents(&env), ("a=1 c=3".into(), 2));
+        assert_eq!(peer.ask("close"), "ok");
+        drop(peer);
+
+        env.rollback(2).unwrap();
+        assert_eq!(contents(&env), ("a=1".into(), 1));
+        put(&env, "d", "4");
+        assert_eq!(contents(&env), ("a=1 d=4".into(), 2));
+        drop(env);
+        c_reads(dir.path(), format, "a=1 d=4");
+    }
+}
+
+/// While the environment has the flag, nothing it committed can be rolled
+/// back: the newest commit is the one the flag stepped back from, and the
+/// previous snapshot has no snapshot before it on the meta pages.
+/// `MDB_CANT_ROLLBACK`, nothing changed (C rolls the newest commit back and
+/// keeps the flag, which then picks the page without a snapshot: row 71).
+/// After the first commit, rollback works as without the flag.
+#[test]
+fn rollback_while_the_flag_is_set_is_refused() {
+    let cant = rlmdb::consts::MDB_CANT_ROLLBACK;
+    for format in FORMATS {
+        for nolock in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            two_commits(dir.path(), format);
+            let mut flags = EnvironmentFlags::PREV_SNAPSHOT;
+            if nolock {
+                flags |= EnvironmentFlags::NO_LOCK;
+            }
+            let env = open(dir.path(), format, flags).unwrap();
+            for txnid in [2, 1] {
+                let e = env.rollback(txnid).unwrap_err();
+                assert_eq!(e.to_err_code(), cant, "{format:?} {txnid}");
+            }
+            assert!(has_prev(&env));
+            assert_eq!(contents(&env), ("a=1".into(), 1));
+            assert_eq!(env.info().unwrap().last_txnid, 1);
+            assert_eq!(env.stat().unwrap().entries, 1);
+
+            put(&env, "c", "3");
+            assert!(!has_prev(&env));
+            env.rollback(2).unwrap();
+            assert_eq!(contents(&env), ("a=1".into(), 1));
+            assert_eq!(env.info().unwrap().last_txnid, 1);
+            drop(env);
+            let env = open(dir.path(), format, EnvironmentFlags::empty()).unwrap();
+            assert_eq!(contents(&env), ("a=1".into(), 1));
+            drop(env);
+            c_reads(dir.path(), format, "a=1");
+        }
     }
 }

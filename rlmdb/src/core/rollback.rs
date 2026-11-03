@@ -16,10 +16,12 @@
 //! the map size of a commit; magic and version stay. Then `mti_txnid`
 //! names `N - 1`.
 //!
-//! What rlmdb adds to C's checks (`KNOWN_C_BUGS.md` rows 62 and 63):
+//! What rlmdb adds to C's checks (`KNOWN_C_BUGS.md` rows 62, 63 and 71):
 //! the previous meta page must hold a committed snapshot (after the
 //! rollback of an odd `N`, C's own meta page has `mm_txnid` 1, which C's
-//! check takes for a snapshot), and no reader may still use `N`.
+//! check takes for a snapshot), no reader may still use `N`, and the
+//! environment may not have `MDB_PREVSNAPSHOT` (it has stepped back from
+//! `N` already).
 //!
 //! The order is chosen for readers that begin meanwhile (they take no
 //! lock): first `mti_txnid` names `N - 1`, so new readers take that
@@ -90,6 +92,13 @@ impl Environment {
     ///   the rollback of an odd txnid C would roll back again and leave no
     ///   snapshot at all (`KNOWN_C_BUGS.md` row 62). Here the previous meta
     ///   page must also hold a snapshot a commit wrote.
+    /// * `MdbError::CantRollback` while the environment has
+    ///   [`PREV_SNAPSHOT`](crate::EnvironmentFlags::PREV_SNAPSHOT) (until
+    ///   its first commit): it presents the previous snapshot as the
+    ///   current one, so the newest commit is one it stepped back from,
+    ///   not one to undo, and its first commit discards that anyway. C
+    ///   rolls it back and keeps the flag, which then picks the page the
+    ///   rollback wrote, without a snapshot (`KNOWN_C_BUGS.md` row 71).
     /// * `MdbError::CantRollback` if a read transaction (of any process
     ///   using the lock file, or without one of this process) still reads
     ///   `txnid`: rolling back under it would let the next writer
@@ -119,6 +128,11 @@ impl Environment {
             return Err(Error::errno(libc::EACCES));
         }
         let _lock = WriterLock::acquire(self)?;
+        // Not in C: nothing of this handle's to roll back yet (row 71).
+        // Read under the writer lock, under which a commit clears it.
+        if self.has_prev_snapshot() {
+            return Err(MdbError::CantRollback.into());
+        }
         let metas = [self.read_meta(0)?, self.read_meta(1)?];
         let newest = pick_newest(&metas);
         let (current, previous) = (metas[newest], metas[newest ^ 1]);

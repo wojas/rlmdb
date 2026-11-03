@@ -1,24 +1,26 @@
 /* MDB_PREVSNAPSHOT, LMDB 1.0's mdb_env_open flag.
  *
- *   capi_prevsnapshot <scratch-dir>
- *   capi_prevsnapshot <scratch-dir> shared <env>
+ *   capi_prevsnapshot <scratch-dir> <format: 0.9|1.0>
+ *   capi_prevsnapshot <scratch-dir> <format> shared <env>
  *
- * Built against C LMDB 1.0 with its lmdb.h (the oracle), against rlmdb's
- * LMDB 1.0 stub and against librlmdb with rlmdb's headers (-DLMDB_RUST;
- * LMDB 1.0 environments, librlmdb asked for them with
- * rlmdb_env_set_format), and against librlmdb with LMDB 0.9's lmdb.h
- * (LMDB 0.9 environments: rlmdb takes the flag in both formats). Every
- * build must pass the same checks and print the same trace ("T ..."
- * lines), except where C 1.0 has a bug rlmdb does not port
- * (KNOWN_C_BUGS.md rows 67 and 69) or where rlmdb refuses what C does not
- * coordinate (two MDB_NOLOCK handles): there BY_LIB() checks each build's
- * own result, and the trace says nothing.
+ * A program written for LMDB 1.0's API. Built against C LMDB 1.0 (the
+ * oracle), against rlmdb's LMDB 1.0 stub (-DLMDB_RUST; a program built for
+ * C 1.0) and against librlmdb with rlmdb's headers (-DLMDB_RUST
+ * -DLMDB_LIBRLMDB), which runs it on environments of the format asked for
+ * (rlmdb_env_set_format; rlmdb takes the flag in both formats); the C
+ * library and the stub make 1.0 environments. Every build must pass the
+ * same checks and print the same trace ("T ..." lines), except where C 1.0
+ * has a bug rlmdb does not port (KNOWN_C_BUGS.md rows 67, 69 and 71) or
+ * where rlmdb refuses what C does not coordinate (two MDB_NOLOCK handles):
+ * there BY_LIB() checks each build's own result, and the trace says
+ * nothing.
  *
  * The first form runs alone. The test (tests/capi_prevsnapshot.rs)
- * compares its environments "prev-commit" and "copy-compact" byte for
- * byte with C 1.0's, and audits them. The second form runs while the test
- * has <env> open (after two commits: a=1, then b=2): a writer gets
- * MDB_ENV_BUSY, a read-only handle reads the previous snapshot.
+ * compares its environments "prev-commit", "copy-compact",
+ * "prepared-commit" and "prepared-rollback" byte for byte with C 1.0's,
+ * and audits them. The second form runs while the test has <env> open
+ * (after two commits: a=1, then b=2): a writer gets MDB_ENV_BUSY, a
+ * read-only handle reads the previous snapshot.
  *
  * Prints "capi_prevsnapshot: N checks, F failures" and exits 1 on
  * failures.
@@ -32,14 +34,8 @@
 #include "../../../tests/compat/posix_compat.h"
 #include "lmdb.h"
 #ifdef LMDB_RUST
-/* rlmdb_env_set_format. */
+/* librlmdb: the format switch (rlmdb_env_set_format). */
 #include "rlmdb.h"
-#endif
-
-#ifndef MDB_PREVSNAPSHOT
-/* LMDB 1.0's, which 0.9's lmdb.h lacks. */
-#define MDB_PREVSNAPSHOT	0x2000000
-#define MDB_ENV_BUSY	(-30771)
 #endif
 
 static int checks, failures;
@@ -68,6 +64,8 @@ static int checks, failures;
 #define T(...) do { printf("T "); printf(__VA_ARGS__); printf("\n"); } while (0)
 
 static char scratch[1024];
+/* The format asked for: LMDB 0.9 (librlmdb only) or 1.0. */
+static int v09;
 
 static MDB_val sv(const char *s)
 {
@@ -83,14 +81,14 @@ static void env_path(char *path, size_t size, const char *name)
 	mkdir(path, 0775);
 }
 
-/* An environment handle: LMDB 1.0 in the 1.0 builds (librlmdb is asked
- * for it), LMDB 0.9 in the build with 0.9's lmdb.h. */
+/* A new environment handle of the format asked for: the 1.0 libraries
+ * make 1.0 environments, librlmdb is asked for the format. */
 static MDB_env *create_env(void)
 {
 	MDB_env *env;
 	OK(mdb_env_create(&env));
-#if defined(LMDB_LIBRLMDB) && MDB_VERSION_MAJOR >= 1
-	OK(rlmdb_env_set_format(env, RLMDB_FORMAT_10));
+#ifdef LMDB_LIBRLMDB
+	OK(rlmdb_env_set_format(env, v09 ? RLMDB_FORMAT_09 : RLMDB_FORMAT_10));
 #endif
 	OK(mdb_env_set_mapsize(env, 8u << 20));
 	return env;
@@ -322,6 +320,62 @@ static void test_nolock(void)
 	mdb_env_close(env);
 }
 
+/* Two-phase commit: the commit of a prepared transaction is the first
+ * commit (C reaches the same code from it); a rollback while the flag is
+ * set. */
+static void test_two_phase(void)
+{
+	MDB_env *env;
+	MDB_txn *txn;
+	MDB_dbi dbi;
+	MDB_val key = sv("c"), data = sv("3");
+
+	/* A prepared commit on the previous snapshot. */
+	two_commits("prepared-commit");
+	OK(open_env("prepared-commit", MDB_PREVSNAPSHOT, &env));
+	OK(mdb_txn_begin(env, NULL, 0, &txn));
+	OK(mdb_dbi_open(txn, NULL, 0, &dbi));
+	OK(mdb_put(txn, dbi, &key, &data, 0));
+	OK(mdb_txn_prepare(txn));
+	T("2pc: prepared txn %zu: flag %#x", (size_t)mdb_txn_id(txn), prev_flag(env));
+	OK(mdb_txn_commit(txn));
+	T("2pc: after the prepared commit: flag %#x, last txnid %zu", prev_flag(env),
+		last_txnid(env));
+	/* C 1.0 published the previous snapshot's txnid (row 67). */
+	SAME(contents(env), BY_LIB("a=1 @1", "a=1 c=3 @2"));
+	mdb_env_close(env);
+	OK(open_env("prepared-commit", MDB_RDONLY, &env));
+	T("2pc: %s", contents(env));
+	mdb_env_close(env);
+
+	/* The same, then the prepared commit rolled back. */
+	two_commits("prepared-rollback");
+	OK(open_env("prepared-rollback", MDB_PREVSNAPSHOT, &env));
+	OK(mdb_txn_begin(env, NULL, 0, &txn));
+	OK(mdb_dbi_open(txn, NULL, 0, &dbi));
+	OK(mdb_put(txn, dbi, &key, &data, 0));
+	OK(mdb_txn_prepare(txn));
+	OK(mdb_txn_commit(txn));
+	OK(mdb_env_rollback(env, 2));
+	T("2pc: rolled back: flag %#x, last txnid %zu, %s", prev_flag(env), last_txnid(env),
+		contents(env));
+	mdb_env_close(env);
+
+	/* A rollback while the flag is set: of the snapshot the environment
+	 * presents (not the newest), and of the newest one, which it stepped
+	 * back from. C rolls the newest back and keeps the flag, which then
+	 * picks the page without a snapshot (row 71); rlmdb refuses. */
+	two_commits("rollback-prev");
+	OK(open_env("rollback-prev", MDB_PREVSNAPSHOT, &env));
+	RC(mdb_env_rollback(env, 1), MDB_CANT_ROLLBACK);
+	RC(mdb_env_rollback(env, 2), BY_LIB(0, MDB_CANT_ROLLBACK));
+	CHECK(last_txnid(env) == BY_LIB(0, 1));
+	T("2pc: rollback with the flag: flag %#x, %s", prev_flag(env), contents(env));
+	put(env, "c", "3");
+	T("2pc: after the commit: flag %#x", prev_flag(env));
+	mdb_env_close(env);
+}
+
 /* While another process has <env> open: no writer on the previous
  * snapshot; a read-only handle reads it. */
 static void test_shared(const char *path)
@@ -346,18 +400,21 @@ static void test_shared(const char *path)
 
 int main(int argc, char **argv)
 {
-	if (argc != 2 && !(argc == 4 && !strcmp(argv[2], "shared"))) {
-		fprintf(stderr, "usage: capi_prevsnapshot <scratch-dir> [shared <env>]\n");
+	if (!(argc == 3 || (argc == 5 && !strcmp(argv[3], "shared")))
+		|| (strcmp(argv[2], "0.9") && strcmp(argv[2], "1.0"))) {
+		fprintf(stderr, "usage: capi_prevsnapshot <scratch-dir> <0.9|1.0> [shared <env>]\n");
 		return 2;
 	}
 	snprintf(scratch, sizeof(scratch), "%s", argv[1]);
-	if (argc == 4) {
-		test_shared(argv[3]);
+	v09 = !strcmp(argv[2], "0.9");
+	if (argc == 5) {
+		test_shared(argv[4]);
 	} else {
 		test_flag();
 		test_previous_snapshot();
 		test_copy();
 		test_nolock();
+		test_two_phase();
 	}
 	printf("capi_prevsnapshot: %d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

@@ -151,8 +151,9 @@ pub unsafe extern "C" fn mdb_txn_prepare(txn: *mut MDB_txn) -> c_int {
 /// is current again ([`rlmdb::Environment::rollback`]). Under the writer
 /// lock. `MDB_CANT_ROLLBACK` if `txnid` is not the newest snapshot or
 /// there is none before it, as in C, and also (not in C) if the previous
-/// meta page was itself rolled back (`KNOWN_C_BUGS.md` row 62) or a read
-/// transaction still uses `txnid` (row 63). `EACCES` for a read-only
+/// meta page was itself rolled back (`KNOWN_C_BUGS.md` row 62), a read
+/// transaction still uses `txnid` (row 63) or the environment still has
+/// `MDB_PREVSNAPSHOT` (row 71). `EACCES` for a read-only
 /// environment (C: `EBADF`, and the environment becomes unusable). `EINVAL`
 /// for NULL or an environment that is not open (C would crash).
 #[no_mangle]

@@ -64,7 +64,7 @@ pub unsafe fn env_create(profile: Profile, env: *mut *mut MDB_env) -> c_int {
 /// environments of either format, as in C 1.0 (`MDB_ENV_BUSY` for a
 /// writer while another process has the environment open), with the
 /// differences of [`rlmdb::EnvironmentFlags::PREV_SNAPSHOT`] (C 1.0's bugs
-/// not ported: `KNOWN_C_BUGS.md` rows 67 to 70). `MDB_FIXEDMAP`,
+/// not ported: `KNOWN_C_BUGS.md` rows 67 to 71). `MDB_FIXEDMAP`,
 /// `MDB_MAPASYNC` and `MDB_NOMEMINIT` are accepted and ignored;
 /// `MDB_WRITEMAP` is accepted without a writable map but with C's limits
 /// (no nested transactions), and on OpenBSD refused with `ENOTSUP` unless

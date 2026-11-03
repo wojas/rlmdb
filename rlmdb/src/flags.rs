@@ -74,10 +74,15 @@ bitflags::bitflags! {
         /// snapshot; this may help to get past some kinds of damage.
         ///
         /// The flag lasts until the first write transaction that changes
-        /// something commits: from then on the environment works as if
-        /// opened without it, and [`Environment::flags`] no longer reports
-        /// it (an empty commit, an abort or a failed commit keep it). A
-        /// read-only environment keeps it until it is closed.
+        /// something commits, also through two-phase commit (the
+        /// [`PreparedTxn::commit`], not the prepare): from then on the
+        /// environment works as if opened without it, and
+        /// [`Environment::flags`] no longer reports it (an empty commit,
+        /// an abort or a failed commit keep it). A read-only environment
+        /// keeps it until it is closed. While it lasts,
+        /// [`Environment::rollback`] fails with `MDB_CANT_ROLLBACK`: the
+        /// newest commit is the one the environment stepped back from (C
+        /// rolls it back: `KNOWN_C_BUGS.md` row 71).
         ///
         /// Opened for writing, the environment must be the only user of
         /// its files, as in C: the open fails with `MDB_ENV_BUSY` if
@@ -97,6 +102,8 @@ bitflags::bitflags! {
         /// fail with `EBUSY` meanwhile.
         ///
         /// [`Environment::flags`]: crate::Environment::flags
+        /// [`Environment::rollback`]: crate::Environment::rollback
+        /// [`PreparedTxn::commit`]: crate::PreparedTxn::commit
         const PREV_SNAPSHOT = MDB_PREVSNAPSHOT;
     }
 }

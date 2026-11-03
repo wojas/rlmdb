@@ -692,8 +692,9 @@ impl Environment {
     }
 
     /// The end of `PREV_SNAPSHOT` after the first commit of a write
-    /// transaction (txnid `txnid`, its meta page written and published),
-    /// the end of `_mdb_txn_commit`: share the lock file's lock
+    /// transaction (txnid `txnid`, its meta page written and published; a
+    /// plain commit's or a prepared transaction's), the end of
+    /// `_mdb_txn_commit`: share the lock file's lock
     /// (`mdb_env_share_locks`), letting other processes in, and clear the
     /// flag. Without a lock file (`NO_LOCK`), share the data file with the
     /// process's other handles instead ([`Registration::share`]). Nothing
