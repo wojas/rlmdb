@@ -5,9 +5,9 @@
 //! writing, with the same reader table and the same writer lock.
 //!
 //! It is a rewrite, not a binding: no C code is linked. The C API
-//! (`liblmdb.a`/`.so`/`.dylib`, a drop-in replacement for C programs) is
-//! the separate `rlmdb-capi` crate, the command line tools are `rlmdb-tools`;
-//! both are built on this crate. See `README.md` for an overview and
+//! (`librlmdb.a`/`.so`/`.dylib`, and stubs named `liblmdb` that stand in
+//! for C LMDB 0.9 and 1.0) is the separate `rlmdb-capi` crate, the command
+//! line tools are `rlmdb-tools`; both are built on this crate. See `README.md` for an overview and
 //! `COMPATIBILITY.md` for the exact compatibility contract.
 //!
 //! # Layers

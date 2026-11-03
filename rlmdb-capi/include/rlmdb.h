@@ -1,23 +1,25 @@
 /** @file rlmdb.h
  *	@brief rlmdb extensions to the LMDB C API
  *
- *	rlmdb is a rewrite of LMDB in Rust. Its C library (liblmdb.a,
- *	liblmdb.so, liblmdb.dylib, built from rlmdb-capi) exports the
- *	functions of the unmodified lmdb.h (LMDB 0.9.37's) and, declared here, a
- *	few of its own that C LMDB does not have, plus the LMDB 1.0 constants a
- *	program needs with a 1.0 environment. A program that calls the
- *	functions needs the rlmdb library; one that only includes lmdb.h works
- *	with either.
+ *	rlmdb is a rewrite of LMDB in Rust. Its C library (librlmdb: link
+ *	with -lrlmdb; built from rlmdb-capi, as are two stubs named liblmdb
+ *	that stand in for C LMDB 0.9 and 1.0) exports the functions of the
+ *	unmodified lmdb.h (LMDB 0.9.37's) and, declared here, a few of its own
+ *	that C LMDB does not have, the functions LMDB 1.0's lmdb.h adds, and
+ *	the LMDB 1.0 constants a program needs with a 1.0 environment. A
+ *	program that calls rlmdb's functions needs an rlmdb library; one that
+ *	only includes lmdb.h works with either.
  *
  *	This header includes lmdb.h.
  *
  *	@section rlmdb_version_sec Which library is this?
- *	#mdb_version() reports 0.9.85 in rlmdb, a patch level above every real
- *	LMDB 0.9 release, while lmdb.h keeps the 0.9.37 #MDB_VERSION_PATCH. A
- *	run-time patch level above the header's is normal for LMDB, and
- *	#mdb_version() is what programs are told to check. #rlmdb_version()
- *	tells the rest: the rlmdb version and the C LMDB release whose file
- *	format each supported format matches.
+ *	#mdb_version() reports 0.9.85 in librlmdb and the LMDB 0.9 stub, a
+ *	patch level above every real LMDB 0.9 release, while lmdb.h keeps the
+ *	0.9.37 #MDB_VERSION_PATCH; the LMDB 1.0 stub reports 1.0.85. A run-time
+ *	patch level above the header's is normal for LMDB, and #mdb_version()
+ *	is what programs are told to check. #rlmdb_version() tells the rest:
+ *	the rlmdb version and the C LMDB release whose file format each
+ *	supported format matches.
  *
  *	@section rlmdb_format_sec Data-file formats
  *	rlmdb reads and writes the data files of LMDB 0.9 (#RLMDB_FORMAT_09,
@@ -31,7 +33,8 @@
  *	<li>the process default of #rlmdb_set_default_format(), else
  *	<li>the format the environment variable RLMDB_DEFAULT_FORMAT names
  *		("0.9" or "1.0"; any other value is ignored), else
- *	<li>LMDB 0.9, which every C LMDB release reads.
+ *	<li>the library's: LMDB 0.9, which every C LMDB release reads, in
+ *		librlmdb and the LMDB 0.9 stub; LMDB 1.0 in the LMDB 1.0 stub.
  *	</ol>
  *	RLMDB_DEFAULT_FORMAT is experimental: it may be removed or restricted in
  *	a later release, so programs should use the functions. Requesting the other
@@ -41,11 +44,14 @@
  *
  *	In an LMDB 1.0 environment keys may be longer than 511 bytes
  *	(#mdb_env_get_maxkeysize() after the open), the page size can be chosen
- *	with #rlmdb_env_set_pagesize(), and named databases are stored under
+ *	with #mdb_env_set_pagesize(), and named databases are stored under
  *	their name with its terminating NUL, as C 1.0 does. The 1.0 features
- *	beyond its data file are not implemented: #MDB_PREVSNAPSHOT and
- *	#MDB_ENCRYPT give EINVAL, and opening an encrypted or checksummed 1.0
- *	file fails with #MDB_ENV_ENCRYPTION or #MDB_BAD_CHECKSUM.
+ *	beyond its data file are not implemented: #MDB_PREVSNAPSHOT,
+ *	#MDB_ENCRYPT and #MDB_REMAP_CHUNKS give EINVAL, opening an encrypted or
+ *	checksummed 1.0 file fails with #MDB_ENV_ENCRYPTION or
+ *	#MDB_BAD_CHECKSUM, and the functions of two-phase commit, encryption,
+ *	checksums, incremental backups and crypto modules return ENOTSUP
+ *	(@ref rlmdb_v10_api).
  *
  *	@copyright See COPYRIGHT in the top-level directory of rlmdb.
  *	Redistribution and use in source and binary forms, with or without

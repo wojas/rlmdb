@@ -1,5 +1,5 @@
 //! Test 1: the unchanged C tools `mdb_stat` and `mdb_dump`, linked against
-//! the Rust `liblmdb.a`, print byte for byte what the same tools linked
+//! the Rust `librlmdb.a`, print byte for byte what the same tools linked
 //! against the C library print, on databases written by C programs
 //! (`mtest`..`mtest5`, `mdb_load`, `tests/c/fixture.c`).
 //!

@@ -22,7 +22,8 @@ not a binding. The goals, in priority order:
    "undefined behaviour if you call this twice".
 4. **A C API compatible with C LMDB** (`rlmdb-capi`): the same `mdb_*` symbols,
    same `lmdb.h`, same error codes and flag values, so existing C programs link
-   and run unchanged against the Rust build (`liblmdb.a` / `liblmdb.so`).
+   and run unchanged against the Rust build (`librlmdb`, or one of the two
+   stubs named `liblmdb` that stand in for C LMDB 0.9 and 1.0).
 5. **Performance comparable to C.** No allocations in the hot read path, binary
    search on pages, cursor stacks in fixed arrays, zero-copy values.
 6. **Minimal `unsafe`.** `unsafe` is confined to `rlmdb/src/os/` (mmap,
@@ -799,7 +800,7 @@ coordinator. What landed (commits of this repository):
   `mtest.c` .. `mtest6.c` and C tools run against it with C's results
   (`2c3a95f`).
 * B3. The Rust peer's write side, a third peer (the C peer linked against
-  the Rust `liblmdb.a`), all nine writer/reader pairs, concurrent and
+  the Rust library, today `librlmdb.a`), all nine writer/reader pairs, concurrent and
   alternating writers, stale readers (`04feda8`).
 * T. `rlmdb-tools`: `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`,
   `mdb_drop`, byte-identical to the C tools (`2a69af3`).

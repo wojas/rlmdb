@@ -8,8 +8,10 @@ so C and Rust processes can open one environment **at the same time**,
 share its reader table and writer lock, and read and write it in turns.
 It is a rewrite, not a binding: no C code is linked into the library.
 
-On top of the Rust library sit a drop-in replacement for `liblmdb`
-(the same `mdb_*` C ABI and `lmdb.h`) and the command line tools.
+On top of the Rust library sit a C library with LMDB's `mdb_*` ABI and
+`lmdb.h` (`librlmdb`, plus two stubs named `liblmdb` that stand in for C
+LMDB 0.9 or 1.0 in programs built against it) and the command line
+tools.
 
 * [`COMPATIBILITY.md`](COMPATIBILITY.md): the compatibility contract and
   what verifies it.
@@ -33,11 +35,15 @@ Implemented and tested against the C library on macOS (arm64) and Linux
   spilling of huge transactions, `mdb_drop`, map resizing, and plain and
   compacting environment copies (byte-identical to `mdb_copy` and
   `mdb_copy -c`). Custom comparators.
-* **`rlmdb-capi`**: all 56 functions of `lmdb.h`. The unmodified upstream
+* **`rlmdb-capi`**: all 56 functions of `lmdb.h`, and the 13 that LMDB
+  1.0's `lmdb.h` adds (page size, transaction flags and `mdb_cursor_is_db`
+  implemented; two-phase commit, encryption, checksums, incremental
+  backups and crypto modules return `ENOTSUP`). The unmodified upstream
   `mtest.c` .. `mtest6.c`, `mdb_stat.c`, `mdb_dump.c`, `mdb_load.c` and
   `mdb_copy.c` run against it and give the same results as against C,
-  down to the page numbers on the free list. `mdb_version()` reports
-  0.9.85, so programs can tell it from C LMDB; `rlmdb.h` adds
+  down to the page numbers on the free list, and so do 1.0's `mtest.c` ..
+  `mtest5.c` against C 1.0. `mdb_version()` reports 0.9.85 (1.0.85 in the
+  1.0 stub), so programs can tell it from C LMDB; `rlmdb.h` adds
   `rlmdb_version()` and `rlmdb_version_string()` (rlmdb's version and the
   C release each format matches), which `rlmdb::version_info()` provides
   on the Rust side, and the data-file format functions
@@ -66,7 +72,8 @@ and rlmdb processes can have it open at the same time, and one process can
 have environments of both formats open. The C API and the
 tools handle both formats: an existing file in its format, a new one as
 0.9 unless 1.0 is asked for (`rlmdb_env_set_format`,
-`rlmdb_set_default_format`, `mdb_load -F 1.0`, or the **experimental**
+`rlmdb_set_default_format`, `mdb_load -F 1.0`, the C library's 1.0 stub,
+or the **experimental**
 environment variable `RLMDB_DEFAULT_FORMAT=1.0`, which may be removed or
 restricted later); for a 1.0 file the tools print what C 1.0's tools
 print.
@@ -130,36 +137,48 @@ runnable version of this example, the rules the types enforce (slices
 cannot outlive a change, a parent is unusable while its child lives, ...),
 and the `unsafe` policy: all `unsafe` code is in the private `os` module.
 
-### `rlmdb-capi`: `liblmdb` for C programs
+### `rlmdb-capi`: `librlmdb` for C programs
 
 ```sh
-cargo build -p rlmdb-capi --release
-# target/release/liblmdb.a and target/release/liblmdb.{so,dylib}
+cargo build --release -p librlmdb -p lmdb09-stub -p lmdb10-stub
+# target/release/librlmdb.a and target/release/librlmdb.{so,dylib}
+# (the stubs: liblmdb09.*, liblmdb10.*)
+scripts/install-libs.sh     # or build and install, PREFIX=/usr/local
 ```
 
-Compile against the shipped header (the unmodified 0.9.37 `lmdb.h`) and
-link either library instead of the C one:
+Compile against the shipped headers (`lmdb.h`, the unmodified 0.9.37
+header, and `rlmdb.h`, which also declares LMDB 1.0's functions) and link
+with `-lrlmdb` instead of `-llmdb`:
 
 ```sh
-# from the repository root; macOS
+# from the repository root; shared library, macOS and Linux
 cc -I rlmdb-capi/include -o mtest tests/lmdb-c/0.9/mtest.c \
-   target/release/liblmdb.a
-# Linux (glibc): the static library needs the Rust runtime's system libs
+   -L target/release -lrlmdb
+# Linux (glibc), static: the library needs the Rust runtime's system libs
 cc -I rlmdb-capi/include -o mtest tests/lmdb-c/0.9/mtest.c \
-   target/release/liblmdb.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
-# shared library, either platform
-cc -I rlmdb-capi/include -o mtest tests/lmdb-c/0.9/mtest.c \
-   -L target/release -llmdb
-gcc -I rlmdb-capi/include -o mtest tests/lmdb-c/0.9/mtest.c target/release/liblmdb.dll.a  # Windows, MinGW (MSVC: lmdb.dll.lib)
+   target/release/librlmdb.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
+# installed: pkg-config knows the flags
+cc $(pkg-config --cflags rlmdb) -o mtest tests/lmdb-c/0.9/mtest.c $(pkg-config --libs rlmdb)
+gcc -I rlmdb-capi/include -o mtest tests/lmdb-c/0.9/mtest.c target/release/librlmdb.dll.a  # Windows, MinGW (MSVC: rlmdb.dll.lib)
 ```
 
-With the shared library, the loader must find it at run time
-(`LD_LIBRARY_PATH` on Linux; on macOS the dylib's install name is its
-absolute build path, or use `DYLD_LIBRARY_PATH`). Behaviour, the deviations
-from C, the thread rule for write transactions and `rlmdb.h` (rlmdb's
-version and data-file format functions, next to `lmdb.h`) are
-in
-[`rlmdb-capi/README.md`](rlmdb-capi/README.md).
+With the shared library from the build directory, the loader must find
+it at run time (`LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS,
+`rlmdb.dll` next to the program on Windows). `mdb_version()` reports
+0.9.85, and new environments are LMDB 0.9 unless the program asks for 1.0.
+
+Two stubs stand in for C LMDB under its own name, for programs that were
+built against it: the 0.9 stub with C 0.9's SONAME `liblmdb.so.0`, and
+the 1.0 stub (`liblmdb.so`; `mdb_version()` says 1.0.85, and new
+environments are LMDB 1.0). Both export everything `librlmdb` exports. `scripts/install-libs.sh`
+puts them into `$libdir/rlmdb/lmdb-0.9` and `$libdir/rlmdb/lmdb-1.0`, off
+the default library path, so that they never replace a C `liblmdb` by
+accident: a program uses one when `LD_LIBRARY_PATH`, `LD_PRELOAD` or its
+rpath names it (`DYLD_LIBRARY_PATH` on macOS; on Windows, as `lmdb.dll`
+next to the program). Behaviour, the deviations from C, the thread rule
+for write transactions, the install layout and `rlmdb.h` (rlmdb's version
+and data-file format functions, LMDB 1.0's functions, next to `lmdb.h`)
+are in [`rlmdb-capi/README.md`](rlmdb-capi/README.md).
 
 ### `rlmdb-tools`
 
@@ -257,7 +276,8 @@ The workspace is the repository root; every command above runs there.
     src/format/       on-disk structures over byte slices
     src/os/           all unsafe code: mmap, file locks, shared mutexes
     tests/            C-written files, differential and interop tests
-  rlmdb-capi/          liblmdb.{a,so,dylib}: the C ABI; include/lmdb.h, rlmdb.h
+  rlmdb-capi/          the C ABI; include/lmdb.h, rlmdb.h
+    artifacts/        librlmdb.{a,so,dylib} and the two liblmdb stubs
     tests/c/          C test programs run against both libraries
   rlmdb-tools/         mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop
   interop/            cross-process test bed: C and Rust peers, scenarios
@@ -267,6 +287,7 @@ The workspace is the repository root; every command above runs there.
   scripts/
     linux-test.sh     cargo in a Linux (Debian glibc) container
     check-all.sh      fmt, clippy, doc, tests on host and Linux
+    install-libs.sh   installs librlmdb, the stubs, headers, rlmdb.pc
     update-c-sources.sh  re-creates tests/lmdb-c from upstream
 ```
 

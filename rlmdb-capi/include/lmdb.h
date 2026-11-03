@@ -1,9 +1,10 @@
 /* lmdb.h for the Rust implementation of LMDB (rlmdb-capi).
  *
  * Everything below this comment is the unmodified LMDB 0.9.37 header
- * (tests/lmdb-c/0.9/lmdb.h). liblmdb.a / liblmdb.so / liblmdb.dylib built
- * from rlmdb-capi implement this ABI; see rlmdb-capi/README.md for
- * the documented differences. The test suite checks that the copy is exact.
+ * (tests/lmdb-c/0.9/lmdb.h). The libraries built from rlmdb-capi
+ * (librlmdb, and the liblmdb stubs) implement this ABI; see
+ * rlmdb-capi/README.md for the documented differences. The test suite
+ * checks that the copy is exact.
  */
 /** @file lmdb.h
  *	@brief Lightning memory-mapped database library

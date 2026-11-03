@@ -12,7 +12,7 @@
 //! (`mdb_stat10`, `mtest10`, `mtest2_10`).
 //!
 //! One more C program is linked at test time: [`cpeer_capi`], the C peer
-//! linked against the *Rust* `liblmdb.a` of `rlmdb-capi`.
+//! linked against the *Rust* `librlmdb.a` of `rlmdb-capi`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

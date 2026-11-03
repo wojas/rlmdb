@@ -1,51 +1,80 @@
 # rlmdb-capi: the LMDB C API over the Rust implementation
 
-`rlmdb-capi` builds `liblmdb.a`, `liblmdb.so` (Linux) and `liblmdb.dylib`
-(macOS), on Windows `lmdb.dll` with its import library and a static
-library (see "Windows" below), from the Rust rewrite in `../rlmdb`. They export the `mdb_*`
-symbols of LMDB 0.9.37 with the same ABI, error codes and flag values, so
-existing C programs compile against `include/lmdb.h` (the unmodified 0.9.37
-header, with one comment added on top) and link against the Rust library
-unchanged. `include/rlmdb.h` declares the few functions rlmdb has beyond
-`lmdb.h` and the LMDB 1.0 constants (see "`rlmdb.h`" below).
+`rlmdb-capi` is the C API of the Rust rewrite in `../rlmdb`: the `mdb_*`
+functions of LMDB 0.9.37 with the same ABI, error codes and flag values,
+the 13 functions LMDB 1.0's `lmdb.h` adds, and rlmdb's own `rlmdb_*`
+functions. C programs compile against `include/lmdb.h` (the unmodified
+0.9.37 header, with one comment added on top) and `include/rlmdb.h` (see
+"`rlmdb.h`" below), or against LMDB 1.0's own `lmdb.h`, and link against
+one of three libraries built from it:
 
-The library opens environments of both data-file formats rlmdb handles,
-LMDB 0.9 and LMDB 1.0 (`../DUAL_FORMAT.md`), through the same `mdb_*`
-functions: an existing file in its format, a new one as LMDB 0.9 unless
-1.0 is asked for (`rlmdb_env_set_format`, `rlmdb_set_default_format`, or
-the experimental `RLMDB_DEFAULT_FORMAT=1.0`; see "`rlmdb.h`: data-file
-formats").
+| Library | Package | Files | `mdb_version()` | New environments |
+|---|---|---|---|---|
+| `librlmdb`, linked with `-lrlmdb` | `librlmdb` | `librlmdb.a`, `librlmdb.so` (SONAME `librlmdb.so`), `librlmdb.dylib`; `rlmdb.dll` | 0.9.85 | LMDB 0.9 |
+| the 0.9 stub | `lmdb09-stub` | built as `liblmdb09.*` (SONAME `liblmdb.so.0`), installed as `liblmdb.so.0` / `liblmdb.dylib` / `lmdb.dll` | 0.9.85 | LMDB 0.9 |
+| the 1.0 stub | `lmdb10-stub` | built as `liblmdb10.*` (SONAME `liblmdb.so`), installed as `liblmdb.so` / `liblmdb.dylib` / `lmdb.dll` | 1.0.85 | LMDB 1.0 |
+
+`librlmdb` is the library to build programs with. The two stubs are named
+like C LMDB and stand in for one C release each, for programs that were
+built against C LMDB 0.9 or 1.0: a user or a distribution puts one in
+front of the C library (`LD_LIBRARY_PATH`, `LD_PRELOAD`, an rpath; see
+"Installing"). All three export the same functions, every one of both
+`lmdb.h` versions and of `rlmdb.h`; they differ only in their names, in
+the version `mdb_version()` (and `rlmdb_version()`) reports, and in the
+format of a new environment that asks for none. The patch level 85 is
+above every C release, so a program can tell rlmdb from C LMDB.
+
+The libraries open environments of both data-file formats rlmdb
+handles, LMDB 0.9 and LMDB 1.0 (`../DUAL_FORMAT.md`), through the same
+`mdb_*` functions: an existing file in its format, a new one in the
+format asked for (`rlmdb_env_set_format`, `rlmdb_set_default_format`, or
+the experimental `RLMDB_DEFAULT_FORMAT`), else in the library's own: 0.9,
+or 1.0 for the 1.0 stub (see "`rlmdb.h`: data-file formats").
 
 Status (stage 4): every function of `lmdb.h` is implemented, read and
-write side. The unmodified upstream programs `mtest.c` .. `mtest6.c`,
-`mdb_load.c`, `mdb_dump.c`, `mdb_copy.c` and `mdb_stat.c` run against it and
-produce what they produce against the C library, down to the page numbers on
-the free list (see "Acceptance"). There are no known gaps (see "Known
-gaps").
+write side; of LMDB 1.0's additions, those rlmdb can implement (see "LMDB
+1.0's functions"). The unmodified upstream programs `mtest.c` ..
+`mtest6.c`, `mdb_load.c`, `mdb_dump.c`, `mdb_copy.c` and `mdb_stat.c` run
+against it and produce what they produce against the C library, down to
+the page numbers on the free list, and so do LMDB 1.0's `mtest.c` ..
+`mtest5.c` on the 1.0 stub against C 1.0 (see "Acceptance"). There are no
+known gaps (see "Known gaps").
 
 ## Building and linking
 
 ```sh
-cargo build -p rlmdb-capi --release
-# target/release/liblmdb.a, target/release/liblmdb.{so,dylib}
+cargo build --release -p librlmdb -p lmdb09-stub -p lmdb10-stub
+# target/release/librlmdb.a, target/release/librlmdb.{so,dylib}
+# target/release/liblmdb09.*, target/release/liblmdb10.* (the stubs)
 ```
 
-Compile C programs with `-I rlmdb-capi/include`. Link the static
-library together with the system libraries the Rust standard library needs
-(from `cargo rustc -p rlmdb-capi --lib --crate-type staticlib -- --print
-native-static-libs`):
+`rlmdb-capi` itself is the implementation (a Rust library); the three
+packages in `artifacts/` link it into the C libraries. Cargo cannot name
+two libraries of one workspace `liblmdb`, so the stubs get their final
+names when they are installed (`scripts/install-libs.sh`, below); their
+SONAMEs (and macOS install names, `@rpath/liblmdb.dylib`) are already the
+final ones. `RLMDB_LMDB10_SONAME` at build time gives the 1.0 stub
+another SONAME (`liblmdb.so.1`, say) for a system whose C LMDB 1.0 has
+one: upstream's Makefile sets none, and no distribution ships C 1.0 yet.
+
+Compile C programs with `-I rlmdb-capi/include` and link with `-lrlmdb`
+(`-L target/release -lrlmdb`, or after installing `$(pkg-config --cflags
+--libs rlmdb)`). The static library needs the system libraries the Rust
+standard library needs (from `cargo rustc -p librlmdb --release --
+--print native-static-libs`):
 
 | Platform | Link line |
 |---|---|
-| Linux (glibc) | `liblmdb.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc` |
-| macOS | `liblmdb.a` (needs `-lSystem -lc -lm`, which the compiler driver adds) |
-| Windows, MinGW-w64 (`x86_64-pc-windows-gnu`) | `liblmdb.a -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp` |
-| Windows, MSVC (`x86_64-pc-windows-msvc`) | `lmdb.lib legacy_stdio_definitions.lib kernel32.lib ntdll.lib userenv.lib ws2_32.lib dbghelp.lib` (compile with `cl /MD`: the library uses the dynamic C runtime, `msvcrt`) |
+| Linux (glibc) | `librlmdb.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc` |
+| macOS | `librlmdb.a` (rustc lists `-liconv -lSystem -lc -lm`; the compiler driver adds the last three) |
+| Windows, MinGW-w64 (`x86_64-pc-windows-gnu`) | `librlmdb.a -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp` |
+| Windows, MSVC (`x86_64-pc-windows-msvc`) | `rlmdb.lib legacy_stdio_definitions.lib kernel32.lib ntdll.lib userenv.lib ws2_32.lib dbghelp.lib` (compile with `cl /MD`: the library uses the dynamic C runtime, `msvcrt`) |
 
 For example `cc -I rlmdb-capi/include -o mdb_stat
-tests/lmdb-c/0.9/mdb_stat.c target/release/liblmdb.a -lpthread
+tests/lmdb-c/0.9/mdb_stat.c target/release/librlmdb.a -lpthread
 -lgcc_s -lutil -lrt -lm -ldl` on Linux. The shared library needs no extra
-flags (`-L target/release -llmdb`).
+flags (`-L target/release -lrlmdb`). The stubs' static libraries
+(`liblmdb.a` once installed) need the same system libraries.
 
 On the BSDs (from `--print native-static-libs` of the Rust targets; the
 interop tests link the C peer this way, tested on OpenBSD and FreeBSD, see
@@ -55,31 +84,36 @@ interop tests link the C peer this way, tested on OpenBSD and FreeBSD, see
 -lutil -lexecinfo -lcompiler_rt`, DragonFly `-lrt -lutil -lexecinfo -lkvm
 -lpthread -lgcc_pic -lc -lm`.
 
-Note: the library target is named `lmdb` so that the artifacts are called
-`liblmdb.*`; the Rust library it is built on is the `rlmdb` package
-(lib `rlmdb`).
+Load only one of the three into a process: each is a complete copy of
+the library with its own process-wide state, as two different C
+libraries would be (see "Several handles and `dlopen`").
 
 ### Windows
 
-64-bit Windows with either Rust toolchain; `cargo build -p rlmdb-capi
---release` (add `--target x86_64-pc-windows-gnu` or use that toolchain for
-MinGW) writes to `target/release/`:
+64-bit Windows with either Rust toolchain; `cargo build --release -p
+librlmdb -p lmdb09-stub -p lmdb10-stub` (add `--target
+x86_64-pc-windows-gnu` or use that toolchain for MinGW) writes to
+`target/release/`:
 
 | | MSVC | MinGW-w64 |
 |---|---|---|
-| DLL | `lmdb.dll` | `lmdb.dll` |
-| its import library | `lmdb.dll.lib` | `liblmdb.dll.a` |
-| static library | `lmdb.lib` | `liblmdb.a` |
+| DLL | `rlmdb.dll` | `rlmdb.dll` |
+| its import library | `rlmdb.dll.lib` | `librlmdb.dll.a` |
+| static library | `rlmdb.lib` | `librlmdb.a` |
+| the stubs | `lmdb09.dll`, `lmdb10.dll`, `lmdb09.lib`, `lmdb10.lib` | `lmdb09.dll`, `lmdb10.dll`, `liblmdb09.a`, `liblmdb10.a` |
 
 Link a C program against the DLL through its import library, which needs
-nothing else (`cl /I rlmdb-capi\include prog.c target\release\lmdb.dll.lib`,
-`gcc -I rlmdb-capi/include prog.c target/release/liblmdb.dll.a`), and put
-`lmdb.dll` next to the program or on `PATH`; or link the static library
+nothing else (`cl /I rlmdb-capi\include prog.c target\release\rlmdb.dll.lib`,
+`gcc -I rlmdb-capi/include prog.c target/release/librlmdb.dll.a`), and put
+`rlmdb.dll` next to the program or on `PATH`; or link the static library
 with the system libraries of the table above. `lmdb.h` has no
 `__declspec(dllimport)`: the functions are reached through the import
 library's stubs, as with a C `lmdb.dll`. A program that calls `LoadLibrary`
 and `FreeLibrary` gets a fresh copy of the DLL after the last
 `FreeLibrary`, as with C's DLL (no `-z nodelete` counterpart is needed).
+A stub stands in for a C `lmdb.dll` as `lmdb.dll` next to the program
+(Windows finds a DLL by its file name); the stubs' import libraries name
+`lmdb09.dll` and `lmdb10.dll` and are not meant for linking.
 
 On Windows the types and texts follow C LMDB's `_WIN32` build:
 `mdb_filehandle_t` is a `HANDLE` (`mdb_env_get_fd` gives the data file's,
@@ -92,6 +126,65 @@ for the life of the process, where C returns a buffer on its stack. The
 upstream `mtest*.c` and tools build unchanged with MinGW's `gcc`; MSVC has
 no `<unistd.h>` (`getopt`, and `ssize_t`, which `mdb_stat.c` uses), so the
 tests give `cl` the `tests/compat/msvc/unistd.h` of this repository.
+
+## Installing
+
+`scripts/install-libs.sh` builds the three libraries (or, with `--from
+<dir>`, takes those built before) and installs them with the headers and a
+pkg-config file. `PREFIX` (default `/usr/local`), `LIBDIR`
+(`$PREFIX/lib`), `INCLUDEDIR` (`$PREFIX/include`) and `DESTDIR` (a
+staging directory in front of every path written) work as with `make
+install`; `--target <triple>` installs a cross build. The layout:
+
+```
+$LIBDIR/librlmdb.a
+$LIBDIR/librlmdb.so                      (macOS: librlmdb.dylib)
+$LIBDIR/pkgconfig/rlmdb.pc               Cflags: -I${includedir}/rlmdb, Libs: -L${libdir} -lrlmdb
+$INCLUDEDIR/rlmdb/lmdb.h                 (the 0.9.37 header)
+$INCLUDEDIR/rlmdb/rlmdb.h
+$LIBDIR/rlmdb/lmdb-0.9/liblmdb.so.0      the 0.9 stub (macOS: liblmdb.dylib)
+$LIBDIR/rlmdb/lmdb-0.9/liblmdb.so -> liblmdb.so.0
+$LIBDIR/rlmdb/lmdb-0.9/liblmdb.a
+$LIBDIR/rlmdb/lmdb-1.0/liblmdb.so        the 1.0 stub, under its SONAME (macOS: liblmdb.dylib)
+$LIBDIR/rlmdb/lmdb-1.0/liblmdb.a
+```
+
+`rlmdb.pc` also lists the system libraries of the table above as
+`Libs.private` (for `pkg-config --static`). On macOS the script sets each
+library's install name to its installed path (without `DESTDIR`), as a
+`make install` there does, and signs it again (ad hoc). On Windows (run
+it from MSYS2 or Git Bash) it installs `rlmdb.dll`, its import library
+and the static library in `$LIBDIR`, and the stubs as `lmdb.dll` (with
+`lmdb.lib` or `liblmdb.a`) in the two `lmdb-*` directories. Files are
+replaced by renaming, so running programs keep the library they mapped.
+
+The two `lmdb-*` directories are deliberately not on the default library
+path: the stubs carry C LMDB's names and must not replace a C `liblmdb`
+the system has, unless a user or a distribution asks for that:
+
+* Linux and the BSDs: `LD_LIBRARY_PATH=$LIBDIR/rlmdb/lmdb-0.9 program`
+  runs a program linked against C LMDB 0.9 (`liblmdb.so.0`) on the 0.9
+  stub; `LD_PRELOAD=$LIBDIR/rlmdb/lmdb-0.9/liblmdb.so.0` does it too, also
+  for a program with an rpath to the C library. A program built against C
+  LMDB 1.0 needs the 1.0 stub's directory (SONAME `liblmdb.so`, or what
+  `RLMDB_LMDB10_SONAME` named). A distribution can point a program's
+  rpath (or `RUNPATH`) at one of the directories, or install a stub in
+  place of its C library.
+* macOS: `DYLD_LIBRARY_PATH=$LIBDIR/rlmdb/lmdb-0.9 program`: dyld looks
+  for the leaf name of the program's `liblmdb.dylib` there first,
+  whatever install name the program recorded. `DYLD_INSERT_LIBRARIES`
+  replaces functions by name only in a flat namespace
+  (`DYLD_FORCE_FLAT_NAMESPACE`); programs use two-level namespaces, so it
+  does not do what `LD_PRELOAD` does. System Integrity Protection strips
+  all `DYLD_*` variables for system binaries (and for programs started
+  through them, such as `/bin/sh` scripts).
+* Windows: copy the stub as `lmdb.dll` next to the program (the
+  directory of the executable is searched first).
+
+`tests/install.rs` runs the script into a `DESTDIR` and does each of these
+on Linux and macOS: a program built with `-lrlmdb` against the installed
+library, and programs linked against a shared C LMDB 0.9 and 1.0 run on
+the stubs.
 
 ## Functions
 
@@ -111,13 +204,56 @@ All 56 functions of `lmdb.h` are implemented (module in parentheses):
 never calls the function; `mdb_env_set_assert` stores the callback, which
 is never called (the core reports errors instead of asserting).
 
+### LMDB 1.0's functions
+
+LMDB 1.0's `lmdb.h` (`../tests/lmdb-c/1.0`, LMDB 1.0.3) declares 13
+functions 0.9's lacks. Every library exports them (module `v10`), and
+`rlmdb.h` declares them for programs that include rlmdb's 0.9 `lmdb.h`.
+Where C 1.0 checks its arguments, the same checks come first, in C's
+order; where C 1.0 would crash (a NULL handle, an environment that is not
+open), the result is `EINVAL`. The functions rlmdb does not implement
+(`../DUAL_FORMAT.md` §7) then return `ENOTSUP` and change nothing:
+
+| Function | Status | Result |
+|---|---|---|
+| `mdb_env_set_pagesize` | Implemented (as `rlmdb_env_set_pagesize`) | `EINVAL` for NULL, after the open, outside 256 .. 65536 or not a power of two (C 1.0's checks); applies to a new 1.0 environment; an LMDB 0.9 one cannot take a page size (`EINVAL` from `mdb_env_open`). |
+| `mdb_txn_flags` | Implemented | `MDB_RDONLY` or 0 in `*flags`; `EINVAL` for NULL (also NULL `flags`, where C crashes). |
+| `mdb_cursor_is_db` | Implemented | 1 if the cursor is on the record of a named database (`F_SUBDATA` without `F_DUPDATA`), else 0, also for NULL and for a cursor whose transaction cannot be used. Where C reads a node the cursor is still on after `MDB_NOTFOUND` (past either end, a failed `MDB_SET`), so does rlmdb. |
+| `mdb_txn_prepare` | Not implemented (two-phase commit) | `EINVAL` for NULL, else `ENOTSUP`; the transaction stays an ordinary one, which may still be used, committed or aborted. C 1.0 writes its data pages and allows only `mdb_txn_commit` or `mdb_txn_abort` afterwards (for a read-only or nested transaction it commits it). |
+| `mdb_env_rollback` | Not implemented (two-phase commit) | `EINVAL` for NULL or an environment that is not open, else `ENOTSUP`; the last commit stays. |
+| `mdb_env_set_encrypt` | Not implemented | `EINVAL` if `env`, `func` or `key` is NULL or the environment is open (C 1.0's checks), else `ENOTSUP`; the environment stays plain. |
+| `mdb_env_set_checksum` | Not implemented | `EINVAL` if `env` or `func` is NULL, `size` is 0 or the environment is open (C 1.0's checks), else `ENOTSUP`. |
+| `mdb_env_incr_dump`, `mdb_env_incr_dumpfd`, `mdb_env_incr_loadfd` | Not implemented (incremental backups) | `EINVAL` for NULL arguments or an environment that is not open, else `ENOTSUP`; nothing is written, created or read (C's `mdb_env_incr_dump` also sets `MDB_NOSUBDIR` on the handle). |
+| `mdb_modload` | Not supported (crypto modules) | NULL, with a static message ("rlmdb does not support LMDB crypto modules") in `*errmsg` if `errmsg` is not NULL (C crashes on NULL); `*mcf_ptr` untouched, as when C's `dlopen` fails. Nothing is loaded. |
+| `mdb_modunload` | Not supported | Does nothing (`mdb_modload` returns no handles). |
+| `mdb_modsetup` | Not supported | `void`, so it cannot report that encryption and checksums are not implemented. Where C would set either up (a checksum function with a non-zero size; an encryption function and a passphrase) on an environment that is not open, the handle is marked and `mdb_env_open` fails with `ENOTSUP`: a program that asked for encryption must not get a plain file. Otherwise, and for NULL arguments, nothing happens. The module's functions are never called. |
+
+`ENOTSUP` is the platform's value (95 on Linux, 45 on macOS, 129 on
+Windows); `mdb_strerror` says "Operation not supported", on Windows too,
+where C would give the system's message for 129, an unrelated one (C
+never returns `ENOTSUP`).
+
 ## `rlmdb.h`
 
 `include/rlmdb.h` includes `lmdb.h` and declares rlmdb's own functions:
 the version (module `version`) and the data-file formats
-(module `format`), plus the LMDB 1.0 constants. C LMDB does not have the
-functions, so a program that calls them needs this library. The header's
-comments are their reference documentation.
+(module `format`), plus the LMDB 1.0 constants and the 13 functions LMDB
+1.0's `lmdb.h` adds (see "LMDB 1.0's functions") with the types they need
+(`MDB_enc_func`, `MDB_sum_func`, `MDB_str2key_func`, `MDB_crypto_funcs`,
+`MDB_crypto_hooks`) and 1.0's `mdb_size_t`, `MDB_SIZE_MAX`, `MDB_PRIy`
+and `MDB_SCNy`. C LMDB does not have rlmdb's functions, so a program that
+calls them needs an rlmdb library. The header's comments are their
+reference documentation.
+
+A program written for LMDB 1.0 may include upstream 1.0's `lmdb.h` before
+`rlmdb.h`: the types are then that header's (`rlmdb.h` defines them only
+after a 0.9 `lmdb.h`, `MDB_VERSION_MAJOR < 1`), and the constants each
+only if no header defined them before. The declarations of the 13
+functions are repeated either way, so the compiler checks them against
+1.0's. Where 1.0 has `mdb_size_t`, `rlmdb.h` has `size_t`: 1.0 makes it
+`uint64_t` only with `MDB_VL32`, for 32-bit builds, which rlmdb does not
+support, and the two are the same type on every platform it does.
+`tests/capi_headers.rs` compiles both orders, as C and as C++.
 
 ### Version
 
@@ -127,7 +263,7 @@ comments are their reference documentation.
 typedef struct rlmdb_version_info {
 	unsigned	size;		/* sizeof(rlmdb_version_info) of the library */
 	int		rlmdb_major, rlmdb_minor, rlmdb_patch;	/* the rlmdb version */
-	int		lmdb_major, lmdb_minor, lmdb_patch;	/* what mdb_version() reports: 0, 9, 85 */
+	int		lmdb_major, lmdb_minor, lmdb_patch;	/* what mdb_version() reports: 0, 9, 85 (1.0 stub: 1, 0, 85) */
 	int		v09_major, v09_minor, v09_patch;	/* C release the 0.9 format and API match: 0, 9, 37 */
 	int		v10_major, v10_minor, v10_patch;	/* C release the 1.0 format matches: 1, 0, 3 */
 } rlmdb_version_info;
@@ -148,16 +284,21 @@ const char *rlmdb_version_string(void);		/* static, one line */
 The Rust side is `rlmdb::version_info()`, from which the C structure and
 strings are filled once, at first use.
 
-**`mdb_version()` reports 0.9.85**, and the string
-`LMDB 0.9.85: (rlmdb 0.0.0)` (the rlmdb version where C has its release
-date). The patch level is above every real 0.9 release, so a program can
-tell rlmdb from C LMDB, and the version stays in the 0.9 series that rlmdb
-is a drop-in for. The shipped `lmdb.h` keeps `MDB_VERSION_PATCH 37`
-(`MDB_VERSION_STRING` is `LMDB 0.9.37: (Oct 21, 2026)`): it is unmodified,
-and a run-time patch level above the header's is the normal case for LMDB
-(a program built against an older 0.9 header runs with a newer 0.9
-library); `mdb_version()` is what programs are told to check. Major and
-minor agree with the header.
+**`mdb_version()` reports 0.9.85** in `librlmdb` and the 0.9 stub, and
+the string `LMDB 0.9.85: (rlmdb 0.0.0)` (the rlmdb version where C has its
+release date); **the 1.0 stub reports 1.0.85**, `LMDB 1.0.85: (rlmdb
+0.0.0)`, and `rlmdb_version()` and `rlmdb_version_string()` say the same
+(`mdb_version 1.0.85`). The patch level is above every real release of
+the series, so a program can tell rlmdb from C LMDB, and the version stays
+in the series the library stands in for. The shipped `lmdb.h` keeps
+`MDB_VERSION_PATCH 37` (`MDB_VERSION_STRING` is `LMDB 0.9.37: (Oct 21,
+2026)`): it is unmodified, and a run-time patch level above the header's
+is the normal case for LMDB (a program built against an older 0.9 header
+runs with a newer 0.9 library); `mdb_version()` is what programs are told
+to check. Major and minor agree with the header (with 1.0's `lmdb.h`, for
+the 1.0 stub). The library is a build-time choice, not a setting: the
+three differ in these functions and in the format of new environments
+only (`src/profile.rs`).
 
 ### Data-file formats
 
@@ -180,24 +321,31 @@ int rlmdb_env_set_pagesize(MDB_env *env, unsigned size);    /* LMDB 1.0's mdb_en
 * A new environment gets the requested format, else the process default
   (`rlmdb_set_default_format`), else the format the environment variable
   `RLMDB_DEFAULT_FORMAT` names (`0.9` or `1.0`; other values are ignored),
-  else LMDB 0.9. **The variable is experimental**: it may be removed or
+  else the library's: LMDB 0.9 in `librlmdb` and the 0.9 stub, LMDB 1.0 in
+  the 1.0 stub (so that a program built for C 1.0 gets 1.0 files without
+  asking). An explicit choice of the program wins over the variable and
+  the library. **The variable is experimental**: it may be removed or
   restricted in a later release. It is read at every open; programs should
   use the functions.
-* `rlmdb_env_set_pagesize` (a power of two from 256 to 65536, as in C 1.0)
-  applies to a new 1.0 environment; `mdb_env_open` fails with `EINVAL` if
-  the environment turns out to be LMDB 0.9, which has no such setting.
-* `rlmdb.h` also defines LMDB 1.0's `MDB_PREVSNAPSHOT`, `MDB_ENCRYPT` and
-  error codes `MDB_PROBLEM` .. `MDB_ADDR_BUSY` (-30779 .. -30769), with
-  1.0's values, each only if no other header defined it, so a program can
-  also include upstream 1.0's `lmdb.h`. `mdb_strerror` returns 1.0's
-  messages for them.
+* `rlmdb_env_set_pagesize` and LMDB 1.0's `mdb_env_set_pagesize` (a power
+  of two from 256 to 65536, as in C 1.0) apply to a new 1.0 environment;
+  `mdb_env_open` fails with `EINVAL` if the environment turns out to be
+  LMDB 0.9, which has no such setting.
+* `rlmdb.h` also defines LMDB 1.0's `MDB_PREVSNAPSHOT`, `MDB_ENCRYPT`,
+  `MDB_REMAP_CHUNKS` and error codes `MDB_PROBLEM` .. `MDB_ADDR_BUSY`
+  (-30779 .. -30769), with 1.0's values, each only if no other header
+  defined it, so a program can also include upstream 1.0's `lmdb.h`.
+  `mdb_strerror` returns 1.0's messages for them. (`MDB_LAST_ERRCODE`
+  stays 0.9's `MDB_BAD_DBI` with rlmdb's `lmdb.h`: it is that header's.)
 
 What changes with an LMDB 1.0 environment:
 
 * `mdb_env_get_maxkeysize` returns the environment's limit after the open
-  (1978 on 4 KiB pages, 32698 on 64 KiB); before it, 511 unless 1.0 was
-  requested with `rlmdb_env_set_format`, then the 1.0 limit for the page
-  size a new environment would get. (C 1.0 returns 0 before the open.)
+  (1978 on 4 KiB pages, 32698 on 64 KiB); before it, the limit of a new
+  environment as it would be created now: 511 for 0.9, and if it would be
+  1.0 (requested, the process default, the variable, or the 1.0 stub) the
+  1.0 limit for the page size it would get. (C 1.0 returns 0 before the
+  open.)
 * Keys and `MDB_DUPSORT` items up to that limit, inline data up to half a
   page (64 KiB pages: 32 KiB); named databases are stored under their name
   and its NUL, as C 1.0 does (`mdb_dbi_open` takes the name as before).
@@ -206,9 +354,12 @@ What changes with an LMDB 1.0 environment:
   `MDB_DBIS_BUSY` while a handle of a named database is open (0.9 leaves
   their pages behind, `../KNOWN_C_BUGS.md` row 21).
 * Not implemented: `MDB_PREVSNAPSHOT` (`mdb_env_open` gives `EINVAL`, for
-  both formats), `MDB_ENCRYPT` (`EINVAL` from `mdb_env_open` and
-  `mdb_env_set_flags`), encrypted or checksummed 1.0 files
-  (`MDB_ENV_ENCRYPTION`, `MDB_BAD_CHECKSUM`), and the rest of 1.0's API.
+  both formats), `MDB_ENCRYPT` and `MDB_REMAP_CHUNKS` (`EINVAL` from
+  `mdb_env_open`; `MDB_ENCRYPT` also from `mdb_env_set_flags`), encrypted
+  or checksummed 1.0 files (`MDB_ENV_ENCRYPTION`, `MDB_BAD_CHECKSUM`), and
+  1.0's two-phase commit, encryption, checksums, incremental backups and
+  crypto modules (their functions return `ENOTSUP`, see "LMDB 1.0's
+  functions").
 * Return codes stay `lmdb.h`'s (0.9's): a write in a read-only transaction
   is `EACCES` where C 1.0 says `MDB_IS_READONLY`.
 
@@ -284,8 +435,9 @@ point into the memory map or the transaction's dirty pages (zero copy).
 
 | Area | C LMDB | This library |
 |---|---|---|
-| `mdb_version()` | The header's version: 0, 9, 37 and `MDB_VERSION_STRING`, `LMDB 0.9.37: (Oct 21, 2026)`. | 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)` (see "`rlmdb.h`"); `lmdb.h` still says 0.9.37. |
-| Data-file formats | LMDB 0.9 only; a 1.0 file is `MDB_INVALID`. | LMDB 0.9 and 1.0 (see "`rlmdb.h`: data-file formats"); new environments are 0.9 by default. |
+| `mdb_version()` | The header's version: 0, 9, 37 and `MDB_VERSION_STRING`, `LMDB 0.9.37: (Oct 21, 2026)`. | 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)` (see "`rlmdb.h`"); `lmdb.h` still says 0.9.37. The 1.0 stub, standing in for C 1.0: 1, 0, 85. |
+| Data-file formats | LMDB 0.9 only; a 1.0 file is `MDB_INVALID`. | LMDB 0.9 and 1.0 (see "`rlmdb.h`: data-file formats"); new environments are 0.9 by default (1.0 in the 1.0 stub). |
+| Functions | `lmdb.h`'s. | Also LMDB 1.0's 13 more and `rlmdb.h`'s (see "LMDB 1.0's functions"). |
 | `mdb_strerror` of LMDB 1.0's codes (-30779 .. -30769) | "Invalid error code". | 1.0's messages. |
 | `mdb_env_set_maxdbs` with more than 1,048,576 | Taken; the environment breaks above about 35 million databases (`KNOWN_C_BUGS.md` row 54). | `EINVAL` (`MAX_DBS_LIMIT` in `rlmdb::consts`; every transaction allocates a slot per database). |
 | `mdb_env_set_maxreaders` with more than 1,048,576 | Taken; a new lock file holds 64 bytes per slot, 256 GiB at `(unsigned)-1` (`KNOWN_C_BUGS.md` row 60). | `EINVAL` (`MAX_READERS_LIMIT` in `rlmdb::consts`; 64 MiB of lock file at the limit). An existing lock file with a larger table is attached to with its size, as in C. |
@@ -378,7 +530,8 @@ a lock file and an `MDB_NOLOCK` handle of one file refuse each other.
 `dlopen` of the library any number of times, with `RTLD_LOCAL` or
 `RTLD_GLOBAL`, returns the one loaded copy, so all handles share that
 state. A program that contains separate copies of the library (the static
-`liblmdb.a` linked into several modules, or `dlmopen` namespaces) has one
+`librlmdb.a` linked into several modules, `librlmdb` and a stub loaded
+side by side, or `dlmopen` namespaces) has one
 registry per copy: each copy coordinates only its own handles, as separate
 C libraries coordinate nothing. Read-only handles are unaffected (nothing
 writes); a copy that writes must be the only user of the file, as with C
@@ -402,13 +555,13 @@ nested one, was closed in stage 4.)
 ## Acceptance: upstream programs against the Rust library
 
 `tests/mtest.rs` builds the unmodified upstream programs twice, against the
-C library and against the Rust `liblmdb.a`:
+C library and against the Rust `librlmdb.a`:
 
 * `mtest.c` .. `mtest6.c` seed `rand()` with `time(NULL)`; the tests build
   them with `tests/c/mtest_shim.h` included first (`-include`, `cl /FI`),
   which includes `<time.h>` and then makes `time` the shim's
   `mtest_time()`, so the seed is `$MTEST_SEED` (and supplies `mdb_dkey()`,
-  which `mtest6.c` needs and `liblmdb` only has with `MDB_DEBUG`). (Not a
+  which `mtest6.c` needs and C's `liblmdb` only has with `MDB_DEBUG`). (Not a
   `-Dtime=mtest_time` on the command line: MSVC's `<time.h>` defines
   `time()` inline and MinGW-w64's gives it an assembler name, and the
   macro would rename those.) `mtest_seed_takes_effect` checks the seed. With seeds 20261030 and 7 each
@@ -431,6 +584,17 @@ C library and against the Rust `liblmdb.a`:
 * `mdb_copy.c`, plain and `-c`, linked against Rust, of an `mtest3`
   environment (with free pages) and of the loaded one: the C tools see the
   same copy as of the C-linked `mdb_copy`, and the source's data.
+* LMDB 1.0's `mtest.c` .. `mtest5.c` (`../tests/lmdb-c/1.0`, which
+  differ from 0.9's in `mtest.c`'s `mdb_env_set_pagesize(env, 1024)`),
+  built with 1.0's `lmdb.h` against C LMDB 1.0 and against the 1.0 stub
+  `liblmdb10.a`, as a program built for C 1.0 would be: with seeds
+  20261030 and 7 both exit 0 with nothing on stderr and the same stdout;
+  the stub creates LMDB 1.0 files without being asked; C 1.0's `mdb_stat
+  -e -f -ff -a` and `mdb_dump` (with `-a` where there are named
+  databases: 1.0's refuses `-a` otherwise) see the same environments
+  (the map address aside), and the same tools linked against the stub
+  read the stub's file as C 1.0's do (C 1.0 reports its own map address
+  where the file records none: `../KNOWN_C_BUGS.md`, LMDB 1.0 section).
 
 ## Design notes
 
@@ -466,11 +630,12 @@ scripts/linux-test.sh test -p rlmdb-capi         # Linux in Docker
 WINDOWS_HOST=<ssh host> scripts/windows-test.sh cargo test -p rlmdb-capi
 ```
 
-The tests compile C programs at test time with the `cc` crate (the crate's
-build script only sets a link option of the shared library) against the C
-library (built from `../tests/lmdb-c/0.9`, the oracle) and against the
-Rust `liblmdb.a` that cargo builds for the tests; `capi_dlopen` loads the
-shared builds of both instead.
+The tests compile C programs at test time with the `cc` crate against the
+C library (built from `../tests/lmdb-c/0.9`, the oracle; for LMDB 1.0's
+API from `../tests/lmdb-c/1.0`) and against the Rust `librlmdb.a` (or the
+1.0 stub `liblmdb10.a`) that cargo builds for the tests: the three
+artifact packages are dev-dependencies of this crate. `capi_dlopen` and
+`capi_artifacts` load the shared builds instead.
 Each test process works in its own directory under `target/tmp/capi/`
 (see `tests/common/mod.rs`): several test runs may share a target directory
 at once (`scripts/linux-test.sh` mounts one Docker volume as `target/` for
@@ -484,6 +649,40 @@ environments.
 * `tests/capi_read.rs`: `tests/c/capi_read.c` checks every read-side
   function and its error codes; it must pass against the C library and the
   Rust library.
+* `tests/capi_artifacts.rs`: `tests/c/capi_symbols.c`, linked against no
+  LMDB, loads each of the three shared libraries with `dlopen`
+  (`LoadLibrary`) and resolves every function declared in LMDB 0.9's
+  `lmdb.h`, in LMDB 1.0's and in `rlmdb.h` (the headers are parsed at test
+  time; `rlmdb.h` must declare exactly what 1.0 adds); checks the version
+  each reports (`mdb_version`, `rlmdb_version`, `rlmdb_version_string`)
+  and the format of a new environment with no request (0.9, 0.9, 1.0, as
+  `rlmdb_sniff_format` tells), with `rlmdb_env_set_format`, with
+  `rlmdb_set_default_format` and with `RLMDB_DEFAULT_FORMAT` set; that
+  `nm` lists exactly those functions as exported (where it runs); and the
+  SONAMEs and `DF_1_NODELETE` (parsed from the ELF dynamic section, and
+  compared with `readelf -d` where it runs) or the macOS install names.
+* `tests/capi_v10.rs`: `tests/c/capi_v10.c`, the 13 functions of LMDB
+  1.0's `lmdb.h`, against C LMDB 1.0 (the oracle, with its `lmdb.h`), the
+  1.0 stub with the same header and `librlmdb` with `rlmdb.h`, on 1.0
+  environments: the same checks and trace for `mdb_env_set_pagesize`
+  (edge values, after the open, existing files, 256-byte and 64 KiB
+  pages), `mdb_txn_flags` (read, reset, write, nested, a parent of an
+  active child, a read-only environment) and `mdb_cursor_is_db` (named
+  databases and plain items in the main DB, a named and a `DUPSORT`
+  database, read, write and nested transactions, cursors past either end
+  and after a failed `MDB_SET`); the Rust builds check `ENOTSUP` after
+  C's argument checks and that nothing changed (a transaction after
+  `mdb_txn_prepare` still writes and commits, the last commit stays after
+  `mdb_env_rollback`, no dump file, a plain environment after
+  `mdb_env_set_encrypt`, `mdb_env_open` refused after `mdb_modsetup`).
+  C 1.0's `mdb_stat` reads every environment the Rust builds left.
+* `tests/capi_headers.rs`: `tests/c/capi_headers.c` compiled with warnings
+  as errors, as C and as C++, with rlmdb's `lmdb.h` (linked against
+  `librlmdb`) and with LMDB 1.0's `lmdb.h` included before `rlmdb.h`
+  (linked against the 1.0 stub): it takes the address of every function
+  `rlmdb.h` declares and uses the types and constants it adds.
+* `tests/install.rs` (Unix): `scripts/install-libs.sh` into a `DESTDIR`,
+  and the uses "Installing" describes (see there).
 * `tests/capi_version.rs`: `tests/c/capi_version.c` checks `rlmdb.h`
   against the Rust library (there is no C oracle): the structure's `size`
   and numbers, `rlmdb_version_string()` equal to the Rust `Display` line and

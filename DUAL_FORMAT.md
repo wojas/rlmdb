@@ -204,8 +204,10 @@ is what C does when it re-initialises the table.
 Default for new environments: V09, so files stay readable by everything
 that ships today. Resolution order, same as lmdb-go: per-environment setter,
 then process default setter, then the environment variable
-`RLMDB_DEFAULT_FORMAT` (`0.9` | `1.0`), then V09. The variable is honoured
-everywhere, including the drop-in `liblmdb`, and is documented as
+`RLMDB_DEFAULT_FORMAT` (`0.9` | `1.0`), then V09 (the C API's LMDB 1.0
+stub, which stands in for C 1.0, ends the chain with V10 instead,
+`EnvironmentBuilder::fallback_format`; §4.4). The variable is honoured
+everywhere, including the C libraries, and is documented as
 **experimental**: it may be removed or restricted in a later release, so
 programs and deployments should prefer the setters. The reason for the
 caveat: a stray variable in a service's environment silently creates 1.0
@@ -318,10 +320,11 @@ Behaviour of existing functions:
 
 * `rlmdb_env_get_format` tells the format of an environment; `mdb_version`
   does not change with it.
-* `mdb_env_get_maxkeysize` returns 511 before open unless V10 was
-  requested, then the 1.0 value for the page size a new environment would
-  get (`rlmdb_env_set_pagesize`, else the OS page size); after open the
-  environment's value. (C 1.0 returns 0 before the open: `me_maxkey` is
+* `mdb_env_get_maxkeysize` returns, before open, the value of the format a
+  new environment would get through the whole chain (request, process
+  default, variable, the library's format): 511 for V09, else the 1.0 value
+  for the page size it would get (`rlmdb_env_set_pagesize`, else the OS
+  page size); after open the environment's value. (C 1.0 returns 0 before the open: `me_maxkey` is
   only computed in `mdb_env_open2`; 1.0 documents it as only valid after
   open.)
 * `mdb_env_open` refuses `MDB_PREVSNAPSHOT` with `EINVAL` for both formats
@@ -332,6 +335,27 @@ Behaviour of existing functions:
   key size (on the heap above 511 bytes, so 0.9 environments copy to the
   stack as before), data up to half and `MDB_MULTIPLE` items up to a whole
   page of `max(page size, 32 KiB)`, which is 0.9's 16/32 KiB unchanged.
+
+Later (after stage 5), the C API grew from one `liblmdb` into three
+libraries built from one implementation (`rlmdb-capi/README.md`):
+`librlmdb` (`-lrlmdb`), the library to build programs with, and two stubs
+named like C LMDB that stand in for one C release each in programs built
+against it (`liblmdb.so.0`, `mdb_version` 0.9.85, new environments V09;
+`liblmdb.so`, `mdb_version` 1.0.85, new environments V10). They differ
+only in their names, those versions and the end of the default-format
+chain, fixed when each is linked (no setting, no load-time code). All
+three export the same functions: `lmdb.h`'s, `rlmdb.h`'s, and the 13 that
+LMDB 1.0's `lmdb.h` adds, which `rlmdb.h` declares too (with 1.0's types,
+guarded so that it also compiles after upstream 1.0's `lmdb.h`).
+`mdb_env_set_pagesize`, `mdb_txn_flags` and `mdb_cursor_is_db` are
+implemented; the functions of the features of stage 7 (`mdb_txn_prepare`,
+`mdb_env_rollback`, `mdb_env_set_encrypt`, `mdb_env_set_checksum`), the
+incremental backups (`mdb_env_incr_dump`, `mdb_env_incr_dumpfd`,
+`mdb_env_incr_loadfd`) and the crypto modules (`mdb_modload`,
+`mdb_modunload`, `mdb_modsetup`) make C 1.0's argument checks and return
+`ENOTSUP` (`mdb_modload` NULL, `mdb_modunload` nothing; after
+`mdb_modsetup` asked for encryption or checksums, `mdb_env_open` returns
+`ENOTSUP`).
   `mdb_dbi_open` copies the name in write transactions: a 1.0 key of the
   main DB ends with the name's NUL, so passing it back is natural there.
 * `mdb_drop` of the main DB, through every API, does what C 1.0 does in a
@@ -395,7 +419,7 @@ The interop matrix of 1.0, as built (`interop/README.md` has the details):
 
 * **Four peers.** `Peer::C` (`cpeer`, C 0.9), `Peer::C10` (`cpeer10`, the
   same C program on C 1.0), `Peer::Rust` (`rpeer`) and `Peer::COnRust`
-  (`cpeer_capi`, the C program on rlmdb's `liblmdb.a`). The C peers open
+  (`cpeer_capi`, the C program on rlmdb's `librlmdb.a`). The C peers open
   their own release's format only; `rpeer` and `cpeer_capi` take
   `--format 1.0` (`EnvironmentBuilder::format`, and under `LMDB_RUST`
   `rlmdb_env_set_format`) and `--pagesize N` (`EnvironmentBuilder::page_size`,
@@ -540,4 +564,7 @@ the Rust and C peers open without it.
    1.0 and rlmdb.
 6. Soon after: the format-converting copy (`convert-copy`), replacing
    `lmdbconvert`.
-7. Later: `MDB_PREVSNAPSHOT`, 2PC, checksums, encryption.
+7. Later: `MDB_PREVSNAPSHOT`, 2PC, checksums, encryption. Their C
+   functions are exported already and return `ENOTSUP` until then
+   (§4.4); so do the incremental backups and the crypto modules, which
+   are not planned.

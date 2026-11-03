@@ -116,10 +116,23 @@ deferred until the core has been validated through the C API.
 
 ## 5. The C API is a drop-in `liblmdb`
 
-* `rlmdb-capi` builds `liblmdb.a` / `liblmdb.so` / `liblmdb.dylib` with
-  the same `mdb_*` symbols, the unmodified upstream `include/lmdb.h`, the
-  same flag values and error codes. Unmodified `mtest*.c` and the C tools
-  must behave identically against it.
+* `rlmdb-capi` (the implementation, an rlib) is linked into three
+  libraries by the packages in `rlmdb-capi/artifacts`: `librlmdb`
+  (`librlmdb.a` / `.so` / `.dylib`, `rlmdb.dll`; `-lrlmdb`), and two stubs
+  named `liblmdb` that stand in for C LMDB 0.9 (SONAME `liblmdb.so.0`)
+  and 1.0 (SONAME `liblmdb.so`), built as `liblmdb09.*` / `liblmdb10.*`
+  and renamed by `scripts/install-libs.sh`. They differ only in their
+  names, in `mdb_version` (0.9.85, 0.9.85, 1.0.85) and in the format of
+  new environments that ask for none (0.9, 0.9, 1.0); everything else is
+  common code, and the profile is a build-time property
+  (`rlmdb-capi/src/profile.rs`: no cargo feature, no load-time code).
+* Every artifact exports the full symbol set: every function of LMDB
+  0.9.37's `lmdb.h`, of LMDB 1.0's `lmdb.h` (what rlmdb does not
+  implement makes C 1.0's argument checks, then returns `ENOTSUP`) and of
+  `rlmdb.h`, with the same flag values and error codes
+  (`rlmdb-capi/tests/capi_artifacts.rs` checks the set against the
+  headers). Unmodified `mtest*.c` and the C tools of each release must
+  behave identically against it.
 * Argument validation follows `mdb.c`: same checks, same order, same
   return codes. Misuse that crashes C (NULL handles, use after free)
   returns `EINVAL` instead; keep that list in `rlmdb-capi/README.md`
@@ -129,9 +142,11 @@ deferred until the core has been validated through the C API.
 * The tools in `rlmdb-tools` match the C tools' options, output, messages
   and exit codes; the C tools are their test oracle, each release for its
   own format (C 1.0's for 1.0 files, in `interop/tests/tools10.rs`).
-* `include/rlmdb.h` holds rlmdb's own functions (`rlmdb_*`) and the LMDB
-  1.0 constants (each under `#ifndef`, values copied from 1.0's `lmdb.h`
-  with a comment naming it); `lmdb.h` stays the pristine 0.9.37 header.
+* `include/rlmdb.h` holds rlmdb's own functions (`rlmdb_*`), the LMDB 1.0
+  constants (each under `#ifndef`, values copied from 1.0's `lmdb.h` with
+  a comment naming it) and the declarations of 1.0's functions, whose
+  types are defined only after a 0.9 `lmdb.h` (it must compile after
+  either `lmdb.h`); `lmdb.h` stays the pristine 0.9.37 header.
 
 ## 6. Performance
 

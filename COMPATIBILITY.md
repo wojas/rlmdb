@@ -21,8 +21,8 @@ table below), 64-bit.
 | OpenBSD (64-bit) | LMDB 0.9 lock file: POSIX named semaphores as on macOS (names in the lock file; slots at 128). LMDB 1.0 lock file: a SysV semaphore set, `semget(ftok(lockfile, 'M'))`, its id `mtb_semid` at 20, `mtb_rlocked` at 24, `mt2_wlocked` at 64, slots at 128. `fsync` for `MDB_FDATASYNC`; meta fd `O_DSYNC`; after every write to the data file `msync(MS_INVALIDATE)` of the map (no unified buffer cache); no `O_DIRECT` for copies | tested by hand in an OpenBSD 7.9 arm64 VM (2 vCPUs, 2 GB): the workspace suite passes (`cargo test --workspace`), the interop matrix with C 0.9.37 and 1.0 built by the base clang included, and `layout_dump` there confirms the lock-file layouts and `MDB_LOCK_FORMAT`; not in CI (tier 3: compiles and lints with nightly `-Zbuild-std`). Maps and descriptor I/O go out of step there, so the tests that write or read an environment's files behind an open environment flush and invalidate through `rlmdb::flush_file_maps` and `rlmdb::invalidate_file` (hidden test hooks); one lock-file test cannot (`robust_lockfile_header_checked`). C 1.0's `mtest_remap` (`MDB_REMAP_CHUNKS`) fails its own assertions there and is left out of the oracle tests |
 | NetBSD (64-bit) | as OpenBSD, but semaphore names of 14 characters (C's `MDB_SHORT_SEMNAMES`) and no invalidation | untested; compiles and lints in CI (`Check BSD targets`) |
 | DragonFly (64-bit) | as OpenBSD, but no invalidation and meta fd `O_SYNC` (there is no `O_DSYNC`) | untested; compiles and lints with nightly `-Zbuild-std` (tier 3), not in CI |
-| Windows x86-64, MinGW-w64 (`x86_64-pc-windows-gnu`) | named mutexes `Global\MDBr…`, `Global\MDBw…` (names in the lock file, version 2: their hash); `LockFileEx` on byte 0; no pid locks; slots at 128 (version 1), 64 (version 2) | tested on Windows 10 with Rust stable and MinGW-w64 gcc (MSYS2): the workspace suite passes as on macOS (`cargo test --workspace`, through `scripts/windows-test.sh`), the interop matrix with C 0.9.37 and 1.0 built by gcc included; the upstream `mtest*.c` and tools and the `rlmdb-capi` test programs linked against `lmdb.dll` and `liblmdb.a` agree with C; the GNU job of `.github/workflows/windows.yml` runs the same in CI |
-| Windows x86-64, MSVC (`x86_64-pc-windows-msvc`) | as MinGW (both toolchains lay C's structures out alike) | tested in CI (`.github/workflows/windows.yml`, MSVC job): the workspace suite, the interop matrix with C 0.9.37 and 1.0 built by `cl`, and the C programs against `lmdb.dll` (the C reference DLL via a module-definition file, since `lmdb.h` has no export macro); `rlmdb-tools` follows this C runtime's `atoi` (saturating). Not run on a local MSVC machine yet |
+| Windows x86-64, MinGW-w64 (`x86_64-pc-windows-gnu`) | named mutexes `Global\MDBr…`, `Global\MDBw…` (names in the lock file, version 2: their hash); `LockFileEx` on byte 0; no pid locks; slots at 128 (version 1), 64 (version 2) | tested on Windows 10 with Rust stable and MinGW-w64 gcc (MSYS2): the workspace suite passes as on macOS (`cargo test --workspace`, through `scripts/windows-test.sh`), the interop matrix with C 0.9.37 and 1.0 built by gcc included; the upstream `mtest*.c` and tools and the `rlmdb-capi` test programs linked against `rlmdb.dll` and `librlmdb.a` (and the stubs) agree with C; the GNU job of `.github/workflows/windows.yml` runs the same in CI |
+| Windows x86-64, MSVC (`x86_64-pc-windows-msvc`) | as MinGW (both toolchains lay C's structures out alike) | tested in CI (`.github/workflows/windows.yml`, MSVC job): the workspace suite, the interop matrix with C 0.9.37 and 1.0 built by `cl`, and the C programs against `rlmdb.dll` and the C reference DLL (built via a module-definition file, since `lmdb.h` has no export macro); `rlmdb-tools` follows this C runtime's `atoi` (saturating). Not run on a local MSVC machine yet |
 | 32-bit targets | | not supported (`compile_error!`) |
 
 C and Rust processes must share the platform ABI: a lock file is only
@@ -261,9 +261,10 @@ of it changes the files or what another process concludes about them.
   `format=print` and odd lines correctly (rows 23–26), `mdb_stat -r` exits 0
   (row 2).
 * Version: `mdb_version()` reports 0.9.85 and `LMDB 0.9.85: (rlmdb
-  <version>)`, and the tools' `-V` prints that string; the shipped `lmdb.h`
-  stays the 0.9.37 header. The patch level, above every C 0.9 release,
-  tells rlmdb apart. `rlmdb_version()` (`rlmdb-capi/include/rlmdb.h`;
+  <version>)` (the LMDB 1.0 stub of the C API, which stands in for C 1.0,
+  reports 1.0.85), and the tools' `-V` prints that string; the shipped
+  `lmdb.h` stays the 0.9.37 header. The patch level, above every C release
+  of the series, tells rlmdb apart. `rlmdb_version()` (`rlmdb-capi/include/rlmdb.h`;
   `rlmdb::version_info()` in Rust) reports the rest: rlmdb's version and
   the C release each file format matches (0.9.37, 1.0.3).
 * Through the C API (`rlmdb-capi/README.md`, "Differences from C LMDB
@@ -311,7 +312,7 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 | A read transaction of a read-only handle pins the snapshot `mti_txnid` names also while it is 0, so it never reads the first commit of an environment while that commit is in flight or after it failed, where C's read-only handles take the newest meta page (`KNOWN_C_BUGS.md` row 45; both formats; C 0.9's `mdb_dump` as the oracle) | `rlmdb/tests/robust_io_errors.rs` (`robust_read_only_reader_skips_unpublished_first_commit`) |
 | The C API behaves as C (return codes, outputs, traces) | `rlmdb-capi/tests/c/capi_read.c`, `capi_write.c` (run against both libraries; traces must be identical; `DIFFERS()`/`DEVIATION()` mark the documented deviations), `rlmdb-capi/tests/tools.rs` (upstream `mdb_stat.c`/`mdb_dump.c` linked against both print the same) |
 | The tools behave as C's | `rlmdb-tools/tests/*.rs` (every option on every environment: same stdout, stderr, exit code; loaded environments identical as C sees them; `-V` prints rlmdb's version line where C prints its own) |
-| `mdb_version` reports 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)`; major and minor equal `lmdb.h`'s | `rlmdb-capi/tests/c/capi_read.c` (`MDB_VERSION_STRING` and 0.9.37 for C, 0.9.85 for Rust), `capi_version.c`, unit tests in `rlmdb/src/version.rs`, `rlmdb-capi/src/version.rs`, `rlmdb-tools/src/common.rs` |
+| `mdb_version` reports 0, 9, 85 and `LMDB 0.9.85: (rlmdb <version>)` (the 1.0 stub 1, 0, 85); major and minor equal `lmdb.h`'s (1.0's for the 1.0 stub) | `rlmdb-capi/tests/c/capi_read.c` (`MDB_VERSION_STRING` and 0.9.37 for C, 0.9.85 for Rust), `capi_version.c`, `capi_artifacts.rs`, `capi_headers.c`, unit tests in `rlmdb/src/version.rs`, `rlmdb-capi/src/version.rs`, `rlmdb-tools/src/common.rs` |
 | `rlmdb.h`: `rlmdb_version()` (struct `size`, numbers), `rlmdb_version_string()` (the `Display` line of `rlmdb::VersionInfo`); usable from C++ | `rlmdb-capi/tests/capi_version.rs` (`tests/c/capi_version.c` built as C and as C++, against the Rust library) |
 | Corrupt input never crashes | `rlmdb` `format::page` unit tests (`corrupt_pointers_do_not_panic`), `rlmdb/tests/handbuilt.rs` (`corrupt_pages_give_errors_not_panics`) |
 
@@ -354,10 +355,17 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
   environment: readers pin pages against the other side's writer, and
   both see each other's readers and the writer lock.
 * **The C API** (`rlmdb-capi`) opens 1.0 environments through the `mdb_*`
-  functions of the 0.9 `lmdb.h`, with `rlmdb.h` for the format functions
-  and 1.0's constants (`rlmdb-capi/README.md`): keys and `MDB_DUPSORT`
-  items up to the environment's `mdb_env_get_maxkeysize`, 1.0's page sizes
-  (`rlmdb_env_set_pagesize`), `mdb_strerror` of 1.0's codes. What a C
+  functions of the 0.9 `lmdb.h`, with `rlmdb.h` for the format functions,
+  1.0's constants and 1.0's functions (`rlmdb-capi/README.md`): keys and
+  `MDB_DUPSORT` items up to the environment's `mdb_env_get_maxkeysize`,
+  1.0's page sizes (`mdb_env_set_pagesize`), `mdb_txn_flags`,
+  `mdb_cursor_is_db`, `mdb_strerror` of 1.0's codes. Every C library
+  (`librlmdb` and the two stubs) exports all 13 functions LMDB 1.0's
+  `lmdb.h` adds; those of 1.0's two-phase commit, encryption, checksums,
+  incremental backups and crypto modules make C 1.0's argument checks
+  and return `ENOTSUP` (rlmdb implements none of them). The LMDB 1.0
+  stub creates 1.0 environments unless asked otherwise, so a program
+  built for C 1.0 gets what C 1.0 would give it. What a C
   program writes through it is what C 1.0 writes, and C 1.0 reads it; what
   C 1.0 writes, it reads. Return codes stay 0.9's where 1.0 changed them
   (`EACCES` for writes in a read-only transaction). `mdb_drop` of the main
@@ -383,7 +391,11 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
 | Corrupt 1.0 input never crashes | `rlmdb/tests/robust_mutation.rs` (`*_v10` at 1 and 4 KiB pages, `*_v10_64k`, `robust_huge_overflow_refs_v10`), `rlmdb/tests/robust_io_errors.rs` (every case in both formats), `rlmdb/tests/format_v10.rs` (`unknown_headers_are_refused_before_the_lock_file`), `rlmdb::format::meta` unit test `sniff` (a header of one shape claiming the other version) |
 | Concurrent C 1.0 and Rust processes | The interop matrix of 1.0: every scenario of the 0.9 matrix with every (writer, reader) pair of the three 1.0 peers, C 1.0 (`cpeer10`), Rust and C-on-Rust, C 1.0 verifying and auditing (`interop/tests/c10_vs_c10.rs`, `c10_writes_rust_reads.rs`, `rust_writes_c10_reads.rs`, `c10_writes_conrust_reads.rs`, `conrust_writes_c10_reads.rs`, `rust_vs_rust10.rs`, `conrust_vs_conrust10.rs`, `rust_writes_conrust_reads10.rs`, `conrust_writes_rust_reads10.rs`); writer loops of all three at once (`three_peers10.rs`); C 1.0 and Rust in both roles at 256 B, 1 KiB and 64 KiB pages (`pagesize10.rs`); `interop/tests/format10.rs` (`c10_reader_pins_pages_against_rlmdb_writer`, `rlmdb_reader_pins_pages_against_c10_writer`, `c10_and_rlmdb_share_an_open_environment`), `interop/tests/lockfile10.rs` |
 | Both formats in one process: an LMDB 0.9 and an LMDB 1.0 environment open at once, each still shared with the C peer of its release | `interop/tests/mixed_formats.rs` (`rpeer formats-loop`: writer loops on both, one thread each, and snapshot checks of both, next to C 0.9 and C 1.0 writer and reader loops), `rlmdb/tests/mixed_formats.rs` (threads writing and reading a 0.9 and a 1 KiB-page 1.0 environment, held snapshots, copies, lock-file versions, reopening) |
-| Defaults for new environments: builder, then `set_default_format`, then `RLMDB_DEFAULT_FORMAT` (unparseable values ignored), then 0.9; never for existing files | `rlmdb/tests/default_format.rs`, `rlmdb-capi/tests/c/capi_format.c` (`test_defaults`), `rlmdb-tools/tests/format.rs`, `interop/tests/capi10.rs` (`capi_creates_1_0_with_the_default_format_variable`, `capi_creates_0_9_by_default`) |
+| Defaults for new environments: builder, then `set_default_format`, then `RLMDB_DEFAULT_FORMAT` (unparseable values ignored), then the builder's fallback (0.9; 1.0 in the C API's 1.0 stub); never for existing files | `rlmdb/tests/default_format.rs`, `rlmdb-capi/tests/c/capi_format.c` (`test_defaults`), `rlmdb-capi/tests/capi_artifacts.rs` (each library, with and without the functions and the variable), `rlmdb-tools/tests/format.rs`, `interop/tests/capi10.rs` (`capi_creates_1_0_with_the_default_format_variable`, `capi_creates_0_9_by_default`) |
+| The C libraries (`librlmdb`, the 0.9 and the 1.0 stub) export every function of LMDB 0.9's and 1.0's `lmdb.h` and of `rlmdb.h`, and nothing else; each reports its version (0.9.85, 0.9.85, 1.0.85); SONAMEs and install names; `rlmdb.h` compiles after either `lmdb.h`, as C and C++ | `rlmdb-capi/tests/capi_artifacts.rs`, `capi_headers.rs` |
+| LMDB 1.0's `mdb_env_set_pagesize`, `mdb_txn_flags`, `mdb_cursor_is_db` as C 1.0's; its unimplemented functions return `ENOTSUP` after C 1.0's argument checks and change nothing | `rlmdb-capi/tests/capi_v10.rs` (`tests/c/capi_v10.c` against C 1.0, the 1.0 stub and `librlmdb`) |
+| Programs built for C LMDB 1.0 run on the 1.0 stub as on C 1.0 (1.0's `mtest*.c`: same output, same environments for C 1.0's `mdb_stat` and `mdb_dump`) | `rlmdb-capi/tests/mtest.rs` (`mtest_1_0` .. `mtest5_1_0`) |
+| The installed layout; programs built against shared C LMDB 0.9 and 1.0 run on the stubs through `LD_LIBRARY_PATH`, `LD_PRELOAD` or `DYLD_LIBRARY_PATH` | `rlmdb-capi/tests/install.rs` |
 | `rlmdb.h` format functions and 1.0 constants; `mdb_env_get_maxkeysize` before and after the open; `MDB_PREVSNAPSHOT`/`MDB_ENCRYPT` refused; `mdb_strerror` of 1.0's codes | `rlmdb-capi/tests/capi_format.rs` (`tests/c/capi_format.c`), `rlmdb-capi/src/version.rs` and `src/format.rs` unit tests |
 | The C API with 1.0 environments at 1, 4 and 64 KiB pages: keys longer than 511 bytes, inline data above 16 KiB, `MDB_RESERVE`, `MDB_MULTIPLE`, `MDB_CURRENT`, inputs that point into dirty pages | `rlmdb-capi/tests/c/capi_format.c` (`test_large_items`) |
 | C 1.0 reads what the C API writes (data sets verified by `cpeer10`, its page audit, `mdb_dump10`, `mdb_stat10`) and the C API reads what C 1.0 writes (`cpeer_capi verify`, keys over 511 bytes from `mdb_load10`) | `interop/tests/capi10.rs` |
