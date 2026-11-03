@@ -98,8 +98,10 @@ int main(void)
 		CHECK(functions[i] != NULL);
 	CHECK(sizeof(mdb_size_t) == sizeof(size_t));
 	CHECK(MDB_SIZE_MAX == SIZE_MAX);
-	snprintf(buf, sizeof(buf), "%" MDB_PRIy(u), count);
-	CHECK(strcmp(buf, "42") == 0);
+	/* Not passed to printf: MinGW's format checking does not know the
+	 * "I" of Windows' MDB_FMT_Z (C 1.0's). */
+	snprintf(buf, sizeof(buf), "%s|%s", MDB_PRIy(u), MDB_SCNy(x));
+	CHECK(strcmp(buf, MDB_FMT_Z "u|" MDB_FMT_Z "x") == 0 && count == MDB_SIZE_MAX - MDB_SIZE_MAX + 42);
 	CHECK(mcf->mcf_encfunc == encp && mcf->mcf_sumfunc == sump && mcf->mcf_keysize == 32);
 	CHECK(remap == 0x4000000 && MDB_PREVSNAPSHOT == 0x2000000 && MDB_ENCRYPT == 0x2000);
 	for (i = 0; i < sizeof(codes) / sizeof(codes[0]); i++)
