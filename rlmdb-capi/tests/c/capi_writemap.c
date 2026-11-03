@@ -15,7 +15,13 @@
  * Every build prints the same trace ("T ..." lines). The same writes run
  * in <scratch>/writemap (with MDB_WRITEMAP) and in <scratch>/plain
  * (without), each followed by a compacting copy (<name>-copy); the test
- * compares the files the Rust builds leave in the two.
+ * compares the files the Rust builds leave in the two. Their trace lines
+ * start with the environment's name.
+ *
+ * On OpenBSD the Rust builds refuse MDB_WRITEMAP for an open for writing
+ * (ENOTSUP; rlmdb/src/os/mod.rs): there the writemap environment's
+ * trace is the single line "T writemap: open refused" (WRITEMAP_REFUSED).
+ * A read-only open with the flag works everywhere (it drops the flag).
  *
  * Prints "capi_writemap: N checks, F failures" and exits 1 on failures.
  */
@@ -51,10 +57,20 @@ static int checks, failures;
 #define C10_RC(c10, other) (other)
 #endif
 
+/* rlmdb refuses MDB_WRITEMAP for an open for writing on OpenBSD, which
+ * keeps a file's maps apart from its descriptors; C accepts it. */
+#if defined(LMDB_RUST) && defined(__OpenBSD__)
+#define WRITEMAP_REFUSED 1
+#else
+#define WRITEMAP_REFUSED 0
+#endif
+
 /* A trace line, compared between the builds. */
 #define T(...) do { printf("T "); printf(__VA_ARGS__); printf("\n"); } while (0)
 /* A traced return code. */
 #define TRC(what, expr) T("%s: %d", what, (expr))
+/* The same in writes(), after the environment's name. */
+#define NTRC(what, expr) T("%s: %s: %d", name, what, (expr))
 
 /* The flags this program sets; mdb_env_get_flags is traced through it. */
 #define FLAG_MASK (MDB_WRITEMAP | MDB_RDONLY | MDB_NOTLS | MDB_MAPASYNC | MDB_NOSYNC)
@@ -88,14 +104,25 @@ static MDB_env *create_env(void)
 	return env;
 }
 
+/* The environment <scratch>/<name>, opened with flags; NULL where the
+ * open is refused (WRITEMAP_REFUSED). */
 static MDB_env *open_env(const char *name, unsigned int flags)
 {
 	char path[1200];
 	MDB_env *env = create_env();
+	int rc;
 	env_path(path, sizeof(path), name);
 	OK(mdb_env_set_mapsize(env, 4u << 20));
 	OK(mdb_env_set_maxdbs(env, 4));
-	OK(mdb_env_open(env, path, flags | MDB_NOTLS, 0664));
+	rc = mdb_env_open(env, path, flags | MDB_NOTLS, 0664);
+#if WRITEMAP_REFUSED
+	if ((flags & (MDB_WRITEMAP | MDB_RDONLY)) == MDB_WRITEMAP) {
+		RC(rc, ENOTSUP);
+		mdb_env_close(env);
+		return NULL;
+	}
+#endif
+	OK(rc);
 	return env;
 }
 
@@ -158,18 +185,22 @@ static void writes(const char *name, unsigned int flags)
 	char path[1200], k[16];
 	int i, n;
 
+	if (!env) {
+		T("%s: open refused", name);
+		return;
+	}
 	T("%s: flags after open: %#x", name, env_flags(env));
 
 	/* MDB_WRITEMAP is not one of the flags that can change. */
-	TRC("set_flags(WRITEMAP, 0)", mdb_env_set_flags(env, MDB_WRITEMAP, 0));
-	TRC("set_flags(WRITEMAP, 1)", mdb_env_set_flags(env, MDB_WRITEMAP, 1));
+	NTRC("set_flags(WRITEMAP, 0)", mdb_env_set_flags(env, MDB_WRITEMAP, 0));
+	NTRC("set_flags(WRITEMAP, 1)", mdb_env_set_flags(env, MDB_WRITEMAP, 1));
 	T("%s: flags: %#x", name, env_flags(env));
 	/* MDB_MAPASYNC can, and syncs work with it. */
-	TRC("set_flags(MAPASYNC, 1)", mdb_env_set_flags(env, MDB_MAPASYNC, 1));
+	NTRC("set_flags(MAPASYNC, 1)", mdb_env_set_flags(env, MDB_MAPASYNC, 1));
 	T("%s: flags: %#x", name, env_flags(env));
-	TRC("sync(0)", mdb_env_sync(env, 0));
-	TRC("sync(1)", mdb_env_sync(env, 1));
-	TRC("set_flags(MAPASYNC, 0)", mdb_env_set_flags(env, MDB_MAPASYNC, 0));
+	NTRC("sync(0)", mdb_env_sync(env, 0));
+	NTRC("sync(1)", mdb_env_sync(env, 1));
+	NTRC("set_flags(MAPASYNC, 0)", mdb_env_set_flags(env, MDB_MAPASYNC, 0));
 
 	memset(big, 'b', sizeof(big));
 	OK(mdb_txn_begin(env, NULL, 0, &txn));
@@ -193,7 +224,7 @@ static void writes(const char *name, unsigned int flags)
 
 	/* A read-only parent: EINVAL, as without MDB_WRITEMAP. */
 	OK(mdb_txn_begin(env, NULL, MDB_RDONLY, &reader));
-	TRC("child of a reader", mdb_txn_begin(env, reader, 0, &child));
+	NTRC("child of a reader", mdb_txn_begin(env, reader, 0, &child));
 	T("%s: reader: after=%s", name, get(reader, dbi, "after"));
 	mdb_txn_abort(reader);
 
@@ -213,7 +244,7 @@ static void writes(const char *name, unsigned int flags)
 	try_children(txn, writemap);
 	mdb_txn_abort(txn);
 
-	TRC("set_mapsize(8 MiB)", mdb_env_set_mapsize(env, 8u << 20));
+	NTRC("set_mapsize(8 MiB)", mdb_env_set_mapsize(env, 8u << 20));
 	OK(mdb_env_info(env, &info));
 	T("%s: mapsize %lu", name, (unsigned long)info.me_mapsize);
 
@@ -227,11 +258,12 @@ static void writes(const char *name, unsigned int flags)
 		snprintf(copy, sizeof(copy), "%s-copy", name);
 		env_path(path, sizeof(path), copy);
 	}
-	TRC("copy2(COMPACT)", mdb_env_copy2(env, path, MDB_CP_COMPACT));
+	NTRC("copy2(COMPACT)", mdb_env_copy2(env, path, MDB_CP_COMPACT));
 	mdb_env_close(env);
 
-	/* A read-only open drops MDB_WRITEMAP. */
-	env = open_env(name, flags | MDB_RDONLY);
+	/* A read-only open drops MDB_WRITEMAP (also where an open for
+	 * writing with it is refused). */
+	env = open_env(name, MDB_WRITEMAP | MDB_RDONLY);
 	T("%s: read-only: flags %#x", name, env_flags(env));
 	RC(mdb_txn_begin(env, NULL, 0, &txn), C10_RC(MDB_IS_READONLY, EACCES));
 	OK(mdb_txn_begin(env, NULL, MDB_RDONLY, &reader));

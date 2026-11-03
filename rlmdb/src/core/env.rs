@@ -320,6 +320,10 @@ impl Environment {
         if read_only {
             // Silently ignore WRITEMAP when we're only getting read access.
             flags &= !MDB_WRITEMAP;
+        } else if flags & MDB_WRITEMAP != 0 {
+            // Not C: refused where the OS keeps maps and descriptors apart
+            // (OpenBSD), before any file is touched.
+            os::check_write_map()?;
         }
         let no_sub_dir = flags & MDB_NOSUBDIR != 0;
         let no_lock = flags & MDB_NOLOCK != 0;

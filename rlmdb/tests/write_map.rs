@@ -6,6 +6,13 @@
 //! drops it. The files a writer leaves with the flag are byte for byte
 //! those it leaves without it, and C reads them (the 0.9 ones here with
 //! C 0.9; `rlmdb-capi/tests/capi_writemap.rs` has C 1.0 read 1.0 ones).
+//!
+//! On OpenBSD, which keeps a file's maps apart from its descriptors, an
+//! open for writing with the flag is refused with `ENOTSUP` instead
+//! (`rlmdb/src/os/mod.rs`); the tests that write with it run elsewhere.
+
+// The helpers of the tests that write with the flag.
+#![cfg_attr(target_os = "openbsd", allow(dead_code, unused_imports))]
 
 mod common;
 
@@ -15,12 +22,12 @@ use rlmdb::{
     DatabaseFlags, Environment, EnvironmentFlags, Error, Format, MdbError, Transaction, WriteFlags,
 };
 
-fn open(
+fn try_open(
     path: &Path,
     format: Format,
     page_size: Option<usize>,
     flags: EnvironmentFlags,
-) -> Environment {
+) -> rlmdb::Result<Environment> {
     let mut b = Environment::builder();
     b.map_size(16 << 20)
         .max_dbs(4)
@@ -29,7 +36,16 @@ fn open(
     if let Some(ps) = page_size {
         b.page_size(ps);
     }
-    b.open(path).unwrap()
+    b.open(path)
+}
+
+fn open(
+    path: &Path,
+    format: Format,
+    page_size: Option<usize>,
+    flags: EnvironmentFlags,
+) -> Environment {
+    try_open(path, format, page_size, flags).unwrap()
 }
 
 fn is_bad_txn(e: &Error) -> bool {
@@ -155,6 +171,7 @@ fn both(format: Format, page_size: Option<usize>) -> (tempfile::TempDir, tempfil
 }
 
 #[test]
+#[cfg(not(target_os = "openbsd"))]
 fn write_map_leaves_the_same_files_v09() {
     let (wm, _plain) = both(Format::V09, None);
     let c = require_c!();
@@ -170,12 +187,14 @@ fn write_map_leaves_the_same_files_v09() {
 }
 
 #[test]
+#[cfg(not(target_os = "openbsd"))]
 fn write_map_leaves_the_same_files_v10() {
     both(Format::V10, None);
     both(Format::V10, Some(1024));
 }
 
 #[test]
+#[cfg(not(target_os = "openbsd"))]
 fn nested_transactions_are_refused_with_write_map() {
     let dir = tempfile::tempdir().unwrap();
     for format in [Format::V09, Format::V10] {
@@ -207,6 +226,7 @@ fn nested_transactions_are_refused_with_write_map() {
 }
 
 #[test]
+#[cfg(not(target_os = "openbsd"))]
 fn write_map_flag_as_c_reports_it() {
     let dir = tempfile::tempdir().unwrap();
     let env = open(dir.path(), Format::V09, None, EnvironmentFlags::WRITE_MAP);
@@ -238,4 +258,40 @@ fn write_map_flag_as_c_reports_it() {
     assert!(!flags.contains(EnvironmentFlags::WRITE_MAP), "{flags:?}");
     assert!(flags.contains(EnvironmentFlags::READ_ONLY), "{flags:?}");
     env.begin_ro_txn().unwrap();
+}
+
+/// OpenBSD: an open for writing with the flag fails with `ENOTSUP` before
+/// any file is touched; without it, and read-only with it (the flag
+/// dropped, as C does), the environment opens as anywhere else.
+#[test]
+#[cfg(target_os = "openbsd")]
+fn write_map_is_refused_on_openbsd() {
+    let dir = tempfile::tempdir().unwrap();
+    for format in [Format::V09, Format::V10] {
+        let path = dir.path().join(format!("{format:?}"));
+        std::fs::create_dir(&path).unwrap();
+        let e = try_open(&path, format, None, EnvironmentFlags::WRITE_MAP).unwrap_err();
+        assert_eq!(e.to_err_code(), libc::ENOTSUP, "{format:?}: {e:?}");
+        let no_lock = EnvironmentFlags::WRITE_MAP | EnvironmentFlags::NO_LOCK;
+        let e = try_open(&path, format, None, no_lock).unwrap_err();
+        assert_eq!(e.to_err_code(), libc::ENOTSUP, "{format:?}: {e:?}");
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0, "{format:?}");
+
+        let env = open(&path, format, None, EnvironmentFlags::empty());
+        let mut txn = env.begin_rw_txn().unwrap();
+        let db = txn.open_db(None).unwrap();
+        txn.put(db, b"a", b"1", WriteFlags::empty()).unwrap();
+        let mut child = txn.begin_nested_txn().unwrap();
+        child.put(db, b"b", b"2", WriteFlags::empty()).unwrap();
+        child.commit().unwrap();
+        txn.commit().unwrap();
+        drop(env);
+
+        let read_only = EnvironmentFlags::WRITE_MAP | EnvironmentFlags::READ_ONLY;
+        let env = open(&path, format, None, read_only);
+        let flags = env.flags();
+        assert!(!flags.contains(EnvironmentFlags::WRITE_MAP), "{flags:?}");
+        let txn = env.begin_ro_txn().unwrap();
+        assert_eq!(txn.get(db, b"b").unwrap(), Some(&b"2"[..]));
+    }
 }

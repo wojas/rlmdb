@@ -18,6 +18,11 @@
 //! data file to the map size; rlmdb does not, see `COMPATIBILITY.md`. The
 //! bytes C leaves uninitialised differ between C and rlmdb as they do
 //! without the flag, so the files are not compared with C's.)
+//!
+//! On OpenBSD the Rust builds refuse an open for writing with the flag
+//! (`ENOTSUP`, `rlmdb/src/os/mod.rs`): their trace has the line
+//! `T writemap: open refused` where the oracle's has those of the
+//! environment with the flag, and they leave only the one without it.
 
 mod common;
 
@@ -28,6 +33,32 @@ use common::*;
 
 /// The environments the program leaves in its scratch directory.
 const ENVS: [&str; 4] = ["writemap", "plain", "writemap-copy", "plain-copy"];
+
+/// Whether the Rust libraries refuse `MDB_WRITEMAP` for an open for
+/// writing (OpenBSD, which keeps a file's maps apart from its
+/// descriptors).
+const WRITEMAP_REFUSED: bool = cfg!(target_os = "openbsd");
+
+/// The environments a Rust build leaves.
+fn rust_envs() -> impl Iterator<Item = &'static str> {
+    ENVS.into_iter()
+        .filter(|env| !(WRITEMAP_REFUSED && env.starts_with("writemap")))
+}
+
+/// The trace a Rust build must print, from the oracle's: the same, but
+/// where the flag is refused, one line for those of the environment with
+/// it.
+fn rust_trace(oracle: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in oracle {
+        if !(WRITEMAP_REFUSED && line.starts_with("T writemap: ")) {
+            out.push(line.to_string());
+        } else if !out.iter().any(|l| l.starts_with("T writemap: ")) {
+            out.push("T writemap: open refused".to_owned());
+        }
+    }
+    out
+}
 
 fn run_capi_writemap(lib: Lib, format: &str) -> (String, PathBuf) {
     let b = builder();
@@ -62,7 +93,8 @@ fn data_file(scratch: &Path, env: &str) -> Vec<u8> {
     std::fs::read(scratch.join(env).join("data.mdb")).unwrap()
 }
 
-/// `lib`'s C tools and peer read every environment in `scratch`:
+/// `lib`'s C tools and peer read every environment a Rust build left in
+/// `scratch`:
 /// `mdb_stat -a` and the page audit (`cpeer check-freelist`) succeed, and
 /// `mdb_dump` prints what it prints for the oracle's environment (or
 /// copy) without the flag (in `oracle`, written by `lib` itself).
@@ -86,7 +118,7 @@ fn c_reads_environments(scratch: &Path, oracle: &Path, lib: Lib) {
         }
         text
     };
-    for env in ENVS {
+    for env in rust_envs() {
         let path = scratch.join(env);
         run_ok(command_as(&mdb_stat, "mdb_stat").arg("-a").arg(&path));
         run_ok(Command::new(&cpeer).arg("check-freelist").arg(&path));
@@ -123,8 +155,9 @@ fn writemap_limits_match_c() {
         (Lib::Rust10, "1.0"),
     ] {
         let (rust, scratch) = run_capi_writemap(lib, format);
-        assert_eq!(t09, trace(&rust), "{lib:?} {format}");
-        for (a, b) in [("writemap", "plain"), ("writemap-copy", "plain-copy")] {
+        assert_eq!(rust_trace(&t09), trace(&rust), "{lib:?} {format}");
+        let pairs = [("writemap", "plain"), ("writemap-copy", "plain-copy")];
+        for (a, b) in pairs.into_iter().filter(|_| !WRITEMAP_REFUSED) {
             assert!(
                 data_file(&scratch, a) == data_file(&scratch, b),
                 "{lib:?} {format}: {a} and {b} differ"
