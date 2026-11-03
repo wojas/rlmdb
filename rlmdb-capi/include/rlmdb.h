@@ -85,7 +85,7 @@ extern "C" {
 typedef struct rlmdb_version_info {
 	unsigned	size;		/**< sizeof(rlmdb_version_info) of the library */
 	int		rlmdb_major, rlmdb_minor, rlmdb_patch;	/**< The rlmdb version */
-	int		lmdb_major, lmdb_minor, lmdb_patch;	/**< What #mdb_version() reports: 0, 9, 85 */
+	int		lmdb_major, lmdb_minor, lmdb_patch;	/**< What #mdb_version() reports: 0, 9, 85 (the LMDB 1.0 stub: 1, 0, 85) */
 	int		v09_major, v09_minor, v09_patch;	/**< C release the 0.9 format and API match */
 	int		v10_major, v10_minor, v10_patch;	/**< C release the 1.0 format matches */
 } rlmdb_version_info;
@@ -195,8 +195,9 @@ int rlmdb_set_default_format(unsigned format);
 
 	/** @brief Set the size of DB pages in bytes (LMDB 1.0).
 	 *
-	 * LMDB 1.0's mdb_env_set_pagesize(), under rlmdb's prefix because
-	 * lmdb.h is LMDB 0.9's. The size defaults to the OS page size; it only
+	 * The same as LMDB 1.0's #mdb_env_set_pagesize() (declared below),
+	 * under rlmdb's prefix, from before rlmdb exported 1.0's functions.
+	 * The size defaults to the OS page size; it only
 	 * applies to a new LMDB 1.0 environment (an existing one keeps the page
 	 * size recorded in its file). LMDB 0.9 has no such setting:
 	 * #mdb_env_open() fails with EINVAL if the environment turns out to be

@@ -312,7 +312,8 @@ fn elf_dynamic(data: &[u8]) -> Result<ElfDynamic, String> {
     })
 }
 
-/// The SONAME `readelf -d` prints for `lib`, if it can be run.
+/// The SONAME `readelf -d` prints for `lib`, if it can be run and prints
+/// it as GNU's does (`(SONAME) ... [name]`).
 fn readelf_soname(lib: &Path) -> Option<String> {
     let out = Command::new("readelf").arg("-d").arg(lib).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -346,7 +347,9 @@ fn shared_library_names() {
             );
             match readelf_soname(&lib) {
                 Some(s) => assert_eq!(s, artifact.soname(), "readelf -d {}", lib.display()),
-                None => eprintln!("NOTE: no readelf: the SONAME was read by the test only"),
+                None => {
+                    eprintln!("NOTE: no GNU readelf output: the SONAME was read by the test only")
+                }
             }
         } else if cfg!(target_os = "macos") {
             let expected = match artifact {
