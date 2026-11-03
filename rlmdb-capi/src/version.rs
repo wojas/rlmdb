@@ -312,5 +312,10 @@ mod tests {
         assert_eq!(s(MDB_KEYEXIST - 1), invalid);
         assert_eq!(s(-1), invalid);
         assert_eq!(s(libc::ENOENT), "No such file or directory");
+        // What LMDB 1.0's unimplemented functions return (crate::v10); on
+        // Windows not the system's text for 129 (crate::platform).
+        if cfg!(any(windows, target_os = "linux", target_os = "macos")) {
+            assert_eq!(s(libc::ENOTSUP), "Operation not supported");
+        }
     }
 }

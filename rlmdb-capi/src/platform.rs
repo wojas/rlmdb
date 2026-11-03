@@ -7,7 +7,10 @@
 //! invalid sequences become U+FFFD), `mdb_filehandle_t` is a `HANDLE`, and
 //! `mdb_strerror` gives the C runtime's text for the `errno` values LMDB
 //! uses and the system's message for every other code (a `GetLastError`
-//! value).
+//! value), except `ENOTSUP`, which only rlmdb returns (LMDB 1.0's
+//! functions it does not implement): "Operation not supported", as on
+//! Unix, where the system's message for its value, 129, is an unrelated
+//! one ("The %1 application cannot be run in Win32 mode").
 
 use std::borrow::Cow;
 use std::ffi::CStr;
@@ -135,9 +138,14 @@ pub(crate) fn system_strerror(err: i32) -> *mut std::os::raw::c_char {
 /// the C runtime's text for `ENOENT`, `EIO`, `ENOMEM`, `EACCES`, `EBUSY`,
 /// `EINVAL` and `ENOSPC`, else the system's message ([`rlmdb::strerror`]).
 /// C formats the message into a buffer on its stack; here each code's text
-/// is made once and kept for the life of the process.
+/// is made once and kept for the life of the process. `ENOTSUP`, which C
+/// never returns, is "Operation not supported" (see the module
+/// documentation; the C runtimes say "not supported" or "Unknown error").
 #[cfg(windows)]
 pub(crate) fn system_strerror(err: i32) -> *mut std::os::raw::c_char {
+    if err == libc::ENOTSUP {
+        return c"Operation not supported".as_ptr().cast_mut();
+    }
     use std::collections::BTreeMap;
     use std::ffi::CString;
     use std::sync::{Mutex, OnceLock};
