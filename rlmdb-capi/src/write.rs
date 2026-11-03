@@ -35,7 +35,7 @@ use rlmdb::consts::{
 };
 use rlmdb::{Dbi, MdbError, RwTxn, Transaction, WriteFlags};
 
-use crate::handles::{CursorAccess, MDB_cursor, MDB_env, MDB_txn};
+use crate::handles::{bad_txn, CursorAccess, MDB_cursor, MDB_env, MDB_txn};
 use crate::types::*;
 use crate::SUCCESS;
 
@@ -98,13 +98,18 @@ impl CopyLimits {
 /// `false` unless `dbi` is a user database handle of the active
 /// transaction.
 fn user_dbi_exists(txn: &MDB_txn, dbi: MDB_dbi) -> bool {
-    txn.with_txn(EINVAL, |rt| {
-        match rt.db_flags(Dbi::from_raw(dbi)) {
-            // C does not check for closed/reused handles here.
-            Ok(_) | Err(rlmdb::Error::Mdb(MdbError::BadDbi)) => Ok(()),
-            Err(_) => Err(EINVAL),
-        }
-    })
+    txn.with_txn(
+        EINVAL,
+        |rt| {
+            match rt.db_flags(Dbi::from_raw(dbi)) {
+                // C does not check for closed/reused handles here.
+                Ok(_) | Err(rlmdb::Error::Mdb(MdbError::BadDbi)) => Ok(()),
+                Err(_) => Err(EINVAL),
+            }
+        },
+        // (Never a read-only transaction.)
+        |_| Err(EINVAL),
+    )
     .is_ok()
 }
 
@@ -241,6 +246,15 @@ pub unsafe extern "C" fn mdb_put(
         }
         return libc::EACCES;
     }
+    // A prepared transaction: C's handle and flag checks, then
+    // MDB_TXN_BLOCKED.
+    if let Some(checked) = t.prepared_dbi(dbi, true) {
+        return match checked {
+            Err(code) => code,
+            Ok(()) if flags & !PUT_FLAGS != 0 => EINVAL,
+            Ok(()) => bad_txn(),
+        };
+    }
     // SAFETY: key and data point to valid values (lmdb.h).
     let (key_in, value) = match unsafe { (key_input(key), &mut *data) } {
         (Ok(k), v) => (k, v),
@@ -293,6 +307,10 @@ pub unsafe extern "C" fn mdb_del(
         } else {
             EINVAL
         };
+    }
+    // A prepared transaction: C's handle check, then MDB_TXN_BLOCKED.
+    if let Some(checked) = t.prepared_dbi(dbi, true) {
+        return checked.err().unwrap_or_else(bad_txn);
     }
     // SAFETY: key points to a valid value (lmdb.h).
     let key_in = match unsafe { key_input(key) } {
@@ -475,6 +493,11 @@ pub unsafe extern "C" fn mdb_drop(txn: *mut MDB_txn, dbi: MDB_dbi, del: c_int) -
         } else {
             EINVAL
         };
+    }
+    // A prepared transaction: C's handle checks (`TXN_DBI_CHANGED`:
+    // `MDB_BAD_DBI`), then mdb_cursor_open's MDB_TXN_BLOCKED.
+    if let Some(checked) = t.prepared_dbi(dbi, true) {
+        return checked.err().unwrap_or_else(bad_txn);
     }
     let db = Dbi::from_raw(dbi);
     let result = t.with_write(|w| {

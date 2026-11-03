@@ -11,7 +11,8 @@
  *
  * mdb_env_set_pagesize, mdb_txn_flags and mdb_cursor_is_db are
  * implemented: every build must pass the same checks and print the same
- * trace ("T ..." lines). The others are not implemented in rlmdb: the
+ * trace ("T ..." lines); so are mdb_txn_prepare and mdb_env_rollback,
+ * which capi_2pc.c tests. The others are not implemented in rlmdb: the
  * Rust builds check that they return ENOTSUP after C 1.0's argument
  * checks and change nothing; DIFFERS() checks the C result in the C build
  * and ENOTSUP in the Rust builds; RUST_ONLY() marks calls that C 1.0
@@ -421,71 +422,6 @@ static void test_cursor_is_db(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Two-phase commit: mdb_txn_prepare, mdb_env_rollback               */
-/* ---------------------------------------------------------------- */
-
-static void test_two_phase_commit(void)
-{
-	MDB_env *env = new_env("2pc", 4);
-	MDB_txn *txn;
-	MDB_dbi dbi;
-	MDB_envinfo info;
-	size_t last;
-
-	RUST_ONLY(RC(mdb_txn_prepare(NULL), EINVAL));
-	RUST_ONLY(RC(mdb_env_rollback(NULL, 1), EINVAL));
-
-	OK(mdb_txn_begin(env, NULL, 0, &txn));
-	OK(mdb_dbi_open(txn, NULL, 0, &dbi));
-	put(txn, dbi, "before", "1");
-	/* C writes the data pages and only allows commit or abort; rlmdb
-	 * returns ENOTSUP and the transaction stays an ordinary one. */
-	DIFFERS(mdb_txn_prepare(txn), 0);
-	RUST_ONLY(put(txn, dbi, "after", "2"));
-	RUST_ONLY(DIFFERS(mdb_txn_prepare(txn), 0));
-	OK(mdb_txn_commit(txn));
-	T("2pc: committed after prepare: before %d", has_key(env, "before"));
-	RUST_ONLY(CHECK(has_key(env, "after")));
-
-	/* A read-only transaction (C commits it, which frees it). */
-	OK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
-	DIFFERS(mdb_txn_prepare(txn), 0);
-	RUST_ONLY(mdb_txn_abort(txn));
-
-	/* A nested transaction. */
-	OK(mdb_txn_begin(env, NULL, 0, &txn));
-	{
-		MDB_txn *child;
-		OK(mdb_txn_begin(env, txn, 0, &child));
-		put(child, dbi, "nested", "3");
-		RUST_ONLY(DIFFERS(mdb_txn_prepare(child), 0));
-		OK(mdb_txn_commit(child));
-	}
-	OK(mdb_txn_commit(txn));
-	T("2pc: nested: %d", has_key(env, "nested"));
-
-	/* mdb_env_rollback: C refuses a txnid other than the last with
-	 * MDB_CANT_ROLLBACK; rlmdb has no rollback. */
-	OK(mdb_env_info(env, &info));
-	last = info.me_last_txnid;
-	DIFFERS(mdb_env_rollback(env, last + 1), MDB_CANT_ROLLBACK);
-	DIFFERS(mdb_env_rollback(env, last - 1), MDB_CANT_ROLLBACK);
-	/* With the last txnid C rolls the commit back; rlmdb keeps it. */
-	RUST_ONLY(DIFFERS(mdb_env_rollback(env, last), 0));
-	OK(mdb_env_info(env, &info));
-	T("2pc: last txnid unchanged: %d, nested %d", info.me_last_txnid == last,
-		has_key(env, "nested"));
-	mdb_env_close(env);
-
-#ifdef LMDB_RUST
-	/* An environment that is not open: EINVAL (C would crash). */
-	env = create_env();
-	RC(mdb_env_rollback(env, 1), EINVAL);
-	mdb_env_close(env);
-#endif
-}
-
-/* ---------------------------------------------------------------- */
 /* Encryption and checksums                                          */
 /* ---------------------------------------------------------------- */
 
@@ -707,7 +643,7 @@ int main(int argc, char **argv)
 	test_set_pagesize();
 	test_txn_flags();
 	test_cursor_is_db();
-	test_two_phase_commit();
+	/* Two-phase commit (mdb_txn_prepare, mdb_env_rollback): capi_2pc.c. */
 	test_crypto();
 	test_incremental();
 	test_modules();

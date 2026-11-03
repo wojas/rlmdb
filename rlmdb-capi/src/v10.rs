@@ -7,10 +7,11 @@
 //!
 //! * `mdb_env_set_pagesize` (as `rlmdb_env_set_pagesize`);
 //! * `mdb_txn_flags`;
-//! * `mdb_cursor_is_db` ([`rlmdb::RoCursor::is_db`]).
+//! * `mdb_cursor_is_db` ([`rlmdb::RoCursor::is_db`]);
+//! * two-phase commit: `mdb_txn_prepare` ([`rlmdb::RwTxn::prepare`]) and
+//!   `mdb_env_rollback` ([`rlmdb::Environment::rollback`]).
 //!
-//! Not implemented: two-phase commit (`mdb_txn_prepare`,
-//! `mdb_env_rollback`), encryption and checksums (`mdb_env_set_encrypt`,
+//! Not implemented: encryption and checksums (`mdb_env_set_encrypt`,
 //! `mdb_env_set_checksum`), incremental backups (`mdb_env_incr_dump`,
 //! `mdb_env_incr_dumpfd`, `mdb_env_incr_loadfd`) and crypto modules
 //! (`mdb_modload`, `mdb_modunload`, `mdb_modsetup`); `DUAL_FORMAT.md` §7.
@@ -106,29 +107,60 @@ pub unsafe extern "C" fn mdb_cursor_is_db(cursor: *mut MDB_cursor) -> c_int {
     c_int::from(is_db.unwrap_or(false))
 }
 
-/// `mdb_txn_prepare` (two-phase commit): not implemented. `EINVAL` for
-/// NULL (C would crash), else `ENOTSUP`, and the transaction stays as it
-/// was: an ordinary transaction, which may still be used, committed or
-/// aborted. (C 1.0 writes the transaction's data pages, closes its
-/// cursors and leaves only `mdb_txn_commit` and `mdb_txn_abort`; on a
-/// read-only or nested transaction it commits it.)
+/// `mdb_txn_prepare` (two-phase commit, C 1.0 `mdb.c` line 4659): write
+/// everything the transaction changed, synced as a commit syncs it, except
+/// the meta page, keeping the writer lock; then only `mdb_txn_commit`
+/// (which writes the meta page) and `mdb_txn_abort` finish it
+/// ([`rlmdb::RwTxn::prepare`]). As in C:
+///
+/// * the transaction's cursors are closed: here their handles stay
+///   allocated but unusable (`EINVAL`) until `mdb_cursor_close` or the
+///   end of the transaction (C frees them at once);
+/// * every call that checks `MDB_TXN_BLOCKED` returns `MDB_BAD_TXN` after
+///   its handle checks (`mdb_get`, `mdb_put`, `mdb_del`, `mdb_drop`,
+///   `mdb_cursor_open`, `mdb_dbi_open`, `mdb_stat`, `mdb_txn_begin` of a
+///   child); `mdb_dbi_flags`, `mdb_set_compare`, `mdb_set_dupsort`,
+///   `mdb_cmp`, `mdb_dcmp`, `mdb_txn_id` and `mdb_txn_flags` still work; a
+///   second `mdb_txn_prepare` returns `MDB_TXN_PENDING`;
+/// * an active child is committed first (if that fails, the transaction
+///   is aborted);
+/// * a read-only or a nested transaction is committed (as
+///   `mdb_txn_commit`, which frees its handle);
+/// * a transaction with nothing to write ends as an empty commit does
+///   (the writer lock is released); `mdb_txn_commit` then returns 0 where
+///   C's returns `MDB_BAD_TXN` and frees memory it does not own
+///   (`KNOWN_C_BUGS.md` row 61);
+/// * if the prepare fails, the transaction is aborted: `mdb_txn_abort`
+///   frees the handle, `mdb_txn_commit` returns `MDB_BAD_TXN` and frees it
+///   (C returns the same and frees memory it does not own, row 61).
+///
+/// `EINVAL` for NULL (C would crash).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_txn_prepare(txn: *mut MDB_txn) -> c_int {
-    // SAFETY: txn is NULL or a live handle (lmdb.h).
-    match unsafe { MDB_txn::from_ptr(txn) } {
-        Some(_) => ENOTSUP,
-        None => EINVAL,
+    if txn.is_null() {
+        return EINVAL;
     }
+    // SAFETY: txn is a live handle (lmdb.h); a read-only or nested one is
+    // freed, as mdb_txn_commit frees it.
+    unsafe { MDB_txn::prepare(txn) }
 }
 
-/// `mdb_env_rollback` (two-phase commit): not implemented. `EINVAL` for
-/// NULL or an environment that is not open (C would crash), else
-/// `ENOTSUP`; the last commit stays.
+/// `mdb_env_rollback` (two-phase commit, C 1.0 `mdb.c` line 4668): undo
+/// the last commit, transaction `txnid`, by overwriting its meta page with
+/// one that holds no snapshot (C's bytes), so that the previous snapshot
+/// is current again ([`rlmdb::Environment::rollback`]). Under the writer
+/// lock. `MDB_CANT_ROLLBACK` if `txnid` is not the newest snapshot or
+/// there is none before it, as in C, and also (not in C) if the previous
+/// meta page was itself rolled back (`KNOWN_C_BUGS.md` row 62) or a read
+/// transaction still uses `txnid` (row 63). `EACCES` for a read-only
+/// environment (C: `EBADF`, and the environment becomes unusable). `EINVAL`
+/// for NULL or an environment that is not open (C would crash).
 #[no_mangle]
-pub unsafe extern "C" fn mdb_env_rollback(env: *mut MDB_env, _txnid: usize) -> c_int {
+pub unsafe extern "C" fn mdb_env_rollback(env: *mut MDB_env, txnid: usize) -> c_int {
     // SAFETY: env is NULL or a live handle (lmdb.h).
-    match unsafe { open_env(env) } {
-        Ok(_) => ENOTSUP,
+    match unsafe { open_env(env) }.map(MDB_env::open_env) {
+        Ok(Some(e)) => crate::rc(e.rollback(txnid as u64)),
+        Ok(None) => EINVAL,
         Err(code) => code,
     }
 }

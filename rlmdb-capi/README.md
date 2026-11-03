@@ -230,8 +230,8 @@ open), the result is `EINVAL`. The functions rlmdb does not implement
 | `mdb_env_set_pagesize` | Implemented (as `rlmdb_env_set_pagesize`) | `EINVAL` for NULL, after the open, outside 256 .. 65536 or not a power of two (C 1.0's checks); applies to a new 1.0 environment; an LMDB 0.9 one cannot take a page size (`EINVAL` from `mdb_env_open`). |
 | `mdb_txn_flags` | Implemented | `MDB_RDONLY` or 0 in `*flags`; `EINVAL` for NULL (also NULL `flags`, where C crashes). |
 | `mdb_cursor_is_db` | Implemented | 1 if the cursor is on the record of a named database (`F_SUBDATA` without `F_DUPDATA`), else 0, also for NULL and for a cursor whose transaction cannot be used. Where C reads a node the cursor is still on after `MDB_NOTFOUND` (past either end, a failed `MDB_SET`), so does rlmdb. |
-| `mdb_txn_prepare` | Not implemented (two-phase commit) | `EINVAL` for NULL, else `ENOTSUP`; the transaction stays an ordinary one, which may still be used, committed or aborted. C 1.0 writes its data pages and allows only `mdb_txn_commit` or `mdb_txn_abort` afterwards (for a read-only or nested transaction it commits it). |
-| `mdb_env_rollback` | Not implemented (two-phase commit) | `EINVAL` for NULL or an environment that is not open, else `ENOTSUP`; the last commit stays. |
+| `mdb_txn_prepare` | Implemented (two-phase commit, `rlmdb::RwTxn::prepare`), both formats | As C 1.0: writes and syncs everything but the meta page and keeps the writer lock; the transaction's cursors are closed; then every call that checks `MDB_TXN_BLOCKED` returns `MDB_BAD_TXN` after its handle checks (`mdb_get`, `mdb_put`, `mdb_del`, `mdb_drop`, `mdb_cursor_open`, `mdb_dbi_open`, `mdb_stat`, a child's `mdb_txn_begin`), `mdb_dbi_flags`, `mdb_set_compare`, `mdb_set_dupsort`, `mdb_cmp`, `mdb_dcmp`, `mdb_txn_id`, `mdb_txn_flags` work, a second prepare returns `MDB_TXN_PENDING`, and `mdb_txn_commit` (the meta page) or `mdb_txn_abort` end it. An active child is committed first; a read-only or nested transaction is committed (and freed); a transaction with nothing to write ends at once as an empty commit (the writer lock is released). `EINVAL` for NULL (C crashes). Differences below. |
+| `mdb_env_rollback` | Implemented (two-phase commit, `rlmdb::Environment::rollback`), both formats | As C 1.0: under the writer lock, `MDB_CANT_ROLLBACK` unless `txnid` is the newest snapshot and a previous one exists; else the newest meta page is overwritten with C 1.0's bytes (no snapshot: zero records but the page size and flags, `mm_last_pg` 2^64-1, `mm_txnid` `txnid & 1`), synced per `MDB_NOSYNC`/`MDB_NOMETASYNC`, and the previous snapshot is current (`mti_txnid`). Also `MDB_CANT_ROLLBACK` if the previous meta page is not a snapshot or a reader uses `txnid`, and `EACCES` for a read-only environment (differences below). `EINVAL` for NULL or an environment that is not open (C crashes). |
 | `mdb_env_set_encrypt` | Not implemented | `EINVAL` if `env`, `func` or `key` is NULL or the environment is open (C 1.0's checks), else `ENOTSUP`; the environment stays plain. |
 | `mdb_env_set_checksum` | Not implemented | `EINVAL` if `env` or `func` is NULL, `size` is 0 or the environment is open (C 1.0's checks), else `ENOTSUP`. |
 | `mdb_env_incr_dump`, `mdb_env_incr_dumpfd`, `mdb_env_incr_loadfd` | Not implemented (incremental backups) | `EINVAL` for NULL arguments or an environment that is not open, else `ENOTSUP`; nothing is written, created or read (C's `mdb_env_incr_dump` also sets `MDB_NOSUBDIR` on the handle). |
@@ -370,9 +370,9 @@ What changes with an LMDB 1.0 environment:
   both formats), `MDB_ENCRYPT` and `MDB_REMAP_CHUNKS` (`EINVAL` from
   `mdb_env_open`; `MDB_ENCRYPT` also from `mdb_env_set_flags`), encrypted
   or checksummed 1.0 files (`MDB_ENV_ENCRYPTION`, `MDB_BAD_CHECKSUM`), and
-  1.0's two-phase commit, encryption, checksums, incremental backups and
-  crypto modules (their functions return `ENOTSUP`, see "LMDB 1.0's
-  functions").
+  1.0's encryption, checksums, incremental backups and crypto modules
+  (their functions return `ENOTSUP`, see "LMDB 1.0's functions"). Its
+  two-phase commit is implemented, for 0.9 environments too.
 * Return codes stay 0.9's: a write in a read-only transaction is `EACCES`
   where C 1.0 says `MDB_IS_READONLY`.
 
@@ -471,6 +471,12 @@ point into the memory map or the transaction's dirty pages (zero copy).
 | `mdb_cmp` / `mdb_dcmp` | Return the comparator's raw value. | Built-in orders return exactly -1, 0 or 1 (C functions installed by the program are called directly). Return 0 for invalid arguments. |
 | Cursor of a reset transaction after `mdb_txn_renew` without `mdb_cursor_renew` | Keeps stale page pointers (undefined). | Starts over unpositioned. |
 | Using a cursor after its read transaction was committed or aborted (other than `mdb_cursor_renew`/`mdb_cursor_close`) | Use after free. | `EINVAL`; `mdb_cursor_txn` returns NULL. |
+| `mdb_txn_commit` or `mdb_txn_abort` after an `mdb_txn_prepare` that ended the transaction (it had nothing to write, or the prepare failed) | Frees the environment's preallocated write transaction: the next `mdb_txn_begin` uses freed memory, `mdb_env_close` frees it twice; `mdb_txn_commit` returns `MDB_BAD_TXN` (`../KNOWN_C_BUGS.md` row 61). | Frees the handle. `mdb_txn_commit` returns 0 after an empty prepare (nothing was to be written), `MDB_BAD_TXN` after a failed one (as C). A second `mdb_txn_prepare` returns `MDB_BAD_TXN`, as C's. |
+| Cursors of a transaction after `mdb_txn_prepare` | Freed (use after free). | `EINVAL` (`mdb_cursor_renew` too); `mdb_cursor_close` frees them; the transaction's end frees those still open. |
+| `mdb_env_rollback` while a read transaction uses the snapshot rolled back | Rolls back: the next writer overwrites pages the reader still reads (`lmdb.h` forbids the situation; `../KNOWN_C_BUGS.md` row 63). | `MDB_CANT_ROLLBACK`, nothing written. Also the slot of a reader that died, until `mdb_reader_check` clears it. |
+| `mdb_env_rollback` twice in a row after rolling back an odd txnid | The rolled-back meta page has `mm_txnid` 1, which passes C's check: the second call zeroes the other meta page too, and no snapshot is left (`../KNOWN_C_BUGS.md` row 62). | `MDB_CANT_ROLLBACK` whenever the previous meta page holds no snapshot (as C after an even txnid). |
+| `mdb_env_rollback` of a read-only environment | Fails writing (`EBADF`) and marks the environment unusable (`MDB_PANIC` for every later transaction). | `EACCES`, nothing changes. |
+| `mdb_env_rollback` that fails to write its meta page | Writes back only the old `mm_txnid` and `mm_last_pg`, over zeroed records: the current snapshot's meta page loses its trees (`../KNOWN_C_BUGS.md` row 64); `MDB_PANIC` afterwards. | Writes the old meta page back whole; `MDB_PANIC` afterwards, as C. |
 | NULL handles and outputs where C would crash (`mdb_txn_begin(NULL, …)`, `mdb_dbi_open(…, NULL)`, `mdb_cursor_put(…, NULL data, …)`, `mdb_env_copy2(NULL, …)`, `mdb_cursor_dbi(NULL)`, `mdb_env_stat` before open, …) | Crash. | `EINVAL` (or 0/NULL for functions without an error result). |
 | `mdb_env_open` after a failed open on the same handle | Not allowed (`mdb_env_close` only). | Allowed. |
 | `mdb_env_set_mapsize` on an open environment | No transaction may be active in the process. | Read transactions may be active (they keep their old map); `EINVAL` while a write transaction is active, as in C. |
@@ -693,10 +699,24 @@ environments.
   database, read, write and nested transactions, cursors past either end
   and after a failed `MDB_SET`); the Rust builds check `ENOTSUP` after
   C's argument checks and that nothing changed (a transaction after
-  `mdb_txn_prepare` still writes and commits, the last commit stays after
-  `mdb_env_rollback`, no dump file, a plain environment after
-  `mdb_env_set_encrypt`, `mdb_env_open` refused after `mdb_modsetup`).
-  C 1.0's `mdb_stat` reads every environment the Rust builds left.
+  no dump file, a plain environment after `mdb_env_set_encrypt`,
+  `mdb_env_open` refused after `mdb_modsetup`). C 1.0's `mdb_stat` reads
+  every environment the Rust builds left.
+* `tests/capi_2pc.rs`: `tests/c/capi_2pc.c`, two-phase commit
+  (`mdb_txn_prepare`, `mdb_env_rollback`), against C LMDB 1.0, the 1.0
+  stub and `librlmdb` (1.0 and 0.9 environments): the same trace of
+  every call on a prepared transaction (return codes, what still works),
+  what readers see between and after the phases, prepare then abort, an
+  active child, read-only and nested transactions, a prepare that ends
+  the transaction (nothing to write, a failed transaction), rollbacks
+  (refused ones, after a prepared commit, with an even and an odd txnid,
+  with a reader, with `MDB_NOSYNC` and `MDB_NOMETASYNC`, the handle of a
+  database the rolled-back commit created); the Rust builds also what C
+  1.0 cannot run (NULL handles, cursors closed by the prepare, commit and
+  abort after a prepare that ended the transaction, a second rollback
+  after an odd txnid, a reader of the snapshot, a read-only environment).
+  The 1.0 files are C 1.0's byte for byte, the files between the phases
+  included; C 1.0's `mdb_stat` reads them, and C 0.9's the 0.9 ones.
 * `tests/capi_headers.rs`: `tests/c/capi_headers.c` compiled with warnings
   as errors, as C and as C++, three ways, and linked against `librlmdb`:
   with `include` alone (1.0's `lmdb.h`, then `rlmdb.h`), with `rlmdb.h`

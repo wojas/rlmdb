@@ -23,7 +23,10 @@
 //! `mdb_txn_renew` it is re-created unpositioned on first use. Cursors of a
 //! write transaction are tracked cursors of the core
 //! ([`rlmdb::CursorId`]); the transaction frees their handles when it
-//! ends, as C does.
+//! ends, as C does. `mdb_txn_prepare` closes them in C (frees them); here
+//! they are detached then (their operations return `EINVAL`,
+//! `mdb_cursor_close` frees them) and freed when the prepared transaction
+//! ends.
 //!
 //! Re-entrancy: while a write operation runs, the transaction state is
 //! borrowed mutably. A C comparison function that calls back into the
@@ -44,9 +47,11 @@ use std::sync::atomic::AtomicPtr;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use rlmdb::consts::DEFAULT_READERS;
-use rlmdb::{CursorId, Dbi, Environment, Format, RwTxn, Transaction};
+use rlmdb::{CursorId, Dbi, Environment, Format, PreparedTxn, RwTxn, Transaction};
 
-use crate::erased::{ErasedInactiveTxn, ErasedRoCursor, ErasedRoTxn, ErasedRwTxn};
+use crate::erased::{
+    ErasedInactiveTxn, ErasedPreparedTxn, ErasedRoCursor, ErasedRoTxn, ErasedRwTxn,
+};
 use crate::types::{MDB_assert_func, MDB_dbi};
 
 // ---------------------------------------------------------------------------
@@ -178,11 +183,38 @@ pub(crate) enum TxnState {
     Finished,
     /// An active write transaction.
     Write(ErasedRwTxn),
+    /// A write transaction after `mdb_txn_prepare` (C's `MDB_TXN_PREPARE`):
+    /// only `mdb_txn_commit` and `mdb_txn_abort` finish it; the calls that
+    /// check `MDB_TXN_BLOCKED` return `MDB_BAD_TXN` after their handle
+    /// checks, a second prepare `MDB_TXN_PENDING`.
+    Prepared(ErasedPreparedTxn),
+    /// A write transaction that `mdb_txn_prepare` ended: `true` if it had
+    /// nothing to write (C's empty commit; `mdb_txn_commit` returns 0, see
+    /// `KNOWN_C_BUGS.md` row 61), `false` if the prepare failed and aborted
+    /// it (`mdb_txn_commit` returns `MDB_BAD_TXN`). As in C (where
+    /// `mdb_txn_end` sets `MDB_TXN_FINISHED` and clears `mt_numdbs`), every
+    /// handle check fails (`EINVAL`), and the calls that check none
+    /// return `MDB_BAD_TXN`.
+    WriteEnded(bool),
 }
 
 /// `MDB_BAD_TXN`.
 pub(crate) fn bad_txn() -> c_int {
     rlmdb::MdbError::BadTxn.to_err_code()
+}
+
+/// C's `TXN_DBI_EXIST(txn, dbi, validity)` (`user`: `DB_USRVALID`, else
+/// `DB_VALID`) on a write transaction `mdb_txn_prepare` is done with: `p`
+/// the prepared transaction, `None` if the prepare ended it (C clears its
+/// `mt_numdbs`, so the check fails: `EINVAL`).
+pub(crate) fn prepared_dbi_check(
+    p: Option<&PreparedTxn<'static>>,
+    dbi: MDB_dbi,
+    user: bool,
+) -> Result<(), c_int> {
+    let p = p.ok_or(libc::EINVAL)?;
+    p.check_dbi(Dbi::from_raw(dbi), user)
+        .map_err(|e| e.to_err_code())
 }
 
 /// `MDB_txn`: a transaction handle (opaque to C).
@@ -297,6 +329,8 @@ impl MDB_txn {
             // the parent's state is refused until the child has ended
             // (crate::erased rule 5).
             TxnState::Write(w) => unsafe { w.begin_nested() }.map_err(|e| e.to_err_code()),
+            // MDB_TXN_PREPARE or MDB_TXN_FINISHED: blocked.
+            TxnState::Prepared(_) | TxnState::WriteEnded(_) => Err(bad_txn()),
             _ => Err(libc::EINVAL),
         }
     }
@@ -331,17 +365,23 @@ impl MDB_txn {
         match self.state().as_deref() {
             Some(TxnState::Read(txn)) => f(txn),
             Some(TxnState::Reset(_) | TxnState::Finished) => Err(err),
-            Some(TxnState::Write(_)) | None => Err(libc::EINVAL),
+            Some(TxnState::Write(_) | TxnState::Prepared(_) | TxnState::WriteEnded(_)) | None => {
+                Err(libc::EINVAL)
+            }
         }
     }
 
     /// The active transaction (read or write) for an operation that only
     /// reads, or `err` if it is a reset or finished read transaction
-    /// (`MDB_BAD_TXN` for a write transaction with an active child).
+    /// (`MDB_BAD_TXN` for a write transaction with an active child). For
+    /// a write transaction that `mdb_txn_prepare` is done with,
+    /// `prepared` gets the prepared transaction, or `None` if the prepare
+    /// ended it (see [`TxnState::Prepared`] and [`TxnState::WriteEnded`]).
     pub(crate) fn with_txn<T>(
         &self,
         err: c_int,
         f: impl FnOnce(&dyn Transaction) -> Result<T, c_int>,
+        prepared: impl FnOnce(Option<&PreparedTxn<'static>>) -> Result<T, c_int>,
     ) -> Result<T, c_int> {
         if self.has_child() {
             return Err(bad_txn());
@@ -349,8 +389,25 @@ impl MDB_txn {
         match self.state().as_deref() {
             Some(TxnState::Read(txn)) => f(txn.txn()),
             Some(TxnState::Write(w)) => f(w.txn()),
+            Some(TxnState::Prepared(p)) => prepared(Some(p.txn())),
+            Some(TxnState::WriteEnded(_)) => prepared(None),
             Some(TxnState::Reset(_) | TxnState::Finished) => Err(err),
             None => Err(libc::EINVAL),
+        }
+    }
+
+    /// For a write transaction that `mdb_txn_prepare` is done with (C's
+    /// `MDB_TXN_PREPARE`, or `MDB_TXN_FINISHED` after a prepare that ended
+    /// it), what C's `TXN_DBI_EXIST(txn, dbi, validity)` check says
+    /// (`user`: `DB_USRVALID`, else `DB_VALID`): `Some(Err(code))` if it
+    /// fails, `Some(Ok(()))` if it passes, after which the caller makes
+    /// the checks C makes before `MDB_TXN_BLOCKED` and returns
+    /// `MDB_BAD_TXN`. `None` for any other transaction.
+    pub(crate) fn prepared_dbi(&self, dbi: MDB_dbi, user: bool) -> Option<Result<(), c_int>> {
+        match self.state().as_deref()? {
+            TxnState::Prepared(p) => Some(prepared_dbi_check(Some(p.txn()), dbi, user)),
+            TxnState::WriteEnded(_) => Some(Err(libc::EINVAL)),
+            _ => None,
         }
     }
 
@@ -372,6 +429,7 @@ impl MDB_txn {
         };
         match &mut *state {
             TxnState::Write(w) => f(w.txn_mut()),
+            TxnState::Prepared(_) | TxnState::WriteEnded(_) => Err(bad_txn()),
             TxnState::Read(_) | TxnState::Reset(_) | TxnState::Finished => Err(libc::EACCES),
         }
     }
@@ -416,7 +474,10 @@ impl MDB_txn {
                 Some(env) => unsafe { ErasedRoTxn::begin(env) },
                 None => return libc::EINVAL,
             },
-            active @ (TxnState::Read(_) | TxnState::Write(_)) => {
+            active @ (TxnState::Read(_)
+            | TxnState::Write(_)
+            | TxnState::Prepared(_)
+            | TxnState::WriteEnded(_)) => {
                 *state = active;
                 return libc::EINVAL;
             }
@@ -461,6 +522,11 @@ impl MDB_txn {
         let parent = handle.parent;
         let rc = match handle.state.into_inner() {
             TxnState::Write(w) => crate::rc(w.commit()),
+            TxnState::Prepared(p) => crate::rc(p.commit()),
+            // An empty commit at the prepare: done (C: MDB_BAD_TXN, row 61).
+            TxnState::WriteEnded(true) => crate::SUCCESS,
+            // Aborted by a failed prepare (C: finished, MDB_BAD_TXN).
+            TxnState::WriteEnded(false) => bad_txn(),
             TxnState::Read(_) | TxnState::Reset(_) | TxnState::Finished => crate::SUCCESS,
         };
         // SAFETY: a parent outlives its child; the child's borrow of it
@@ -469,6 +535,65 @@ impl MDB_txn {
             parent.set_child(ptr::null_mut());
         }
         rc
+    }
+
+    /// `mdb_txn_prepare` (LMDB 1.0, `_mdb_txn_commit` with
+    /// `MDB_TXN_PREPARE`): as C, a read-only or nested transaction is
+    /// committed (and the handle freed); a prepared one returns
+    /// `MDB_TXN_PENDING`, one the prepare ended `MDB_BAD_TXN`; an active
+    /// child is committed first (if that fails, this transaction is
+    /// aborted). Then the transaction's cursors are closed (detached here,
+    /// see the module documentation) and everything but the meta page is
+    /// written: the handle holds a [`TxnState::Prepared`] transaction, or a
+    /// [`TxnState::WriteEnded`] one if it had nothing to write or the
+    /// prepare failed (aborted, as in C). The handle stays allocated for
+    /// `mdb_txn_commit` / `mdb_txn_abort` unless it was committed.
+    ///
+    /// # Safety
+    ///
+    /// `p` is a live handle from `mdb_txn_begin`; it is invalid afterwards
+    /// if it was read-only or nested.
+    pub(crate) unsafe fn prepare(p: *mut MDB_txn) -> c_int {
+        // SAFETY: per this function's contract.
+        let txn = unsafe { &*p };
+        txn.assert_not_in_use("mdb_txn_prepare");
+        if !txn.write || !txn.parent.is_null() {
+            // SAFETY: per this function's contract.
+            return unsafe { MDB_txn::commit_and_free(p) };
+        }
+        match &*txn.state.borrow() {
+            TxnState::Prepared(_) => return rlmdb::MdbError::TxnPending.to_err_code(),
+            TxnState::WriteEnded(_) => return bad_txn(),
+            _ => {}
+        }
+        let child = txn.child.get();
+        let mut rc = crate::SUCCESS;
+        if !child.is_null() {
+            // SAFETY: the active child is a live handle.
+            rc = unsafe { MDB_txn::commit_and_free(child) };
+        }
+        // mdb_cursors_close (C frees them).
+        txn.release_cursors(false);
+        let mut state = txn.state.borrow_mut();
+        let TxnState::Write(w) = std::mem::replace(&mut *state, TxnState::WriteEnded(false)) else {
+            return libc::EINVAL;
+        };
+        if rc != crate::SUCCESS {
+            // The child's commit failed: this transaction is aborted.
+            drop(w);
+            return rc;
+        }
+        match w.prepare() {
+            Ok(prepared) if prepared.txn().ended() => {
+                *state = TxnState::WriteEnded(true);
+                crate::SUCCESS
+            }
+            Ok(prepared) => {
+                *state = TxnState::Prepared(prepared);
+                crate::SUCCESS
+            }
+            Err(e) => e.to_err_code(),
+        }
     }
 
     /// Ends the transaction (`mdb_txn_abort`), after its active child, and
@@ -518,7 +643,8 @@ impl MDB_txn {
         self.cursors.borrow_mut().retain(|&x| x != c);
     }
 
-    /// Drops the Rust state of every bound read cursor; with `end` (the
+    /// Drops the Rust state of every bound cursor (of a write transaction:
+    /// at `mdb_txn_prepare`, which closes them in C); with `end` (the
     /// transaction is about to be freed), also unbinds them, and frees the
     /// handles of write cursors, which C closes with their transaction.
     fn release_cursors(&self, end: bool) {
@@ -527,13 +653,14 @@ impl MDB_txn {
             // SAFETY: registered cursors are live: mdb_cursor_close
             // unregisters a cursor before freeing it.
             let cursor = unsafe { c.as_ref() };
-            let inner = cursor.inner.borrow_mut().take();
+            cursor.inner.borrow_mut().take();
             if end {
                 cursor.txn.set(ptr::null_mut());
-                if let Some(CursorInner::Write(_)) = inner {
+                if self.write {
                     // SAFETY: the handle came from Box::into_raw in
-                    // mdb_cursor_open; lmdb.h forbids using a write cursor
-                    // after its transaction ended (C frees it too).
+                    // mdb_cursor_open (a write transaction's cursors are
+                    // all write cursors); lmdb.h forbids using a write
+                    // cursor after its transaction ended (C frees it too).
                     drop(unsafe { Box::from_raw(c.as_ptr()) });
                 }
             }
