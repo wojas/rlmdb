@@ -6,10 +6,12 @@
 //! program built for C 1.0), and against `librlmdb` with rlmdb's `lmdb.h`
 //! and `rlmdb.h`, asking for 1.0 environments. All
 //! must report no failures and print the same trace (`T ...` lines) of
-//! what `mdb_env_set_pagesize`, `mdb_txn_flags` and `mdb_cursor_is_db`
-//! do; the Rust builds also check that the unimplemented functions return
-//! `ENOTSUP` after C 1.0's argument checks and change nothing. C 1.0's
-//! `mdb_stat` then reads every environment the Rust builds left.
+//! what `mdb_env_set_pagesize`, `mdb_txn_flags`, `mdb_cursor_is_db` and
+//! the incremental backups do (for these, the checksums of the dumps,
+//! which must be C 1.0's bytes, and of a copy they restore); the Rust
+//! builds also check that the unimplemented functions return `ENOTSUP`
+//! after C 1.0's argument checks and change nothing. C 1.0's `mdb_stat`
+//! then reads every environment the Rust builds left.
 
 mod common;
 

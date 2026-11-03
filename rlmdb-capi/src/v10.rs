@@ -9,20 +9,24 @@
 //! * `mdb_txn_flags`;
 //! * `mdb_cursor_is_db` ([`rlmdb::RoCursor::is_db`]);
 //! * two-phase commit: `mdb_txn_prepare` ([`rlmdb::RwTxn::prepare`]) and
-//!   `mdb_env_rollback` ([`rlmdb::Environment::rollback`]).
+//!   `mdb_env_rollback` ([`rlmdb::Environment::rollback`]);
+//! * incremental backups of LMDB 1.0 environments: `mdb_env_incr_dumpfd`,
+//!   `mdb_env_incr_dump` and `mdb_env_incr_loadfd`
+//!   ([`rlmdb::Environment::incr_dump`] and its path and load forms;
+//!   `ENOTSUP` for an LMDB 0.9 environment).
 //!
 //! Not implemented: encryption and checksums (`mdb_env_set_encrypt`,
-//! `mdb_env_set_checksum`), incremental backups (`mdb_env_incr_dump`,
-//! `mdb_env_incr_dumpfd`, `mdb_env_incr_loadfd`) and crypto modules
-//! (`mdb_modload`, `mdb_modunload`, `mdb_modsetup`); `DUAL_FORMAT.md` §7.
-//! The functions that return an error code make C 1.0's argument checks
-//! first, in C's order (`EINVAL`; also where C would crash on a NULL
-//! handle or an environment that is not open), then return `ENOTSUP`
-//! without changing anything. The module functions return `NULL` and
-//! an error message (`mdb_modload`), do nothing (`mdb_modunload`), and
-//! make `mdb_env_open` refuse an environment that `mdb_modsetup` asked to
-//! encrypt or checksum.
+//! `mdb_env_set_checksum`) and crypto modules (`mdb_modload`,
+//! `mdb_modunload`, `mdb_modsetup`); `DUAL_FORMAT.md` §7. The functions
+//! that return an error code make C 1.0's argument checks first, in C's
+//! order (`EINVAL`; also where C would crash on a NULL handle or an
+//! environment that is not open), then return `ENOTSUP` without changing
+//! anything. The module functions return `NULL` and an error message
+//! (`mdb_modload`), do nothing (`mdb_modunload`), and make `mdb_env_open`
+//! refuse an environment that `mdb_modsetup` asked to encrypt or checksum.
 
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::ptr;
 
@@ -216,50 +220,140 @@ pub unsafe extern "C" fn mdb_env_set_checksum(
     ENOTSUP
 }
 
-/// `mdb_env_incr_dumpfd` (incremental backup): not implemented. `EINVAL`
-/// for NULL or an environment that is not open (C would crash), else
-/// `ENOTSUP`; nothing is written to `fd`.
-#[no_mangle]
-pub unsafe extern "C" fn mdb_env_incr_dumpfd(
-    env: *mut MDB_env,
-    _fd: mdb_filehandle_t,
-    _txnid: usize,
-) -> c_int {
-    // SAFETY: env is NULL or a live handle (lmdb.h).
-    match unsafe { open_env(env) } {
-        Ok(_) => ENOTSUP,
-        Err(code) => code,
+/// The caller's descriptor for the duration of a call, as the file a dump
+/// writes or a load reads: a duplicate of it (sharing its position), or,
+/// for one that cannot be used, the error C's first `write` or `read` on
+/// it gets (`EBADF`; on Windows `ERROR_INVALID_HANDLE`), so that, as in C,
+/// it only matters once something is written or read.
+enum Handle {
+    File(File),
+    Unusable(c_int),
+}
+
+impl Handle {
+    /// # Safety
+    ///
+    /// A descriptor (on Windows a handle) other than -1 (NULL or
+    /// `INVALID_HANDLE_VALUE`) is an open file of the caller (`lmdb.h`),
+    /// which stays open for the duration of the call.
+    unsafe fn of(fd: mdb_filehandle_t) -> Handle {
+        // SAFETY: per this function's contract; the handle is only
+        // borrowed to duplicate it.
+        let Some(fd) = (unsafe { crate::platform::borrow_handle(fd) }) else {
+            return Handle::Unusable(crate::platform::BAD_HANDLE);
+        };
+        match fd.try_clone_to_owned() {
+            Ok(owned) => Handle::File(File::from(owned)),
+            Err(e) => Handle::Unusable(e.raw_os_error().unwrap_or(crate::platform::BAD_HANDLE)),
+        }
     }
 }
 
-/// `mdb_env_incr_dump` (incremental backup to a file): not implemented.
-/// `EINVAL` for NULL `env` or `path` or an environment that is not open (C
-/// would crash), else `ENOTSUP`; no file is created. (C 1.0 also sets
-/// `MDB_NOSUBDIR` in the environment's flags.)
+impl Write for Handle {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Handle::File(f) => f.write(buf),
+            Handle::Unusable(code) => Err(io::Error::from_raw_os_error(*code)),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Read for Handle {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Handle::File(f) => f.read(buf),
+            Handle::Unusable(code) => Err(io::Error::from_raw_os_error(*code)),
+        }
+    }
+}
+
+/// `mdb_env_incr_dumpfd` (C 1.0, `mdb.c` line 11825): write an incremental
+/// dump of the environment since transaction `txnid` to `fd`, from its
+/// current position (not closed, not synced): the meta pages and pages
+/// that later transactions wrote, byte for byte as C 1.0 writes them
+/// ([`rlmdb::Environment::incr_dump`]). `EINVAL` for NULL or an
+/// environment that is not open (C would crash); `ENOTSUP` for an LMDB 0.9
+/// environment. A descriptor that cannot be one (-1; on Windows NULL or
+/// `INVALID_HANDLE_VALUE`) gives the error of the first write, as in C:
+/// none if there is nothing to write.
+#[no_mangle]
+pub unsafe extern "C" fn mdb_env_incr_dumpfd(
+    env: *mut MDB_env,
+    fd: mdb_filehandle_t,
+    txnid: usize,
+) -> c_int {
+    // SAFETY: env is NULL or a live handle (lmdb.h).
+    let e = match unsafe { open_env(env) } {
+        Ok(e) => e,
+        Err(code) => return code,
+    };
+    let Some(env) = e.open_env() else {
+        return EINVAL;
+    };
+    // SAFETY: fd is the caller's open descriptor for this call (lmdb.h).
+    let out = unsafe { Handle::of(fd) };
+    crate::rc(env.incr_dump(out, txnid as u64))
+}
+
+/// `mdb_env_incr_dump` (C 1.0, `mdb.c` line 11958):
+/// [`mdb_env_incr_dumpfd`] into a new file `path` (the file itself), which
+/// must not exist yet (`EEXIST`; created as `mdb_env_copy` creates its
+/// file). `EINVAL` for NULL `env` or `path` or an environment that is not
+/// open (C would crash); `ENOTSUP` for an LMDB 0.9 environment, before any
+/// file is created. C 1.0 also sets `MDB_NOSUBDIR` in the environment's
+/// flags, for good (a later `mdb_env_copy` then takes its path for the
+/// file); rlmdb does not (`KNOWN_C_BUGS.md` row 74).
 #[no_mangle]
 pub unsafe extern "C" fn mdb_env_incr_dump(
     env: *mut MDB_env,
     path: *const c_char,
-    _txnid: usize,
+    txnid: usize,
 ) -> c_int {
     // SAFETY: env is NULL or a live handle (lmdb.h).
-    match unsafe { open_env(env) } {
-        Ok(_) if path.is_null() => EINVAL,
-        Ok(_) => ENOTSUP,
-        Err(code) => code,
-    }
+    let e = match unsafe { open_env(env) } {
+        Ok(_) if path.is_null() => return EINVAL,
+        Ok(e) => e,
+        Err(code) => return code,
+    };
+    let Some(env) = e.open_env() else {
+        return EINVAL;
+    };
+    // SAFETY: path is a NUL-terminated string (lmdb.h).
+    let path = unsafe { std::ffi::CStr::from_ptr(path) };
+    let path = crate::platform::path_from_c(path);
+    crate::rc(env.incr_dump_to_path(path, txnid as u64))
 }
 
-/// `mdb_env_incr_loadfd` (restore an incremental backup): not
-/// implemented. `EINVAL` for NULL or an environment that is not open (C
-/// would crash), else `ENOTSUP`; nothing is read from `fd`.
+/// `mdb_env_incr_loadfd` (C 1.0, `mdb.c` line 11978): apply the
+/// incremental dump read from `fd` (to its end) to the environment's data
+/// file ([`rlmdb::Environment::incr_load`]); the environment need not be
+/// opened with `MDB_WRITEMAP`, which `lmdb.h` asks for. `EINVAL` for NULL
+/// or an environment that is not open (C would crash); `ENOTSUP` for an
+/// LMDB 0.9 environment; `EBUSY` while a transaction of this process (a
+/// read transaction that pins a snapshot, or a write transaction; without
+/// a lock file also a reset one, of any handle of the file) or a reader of
+/// another process pins a snapshot, where C loads under it. The input is
+/// checked where C's is not: a read error, an input that ends inside a page
+/// (`EIO`), a page that would land past the map (`MDB_CORRUPTED`) fail the
+/// load (`KNOWN_C_BUGS.md` row 66), so does a descriptor that cannot be
+/// one, which C takes for an empty input.
 #[no_mangle]
-pub unsafe extern "C" fn mdb_env_incr_loadfd(env: *mut MDB_env, _fd: mdb_filehandle_t) -> c_int {
+pub unsafe extern "C" fn mdb_env_incr_loadfd(env: *mut MDB_env, fd: mdb_filehandle_t) -> c_int {
     // SAFETY: env is NULL or a live handle (lmdb.h).
-    match unsafe { open_env(env) } {
-        Ok(_) => ENOTSUP,
-        Err(code) => code,
-    }
+    let e = match unsafe { open_env(env) } {
+        Ok(e) => e,
+        Err(code) => return code,
+    };
+    let Some(env) = e.open_env() else {
+        return EINVAL;
+    };
+    // SAFETY: fd is the caller's open descriptor for this call (lmdb.h).
+    let input = unsafe { Handle::of(fd) };
+    crate::rc(env.incr_load_shared(input))
 }
 
 /// `mdb_modload` (`module.c`): load a crypto module. Not supported: loads
