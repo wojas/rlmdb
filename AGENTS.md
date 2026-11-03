@@ -247,8 +247,10 @@ deferred until the core has been validated through the C API.
 * Windows (64-bit, MSVC and MinGW) is implemented in
   `rlmdb/src/os/windows.rs`, whose module documentation lists every
   Windows decision. Keep every OS specific behind `rlmdb/src/os/`.
-* Possible later: `MDB_WRITEMAP` (dirty pages are owned buffers today;
-  keep the page backing replaceable), the typed Rust API, LMDB 1.0
+* Possible later: `MDB_WRITEMAP`'s writable map (the flag is accepted
+  with C's API limits, refused for writing on OpenBSD; dirty pages are
+  owned buffers today; keep the page backing replaceable), the typed Rust
+  API, LMDB 1.0
   features beyond its data file (`MDB_PREVSNAPSHOT`, checksums,
   encryption; `DUAL_FORMAT.md` §7) and the format-converting
   copy (`convert-copy`, §4.3). The C API and the tools handle both formats

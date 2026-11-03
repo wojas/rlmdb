@@ -22,7 +22,8 @@ pub const MDB_NOSYNC: u32 = 0x10000;
 pub const MDB_RDONLY: u32 = 0x20000;
 /// `MDB_NOMETASYNC`: do not fsync the meta page after commit.
 pub const MDB_NOMETASYNC: u32 = 0x40000;
-/// `MDB_WRITEMAP`: use a writable memory map (accepted, ignored).
+/// `MDB_WRITEMAP`: use a writable memory map (not used; its API limits
+/// are kept, see [`crate::EnvironmentFlags::WRITE_MAP`]).
 pub const MDB_WRITEMAP: u32 = 0x80000;
 /// `MDB_MAPASYNC`: asynchronous msync with `MDB_WRITEMAP` (accepted, ignored).
 pub const MDB_MAPASYNC: u32 = 0x100000;

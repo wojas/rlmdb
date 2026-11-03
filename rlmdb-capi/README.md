@@ -373,9 +373,12 @@ What changes with an LMDB 1.0 environment:
   or checksummed 1.0 files (`MDB_ENV_ENCRYPTION`, `MDB_BAD_CHECKSUM`), and
   1.0's encryption, checksums, incremental backups and crypto modules
   (their functions return `ENOTSUP`, see "LMDB 1.0's functions"). Its
-  two-phase commit is implemented, for 0.9 environments too.
+  two-phase commit is implemented, for 0.9 environments too. Nor are 1.0's
+  read-only child transactions of a write transaction: `mdb_txn_begin`
+  with a parent and `MDB_RDONLY` returns `MDB_BAD_TXN`, as in 0.9.
 * Return codes stay 0.9's: a write in a read-only transaction is `EACCES`
-  where C 1.0 says `MDB_IS_READONLY`.
+  where C 1.0 says `MDB_IS_READONLY`, and a nested transaction in an
+  `MDB_WRITEMAP` environment is `MDB_BAD_TXN` where C 1.0 says `EINVAL`.
 
 ## Write side
 
@@ -385,10 +388,10 @@ same return codes:
 * `mdb_txn_begin` without `MDB_RDONLY` waits for the environment's writer
   lock (shared with C processes); `EACCES` in a read-only environment. With
   a `parent`: a nested transaction (`EINVAL` for a read-only parent,
-  `MDB_BAD_TXN` with `MDB_RDONLY` or when the parent already has a child or
-  failed). While a child is active, the parent is blocked: its operations
-  return `MDB_BAD_TXN`. Committing or aborting a parent ends its child
-  first. The parent's cursors (and those of further ancestors) work
+  `MDB_BAD_TXN` with `MDB_RDONLY`, when the parent already has a child or
+  failed, or in an environment opened with `MDB_WRITEMAP`). While a child
+  is active, the parent is blocked: its operations return `MDB_BAD_TXN`.
+  Committing or aborting a parent ends its child first. The parent's cursors (and those of further ancestors) work
   through the active child, as in C (`mdb_cursor_shadow`):
   `mdb_cursor_txn` returns the child, they see and change the child's
   data and are moved by its changes; when the child commits they keep the
@@ -459,7 +462,8 @@ point into the memory map or the transaction's dirty pages (zero copy).
 | Threads | Without `MDB_NOTLS` a thread may hold one read transaction at a time (`MDB_BAD_RSLOT` otherwise) and a read transaction is tied to its thread. | Always behaves like `MDB_NOTLS`: any number of read transactions per thread, usable from any thread (one at a time). `MDB_NOTLS` is accepted. A superset of C. |
 | Opening one environment twice in a process | Allowed but unsafe (setting the lock file up again re-initialises the reader table under the first handle's readers; closing one handle drops the other's locks). | `mdb_env_open` fails with `EBUSY`, also under another name (a symlink, hard links of its files, a bind mount) and before it touches the lock file, except under `MDB_NOLOCK`, where handles share one in-process reader table and writer lock (see "Several handles and `dlopen`"). |
 | Read transactions with `MDB_NOLOCK` | Not tracked: a write transaction of the same process reuses pages a live read transaction still reads (`lmdb.h` asks the caller to prevent that), and writers of different handles are not serialised. | Tracked in memory (`../KNOWN_C_BUGS.md` row 35), in one table for all `MDB_NOLOCK` handles of the environment in the process, which also share a writer lock: writers of the process never reuse pages its readers read. `mdb_env_info` (`me_numreaders` 0), `mdb_reader_list` (`(no reader locks)`) and `mdb_reader_check` (none cleared) report what C reports. Other processes remain the caller's job, as in C. |
-| `MDB_FIXEDMAP`, `MDB_WRITEMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT` | Honoured. | Accepted and ignored (`mdb_env_get_flags` reports them). A new environment records map address 0 (`KNOWN_C_BUGS.md` row 9); a C-created `MDB_FIXEDMAP` environment's recorded address is reported by `mdb_env_info`. |
+| `MDB_WRITEMAP` | Writes through a writable map; extends the data file to the map size (`ftruncate` in `mdb_env_open` and `mdb_env_set_mapsize`). | Accepted, but pages are written with `pwrite` as without the flag: the files are those written without it, and the data file is not extended. Its limits are C's: `mdb_env_get_flags` reports it, `mdb_env_set_flags` cannot change it (`EINVAL`), `MDB_RDONLY` drops it, nested transactions are refused (`MDB_BAD_TXN`, also in the 1.0 stub, where C 1.0 returns `EINVAL`). On OpenBSD, whose maps do not see `pwrite`s, `mdb_env_open` with it and without `MDB_RDONLY` fails with `ENOTSUP` (`../COMPATIBILITY.md`, "Flags"). |
+| `MDB_FIXEDMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT` | Honoured. | Accepted and ignored (`mdb_env_get_flags` reports them). A new environment records map address 0 (`KNOWN_C_BUGS.md` row 9); a C-created `MDB_FIXEDMAP` environment's recorded address is reported by `mdb_env_info`. |
 | Handles of existing databases opened in a transaction | Visible to other transactions only after that transaction commits; closed if it aborts (read or write transaction). | Published at once and kept after commit or abort. Handles of databases *created* by a write transaction follow C (published at commit, closed on abort). |
 | A parent transaction while its nested child is active | Most functions return `MDB_BAD_TXN`, but some check the DBI first (`EINVAL` for a bad one) and `mdb_dbi_flags`, `mdb_cmp`, `mdb_dcmp` still work. | Every function on the parent returns `MDB_BAD_TXN` (`mdb_txn_id`, `mdb_txn_env` work). |
 | `MDB_MULTIPLE` that fails after storing some items | `data[1].mv_size` = items stored, `data[0].mv_data` advanced to the failing one. | `data[1].mv_size` = 0, `data[0].mv_data` unchanged. Failures there leave the transaction unusable anyway. |
@@ -790,6 +794,17 @@ environments.
   Rust library serialises; reset, renew, and the reader information
   (`mdb_env_info`, `mdb_reader_list`, `mdb_reader_check`) as C reports it
   without a lock file; then the C page audit.
+* `tests/capi_writemap.rs`: `tests/c/capi_writemap.c`, `MDB_WRITEMAP`
+  against C LMDB 0.9 and 1.0 and the three Rust builds (both formats):
+  the same trace of `mdb_env_get_flags`, `mdb_env_set_flags` (the flag
+  cannot change, before or after the open; `MDB_MAPASYNC` can),
+  `mdb_env_sync`, nested transactions (refused: `MDB_BAD_TXN`; C 1.0's
+  `EINVAL` and read-only child are checked per library, not traced), a
+  read-only parent and a read-only reopen (the flag dropped). The same
+  writes with and without the flag leave the same files in the Rust
+  builds (compacting copies too), which C's `mdb_stat`, `mdb_dump` and
+  page audit read as they read the oracle's. On OpenBSD the Rust builds
+  refuse the flag for an open for writing (`ENOTSUP`).
 * `tests/capi_alias.rs`: `tests/c/capi_alias.c`, against the Rust library
   only: `mdb_env_open` of an environment the process has open, through
   hard links of both of its files and of the lock file alone, fails with

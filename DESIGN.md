@@ -44,9 +44,13 @@ Out of scope for now (leave the door open, do not design it away):
 * `MDB_VL32`, encryption / checksums (1.0 features, not in 0.9 anyway).
   `MDB_FIXEDMAP`, `MDB_NOMEMINIT` and `MDB_MAPASYNC` are accepted and
   ignored (per-process choices; see `COMPATIBILITY.md`).
-* `MDB_WRITEMAP` is deferred (not needed for compatibility: it is a per-process
-  choice). Design `RwTxn` so dirty pages are owned buffers; WRITEMAP can be
-  added later as an alternative page backing.
+* `MDB_WRITEMAP`'s writable map is deferred (not needed for compatibility: it
+  is a per-process choice). The flag is accepted with C's API limits (no
+  nested transactions) and pages are written with `pwrite`; on OpenBSD,
+  which keeps maps apart from descriptor writes, an open for writing with
+  it is refused (`os/mod.rs`). Design `RwTxn` so dirty pages are owned
+  buffers; the writable map can be added later as an alternative page
+  backing.
 
 ## Reference material
 
@@ -606,8 +610,9 @@ DUP_FIXED, INTEGER_DUP, REVERSE_DUP, CREATE`), `WriteFlags` (`NO_OVERWRITE,
 NO_DUP_DATA, CURRENT, RESERVE, APPEND, APPEND_DUP, MULTIPLE`), all with the C
 bit values; the heed layer re-exports them under heed's names (`EnvFlags`,
 `DatabaseFlags`, `PutFlags`). Unsupported env flags (`FIXED_MAP`,
-`WRITE_MAP`, `MAP_ASYNC`, `NO_MEM_INIT`) are all accepted and ignored
-(`flags.rs` documents each); `PREV_SNAPSHOT` (1.0 only) is `EINVAL`.
+`MAP_ASYNC`, `NO_MEM_INIT`) are accepted and ignored, `WRITE_MAP` is
+accepted with C's limits and refused for writing on OpenBSD (`flags.rs`
+documents each); `PREV_SNAPSHOT` (1.0 only) is `EINVAL`.
 
 Footgun rules: `put`/`del` take `&mut self` so no `&[u8]` borrowed from a
 write txn can be alive across a mutation; a `Dbi` is `Copy` and borrows

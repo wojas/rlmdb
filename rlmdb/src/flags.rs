@@ -26,11 +26,30 @@ bitflags::bitflags! {
         const READ_ONLY = MDB_RDONLY;
         /// `MDB_NOMETASYNC`: flush data but not the meta page on commit.
         const NO_META_SYNC = MDB_NOMETASYNC;
-        /// `MDB_WRITEMAP`. Accepted and ignored: writes always go through
-        /// `pwrite`, which is compatible with C peers using a writable map.
+        /// `MDB_WRITEMAP`. The writable map is not used: pages are written
+        /// with `pwrite`, as without the flag, and the files are byte for
+        /// byte those written without it (C with the flag also extends the
+        /// data file to the map size; rlmdb leaves it as long as a writer
+        /// without the flag does). What the flag changes through the API
+        /// is C's: nested transactions are refused
+        /// ([`RwTxn::begin_nested_txn`](crate::RwTxn::begin_nested_txn)
+        /// returns `MdbError::BadTxn`, C 0.9's code; C 1.0 returns
+        /// `EINVAL`), [`Environment::set_flags`](crate::Environment::set_flags)
+        /// cannot change it (`EINVAL`), and a read-only open drops it
+        /// ([`Environment::flags`](crate::Environment::flags) does not
+        /// report it).
+        ///
+        /// On OpenBSD an open for writing with it fails with `ENOTSUP`:
+        /// that OS keeps a file's maps apart from what `pwrite` writes, so
+        /// a process that took the flag but writes with `pwrite` must not
+        /// share an environment with C processes that write through the
+        /// map (`lmdb.h` forbids mixing processes with and without the
+        /// flag). A read-only open drops it there too.
         const WRITE_MAP = MDB_WRITEMAP;
-        /// `MDB_MAPASYNC`. Accepted and ignored (only meaningful with
-        /// `MDB_WRITEMAP`).
+        /// `MDB_MAPASYNC`. Accepted and ignored: it only changes how C
+        /// flushes a writable map (`MDB_WRITEMAP`); commits and
+        /// [`Environment::sync`](crate::Environment::sync) sync as without
+        /// it.
         const MAP_ASYNC = MDB_MAPASYNC;
         /// `MDB_NOTLS`. Accepted; this implementation always behaves this
         /// way (a reader slot belongs to a transaction, not a thread).

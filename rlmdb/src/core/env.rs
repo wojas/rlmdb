@@ -162,7 +162,10 @@ impl EnvironmentBuilder {
     /// Environment flags. Bits that are not environment flags of LMDB 0.9
     /// make the open fail with `EINVAL`, for either format; among them are
     /// LMDB 1.0's `MDB_PREVSNAPSHOT` (`0x2000000`, not implemented: rlmdb
-    /// always opens the newest snapshot) and `MDB_ENCRYPT` (`0x2000`).
+    /// always opens the newest snapshot) and `MDB_ENCRYPT` (`0x2000`). On
+    /// OpenBSD, [`EnvironmentFlags::WRITE_MAP`] without
+    /// [`EnvironmentFlags::READ_ONLY`] makes it fail with `ENOTSUP` (see
+    /// there).
     pub fn flags(&mut self, flags: EnvironmentFlags) -> &mut Self {
         self.flags = flags;
         self

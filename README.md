@@ -85,9 +85,12 @@ Deliberately out of scope:
   `compile_error!` says so). Windows (64-bit, MSVC and MinGW), the BSDs
   and big-endian Linux are supported; `COMPATIBILITY.md` says how far each
   is tested.
-* `MDB_WRITEMAP`, `MDB_FIXEDMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT`: accepted
-  and ignored. They are per-process choices, so C peers using them are
-  unaffected.
+* `MDB_FIXEDMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT`: accepted and ignored.
+  They are per-process choices, so C peers using them are unaffected.
+* A writable map (`MDB_WRITEMAP`): the flag is accepted, pages are written
+  as without it, and its limits are C's (no nested transactions). On
+  OpenBSD, whose maps do not see what is written to the file, an open for
+  writing with it is refused (`ENOTSUP`); see `COMPATIBILITY.md`.
 * LMDB 1.0 features beyond its data file: `MDB_VL32`, encryption,
   checksums, `MDB_PREVSNAPSHOT` (rejected with `EINVAL`, as 0.9 does, for
   1.0 environments too); the format-converting copy (`DUAL_FORMAT.md`

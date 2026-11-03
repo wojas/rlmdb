@@ -61,8 +61,10 @@ pub unsafe fn env_create(profile: Profile, env: *mut *mut MDB_env) -> c_int {
 /// Flags set earlier with `mdb_env_set_flags` are added to `flags`, as in
 /// C. Unknown flags give `EINVAL`, among them LMDB 1.0's
 /// `MDB_PREVSNAPSHOT` for environments of either format (it is not
-/// implemented) and `MDB_ENCRYPT`. `MDB_FIXEDMAP`, `MDB_WRITEMAP`,
-/// `MDB_MAPASYNC` and `MDB_NOMEMINIT` are accepted and ignored;
+/// implemented) and `MDB_ENCRYPT`. `MDB_FIXEDMAP`, `MDB_MAPASYNC` and
+/// `MDB_NOMEMINIT` are accepted and ignored; `MDB_WRITEMAP` is accepted
+/// without a writable map but with C's limits (no nested transactions),
+/// and on OpenBSD refused with `ENOTSUP` unless `MDB_RDONLY` drops it;
 /// `MDB_NOTLS` is accepted and is how this implementation always behaves.
 /// Opening an environment that this process already has open fails with
 /// `EBUSY`, except that any number of `MDB_NOLOCK` handles may open one
