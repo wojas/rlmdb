@@ -112,7 +112,11 @@ fn two_phase_commit_matches_c_1_0() {
     assert!(tc.len() > 80, "{c}");
     let c_envs = environments(&c_scratch);
     assert!(c_envs.len() >= 9, "{c_envs:?}");
-    for (lib, format) in [(Lib::Rust10, "1.0"), (Lib::Rust, "1.0"), (Lib::Rust, "0.9")] {
+    for (lib, format) in [
+        (Lib::Rust10, "1.0"),
+        (Lib::RustApi, "1.0"),
+        (Lib::RustApi, "0.9"),
+    ] {
         let (rust, scratch) = run_capi_2pc(lib, format);
         let tr = trace(&rust);
         for (i, (a, b)) in tc.iter().zip(&tr).enumerate() {

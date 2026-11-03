@@ -30,9 +30,8 @@
 /* mkdir; its Windows form (tests/compat). */
 #include "../../../tests/compat/posix_compat.h"
 #include "lmdb.h"
-#if defined(LMDB_RUST) && MDB_VERSION_MAJOR < 1
-/* rlmdb's 0.9 lmdb.h: the 1.0 functions, codes and the format switch
- * come from rlmdb.h. */
+#ifdef LMDB_RUST
+/* librlmdb: the format switch (rlmdb_env_set_format). */
 #include "rlmdb.h"
 #endif
 

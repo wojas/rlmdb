@@ -179,6 +179,13 @@ int cmd_rollback(struct opts *o);
 #else
 #define HAVE_TWO_PHASE_COMMIT 0
 #endif
+#if defined(LMDB_RUST) && MDB_VERSION_MAJOR < 1
+/* cpeer_capi is compiled against LMDB 0.9's lmdb.h, which does not
+ * declare them; librlmdb exports LMDB 1.0's functions (rlmdb.h declares
+ * only rlmdb's own). mdb_size_t is size_t on every supported platform. */
+int mdb_txn_prepare(MDB_txn *txn);
+int mdb_env_rollback(MDB_env *env, size_t txnid);
+#endif
 int cmd_writer_loop(struct opts *o);
 int cmd_reader_loop(struct opts *o);
 int cmd_check_freelist(struct opts *o);
