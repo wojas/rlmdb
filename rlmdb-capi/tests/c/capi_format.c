@@ -388,9 +388,9 @@ static void test_refused_flags(void)
 	MDB_env *env;
 	const char *dir;
 
-	/* MDB_PREVSNAPSHOT: unknown to 0.9, not implemented for 1.0. */
-	RC(open_env(new_dir(), 0, 0, MDB_PREVSNAPSHOT, &env), EINVAL);
-	RC(open_env(new_dir(), RLMDB_FORMAT_10, 0, MDB_PREVSNAPSHOT, &env), EINVAL);
+	/* MDB_ENCRYPT is not implemented. MDB_PREVSNAPSHOT is, for both
+	 * formats (tests/c/capi_prevsnapshot.c); it cannot be set on an open
+	 * environment, as in C. */
 	dir = new_dir();
 	OK(open_env(dir, RLMDB_FORMAT_10, 0, 0, &env));
 	if (env) {
@@ -399,9 +399,8 @@ static void test_refused_flags(void)
 		RC(mdb_env_set_flags(env, MDB_PREVSNAPSHOT, 1), EINVAL);
 		mdb_env_close(env);
 	}
-	RC(open_env(dir, 0, 0, MDB_PREVSNAPSHOT, &env), EINVAL);
-	RC(open_env(dir, 0, 0, MDB_PREVSNAPSHOT | MDB_RDONLY, &env), EINVAL);
 	RC(open_env(dir, 0, 0, MDB_ENCRYPT, &env), EINVAL);
+	RC(open_env(dir, 0, 0, MDB_ENCRYPT | MDB_PREVSNAPSHOT, &env), EINVAL);
 	OK(mdb_env_create(&env));
 	RC(mdb_env_set_flags(env, MDB_ENCRYPT, 1), EINVAL);
 	mdb_env_close(env);
