@@ -12,6 +12,9 @@
 //! * [`RwTxn::commit`] = `mdb_txn_commit` (line 3791, see `super::commit`):
 //!   write named DB records into the main DB, save the free list, write the
 //!   dirty pages, sync, write the meta page, publish the txnid.
+//!   [`RwTxn::prepare`] (LMDB 1.0's `mdb_txn_prepare`) does all but the
+//!   last two, which [`PreparedTxn::commit`](crate::core::PreparedTxn::commit)
+//!   does later.
 //! * [`RwTxn::abort`] or dropping the transaction = `mdb_txn_abort` /
 //!   `mdb_txn_end`: discard the dirty pages, close handles of databases
 //!   created by the transaction, unlock.
@@ -47,7 +50,6 @@ use crate::core::wcursor::{read_cursors, write_back, Arena, CRef};
 use crate::core::Stat;
 use crate::error::{Error, MdbError, Result};
 use crate::flags::{DatabaseFlags, WriteFlags};
-use crate::format::meta::Meta;
 use crate::format::Db;
 use crate::idl::Idl;
 
@@ -200,13 +202,34 @@ impl std::ops::DerefMut for FailOnPanic<'_, '_> {
 /// of its handle and, unless `MDB_NOLOCK`, the shared writer mutex; with
 /// `MDB_NOLOCK`, the writer lock of every handle of the data file in the
 /// process instead. Dropping it unlocks in the reverse order (`Drop`, then
-/// the fields in order).
-struct WriterLock<'env> {
+/// the fields in order). [`Environment::rollback`] holds it too.
+pub(crate) struct WriterLock<'env> {
     state: MutexGuard<'env, WriterState>,
     /// `NO_LOCK`: the file's in-process writer lock (`registry::LocalShared`),
     /// held only.
     _file: Option<MutexGuard<'env, ()>>,
     shared: Option<&'env LockRegion>,
+}
+
+impl<'env> WriterLock<'env> {
+    /// Takes the writer locks of `env`, waiting for other writers of this
+    /// process and (with a lock file) of other processes: first, without a
+    /// lock file, the writer lock of every handle of the file in this
+    /// process, then the handle's writer state, then the shared writer
+    /// mutex (`LOCK_MUTEX(env->me_wmutex)`).
+    pub(crate) fn acquire(env: &'env Environment) -> Result<WriterLock<'env>> {
+        let file = env.local_shared().map(|l| l.lock_writer());
+        let state = env.lock_writer_state();
+        let shared = env.lock_region();
+        if let Some(lock) = shared {
+            lock.lock_writer(|| env.pick_meta().map(|m| m.txnid))?;
+        }
+        Ok(WriterLock {
+            state,
+            _file: file,
+            shared,
+        })
+    }
 }
 
 impl Drop for WriterLock<'_> {
@@ -290,29 +313,12 @@ impl<'env> RwTxn<'env> {
         if env.is_read_only() {
             return Err(Error::errno(libc::EACCES));
         }
-        // Without a lock file, first the writer lock of every handle of the
-        // file in this process.
-        let file = env.local_shared().map(|l| l.lock_writer());
-        let state = env.lock_writer_state();
-        let shared = env.lock_region();
-        if let Some(lock) = shared {
-            lock.lock_writer(|| env.pick_meta().map(|m| m.txnid))?;
-        }
         // From here on, dropping `lock` unlocks again.
-        let mut lock = WriterLock {
-            state,
-            _file: file,
-            shared,
-        };
-        let (last, meta) = match shared {
+        let mut lock = WriterLock::acquire(env)?;
+        let (last, meta) = match env.lock_region() {
             Some(l) => {
                 let t = l.txnid();
-                match lock.state.last_meta {
-                    // This process wrote the newest meta page (see
-                    // `WriterState::last_meta`).
-                    Some(m) if m.txnid == t => (t, m),
-                    _ => (t, env.read_meta((t & 1) as usize)?),
-                }
+                (t, env.read_meta((t & 1) as usize)?)
             }
             None => {
                 let m = env.pick_meta()?;
@@ -369,7 +375,7 @@ impl<'env> RwTxn<'env> {
     /// or close the handles of databases this transaction created
     /// (`mdb_dbis_update`), drop the dirty pages and cursors, unlock. A
     /// nested transaction hands its state back to its parent instead.
-    fn end(&mut self, keep: bool) {
+    pub(crate) fn end(&mut self, keep: bool) {
         if self.w.flags & TXN_FINISHED != 0 {
             return;
         }
@@ -419,15 +425,6 @@ impl<'env> RwTxn<'env> {
             if !leaked_child {
                 lock.state.spare = Some(self.spare());
             }
-        }
-    }
-
-    /// After `mdb_env_write_meta` wrote `meta` and published its txnid:
-    /// remember it for the next write transaction (see
-    /// `WriterState::last_meta`). Top-level transactions only.
-    pub(crate) fn wrote_meta(&mut self, meta: Meta) {
-        if let Some(lock) = &mut self.lock {
-            lock.state.last_meta = lock.shared.is_some().then_some(meta);
         }
     }
 

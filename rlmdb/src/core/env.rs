@@ -287,12 +287,6 @@ pub(crate) struct WriterState {
     /// (see `RwTxn::dup_prepare`). State, not a container: it is kept here
     /// whatever happens to `spare`.
     pub(crate) pbuf_pad: u16,
-    /// The meta page the last write transaction of this process wrote:
-    /// while the lock file still names its txnid, no other writer has
-    /// committed since, so it is the newest meta page, and the next write
-    /// transaction begins from it without reading it back. Never used
-    /// without a lock file (`MDB_NOLOCK`).
-    pub(crate) last_meta: Option<Meta>,
 }
 
 impl std::fmt::Debug for Environment {
@@ -520,7 +514,6 @@ impl Environment {
                 pbuf_pad: 0,
                 pg_oldest: 0,
                 spare: Some(SpareTxn::new(page_size)),
-                last_meta: None,
             }),
             page_size,
             map_size: AtomicUsize::new(map_size),
@@ -932,15 +925,11 @@ impl Environment {
     /// grew the database (`MDB_MAP_RESIZED`).
     pub fn set_map_size(&self, size: usize) -> Result<()> {
         // C: `if (env->me_txn) return EINVAL;`
-        let mut writer = match self.writer.try_lock() {
+        let _writer = match self.writer.try_lock() {
             Ok(g) => g,
             Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return Err(Error::einval()),
         };
-        // The next write transaction reads its meta page again (this does
-        // not write one, so `last_meta` would still be right; reading is
-        // the simple rule after a change of the map).
-        writer.last_meta = None;
         let meta = self.pick_meta()?;
         let mut size = if size == 0 {
             meta.map_size as usize

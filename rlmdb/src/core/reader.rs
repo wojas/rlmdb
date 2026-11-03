@@ -113,6 +113,16 @@ impl ReaderTable {
             ReaderTable::Local(local) => local.readers.find_oldest(txnid),
         }
     }
+
+    /// Whether a read transaction uses snapshot `txnid` (for
+    /// [`Environment::rollback`](crate::core::Environment::rollback)).
+    /// Without a lock file, the readers of this process.
+    pub(crate) fn pins(&self, txnid: u64) -> bool {
+        match self {
+            ReaderTable::Shared(lock) => lock.pins(txnid),
+            ReaderTable::Local(local) => local.readers.pins(txnid),
+        }
+    }
 }
 
 /// How many times [`LockRegion::open`] goes back to the exclusive probe
@@ -539,6 +549,12 @@ impl LockRegion {
         oldest
     }
 
+    /// Whether an occupied slot pins snapshot `txnid` (the slots
+    /// [`LockRegion::find_oldest`] looks at).
+    pub(crate) fn pins(&self, txnid: u64) -> bool {
+        (0..self.num_readers()).any(|i| self.slot_pid(i) != 0 && self.slot_txnid(i) == txnid)
+    }
+
     /// The occupied slots, as `mdb_reader_list` walks them.
     pub(crate) fn reader_list(&self) -> Vec<ReaderInfo> {
         (0..self.num_readers())
@@ -725,6 +741,16 @@ impl LocalReaders {
             .iter()
             .map(|e| e.txnid.load(Ordering::SeqCst))
             .fold(txnid.wrapping_sub(1), u64::min)
+    }
+
+    /// Whether an entry pins snapshot `txnid`.
+    pub(crate) fn pins(&self, txnid: u64) -> bool {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        // As in `find_oldest`.
+        fence(Ordering::SeqCst);
+        entries
+            .iter()
+            .any(|e| e.txnid.load(Ordering::SeqCst) == txnid)
     }
 
     /// The number of entries that pin a snapshot.

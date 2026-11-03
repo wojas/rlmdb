@@ -60,7 +60,9 @@
 //!   (`mdb_cursor_put`, `mdb_node_add`), `split` (`mdb_page_split`),
 //!   `cursor_del` (`mdb_cursor_del`, `mdb_rebalance`, `mdb_page_merge`,
 //!   `mdb_node_move`, `mdb_drop`), `commit` (`mdb_page_flush`,
-//!   `mdb_env_write_meta`), `nested` (nested transactions:
+//!   `mdb_env_write_meta`, LMDB 1.0's `mdb_txn_prepare`: [`PreparedTxn`]),
+//!   `rollback` (LMDB 1.0's `mdb_env_rollback`:
+//!   [`Environment::rollback`]), `nested` (nested transactions:
 //!   `mdb_txn_begin` with a parent, `mdb_cursor_shadow`, the nested commit
 //!   and abort) and `spill` (`mdb_page_spill`, `mdb_page_unspill`);
 //! * `copy`: [`Environment::copy_to_path`] and
@@ -83,6 +85,7 @@ pub(crate) mod page_ops;
 pub mod reader;
 mod registry;
 pub mod ro_cursor;
+mod rollback;
 mod spill;
 mod split;
 pub mod txn;
@@ -92,6 +95,7 @@ pub(crate) mod wcursor;
 pub use crate::cmp::{CmpFn, Comparator};
 pub use crate::error::{Error, MdbError, Result};
 pub use crate::flags::{DatabaseFlags, EnvironmentFlags, WriteFlags};
+pub use commit::PreparedTxn;
 pub use dbi::Dbi;
 pub use env::{
     default_format, default_format_or, process_default_format, set_default_format, sniff_format,

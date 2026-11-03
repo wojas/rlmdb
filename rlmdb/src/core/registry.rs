@@ -74,7 +74,9 @@ pub(crate) struct LocalShared {
     /// transactions publish and pin as they would the lock file's (see
     /// `RoTxn::take_snapshot`). [`TXNID_UNKNOWN`] until the first handle
     /// has read the file's header ([`LocalShared::init_txnid`]); from then
-    /// on changed only under `writer`, and never back.
+    /// on changed only under `writer`, and never back but by a rollback
+    /// (`Environment::rollback`, which a reader of the snapshot it takes
+    /// back stops, or one of another process, [`LocalShared::adopt_txnid`]).
     txnid: AtomicU64,
     /// The read transactions of every handle of the file.
     pub(crate) readers: LocalReaders,
@@ -138,12 +140,14 @@ impl LocalShared {
     }
 
     /// Adopts `newest`, the txnid of the newest meta page, read while
-    /// holding the writer lock (`_writer`), if it is newer than what this
+    /// holding the writer lock (`_writer`), if it differs from what this
     /// process knows: a commit of another process (`NO_LOCK` leaves keeping
     /// processes apart to the caller, as in C, so such a commit happened
-    /// while no transaction of ours ran). Returns whether it was newer.
+    /// while no transaction of ours ran), or a rollback of another process
+    /// (`Environment::rollback`), after which the newest meta page is older
+    /// than what we know. Returns whether it differed.
     pub(crate) fn adopt_txnid(&self, _writer: &MutexGuard<'_, ()>, newest: u64) -> bool {
-        self.txnid.fetch_max(newest, Ordering::SeqCst) < newest
+        self.txnid.swap(newest, Ordering::SeqCst) != newest
     }
 
     /// Sets the last committed transaction from the newest meta page of the
