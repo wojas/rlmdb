@@ -19,7 +19,9 @@ fn run_capi_read(lib: Lib) -> String {
     let rw = b.scratch(&format!("rw-{}", lib.name()));
     copy_env(&fixture, &ro);
     copy_env(&fixture, &rw);
-    let scratch = b.scratch(&format!("work-{}", lib.name()));
+    // The program writes copies into it (`mdb_env_copy`): on the disk, see
+    // `Builder::disk_scratch`.
+    let scratch = b.disk_scratch(&format!("work-{}", lib.name()));
     let out = Command::new(&exe)
         .arg(&ro)
         .arg(&rw)

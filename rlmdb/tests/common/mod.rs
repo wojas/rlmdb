@@ -29,6 +29,55 @@ pub mod dataset;
 /// A key/data pair as owned bytes.
 pub type Pair = (Vec<u8>, Vec<u8>);
 
+// ---------------------------------------------------------------------------
+// Scratch directories
+// ---------------------------------------------------------------------------
+
+/// The variable that names a directory for the tests' environments where
+/// no disk is needed: CI points it at a file system in memory (tmpfs, a RAM
+/// disk), where the synced commits of the tests and of C do not wait for a
+/// disk. Unset, they go to the system's temporary directory.
+pub const SCRATCH_VAR: &str = "RLMDB_TEST_SCRATCH";
+
+/// Where [`tempdir`] makes directories: `$RLMDB_TEST_SCRATCH` (created if
+/// missing), else the system's temporary directory.
+pub fn scratch_root() -> PathBuf {
+    match std::env::var_os(SCRATCH_VAR) {
+        Some(dir) if !dir.is_empty() => {
+            let dir = PathBuf::from(dir);
+            fs::create_dir_all(&dir)
+                .unwrap_or_else(|e| panic!("${SCRATCH_VAR} {}: {e}", dir.display()));
+            dir
+        }
+        _ => std::env::temp_dir(),
+    }
+}
+
+/// A new directory for a test's environments (removed when dropped), in
+/// [`scratch_root`]: for everything that does not need a disk, which is
+/// everything but the targets of copies ([`disk_tempdir`]). What the
+/// tests check (file contents, sizes, sparse files, locks, `mmap`, errors
+/// injected into writes and syncs, killed processes) is the same on a
+/// file system in memory; durability across a power loss, where a disk
+/// would differ, no test can see.
+pub fn tempdir() -> tempfile::TempDir {
+    tempfile::tempdir_in(scratch_root()).expect("scratch directory")
+}
+
+/// A new directory under `target/tmp` (`CARGO_TARGET_TMPDIR`, on the disk
+/// of the build) whatever `$RLMDB_TEST_SCRATCH` says, for the target of a
+/// copy (`copy_to_path`, `mdb_copy`): rlmdb and C open it with `O_DIRECT`
+/// on Linux (`os::set_nocache`, `MDB_O_COPY`), which a disk file system
+/// honours (writes must be aligned to its logical block size, which C 1.0
+/// misses below 4 KiB pages, `KNOWN_C_BUGS.md` row 34) and tmpfs ignores
+/// (it takes any write, aligned or not). Only the target: the source is
+/// read through the map.
+pub fn disk_tempdir() -> tempfile::TempDir {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    fs::create_dir_all(&base).expect("CARGO_TARGET_TMPDIR");
+    tempfile::tempdir_in(base).expect("disk scratch directory")
+}
+
 /// The built C library and programs.
 pub struct CTools {
     pub dir: PathBuf,

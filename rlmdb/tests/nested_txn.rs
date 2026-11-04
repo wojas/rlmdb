@@ -222,7 +222,7 @@ fn check_with_c(c: &CTools, path: &std::path::Path) {
 
 #[test]
 fn rust_nested_scenarios_pass_c_check() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     {
         let env = open(dir.path());
         nested_write(&env);
@@ -238,7 +238,7 @@ fn rust_nested_scenarios_pass_c_check() {
 #[test]
 fn c_nested_scenarios_pass_rust_check() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let p = dir.path().to_str().unwrap();
     c.peer_ok(&["create", p, &(64u64 << 20).to_string(), "8"]);
     let out = c.peer_ok(&["nested-test", p]);
@@ -261,8 +261,8 @@ fn c_nested_scenarios_pass_rust_check() {
 #[test]
 fn nested_scenarios_match_c_page_counts() {
     let c = require_c!();
-    let cdir = tempfile::tempdir().unwrap();
-    let rdir = tempfile::tempdir().unwrap();
+    let cdir = common::tempdir();
+    let rdir = common::tempdir();
     let cp = cdir.path().to_str().unwrap();
     c.peer_ok(&["create", cp, &(64u64 << 20).to_string(), "8"]);
     c.peer_ok(&["nested-test", cp]);
@@ -284,7 +284,7 @@ fn cursor_at(t: &mut RwTxn<'_>, id: rlmdb::CursorId) -> Option<(Vec<u8>, Vec<u8>
 
 #[test]
 fn parent_cursors_follow_child_commit_and_restore_on_abort() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path());
     let mut t = env.begin_rw_txn().unwrap();
     let db = t.create_db(Some("c"), DatabaseFlags::CREATE).unwrap();
@@ -375,7 +375,7 @@ fn parent_cursors_follow_child_commit_and_restore_on_abort() {
 
 #[test]
 fn child_handles_and_failures() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path());
     let mut t = env.begin_rw_txn().unwrap();
     let a = t.create_db(Some("a"), DatabaseFlags::CREATE).unwrap();
@@ -417,7 +417,7 @@ fn child_handles_and_failures() {
 
 #[test]
 fn nested_txn_on_failed_parent_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = Environment::builder()
         .map_size(1 << 20)
         .flags(EnvironmentFlags::NO_SYNC)
@@ -439,7 +439,7 @@ fn nested_txn_on_failed_parent_is_refused() {
 
 #[test]
 fn failed_child_commit_fails_the_parent() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = Environment::builder()
         .map_size(1 << 20)
         .flags(EnvironmentFlags::NO_SYNC)
@@ -472,7 +472,7 @@ fn comparator_set_in_child_survives_abort() {
     fn rev(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
         b.cmp(a)
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path());
     let mut t = env.begin_rw_txn().unwrap();
     let db = t.create_db(Some("r"), DatabaseFlags::CREATE).unwrap();
@@ -498,7 +498,7 @@ fn comparator_set_in_child_survives_abort() {
 /// half-written reaches the file.
 #[test]
 fn leaked_child_blocks_the_parent() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path());
     let mut t = env.begin_rw_txn().unwrap();
     t.put(Dbi::MAIN, b"a", b"1", WriteFlags::empty()).unwrap();
@@ -587,7 +587,7 @@ fn leaked_descendant_blocks_every_ancestor() {
     ];
     for format in [Format::V09, Format::V10] {
         for ends in cases {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = common::tempdir();
             let env = open_format(dir.path(), format);
             let mut t = env.begin_rw_txn().unwrap();
             t.put(Dbi::MAIN, b"key", b"original", WriteFlags::empty())
@@ -753,7 +753,7 @@ fn assert_pages_accounted(env: &Environment, at: &str) {
 /// files byte for byte).
 fn unsorted_main_run(format: Format, child: bool, reuse: bool) {
     let at = format!("{format:?}, child {child}, reuse {reuse}");
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open_format(dir.path(), format);
     let (mut t, dups) = unsorted_main(&env);
     if child {
@@ -828,7 +828,7 @@ fn child_abort_keeps_parent_handles_in_unsorted_main() {
 /// `MDB_BAD_DBI`.)
 #[test]
 fn child_abort_keeps_handles_after_the_parent_emptied_the_main_db() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open_format(dir.path(), Format::V09);
     let mut t = env.begin_rw_txn().unwrap();
     let x = t.create_db(Some("x"), DatabaseFlags::CREATE).unwrap();
@@ -864,7 +864,7 @@ fn new_database_record_goes_where_c_puts_it_in_unsorted_main() {
 #[test]
 fn child_abort_closes_the_handle_of_a_database_only_the_child_had() {
     for format in [Format::V09, Format::V10] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let env = open_format(dir.path(), format);
         let mut t = env.begin_rw_txn().unwrap();
         t.create_db(Some("y"), DatabaseFlags::CREATE).unwrap();
@@ -906,7 +906,7 @@ fn child_abort_closes_the_handle_of_a_database_only_the_child_had() {
 fn child_abort_closes_the_handle_of_a_database_deleted_elsewhere() {
     for format in [Format::V09, Format::V10] {
         let at = format!("{format:?}");
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let env = open_format(dir.path(), format);
         let mut t = env.begin_rw_txn().unwrap();
         let gone = t.create_db(Some("gone"), DatabaseFlags::CREATE).unwrap();

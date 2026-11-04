@@ -1119,13 +1119,14 @@ pub fn copy_dump_equal(pair: Pair) -> Result<()> {
     let orig_audit = audit(&pair, &env)?;
     let orig_tool_dump = tools::mdb_dump(&env, &["-a"])?;
 
+    // The copies' targets are on the disk (`TestEnv::derived_on_disk`).
     let mut targets: Vec<(&TestEnv, bool)> = Vec::new();
-    let copy = env.derived("copy");
+    let copy = env.derived_on_disk("copy")?;
     let out = pair.writer.on("copy", &env).arg(copy.path()).output()?;
     if copy_or_skip(pair.writer, &pair, out, "copy_dump_equal")?.is_some() {
         targets.push((&copy, false));
     }
-    let compact = env.derived("compact");
+    let compact = env.derived_on_disk("compact")?;
     let compactor = pair.capable(pair.reader, "copy");
     let out = compactor
         .on("copy", &env)
@@ -1135,12 +1136,12 @@ pub fn copy_dump_equal(pair: Pair) -> Result<()> {
     if copy_or_skip(compactor, &pair, out, "copy_dump_equal")?.is_some() {
         targets.push((&compact, true));
     }
-    let tcopy = env.derived("tcopy");
+    let tcopy = env.derived_on_disk("tcopy")?;
     let out = tools::mdb_copy_any_status(&env, &tcopy, false)?;
     if tool_copy_or_skip(&pair, out, "copy_dump_equal")?.is_some() {
         targets.push((&tcopy, false));
     }
-    let tcompact = env.derived("tcompact");
+    let tcompact = env.derived_on_disk("tcompact")?;
     let out = tools::mdb_copy_any_status(&env, &tcompact, true)?;
     if tool_copy_or_skip(&pair, out, "copy_dump_equal")?.is_some() {
         targets.push((&tcompact, true));
@@ -1385,7 +1386,8 @@ pub fn nosubdir(pair: Pair) -> Result<()> {
     fill_verify(&pair, &env, &main, &[])?;
     fill_verify(&pair, &env, &named, &[])?;
     audit(&pair, &env)?;
-    let copy = env.derived("copy.mdb");
+    // On the disk, as every copy target (`TestEnv::derived_on_disk`).
+    let copy = env.derived_on_disk("copy.mdb")?;
     let out = pair
         .writer
         .on("copy", &env)
@@ -1662,6 +1664,7 @@ macro_rules! __scenario_tests_impl {
             #[test]
             fn $name() {
                 $crate::register_rpeer(option_env!("CARGO_BIN_EXE_rpeer"));
+                $crate::register_target_tmpdir(option_env!("CARGO_TARGET_TMPDIR"));
                 let pair = $pair;
                 if let Some(why) = pair.unavailable() {
                     $crate::scenarios::skipped(format_args!(

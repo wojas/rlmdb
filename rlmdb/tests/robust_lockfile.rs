@@ -26,6 +26,8 @@
 //! `ROBUST_LOCK_SEED=<09|10>:<seed>` to run one case,
 //! `ROBUST_LOCK_TIMEOUT=S` watchdog per case (default 60).
 
+mod common;
+
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 #[cfg(unix)]
@@ -488,7 +490,7 @@ fn exercise(env: &Environment, lock: &LockFile, rng: &mut Rng, holder: i32, log:
 /// exited cleanly.
 fn case(format: Format, seed: u64) -> (Vec<String>, bool) {
     let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::tempdir();
     let dir = tmp.path();
     create(dir, format);
     let holder = Holder::start(dir, format);
@@ -582,7 +584,7 @@ fn robust_lockfile_v10() {
 #[test]
 fn robust_lockfile_header_checked() {
     for format in [Format::V09, Format::V10] {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = common::tempdir();
         let dir = tmp.path();
         create(dir, format);
         let holder = Holder::start(dir, format);

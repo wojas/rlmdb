@@ -149,7 +149,7 @@ fn workload(env: &Environment, write_map: bool) {
 /// Runs [`workload`] with and without `WRITE_MAP` and returns the two
 /// environments' directories.
 fn both(format: Format, page_size: Option<usize>) -> (tempfile::TempDir, tempfile::TempDir) {
-    let (wm, plain) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (wm, plain) = (common::tempdir(), common::tempdir());
     {
         let env = open(wm.path(), format, page_size, EnvironmentFlags::WRITE_MAP);
         assert!(env.flags().contains(EnvironmentFlags::WRITE_MAP));
@@ -196,7 +196,7 @@ fn write_map_leaves_the_same_files_v10() {
 #[test]
 #[cfg(not(target_os = "openbsd"))]
 fn nested_transactions_are_refused_with_write_map() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     for format in [Format::V09, Format::V10] {
         let path = dir.path().join(format!("{format:?}"));
         std::fs::create_dir(&path).unwrap();
@@ -228,7 +228,7 @@ fn nested_transactions_are_refused_with_write_map() {
 #[test]
 #[cfg(not(target_os = "openbsd"))]
 fn write_map_flag_as_c_reports_it() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path(), Format::V09, None, EnvironmentFlags::WRITE_MAP);
     let flags = env.flags();
     assert!(flags.contains(EnvironmentFlags::WRITE_MAP), "{flags:?}");
@@ -266,7 +266,7 @@ fn write_map_flag_as_c_reports_it() {
 #[test]
 #[cfg(target_os = "openbsd")]
 fn write_map_is_refused_on_openbsd() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     for format in [Format::V09, Format::V10] {
         let path = dir.path().join(format!("{format:?}"));
         std::fs::create_dir(&path).unwrap();

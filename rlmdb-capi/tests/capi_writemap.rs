@@ -63,7 +63,9 @@ fn rust_trace(oracle: &[&str]) -> Vec<String> {
 fn run_capi_writemap(lib: Lib, format: &str) -> (String, PathBuf) {
     let b = builder();
     let exe = b.test_program("capi_writemap", lib);
-    let scratch = b.scratch(&format!("writemap-{}-{format}", lib.name()));
+    // The program writes copies into it (`mdb_env_copy`): on the disk, see
+    // `Builder::disk_scratch`.
+    let scratch = b.disk_scratch(&format!("writemap-{}-{format}", lib.name()));
     let out = Command::new(&exe)
         .arg(&scratch)
         .arg(format)

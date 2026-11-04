@@ -26,7 +26,7 @@ use rlmdb::{
 fn tmp() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("rlmdb-2pc-")
-        .tempdir()
+        .tempdir_in(common::scratch_root())
         .unwrap()
 }
 

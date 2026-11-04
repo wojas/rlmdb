@@ -36,7 +36,7 @@ fn me() -> i32 {
 #[test]
 fn rust_creates_environment_c_uses_it() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("testdb");
     std::fs::create_dir(&path).unwrap();
 
@@ -94,7 +94,7 @@ fn rust_creates_environment_c_uses_it() {
 #[test]
 fn rust_creates_no_sub_dir_environment() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("flat.db");
     let env = Environment::builder()
         .flags(EnvironmentFlags::NO_SUB_DIR)
@@ -110,7 +110,7 @@ fn rust_creates_no_sub_dir_environment() {
 #[test]
 fn c_creates_environment_rust_attaches() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("testdb");
     std::fs::create_dir(&path).unwrap();
     // C first: creates the files and the shared locks, holds a read txn.
@@ -199,7 +199,7 @@ fn pair(k: &[u8], v: &[u8]) -> Pair {
 #[test]
 fn rust_reader_check_clears_dead_c_reader() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("testdb");
     std::fs::create_dir(&path).unwrap();
     let env = Environment::builder().open(&path).unwrap();
@@ -219,7 +219,7 @@ fn rust_reader_check_clears_dead_c_reader() {
 #[test]
 fn snapshot_stable_while_c_writes() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     std::fs::create_dir(&path).unwrap();
     let env = Environment::builder()
@@ -302,7 +302,7 @@ fn snapshot_stable_while_c_writes() {
 #[test]
 fn map_resized_when_c_grows_the_file() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     std::fs::create_dir(&path).unwrap();
     // Rust maps only the default 1 MiB.
@@ -331,7 +331,7 @@ fn map_resized_when_c_grows_the_file() {
 #[test]
 fn exclusive_opener_resizes_small_lock_file() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     // mtest creates its lock file with room for a single reader.
     let path = c.mtest("mtest", dir.path());
     let small = std::fs::metadata(path.join("lock.mdb")).unwrap().len();
@@ -362,7 +362,7 @@ fn check_env_info_with(env: &Environment, c: &CTools, path: &Path) {
 #[test]
 fn rust_readers_while_c_mtest_writes() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("testdb");
     std::fs::create_dir(&path).unwrap();
     let env = Environment::builder()
@@ -428,7 +428,9 @@ fn rust_readers_while_c_mtest_writes() {
 #[test]
 fn no_lock_handle_sees_commits_of_another_process() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
+    // The copy targets: on the disk (`O_DIRECT`, see `common::disk_tempdir`).
+    let copies = common::disk_tempdir();
     let path = dir.path().join("testdb");
     std::fs::create_dir(&path).unwrap();
     let env = Environment::builder()
@@ -469,7 +471,7 @@ fn no_lock_handle_sees_commits_of_another_process() {
         };
         // A plain copy has every page of that snapshot.
         let copy = || {
-            let copy = dir.path().join(format!("copy-{key}"));
+            let copy = copies.path().join(format!("copy-{key}"));
             std::fs::create_dir(&copy).unwrap();
             env.copy_to_path(&copy, false).unwrap();
             assert_eq!(last_txnid(&copy), newest, "copy after {key}");

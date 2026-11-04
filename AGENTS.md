@@ -240,7 +240,15 @@ deferred until the core has been validated through the C API.
   differential tests for anything that affects what is written, `interop/`
   scenarios for anything cross-process.
 * Test scratch directories must be per process (tests run in parallel and
-  in shared containers).
+  in shared containers). Make them with the helpers of the crate's tests
+  (`common::tempdir`, `Builder::scratch`, `TestEnv::new`, …), which honour
+  `$RLMDB_TEST_SCRATCH` (CI points it at a file system in memory). The
+  target of a copy (`copy_to_path`, `mdb_copy`, a peer's `copy`) goes to
+  the disk helper instead (`common::disk_tempdir`,
+  `Builder::disk_scratch`, `TestEnv::derived_on_disk`) unless any copy
+  error is accepted (the robustness tests): copies are written with
+  `O_DIRECT` on Linux, whose alignment only a disk file system checks.
+  Nothing else the tests check differs on tmpfs.
 
 ## 9. Not implemented yet, and what that means
 

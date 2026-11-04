@@ -26,6 +26,26 @@ use rlmdb::{
     RwTxn, Transaction, WriteFlags,
 };
 
+/// A new directory for the environments of a round: under
+/// `$RLMDB_TEST_SCRATCH` if set, else in the system's temporary directory
+/// (`common::tempdir` of rlmdb's tests, which this file cannot use).
+fn tempdir() -> tempfile::TempDir {
+    match std::env::var_os("RLMDB_TEST_SCRATCH") {
+        Some(dir) if !dir.is_empty() => {
+            std::fs::create_dir_all(&dir).unwrap();
+            tempfile::tempdir_in(dir).unwrap()
+        }
+        _ => tempfile::tempdir().unwrap(),
+    }
+}
+
+/// A new directory under `target/tmp`, on the disk, for the target of a
+/// copy, which rlmdb and C write with `O_DIRECT` on Linux: a disk file
+/// system checks its alignment, tmpfs does not (`common::disk_tempdir`).
+fn disk_tempdir() -> tempfile::TempDir {
+    tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
+}
+
 /// The C side of a differential round: which `writeops` to run, the format
 /// and page size of the environments, and the checks of the results.
 pub trait Oracle {
@@ -749,7 +769,7 @@ pub fn current_single_item_script(
 fn sub_db_leaf_firsts(o: &dyn Oracle, dbflags: u32, key: &[u8], items: &[Vec<u8>]) -> Vec<usize> {
     use rlmdb::format::meta::pick_newest;
     use rlmdb::format::{Db, Meta, NodeRef, PageRef};
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     if let Some(file) = o.data_file() {
         std::fs::write(dir.path().join("data.mdb"), &file).unwrap();
     }
@@ -1227,7 +1247,7 @@ pub fn single_item_on_overflow_pages(o: &dyn Oracle, dbflags: u32, klen: usize, 
     let (ka, kz) = (vec![b'a'; klen], vec![b'z'; klen]);
     let dbs = DatabaseFlags::from_bits_retain(dbflags);
     let new_dir = || {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         if let Some(file) = o.data_file() {
             std::fs::write(dir.path().join("data.mdb"), file).unwrap();
         }
@@ -1397,7 +1417,7 @@ pub fn single_item_on_overflow_pages(o: &dyn Oracle, dbflags: u32, klen: usize, 
         ));
     }
     for (name, op, rc, k_items, left) in cases {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         std::fs::copy(state.path().join("data.mdb"), dir.path().join("data.mdb")).unwrap();
         {
             let env = open(dir.path());
@@ -1424,7 +1444,7 @@ pub fn single_item_on_overflow_pages(o: &dyn Oracle, dbflags: u32, klen: usize, 
         assert_eq!(o.dump(dir.path(), "t"), expected_dump(&k_items), "{name}");
     }
     {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         std::fs::copy(state.path().join("data.mdb"), dir.path().join("data.mdb")).unwrap();
         let env = open(dir.path());
         let mut txn = env.begin_rw_txn().unwrap();
@@ -1435,7 +1455,8 @@ pub fn single_item_on_overflow_pages(o: &dyn Oracle, dbflags: u32, klen: usize, 
         assert_eq!(overflow_pages(dir.path()), 0, "mdb_drop: md_overflow_pages");
         audit(dir.path(), "mdb_drop");
     }
-    let copy = tempfile::tempdir().unwrap();
+    // The copy target: on the disk (`O_DIRECT`, see `disk_tempdir`).
+    let copy = disk_tempdir();
     open(state.path()).copy_to_path(copy.path(), true).unwrap();
     audit(copy.path(), "compacting copy");
     assert_eq!(o.dump(copy.path(), "t"), c_dump, "compacting copy");
@@ -1975,8 +1996,8 @@ pub fn run_round_sized(
     tag: &str,
     map_size: usize,
 ) -> Round {
-    let cdir = tempfile::tempdir().unwrap();
-    let rdir = tempfile::tempdir().unwrap();
+    let cdir = tempdir();
+    let rdir = tempdir();
     if let Some(file) = o.data_file() {
         std::fs::write(cdir.path().join("data.mdb"), &file).unwrap();
         std::fs::write(rdir.path().join("data.mdb"), &file).unwrap();

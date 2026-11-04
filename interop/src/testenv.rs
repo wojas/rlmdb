@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 
 use tempfile::TempDir;
 
@@ -72,17 +72,57 @@ impl Drop for LargePermit {
     }
 }
 
-/// A new temporary directory `interop-*`; kept after the test if
-/// `$INTEROP_KEEP` is set (to look at the files of a failed scenario: the
-/// paths are in the failure message).
-fn temp_root() -> Result<Arc<TempDir>> {
+/// The variable that names a directory for the environments of tests
+/// that need no disk: CI points it at a file system in memory (tmpfs, a
+/// RAM disk), where synced commits do not wait for a disk. Unset, they go
+/// to the system's temporary directory. The targets of copies never go
+/// there ([`TestEnv::derived_on_disk`]).
+pub const SCRATCH_VAR: &str = "RLMDB_TEST_SCRATCH";
+
+/// `target/tmp` (`CARGO_TARGET_TMPDIR`), if a test told [`register_target_tmpdir`].
+static TARGET_TMPDIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Tells the library where `target/tmp` is (`CARGO_TARGET_TMPDIR`, which
+/// only integration tests see): the directory of
+/// [`TestEnv::derived_on_disk`]. [`scenario_tests!`](crate::scenario_tests)
+/// calls it, tests of their own with copies too; without it, those
+/// environments go to the system's temporary directory.
+pub fn register_target_tmpdir(dir: Option<&str>) {
+    if let Some(dir) = dir {
+        let _ = TARGET_TMPDIR.set(PathBuf::from(dir));
+    }
+}
+
+/// A new temporary directory `interop-*` in `dir` (`None`: the system's
+/// temporary directory); kept after the test if `$INTEROP_KEEP` is set (to
+/// look at the files of a failed scenario: the paths are in the failure
+/// message).
+fn temp_root_in(dir: Option<PathBuf>) -> Result<Arc<TempDir>> {
     let keep = std::env::var_os("INTEROP_KEEP").is_some_and(|v| !v.is_empty() && v != "0");
-    Ok(Arc::new(
-        tempfile::Builder::new()
-            .prefix("interop-")
-            .disable_cleanup(keep)
-            .tempdir()?,
-    ))
+    let mut b = tempfile::Builder::new();
+    b.prefix("interop-").disable_cleanup(keep);
+    Ok(Arc::new(match dir {
+        Some(dir) => {
+            std::fs::create_dir_all(&dir)?;
+            b.tempdir_in(dir)?
+        }
+        None => b.tempdir()?,
+    }))
+}
+
+/// [`temp_root_in`] `$RLMDB_TEST_SCRATCH`, if set.
+fn temp_root() -> Result<Arc<TempDir>> {
+    temp_root_in(
+        std::env::var_os(SCRATCH_VAR)
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from),
+    )
+}
+
+/// [`temp_root_in`] `target/tmp`, if registered ([`register_target_tmpdir`]),
+/// on the disk of the build, whatever `$RLMDB_TEST_SCRATCH` says.
+fn disk_temp_root() -> Result<Arc<TempDir>> {
+    temp_root_in(TARGET_TMPDIR.get().cloned())
 }
 
 impl TestEnv {
@@ -146,8 +186,8 @@ impl TestEnv {
 
     /// Another environment location `<name>` in the same temporary directory
     /// and with the same subdir mode and format, not created: a target for
-    /// copies and loads. (`cpeer copy` creates the directory, [`crate::tools`]
-    /// too.)
+    /// loads. (`cpeer copy` creates the directory, [`crate::tools`] too.)
+    /// Copies go to [`derived_on_disk`](Self::derived_on_disk).
     pub fn derived(&self, name: &str) -> TestEnv {
         TestEnv {
             root: Arc::clone(&self.root),
@@ -157,6 +197,28 @@ impl TestEnv {
             page_size: self.page_size,
             permit: self.permit.clone(),
         }
+    }
+
+    /// Another environment location `<name>` with the same subdir mode,
+    /// format and page size, not created, in a new temporary directory under
+    /// `target/tmp` ([`register_target_tmpdir`]), on the disk whatever
+    /// `$RLMDB_TEST_SCRATCH` says: the target of a copy. The peers, C's and
+    /// rlmdb's `mdb_copy` open it with `O_DIRECT` on Linux, which a disk
+    /// file system honours (writes must be aligned to its logical block
+    /// size; C 1.0 misses that below 4 KiB pages, `KNOWN_C_BUGS.md` row 34,
+    /// which [`copy_or_skip`](crate::scenarios::copy_or_skip) expects)
+    /// and tmpfs ignores (it takes any write).
+    pub fn derived_on_disk(&self, name: &str) -> Result<TestEnv> {
+        let root = disk_temp_root()?;
+        let path = root.path().join(name);
+        Ok(TestEnv {
+            root,
+            path,
+            nosubdir: self.nosubdir,
+            format: self.format,
+            page_size: self.page_size,
+            permit: None,
+        })
     }
 
     /// The data-file format of this environment.

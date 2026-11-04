@@ -1969,7 +1969,7 @@ fn run_seed(
     deadline: Option<Instant>,
     total: &mut Stats,
 ) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path();
     let ps = common::os_page_size();
     let mut cx = Cx {

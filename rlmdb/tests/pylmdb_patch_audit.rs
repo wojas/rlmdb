@@ -15,6 +15,8 @@
 //!
 //! Not committed to the repository: produced by the py-lmdb patch audit.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
@@ -162,7 +164,7 @@ fn build_base(dir: &Path) {
 fn base() -> &'static Base {
     static BASE: OnceLock<Base> = OnceLock::new();
     BASE.get_or_init(|| {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         build_base(dir.path());
         let data = std::fs::read(dir.path().join("data.mdb")).unwrap();
         let ps = u32::from_ne_bytes(data[40..44].try_into().unwrap()) as usize;
@@ -527,6 +529,9 @@ fn write_env(env: &Environment) -> Vec<Error> {
 }
 
 fn copy_env(env: &Environment, dir: &Path) {
+    // Next to the environment, on the scratch: any copy error is accepted
+    // here, so a disk's `O_DIRECT` checks (see `common::disk_tempdir`)
+    // would not fail the test either.
     for (i, compact) in [false, true].into_iter().enumerate() {
         let target = dir.join(format!("copy{i}"));
         std::fs::create_dir_all(&target).unwrap();
@@ -618,7 +623,7 @@ fn run_case<T: Send + 'static>(
         ps: base.ps,
     };
     mutate(&mut img);
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().to_path_buf();
     std::fs::write(path.join("data.mdb"), &img.buf).unwrap();
     let tname = format!("case-{name}");
@@ -1326,7 +1331,7 @@ fn validate_freedb_record() {
 /// must not loop forever or panic.
 #[test]
 fn cursor_next_after_delete_leaves_tree_empty() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path()).unwrap();
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn

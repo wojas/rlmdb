@@ -312,10 +312,11 @@ pub fn copy_cross(pair: Pair) -> Result<()> {
     let mut copies: Vec<(Peer, bool, TestEnv)> = Vec::new();
     for peer in pair.verifiers() {
         for compact in [false, true] {
-            let target = env.derived(&format!(
+            // On the disk, as every copy target (`TestEnv::derived_on_disk`).
+            let target = env.derived_on_disk(&format!(
                 "{peer}-{}",
                 if compact { "compact" } else { "plain" }
-            ));
+            ))?;
             let copier = pair.capable(peer, "copy");
             let mut cmd = copier.on("copy", &env).arg(target.path());
             if compact {

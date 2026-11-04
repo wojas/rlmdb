@@ -308,8 +308,9 @@ fn default_variable_does_not_touch_existing_files() {
             assert_runs_equal(tool, &argv, &c, &r);
         }
     }
-    // Copies keep the source's format: byte-identical to C's.
-    let dir = tempdir();
+    // Copies keep the source's format: byte-identical to C's. (Holds the
+    // copies: on the disk, see `disk_tempdir`.)
+    let dir = disk_tempdir();
     let src = env_copy("named", dir.path());
     for compact in [false, true] {
         let mut files = Vec::new();

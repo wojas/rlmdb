@@ -228,7 +228,7 @@ fn base(name: &'static str) -> &'static Base {
     if let Some(b) = all.iter().find(|b| b.name == name) {
         return b;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let names = match (name, common::c_tools()) {
         // LMDB 1.0 bases: small pages for deep trees and many overflow
         // pages.
@@ -1184,6 +1184,9 @@ fn write_env(env: &Environment, base: &Base, rng: &mut Rng) {
 }
 
 fn copy_env(env: &Environment, dir: &Path, base: &Base, rng: &mut Rng) {
+    // Next to the environment, on the scratch: any copy error is accepted
+    // here, so a disk's `O_DIRECT` checks (see `common::disk_tempdir`)
+    // would not fail the test either.
     for (i, compact) in [false, true].into_iter().enumerate() {
         let target = dir.join(format!("copy{i}"));
         std::fs::create_dir_all(&target).unwrap();
@@ -1337,7 +1340,7 @@ fn run_case(base: &'static Base, seed: u64, scratch: &Path) -> (Outcome, Vec<Str
 fn run_base(name: &'static str, first_seed: u64) {
     install_hook();
     let base = base(name);
-    let scratch = tempfile::tempdir().unwrap();
+    let scratch = common::tempdir();
     let only = std::env::var("ROBUST_SEED").ok();
     let seeds: Vec<u64> = match only.as_deref().and_then(|s| s.split_once(':')) {
         Some((b, s)) if b == name => vec![s.parse().expect("ROBUST_SEED=<base>:<seed>")],
@@ -1435,7 +1438,7 @@ fn robust_mutation_overflow_values_v10_64k() {
 #[test]
 fn robust_short_file_after_reopen() {
     let base = base("main");
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let ps = u32::from_ne_bytes(base.data[40..44].try_into().unwrap()) as usize;
     // Keep the meta pages and a third of the rest: every snapshot page
     // past the end must be PAGE_NOTFOUND, never SIGBUS.
@@ -1485,7 +1488,7 @@ fn damaged_copy(
     for pg in img.pages_with(want) {
         f(&mut img, pg);
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     std::fs::write(dir.path().join("data.mdb"), &img.buf).unwrap();
     dir
 }
@@ -1567,7 +1570,7 @@ fn robust_huge_overflow_refs_v10() {
             let d = img.node_data(n);
             img.put64(d + field, value);
         }
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         std::fs::write(dir.path().join("data.mdb"), &img.buf).unwrap();
         let env = open_damaged(dir.path());
         assert_eq!(env.format(), rlmdb::Format::V10);

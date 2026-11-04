@@ -76,7 +76,7 @@ fn assert_model(env: &Environment, db: Dbi, model: &BTreeMap<Vec<u8>, Vec<u8>>) 
 #[test]
 fn many_txns_overwrites_deletes_aborts() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open_env(dir.path());
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn.create_db(Some("churn"), DatabaseFlags::CREATE).unwrap();
@@ -139,7 +139,7 @@ fn many_txns_overwrites_deletes_aborts() {
 #[test]
 fn rust_and_c_take_turns() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path();
     let env = open_env(path);
     let r1 = Dataset::new(Some("r1"), 3000, 31)
@@ -243,7 +243,7 @@ fn rust_and_c_take_turns() {
 #[test]
 fn c_reader_pins_snapshot() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path();
     let env = open_env(path);
     let old = Dataset::new(Some("m"), 2000, 41).big(7000).finish();
@@ -340,7 +340,7 @@ fn counter(txn: &impl Transaction, db: Dbi, name: &str) -> u64 {
 #[test]
 fn concurrent_c_and_rust_writers() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().to_str().unwrap().to_owned();
     // Initialise the writer-loop DBs ("0 seconds" commits once).
     c.peer_ok(&[
@@ -432,7 +432,7 @@ fn concurrent_c_and_rust_writers() {
 /// for the first to end.
 #[test]
 fn writers_in_one_process_take_turns() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = std::sync::Arc::new(open_env(dir.path()));
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn.create_db(None, DatabaseFlags::empty()).unwrap();

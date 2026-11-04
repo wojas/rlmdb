@@ -545,8 +545,27 @@ pub fn c_ok(tool: &str, argv: &[Vec<u8>], cwd: &Path) -> Vec<u8> {
     r.stdout
 }
 
-/// A fresh temporary directory for one test.
+/// A fresh temporary directory for one test: under `$RLMDB_TEST_SCRATCH`
+/// if set (CI points it at a file system in memory), else under
+/// `target/tmp`. Not for the targets of copies: see [`disk_tempdir`].
 pub fn tempdir() -> tempfile::TempDir {
+    let root = match std::env::var_os("RLMDB_TEST_SCRATCH") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
+    };
+    fs::create_dir_all(&root).unwrap();
+    tempfile::Builder::new()
+        .prefix("rlmdb-tools-")
+        .tempdir_in(root)
+        .unwrap()
+}
+
+/// A fresh temporary directory under `target/tmp`, on the disk, whatever
+/// `$RLMDB_TEST_SCRATCH` says: for tests that write copies (`mdb_copy`)
+/// into it. rlmdb and C open a copy's target with `O_DIRECT` on Linux,
+/// which a disk file system honours (writes must be aligned to its logical
+/// block size, `KNOWN_C_BUGS.md` row 34) and tmpfs ignores.
+pub fn disk_tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("rlmdb-tools-")
         .tempdir_in(env!("CARGO_TARGET_TMPDIR"))

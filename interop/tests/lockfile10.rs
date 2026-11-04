@@ -484,8 +484,10 @@ fn lock_versions_refuse_each_other() {
         ]
     };
     for &(env, other, c, lock) in swaps {
-        // A copy of `env` that the C peer of its release holds open.
-        let held = env.derived("held");
+        // A copy of `env` that the C peer of its release holds open (on the
+        // disk, as every copy target: `TestEnv::derived_on_disk`).
+        interop::register_target_tmpdir(option_env!("CARGO_TARGET_TMPDIR"));
+        let held = env.derived_on_disk("held").expect("copy target");
         c.on("copy", env).arg(held.path()).run().expect("copy");
         let mut holder = c
             .on("hold-env", &held)

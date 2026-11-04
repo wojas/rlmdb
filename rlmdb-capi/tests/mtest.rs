@@ -465,7 +465,9 @@ fn copy(lib: Lib, compact: bool, src: &Path, dst: &Path) {
 
 #[test]
 fn mdb_copy_across_libraries() {
-    let dir = builder().scratch("copy");
+    // `mdb_copy` writes its copies into it: on the disk, see
+    // `Builder::disk_scratch`.
+    let dir = builder().disk_scratch("copy");
     // A source with free pages, so that compaction changes something.
     run_mtest_seeded("mtest3", Lib::C, &dir, MTEST_SEED);
     let src = dir.join("testdb");
