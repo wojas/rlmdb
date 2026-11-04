@@ -9,15 +9,21 @@
 //! * A comparison function that frees a handle the running operation uses
 //!   (`mdb_txn_abort`, `mdb_txn_commit`, `mdb_cursor_close`) aborts the
 //!   process with a message instead of a use after free.
-//! * A comparison function that unwinds (a Rust panic here, standing in for
-//!   a C++ exception: the callback types are `extern "C-unwind"`) aborts
-//!   the process at the library boundary instead of unwinding into C.
+//! * A callback that unwinds (a Rust panic here, standing in for a C++
+//!   exception: the callback types are `extern "C-unwind"`) aborts the
+//!   process where the library called it, with rlmdb's message and the
+//!   same signal (exit code on Windows) whatever the platform, toolchain
+//!   and optimisation level: a comparison function called by the core and
+//!   by `mdb_cmp`, the message function of `mdb_reader_list`. (Relying on
+//!   the `extern "C"` functions' own abort-on-unwind instead made the
+//!   process die however the unwinder ends a search that a caller's frame
+//!   stops: exit code 3 from MinGW-w64's C runtime at opt-level 1.)
 //!
 //! The aborting cases run in a child process: the test binary re-runs
 //! itself with `ROBUST_CAPI_CHILD=<scenario>`.
 
 use std::ffi::CString;
-use std::os::raw::c_int;
+use std::os::raw::{c_int, c_void};
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicUsize, Ordering};
@@ -160,6 +166,10 @@ unsafe extern "C-unwind" fn cmp_panics(_: *const MDB_val, _: *const MDB_val) -> 
     panic!("comparator unwinds");
 }
 
+unsafe extern "C-unwind" fn msg_panics(_: *const std::os::raw::c_char, _: *mut c_void) -> c_int {
+    panic!("message function unwinds");
+}
+
 #[test]
 fn robust_read_cursor_outlives_its_transaction() {
     let f = Fixture::new("cursor", &[b"a", b"b", b"c"]);
@@ -266,6 +276,14 @@ fn child_scenario(name: &str) {
                 assert_eq!(mdb_set_compare(txn, f.dbi, Some(cmp_panics)), 0);
                 mdb_put(txn, f.dbi, &mut k, &mut d, 0);
             }
+            "panic_mdb_cmp" => {
+                let txn = f.begin(0);
+                assert_eq!(mdb_set_compare(txn, f.dbi, Some(cmp_panics)), 0);
+                mdb_cmp(txn, f.dbi, &k, &d);
+            }
+            "panic_reader_list" => {
+                mdb_reader_list(f.env, Some(msg_panics), ptr::null_mut());
+            }
             _ => unreachable!(),
         }
     }
@@ -282,7 +300,35 @@ fn robust_child_entry() {
     }
 }
 
-fn run_child(name: &str) -> (Option<i32>, String) {
+/// How a child process of [`run_child`] ended.
+struct ChildEnd {
+    /// The scenario.
+    name: String,
+    /// [`abort_signal`] of its status.
+    signal: Option<i32>,
+    /// Its exit status.
+    status: std::process::ExitStatus,
+    /// What it wrote on stderr.
+    stderr: String,
+}
+
+impl std::fmt::Display for ChildEnd {
+    /// For failure messages: the scenario, the exit status (with the
+    /// exit code in hex: Windows status codes) and stderr.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let code = self
+            .status
+            .code()
+            .map_or_else(|| "none".to_owned(), |c| format!("{:#010x}", c as u32));
+        write!(
+            f,
+            "child {}: {} (exit code {code}), stderr:\n{}",
+            self.name, self.status, self.stderr
+        )
+    }
+}
+
+fn run_child(name: &str) -> ChildEnd {
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -294,10 +340,12 @@ fn run_child(name: &str) -> (Option<i32>, String) {
         .env("ROBUST_CAPI_CHILD", name)
         .output()
         .unwrap();
-    (
-        abort_signal(&out.status),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
+    ChildEnd {
+        name: name.to_owned(),
+        signal: abort_signal(&out.status),
+        status: out.status,
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
 }
 
 /// The signal that ended the process (Unix).
@@ -322,18 +370,39 @@ fn robust_callback_freeing_its_handle_aborts() {
         "write_cursor_close",
         "read_cursor_close",
     ] {
-        let (signal, stderr) = run_child(name);
-        assert_eq!(signal, Some(libc::SIGABRT), "{name}: {stderr}");
+        let child = run_child(name);
+        assert_eq!(child.signal, Some(libc::SIGABRT), "{child}");
         assert!(
-            stderr.contains("called on a handle that is in use"),
-            "{name}: {stderr}"
+            child.stderr.contains("called on a handle that is in use"),
+            "{child}"
         );
     }
 }
 
+/// A callback that unwinds (here a Rust panic) aborts the process where
+/// the library called it (`rlmdb_capi`'s `callback::call`), with the same
+/// signal or exit code on every platform and toolchain, and whatever the
+/// caller's frames say: through the core's comparator, through `mdb_cmp`,
+/// and the message function of `mdb_reader_list`.
 #[test]
 fn robust_unwinding_callback_aborts_at_the_boundary() {
-    let (signal, stderr) = run_child("panic");
-    assert_eq!(signal, Some(libc::SIGABRT), "{stderr}");
-    assert!(stderr.contains("comparator unwinds"), "{stderr}");
+    for (name, message, callback) in [
+        ("panic", "comparator unwinds", "a comparison function"),
+        (
+            "panic_mdb_cmp",
+            "comparator unwinds",
+            "a comparison function",
+        ),
+        (
+            "panic_reader_list",
+            "message function unwinds",
+            "the message function of mdb_reader_list",
+        ),
+    ] {
+        let child = run_child(name);
+        assert_eq!(child.signal, Some(libc::SIGABRT), "{child}");
+        assert!(child.stderr.contains(message), "{child}");
+        let aborted = format!("rlmdb: {callback} unwound into the library; aborting");
+        assert!(child.stderr.contains(&aborted), "{child}");
+    }
 }

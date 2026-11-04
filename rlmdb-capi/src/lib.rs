@@ -54,7 +54,9 @@
 //!   [`handles`].
 //! * Private: `erased`, the one place where Rust lifetimes are erased so
 //!   that transactions and cursors can live in heap handles owned by C;
-//!   `cmp`, adapting C comparison functions to Rust comparators.
+//!   `cmp`, adapting C comparison functions to Rust comparators;
+//!   `callback`, where every call of a callback of the program goes
+//!   through (a callback that unwinds aborts the process there).
 //!
 //! # Safety contract
 //!
@@ -76,6 +78,7 @@
 // lmdb.h; it is stated once in the crate documentation above.
 #![allow(clippy::missing_safety_doc)]
 
+mod callback;
 mod cmp;
 pub mod cursor;
 pub mod dbi;

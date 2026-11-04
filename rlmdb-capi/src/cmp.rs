@@ -23,6 +23,7 @@ use std::sync::OnceLock;
 
 use rlmdb::CmpFn;
 
+use crate::callback;
 use crate::types::{MDB_cmp_func, MDB_val};
 
 /// Number of distinct C comparison functions a process can install.
@@ -42,7 +43,7 @@ fn call_slot(slot: usize, a: &[u8], b: &[u8]) -> Ordering {
     // SAFETY: `f` is a comparison function the C program installed with
     // mdb_set_compare/mdb_set_dupsort; it gets two valid values that live
     // for the duration of the call and must not modify them (lmdb.h).
-    let r = unsafe { f(&a, &b) };
+    let r = callback::call("a comparison function", || unsafe { f(&a, &b) });
     r.cmp(&0)
 }
 
