@@ -113,7 +113,7 @@ INTEROP_PEER=/path/to/peer cargo test -p rlmdb-interop \
 | `tests/c10_writes_rust_reads.rs`, `tests/rust_writes_c10_reads.rs` | `scenario_tests!(C10, Rust, Format::V10)` and `(Rust, C10, ...)` |
 | `tests/c10_writes_conrust_reads.rs`, `tests/conrust_writes_c10_reads.rs` | `(C10, COnRust, ...)` and `(COnRust, C10, ...)` |
 | `tests/rust_vs_rust10.rs`, `tests/conrust_vs_conrust10.rs`, `tests/rust_writes_conrust_reads10.rs`, `tests/conrust_writes_rust_reads10.rs` | the pairs of peers on rlmdb on 1.0 environments, C 1.0 verifying and auditing |
-| `tests/pagesize10.rs` | `scenario_tests!(C10, Rust, Format::V10, <page size>)` and `(Rust, C10, ...)` at 256 B, 1 KiB and 64 KiB pages (test names `<pair>_<size>::<scenario>`) |
+| `tests/pagesize10.rs` | `scenario_tests!(C10, Rust, Format::V10, <page size>)` and `(Rust, C10, ...)` at 256 B, 1 KiB, 16 KiB and 64 KiB pages (test names `<pair>_<size>::<scenario>`) |
 | `tests/three_peers10.rs` | `scenarios::all_peers` on a 1.0 environment: C 1.0, Rust and COnRust at once |
 | `tests/mixed_formats.rs` | `scenarios::mixed`: one rlmdb process (`rpeer formats-loop`) with a 0.9 and a 1.0 environment open, next to C 0.9 and C 1.0 on theirs |
 | `tests/rpeer.rs` | `gen`, `stat`, `dump`, `verify`, `check-freelist`, and `create`/`fill`/`delete` byte-identical to C (also failure reports); unimplemented commands exit 4; usage errors |
