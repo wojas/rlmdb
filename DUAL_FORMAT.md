@@ -614,6 +614,8 @@ Later decisions (owner, 2026-11-03), for the three C libraries:
    four bugs (`KNOWN_C_BUGS.md` rows 67 to 70):
    `EnvironmentFlags::PREV_SNAPSHOT`, `mdb_env_open`, the tools' `-v`, the
    interop scenario `prev_snapshot`. A prepared transaction's commit ends
-   the flag as a plain commit does; a rollback while the flag is set is
-   refused, where C rolls back the commit the flag stepped back from
+   the flag as a plain commit does. A rollback while the flag is set is
+   C's, of the newest commit (the reported txnid plus one: with the flag
+   the environment reports the previous snapshot), and then ends the
+   flag, where C keeps it and reports the page the rollback wrote
    (row 71).

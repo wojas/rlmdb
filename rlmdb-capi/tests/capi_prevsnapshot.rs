@@ -120,6 +120,7 @@ fn prev_snapshot_matches_c_1_0() {
             "prepared-commit",
             "prepared-rollback",
             "rollback-prev",
+            "rollback-prev-commit",
         ] {
             audit(&scratch.join(env), format);
         }
@@ -129,6 +130,8 @@ fn prev_snapshot_matches_c_1_0() {
                 "copy-compact",
                 "prepared-commit",
                 "prepared-rollback",
+                "rollback-prev",
+                "rollback-prev-commit",
             ] {
                 assert!(
                     data_file(c_scratch, env) == data_file(&scratch, env),

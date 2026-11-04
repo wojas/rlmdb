@@ -17,7 +17,8 @@
  *
  * The first form runs alone. The test (tests/capi_prevsnapshot.rs)
  * compares its environments "prev-commit", "copy-compact",
- * "prepared-commit" and "prepared-rollback" byte for byte with C 1.0's,
+ * "prepared-commit", "prepared-rollback", "rollback-prev" and
+ * "rollback-prev-commit" byte for byte with C 1.0's,
  * and audits them. The second form runs while the test has <env> open
  * (after two commits: a=1, then b=2): a writer gets MDB_ENV_BUSY, a
  * read-only handle reads the previous snapshot.
@@ -328,6 +329,7 @@ static void test_two_phase(void)
 	MDB_env *env;
 	MDB_txn *txn;
 	MDB_dbi dbi;
+	int i;
 	MDB_val key = sv("c"), data = sv("3");
 
 	/* A prepared commit on the previous snapshot. */
@@ -361,19 +363,39 @@ static void test_two_phase(void)
 		contents(env));
 	mdb_env_close(env);
 
-	/* A rollback while the flag is set: of the snapshot the environment
-	 * presents (not the newest), and of the newest one, which it stepped
-	 * back from. C rolls the newest back and keeps the flag, which then
-	 * picks the page without a snapshot (row 71); rlmdb refuses. */
-	two_commits("rollback-prev");
-	OK(open_env("rollback-prev", MDB_PREVSNAPSHOT, &env));
-	RC(mdb_env_rollback(env, 1), MDB_CANT_ROLLBACK);
-	RC(mdb_env_rollback(env, 2), BY_LIB(0, MDB_CANT_ROLLBACK));
-	CHECK(last_txnid(env) == BY_LIB(0, 1));
-	T("2pc: rollback with the flag: flag %#x, %s", prev_flag(env), contents(env));
-	put(env, "c", "3");
-	T("2pc: after the commit: flag %#x", prev_flag(env));
-	mdb_env_close(env);
+	/* A rollback while the flag is set. The environment reports the
+	 * previous snapshot's txnid; the newest commit, one more, is the one
+	 * to roll back, and the reported one cannot be. Both write C's page
+	 * and publish the previous txnid. C keeps the flag, whose rule then
+	 * picks the page just written: mdb_env_info and mdb_env_stat report
+	 * txnid 0 and an empty main DB (its read transactions follow the lock
+	 * file and still read the previous snapshot); rlmdb ends the flag, as
+	 * the first commit does (row 71). A second rollback fails in both. */
+	for (i = 0; i < 2; i++) {
+		const char *name = i ? "rollback-prev-commit" : "rollback-prev";
+		MDB_stat st;
+		size_t reported;
+		two_commits(name);
+		OK(open_env(name, MDB_PREVSNAPSHOT, &env));
+		reported = last_txnid(env);
+		RC(mdb_env_rollback(env, reported), MDB_CANT_ROLLBACK);
+		OK(mdb_env_rollback(env, reported + 1));
+		OK(mdb_env_stat(env, &st));
+		CHECK(prev_flag(env) == BY_LIB(MDB_PREVSNAPSHOT, 0));
+		CHECK(last_txnid(env) == BY_LIB(0, 1));
+		CHECK(st.ms_entries == BY_LIB(0, 1));
+		T("2pc: rolled back %zu with the flag: %s", reported + 1, contents(env));
+		RC(mdb_env_rollback(env, reported), MDB_CANT_ROLLBACK);
+		RC(mdb_env_rollback(env, reported + 1), MDB_CANT_ROLLBACK);
+		if (i) {
+			put(env, "c", "3");
+			T("2pc: after the commit: flag %#x, last txnid %zu", prev_flag(env),
+				last_txnid(env));
+			/* C 1.0 published the previous snapshot's txnid (row 67). */
+			SAME(contents(env), BY_LIB("a=1 @1", "a=1 c=3 @2"));
+		}
+		mdb_env_close(env);
+	}
 }
 
 /* While another process has <env> open: no writer on the previous

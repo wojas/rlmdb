@@ -7,7 +7,8 @@
 //! leave (C 1.0 does the same for 1.0 files in `rlmdb-capi/tests` and
 //! `interop`); C 1.0 behaves differently in five places, which the tests
 //! name (`KNOWN_C_BUGS.md` rows 67 to 71). Two-phase commit: a prepared
-//! transaction's commit ends the flag as a plain commit does.
+//! transaction's commit ends the flag as a plain commit does, and so does a
+//! rollback.
 
 mod common;
 
@@ -624,43 +625,101 @@ fn prepared_commit_ends_the_flag() {
     }
 }
 
-/// While the environment has the flag, nothing it committed can be rolled
-/// back: the newest commit is the one the flag stepped back from, and the
-/// previous snapshot has no snapshot before it on the meta pages.
-/// `MDB_CANT_ROLLBACK`, nothing changed (C rolls the newest commit back and
-/// keeps the flag, which then picks the page without a snapshot: row 71).
-/// After the first commit, rollback works as without the flag.
+/// A rollback while the environment has the flag (before its first
+/// commit): C's checks and C's page, then the flag ends as after the first
+/// commit. The environment reports the previous snapshot's txnid, so the
+/// txnid to roll back is that plus one; the reported one is not the newest
+/// commit and cannot be rolled back. The data file is what a rollback
+/// without the flag leaves (C 1.0's bytes: `rlmdb-capi/tests/capi_2pc.rs`
+/// and `capi_prevsnapshot.rs`). Afterwards the handle reads and reports the
+/// snapshot that is now the newest, the lock is shared (another process
+/// opens at once), a second rollback fails as in C, and a commit works and
+/// is published. C keeps the flag, which then picks the page the rollback
+/// wrote (row 71). A read-only handle cannot roll back (`EACCES`; C:
+/// `EBADF`, and the environment is unusable) and keeps the flag.
 #[test]
-fn rollback_while_the_flag_is_set_is_refused() {
+fn rollback_with_the_flag_ends_it() {
     let cant = rlmdb::consts::MDB_CANT_ROLLBACK;
     for format in FORMATS {
         for nolock in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             two_commits(dir.path(), format);
+            // The same rollback without the flag, on a copy.
+            let plain = tempfile::tempdir().unwrap();
+            std::fs::copy(dir.path().join("data.mdb"), plain.path().join("data.mdb")).unwrap();
             let mut flags = EnvironmentFlags::PREV_SNAPSHOT;
             if nolock {
                 flags |= EnvironmentFlags::NO_LOCK;
             }
             let env = open(dir.path(), format, flags).unwrap();
-            for txnid in [2, 1] {
-                let e = env.rollback(txnid).unwrap_err();
-                assert_eq!(e.to_err_code(), cant, "{format:?} {txnid}");
-            }
+            let reported = env.info().unwrap().last_txnid as u64;
+            assert_eq!(reported, 1);
+            let e = env.rollback(reported).unwrap_err();
+            assert_eq!(e.to_err_code(), cant, "{format:?}");
             assert!(has_prev(&env));
+            env.rollback(reported + 1).unwrap();
+            assert!(!has_prev(&env), "{format:?} nolock {nolock}");
             assert_eq!(contents(&env), ("a=1".into(), 1));
             assert_eq!(env.info().unwrap().last_txnid, 1);
             assert_eq!(env.stat().unwrap().entries, 1);
+            let rolled_back = std::fs::read(dir.path().join("data.mdb")).unwrap();
+            {
+                let p = open(
+                    plain.path(),
+                    format,
+                    flags - EnvironmentFlags::PREV_SNAPSHOT,
+                )
+                .unwrap();
+                p.rollback(2).unwrap();
+            }
+            assert!(
+                rolled_back == std::fs::read(plain.path().join("data.mdb")).unwrap(),
+                "{format:?}: not the file a rollback without the flag leaves"
+            );
+            // A second rollback fails, as in C (the previous page holds no
+            // snapshot), and so does one of the old newest.
+            for txnid in [1, 2] {
+                let e = env.rollback(txnid).unwrap_err();
+                assert_eq!(e.to_err_code(), cant, "{format:?} {txnid}");
+            }
 
+            let mut peer = (!nolock).then(|| Peer::start(dir.path(), format));
+            let other = if nolock {
+                // The file is shared with the process's other handles now.
+                Some(open(dir.path(), format, flags - EnvironmentFlags::PREV_SNAPSHOT).unwrap())
+            } else {
+                let p = peer.as_mut().unwrap();
+                assert_eq!(p.open(EnvironmentFlags::empty()), "ok");
+                assert_eq!(p.ask("get"), "a=1 @1");
+                None
+            };
             put(&env, "c", "3");
-            assert!(!has_prev(&env));
-            env.rollback(2).unwrap();
-            assert_eq!(contents(&env), ("a=1".into(), 1));
-            assert_eq!(env.info().unwrap().last_txnid, 1);
-            drop(env);
+            assert_eq!(contents(&env), ("a=1 c=3".into(), 2));
+            if let Some(p) = peer.as_mut() {
+                assert_eq!(p.ask("get"), "a=1 c=3 @2");
+                assert_eq!(p.ask("close"), "ok");
+            }
+            if let Some(o) = &other {
+                assert_eq!(contents(o), ("a=1 c=3".into(), 2));
+            }
+            drop((peer, other, env));
             let env = open(dir.path(), format, EnvironmentFlags::empty()).unwrap();
-            assert_eq!(contents(&env), ("a=1".into(), 1));
+            assert_eq!(contents(&env), ("a=1 c=3".into(), 2));
             drop(env);
-            c_reads(dir.path(), format, "a=1");
+            c_reads(dir.path(), format, "a=1 c=3");
         }
+
+        // Read-only: no rollback, the flag stays, nothing changes.
+        let dir = tempfile::tempdir().unwrap();
+        two_commits(dir.path(), format);
+        let ro = EnvironmentFlags::READ_ONLY | EnvironmentFlags::PREV_SNAPSHOT;
+        let env = open(dir.path(), format, ro).unwrap();
+        let e = env.rollback(2).unwrap_err();
+        assert_eq!(e.to_err_code(), libc::EACCES);
+        assert!(has_prev(&env));
+        assert_eq!(contents(&env), ("a=1".into(), 1));
+        drop(env);
+        let env = open(dir.path(), format, EnvironmentFlags::empty()).unwrap();
+        assert_eq!(contents(&env), ("a=1 b=2".into(), 2));
     }
 }

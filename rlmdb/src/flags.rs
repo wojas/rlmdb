@@ -79,10 +79,14 @@ bitflags::bitflags! {
         /// environment works as if opened without it, and
         /// [`Environment::flags`] no longer reports it (an empty commit,
         /// an abort or a failed commit keep it). A read-only environment
-        /// keeps it until it is closed. While it lasts,
-        /// [`Environment::rollback`] fails with `MDB_CANT_ROLLBACK`: the
-        /// newest commit is the one the environment stepped back from (C
-        /// rolls it back: `KNOWN_C_BUGS.md` row 71).
+        /// keeps it until it is closed. While it lasts, the environment
+        /// reports the previous snapshot's txnid, one less than the newest
+        /// commit's (the meta pages hold consecutive txnids): to roll the
+        /// newest commit back ([`Environment::rollback`]), pass the
+        /// reported txnid plus one. The rollback is the one without the
+        /// flag, and then ends the flag as the first commit does (C keeps
+        /// it, and then reports the page the rollback wrote:
+        /// `KNOWN_C_BUGS.md` row 71).
         ///
         /// Opened for writing, the environment must be the only user of
         /// its files, as in C: the open fails with `MDB_ENV_BUSY` if

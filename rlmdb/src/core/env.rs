@@ -694,7 +694,9 @@ impl Environment {
     /// The end of `PREV_SNAPSHOT` after the first commit of a write
     /// transaction (txnid `txnid`, its meta page written and published; a
     /// plain commit's or a prepared transaction's), the end of
-    /// `_mdb_txn_commit`: share the lock file's lock
+    /// `_mdb_txn_commit`, or after a rollback ([`Environment::rollback`],
+    /// `txnid` the snapshot before the one rolled back, which C does not
+    /// end it for: `KNOWN_C_BUGS.md` row 71): share the lock file's lock
     /// (`mdb_env_share_locks`), letting other processes in, and clear the
     /// flag. Without a lock file (`NO_LOCK`), share the data file with the
     /// process's other handles instead ([`Registration::share`]). Nothing
