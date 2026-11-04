@@ -29,9 +29,12 @@
 //! `tests/lmdb-c/1.0/mdb_load.c` does (no header, no text; `-a`, `-s`,
 //! `-N` and `-T` are ignored). The environment is opened (and created if
 //! need be) with `MDB_NOSYNC` and the defaults, and not synced afterwards,
-//! as in C. A new environment is LMDB 1.0 (incremental dumps are 1.0's;
-//! C 1.0's tool creates 1.0 files), with the default page size, unless
-//! `-F 0.9` or the experimental `RLMDB_DEFAULT_FORMAT=0.9` asks for 0.9. Messages: "mdb_env_open failed, …",
+//! as in C. Incremental dumps exist only for LMDB 1.0, so `-i` always means
+//! 1.0: a new environment is a 1.0 one with the default page size (C 1.0's
+//! tool creates 1.0 files), whatever the experimental
+//! `RLMDB_DEFAULT_FORMAT` says; `-F 0.9` with `-i` is a usage error, before
+//! anything is opened; an existing environment keeps its format (a 0.9
+//! one fails in the load, `ENOTSUP`). Messages: "mdb_env_open failed, …",
 //! "mdb_env_incr_load failed, error N …".
 //!
 //! Deliberate differences from C 0.9.37:
@@ -407,6 +410,10 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     }
     let envname = &operands[0];
     if o.incr {
+        if o.format == Some(Format::V09) {
+            tool.eprint_prog(&[b"-i loads LMDB 1.0 environments only, not with -F 0.9\n"]);
+            return tool.usage(SYNOPSIS);
+        }
         return load_incremental(o, envname);
     }
 
@@ -516,9 +523,13 @@ fn load_incremental(o: Options, envname: &[u8]) -> i32 {
         flags |= EnvironmentFlags::NO_SUB_DIR;
     }
     let mut builder = Environment::builder();
-    builder.flags(flags).fallback_format(Format::V10);
-    if let Some(f) = o.format {
-        builder.format(f);
+    builder.flags(flags);
+    // -F is 1.0 here. Without it a new environment is 1.0 too, whatever
+    // the process default or the variable says; an existing one keeps its
+    // format (a file that cannot be sniffed fails at the open).
+    let new = matches!(rlmdb::sniff_format(path_of(envname), flags), Ok(None));
+    if o.format.is_some() || new {
+        builder.format(Format::V10);
     }
     let mut env = match builder.open_with_permissions(path_of(envname), 0o664) {
         Ok(env) => env,

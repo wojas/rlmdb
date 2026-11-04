@@ -836,7 +836,8 @@ fn mdb_load_i_matches_mdb_load10() {
 /// cut inside a header or a page is an error (`KNOWN_C_BUGS.md` row 66;
 /// C 1.0 reports success, or reads for ever); an LMDB 0.9 environment
 /// cannot be dumped or loaded incrementally (C 1.0 does not open it);
-/// `mdb_load -i` of a new environment makes a 1.0 one unless `-F 0.9`.
+/// `mdb_load -i` makes a new environment 1.0 whatever the variable says,
+/// and refuses `-F 0.9` as a usage error.
 #[test]
 fn incremental_tools_beyond_c10() {
     let dir = tmp();
@@ -878,20 +879,35 @@ fn incremental_tools_beyond_c10() {
     assert_eq!((r.code, r.stderr), (1, enotsup("mdb_env_incr_dump")));
     let r = rust_bin_run("mdb_load", &["-i", s(&v09)], &dump);
     assert_eq!((r.code, r.stderr), (1, enotsup("mdb_env_incr_load")));
+    // -i always means 1.0: -F 0.9 with it is a usage error before
+    // anything is opened, in either order.
     let new09 = new_env(dir.path(), "new09");
-    let r = rust_bin_run("mdb_load", &["-F", "0.9", "-i", s(&new09)], &dump);
-    assert_eq!((r.code, r.stderr), (1, enotsup("mdb_env_incr_load")));
-    assert_eq!(format_of(&new09), Some(Format::V09));
-    // Without -F a new environment is 1.0, unless the experimental
-    // variable asks for 0.9.
-    let new10 = new_env(dir.path(), "new10");
-    let r = rust_bin_run("mdb_load", &["-i", s(&new10)], b"");
-    assert_eq!(r.code, 0, "{r:?}");
-    assert_eq!(format_of(&new10), Some(Format::V10));
-    let var09 = new_env(dir.path(), "var09");
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtools"));
-    cmd.args(["mdb_load", "-i", s(&var09)]);
-    let r = run_cmd(cmd, b"", Some("0.9"));
-    assert_eq!(r.code, 1, "{r:?}");
-    assert_eq!(format_of(&var09), Some(Format::V09));
+    for args in [["-F", "0.9", "-i"], ["-i", "-F", "0.9"]] {
+        let mut all = args.to_vec();
+        all.push(s(&new09));
+        let r = rust_bin_run("mdb_load", &all, &dump);
+        let usage = "usage: mdb_load [-V] [-a] [-f input] [-F 0.9|1.0] [-i] [-n] [-s name] [-N] [-T] dbpath";
+        let expected =
+            format!("mdb_load: -i loads LMDB 1.0 environments only, not with -F 0.9\n{usage}\n");
+        assert_eq!(
+            (r.code, r.stderr.replace("\r\n", "\n")),
+            (1, expected),
+            "{all:?}"
+        );
+        assert_eq!(format_of(&new09), None, "{all:?}");
+    }
+    // A new environment is 1.0, also with -F 1.0, and whatever the
+    // experimental variable says.
+    for (name, args, var) in [
+        ("new10", &[][..], None),
+        ("f10", &["-F", "1.0"][..], None),
+        ("var09", &[][..], Some("0.9")),
+    ] {
+        let env = new_env(dir.path(), name);
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtools"));
+        cmd.arg("mdb_load").args(args).args(["-i", s(&env)]);
+        let r = run_cmd(cmd, b"", var);
+        assert_eq!((r.code, r.stderr.as_str()), (0, ""), "{name}");
+        assert_eq!(format_of(&env), Some(Format::V10), "{name}");
+    }
 }

@@ -126,10 +126,10 @@ Each C release's tools are the oracle for their own format: for an LMDB
   `mdb_load -i` reports a dump cut short (`mdb_env_incr_load failed,
   error 5 Input/output error`; C reports success, or reads for ever, row
   66) and fails with `EBUSY` while a reader of another process pins a
-  snapshot (row 65). `mdb_load -i` creates a new environment in format
-  1.0 unless `-F 0.9` or the experimental variable asks for 0.9 (C 1.0's
-  creates 1.0 files); like C's it opens the environment with
-  `MDB_NOSYNC` and does not sync it. On an LMDB 0.9 environment both fail
+  snapshot (row 65). `-i` always means 1.0: `mdb_load -i` creates a new
+  environment in format 1.0 whatever the experimental variable says (C
+  1.0's creates 1.0 files), and `-F 0.9` with `-i` is a usage error; like
+  C's it opens the environment with `MDB_NOSYNC` and does not sync it. On an LMDB 0.9 environment both fail
   with `ENOTSUP` (0.9 pages record no txnid; C 1.0's tools do not open
   0.9 files).
 * Not reproduced from C 1.0: its `mdb_env_info` reports the process's map
