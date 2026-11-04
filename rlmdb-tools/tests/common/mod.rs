@@ -475,16 +475,18 @@ pub fn version_line(imp: Impl) -> Vec<u8> {
 
 /// The usage synopsis of `mdb_load` as C 0.9 prints it, and as the Rust
 /// tool does, which also has `-F 0.9|1.0` (the format of a new
-/// environment; C 0.9 knows one format only). With `\n` line ends
-/// ([`platform_lines`] gives what the tools write).
+/// environment; C 0.9 knows one format only) and LMDB 1.0's `-i` (load an
+/// incremental dump). With `\n` line ends ([`platform_lines`] gives what
+/// the tools write).
 pub const LOAD_USAGE_C: &[u8] = b"[-V] [-a] [-f input] [-n] [-s name] [-N] [-T] dbpath\n";
 pub const LOAD_USAGE_RUST: &[u8] =
-    b"[-V] [-a] [-f input] [-F 0.9|1.0] [-n] [-s name] [-N] [-T] dbpath\n";
+    b"[-V] [-a] [-f input] [-F 0.9|1.0] [-i] [-n] [-s name] [-N] [-T] dbpath\n";
 
 /// The usage synopses in which the Rust tools differ from C 0.9's: (tool,
-/// C 0.9's, the Rust tool's). `mdb_load` has `-F` ([`LOAD_USAGE_RUST`]);
-/// `mdb_stat`, `mdb_dump` and `mdb_copy` have C 1.0's `-v`
-/// (`MDB_PREVSNAPSHOT`), named where C 1.0's usage lines name it.
+/// C 0.9's, the Rust tool's). `mdb_load` has `-F` and C 1.0's `-i`
+/// ([`LOAD_USAGE_RUST`]); `mdb_stat`, `mdb_dump` and `mdb_copy` have C
+/// 1.0's `-v` (`MDB_PREVSNAPSHOT`), and `mdb_dump` C 1.0's `-i`, named
+/// where C 1.0's usage lines name them.
 pub const USAGE_DIFFS: [(&str, &[u8], &[u8]); 4] = [
     ("mdb_load", LOAD_USAGE_C, LOAD_USAGE_RUST),
     (
@@ -495,7 +497,7 @@ pub const USAGE_DIFFS: [(&str, &[u8], &[u8]); 4] = [
     (
         "mdb_dump",
         b"[-V] [-f output] [-l] [-n] [-p] [-a|-s subdb] dbpath\n",
-        b"[-V] [-f output] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath\n",
+        b"[-V] [-f output] [-i txnid] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath\n",
     ),
     (
         "mdb_copy",

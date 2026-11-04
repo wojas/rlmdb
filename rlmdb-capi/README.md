@@ -235,7 +235,8 @@ open), the result is `EINVAL`. The functions rlmdb does not implement
 | `mdb_env_rollback` | Implemented (two-phase commit, `rlmdb::Environment::rollback`), both formats | As C 1.0: under the writer lock, `MDB_CANT_ROLLBACK` unless `txnid` is the newest snapshot and a previous one exists; else the newest meta page is overwritten with C 1.0's bytes (no snapshot: zero records but the page size and flags, `mm_last_pg` 2^64-1, `mm_txnid` `txnid & 1`), synced per `MDB_NOSYNC`/`MDB_NOMETASYNC`, and the previous snapshot is current (`mti_txnid`). Also `MDB_CANT_ROLLBACK` if the previous meta page is not a snapshot or a reader uses `txnid`, and `EACCES` for a read-only environment (differences below). `EINVAL` for NULL or an environment that is not open (C crashes). With `MDB_PREVSNAPSHOT` (before the first commit, `mdb_env_info` reports the previous snapshot, so the txnid to roll back is that plus one) the rollback then ends the flag, which C keeps (row 71). |
 | `mdb_env_set_encrypt` | Not implemented | `EINVAL` if `env`, `func` or `key` is NULL or the environment is open (C 1.0's checks), else `ENOTSUP`; the environment stays plain. |
 | `mdb_env_set_checksum` | Not implemented | `EINVAL` if `env` or `func` is NULL, `size` is 0 or the environment is open (C 1.0's checks), else `ENOTSUP`. |
-| `mdb_env_incr_dump`, `mdb_env_incr_dumpfd`, `mdb_env_incr_loadfd` | Not implemented (incremental backups) | `EINVAL` for NULL arguments or an environment that is not open, else `ENOTSUP`; nothing is written, created or read (C's `mdb_env_incr_dump` also sets `MDB_NOSUBDIR` on the handle). |
+| `mdb_env_incr_dumpfd`, `mdb_env_incr_dump` | Implemented (incremental backups, `rlmdb::Environment::incr_dump` and `incr_dump_to_path`), LMDB 1.0 environments | As C 1.0: the meta pages, then every page from 2 to the snapshot's last whose `mp_txnid` is above `txnid` (overflow runs whole), the same bytes as C 1.0's but where C's walk takes stale free pages for pages (`../KNOWN_C_BUGS.md` row 72): a record is only a page whose header names its own position, with an `mp_txnid` up to the snapshot's; to the descriptor from its position (an unusable one: the error of the first write, as in C), or into a new file `path` (`EEXIST` if it exists). `ENOTSUP` for a 0.9 environment, whose pages record no txnid (before any file is created). `EINVAL` for NULL or an environment that is not open (C crashes). Differences below. |
+| `mdb_env_incr_loadfd` | Implemented (`rlmdb::Environment::incr_load`), LMDB 1.0 environments | As C 1.0: every page record of the input, to its end, written at `mp_pgno` times the page size through the data file; `MDB_WRITEMAP` is not needed (C's code does not need it either, though `lmdb.h` asks for it). Beyond C: each dump's meta pages written after its data pages, each step synced (C: meta pages first, no sync), `EBUSY` while this process has a transaction of the environment or a reader of another process pins a snapshot, the writer lock held throughout, the loaded snapshot published in `mti_txnid`, and malformed input reported (differences below). `ENOTSUP` for a 0.9 environment, `EINVAL` for NULL or an environment that is not open (C crashes). |
 | `mdb_modload` | Not supported (crypto modules) | NULL, with a static message ("rlmdb does not support LMDB crypto modules") in `*errmsg` if `errmsg` is not NULL (C crashes on NULL); `*mcf_ptr` untouched, as when C's `dlopen` fails. Nothing is loaded. |
 | `mdb_modunload` | Not supported | Does nothing (`mdb_modload` returns no handles). |
 | `mdb_modsetup` | Not supported | `void`, so it cannot report that encryption and checksums are not implemented. Where C would set either up (a checksum function with a non-zero size; an encryption function and a passphrase) on an environment that is not open, the handle is marked and `mdb_env_open` fails with `ENOTSUP`: a program that asked for encryption must not get a plain file. Otherwise, and for NULL arguments, nothing happens. The module's functions are never called. |
@@ -370,9 +371,10 @@ What changes with an LMDB 1.0 environment:
 * Not implemented: `MDB_ENCRYPT` and `MDB_REMAP_CHUNKS` (`EINVAL` from
   `mdb_env_open`; `MDB_ENCRYPT` also from `mdb_env_set_flags`), encrypted
   or checksummed 1.0 files (`MDB_ENV_ENCRYPTION`, `MDB_BAD_CHECKSUM`), and
-  1.0's encryption, checksums, incremental backups and crypto modules
-  (their functions return `ENOTSUP`, see "LMDB 1.0's functions"). Its
-  two-phase commit is implemented, for 0.9 environments too. Nor are 1.0's
+  1.0's encryption, checksums and crypto modules (their functions return
+  `ENOTSUP`, see "LMDB 1.0's functions"). Its two-phase commit is
+  implemented, for 0.9 environments too, and its incremental backups, for
+  1.0 environments (0.9 pages record no txnid: `ENOTSUP`). Nor are 1.0's
   read-only child transactions of a write transaction: `mdb_txn_begin`
   with a parent and `MDB_RDONLY` returns `MDB_BAD_TXN`, as in 0.9.
 * Return codes stay 0.9's: a write in a read-only transaction is `EACCES`
@@ -506,6 +508,11 @@ point into the memory map or the transaction's dirty pages (zero copy).
 | `mdb_env_rollback` twice in a row after rolling back an odd txnid | The rolled-back meta page has `mm_txnid` 1, which passes C's check: the second call zeroes the other meta page too, and no snapshot is left (`../KNOWN_C_BUGS.md` row 62). | `MDB_CANT_ROLLBACK` whenever the previous meta page holds no snapshot (as C after an even txnid). |
 | `mdb_env_rollback` of a read-only environment | Fails writing (`EBADF`) and marks the environment unusable (`MDB_PANIC` for every later transaction). | `EACCES`, nothing changes. |
 | `mdb_env_rollback` that fails to write its meta page | Writes back only the old `mm_txnid` and `mm_last_pg`, over zeroed records: the current snapshot's meta page loses its trees (`../KNOWN_C_BUGS.md` row 64); `MDB_PANIC` afterwards. | Writes the old meta page back whole; `MDB_PANIC` afterwards, as C. |
+| `mdb_env_incr_loadfd` while a transaction of the process, or a reader of another process, uses the environment | Loads under them (`lmdb.h` forbids it) without a lock, and leaves `mti_txnid` as it was: the loading handle's next transaction mixes the old txnid with the loaded meta pages (`../KNOWN_C_BUGS.md` row 65). | `EBUSY` while this process has a write transaction or a read transaction that pins a snapshot (without a lock file also a reset one, of any handle of the file) or a reader of another live process pins one; waits for a writer of another process; publishes the loaded snapshot in `mti_txnid`. |
+| `mdb_env_incr_loadfd` that stops early (an error, a crash) | The meta pages come first in a dump and are written first, unsynced: an interrupted load leaves meta pages naming pages never written (`../KNOWN_C_BUGS.md` row 65). | Each dump's meta pages are held back until its data pages are written and synced, then written and synced: the base's meta pages stay, and the base snapshot too if the dump spans at most two commits (a third may reuse pages the base tree names). A stream cut at a record boundary cannot be detected in C's format. Load onto a copy that can be thrown away, or keep the base; loading the same dump again completes an interrupted load. |
+| `mdb_env_incr_loadfd` of a cut or malformed dump, or from an unusable descriptor | Success at a short header read, a read error or an unusable descriptor (half a restore from a pipe that delivers a header in two pieces); loops for ever when the input ends inside a page; overruns its buffer for `mp_pages` 0; writes pages wherever their number says (`../KNOWN_C_BUGS.md` row 66). | `EIO` for an input that ends inside a page, the read error, `MDB_CORRUPTED` for `mp_pages` 0 and for a page past the larger of the map size, the file's size and the map size of the dump's meta pages. |
+| `mdb_env_incr_dumpfd` after an overflow run was freed and partly reused | Steps from header to header through free pages: dumps the old value's bytes as pages (under page numbers the bytes give, which `mdb_env_incr_loadfd` writes there or fails on), steps over live pages under a stale header, or fails: `EFAULT` after part of a stale "run", `SIGBUS` on a page past the file's end, an endless loop for a stale `mp_pages` of 0 (`../KNOWN_C_BUGS.md` row 72). | Looks at every page position: a record only for a page whose header names its own position, with an `mp_txnid` above `txnid` and up to the snapshot's (meta pages too), and a run only if it ends by the snapshot's end and the file's. Every page of the snapshot written since `txnid` is dumped, and C 1.0 loads the dump to the source; no error. Elsewhere C's bytes. A short write of a meta page is retried (C takes it for whole, row 73). |
+| `mdb_env_incr_dump` | Sets `MDB_NOSUBDIR` in the handle's flags for good (`../KNOWN_C_BUGS.md` row 74). | The flags stay as they were; the path names the file. |
 | NULL handles and outputs where C would crash (`mdb_txn_begin(NULL, …)`, `mdb_dbi_open(…, NULL)`, `mdb_cursor_put(…, NULL data, …)`, `mdb_env_copy2(NULL, …)`, `mdb_cursor_dbi(NULL)`, `mdb_env_stat` before open, …) | Crash. | `EINVAL` (or 0/NULL for functions without an error result). |
 | `mdb_env_open` after a failed open on the same handle | Not allowed (`mdb_env_close` only). | Allowed. |
 | `mdb_env_set_mapsize` on an open environment | No transaction may be active in the process. | Read transactions may be active (they keep their old map); `EINVAL` while a write transaction is active, as in C. |
@@ -723,14 +730,17 @@ environments.
   environments: the same checks and trace for `mdb_env_set_pagesize`
   (edge values, after the open, existing files, 256-byte and 64 KiB
   pages), `mdb_txn_flags` (read, reset, write, nested, a parent of an
-  active child, a read-only environment) and `mdb_cursor_is_db` (named
+  active child, a read-only environment), `mdb_cursor_is_db` (named
   databases and plain items in the main DB, a named and a `DUPSORT`
   database, read, write and nested transactions, cursors past either end
-  and after a failed `MDB_SET`); the Rust builds check `ENOTSUP` after
-  C's argument checks and that nothing changed (a transaction after
-  no dump file, a plain environment after `mdb_env_set_encrypt`,
-  `mdb_env_open` refused after `mdb_modsetup`). C 1.0's `mdb_stat` reads
-  every environment the Rust builds left.
+  and after a failed `MDB_SET`) and the incremental backups (the
+  checksums of dumps since a copy, since 0 and since the last commit, to
+  a file and a descriptor, and of the copy they restore; C's
+  `MDB_NOSUBDIR` left in the flags, rlmdb's `EBUSY` and refused unusable
+  descriptor where C differs); the Rust builds check `ENOTSUP` after C's
+  argument checks and that nothing changed (a plain environment after
+  `mdb_env_set_encrypt`, `mdb_env_open` refused after `mdb_modsetup`). C
+  1.0's `mdb_stat` reads every environment the Rust builds left.
 * `tests/capi_2pc.rs`: `tests/c/capi_2pc.c`, two-phase commit
   (`mdb_txn_prepare`, `mdb_env_rollback`), against C LMDB 1.0, the 1.0
   stub and `librlmdb` (1.0 and 0.9 environments): the same trace of

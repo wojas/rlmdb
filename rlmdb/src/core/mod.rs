@@ -67,7 +67,11 @@
 //!   and abort) and `spill` (`mdb_page_spill`, `mdb_page_unspill`);
 //! * `copy`: [`Environment::copy_to_path`] and
 //!   [`Environment::copy_to_fd`] (`mdb_env_copyfd0`, `mdb_env_copyfd1`,
-//!   `mdb_env_cwalk`), byte-identical to `mdb_copy` and `mdb_copy -c`.
+//!   `mdb_env_cwalk`), byte-identical to `mdb_copy` and `mdb_copy -c`;
+//! * `incr`: incremental backups of LMDB 1.0 environments,
+//!   [`Environment::incr_dump`], [`Environment::incr_dump_to_path`] and
+//!   [`Environment::incr_load`] (`mdb_env_incr_dumpfd`,
+//!   `mdb_env_incr_dump`, `mdb_env_incr_loadfd`).
 
 #[cfg(test)]
 pub(crate) mod audit;
@@ -80,6 +84,7 @@ pub mod dbi;
 pub(crate) mod dirty;
 pub mod env;
 mod freelist;
+mod incr;
 mod nested;
 pub(crate) mod page_ops;
 pub mod reader;

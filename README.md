@@ -36,9 +36,10 @@ Implemented and tested against the C library on macOS (arm64) and Linux
   compacting environment copies (byte-identical to `mdb_copy` and
   `mdb_copy -c`). Custom comparators.
 * **`rlmdb-capi`**: all 56 functions of `lmdb.h`, and the 13 that LMDB
-  1.0's `lmdb.h` adds (page size, transaction flags, `mdb_cursor_is_db`
-  and two-phase commit implemented; encryption, checksums, incremental
-  backups and crypto modules return `ENOTSUP`). The unmodified upstream
+  1.0's `lmdb.h` adds (page size, transaction flags, `mdb_cursor_is_db`,
+  two-phase commit and, for 1.0 environments, incremental backups
+  implemented; encryption, checksums and crypto modules return
+  `ENOTSUP`). The unmodified upstream
   `mtest.c` .. `mtest6.c`, `mdb_stat.c`, `mdb_dump.c`, `mdb_load.c` and
   `mdb_copy.c` run against it and give the same results as against C,
   down to the page numbers on the free list, and so do 1.0's `mtest.c` ..
@@ -53,8 +54,9 @@ Implemented and tested against the C library on macOS (arm64) and Linux
   constants.
 * **`rlmdb-tools`**: `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` with the
   same options, output, messages and exit codes as the C tools, plus
-  `mdb_drop` (not part of 0.9.37; modelled on 1.0's), and `mdb_load -F
-  0.9|1.0` for the format of a new environment.
+  `mdb_drop` (not part of 0.9.37; modelled on 1.0's), `mdb_load -F
+  0.9|1.0` for the format of a new environment, and LMDB 1.0's
+  incremental backups (`mdb_dump -i txnid`, `mdb_load -i`).
 * **`interop`**: the cross-process test bed: C, Rust and "C on the Rust
   library" peers writing and reading one environment concurrently, in all
   nine combinations, for each format (the C peer is C 0.9 on 0.9

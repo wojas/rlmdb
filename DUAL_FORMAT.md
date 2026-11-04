@@ -100,7 +100,7 @@ Features of 1.0 that are API, not format, and can come later without
 touching the layout work: `mdb_txn_prepare` / `mdb_env_rollback` (2PC,
 done: stage 7), `MDB_PREVSNAPSHOT` (pick the older meta, mdb10.c 4783),
 read-only child transactions of a write transaction, `mdb_env_incr_dump*`
-(walks `mp_txnid`), `mdb_cursor_is_db`, `mdb_txn_flags`, `MDB_REMAP_CHUNKS`
+(walks `mp_txnid`; done, §7), `mdb_cursor_is_db`, `mdb_txn_flags`, `MDB_REMAP_CHUNKS`
 and the reader page cache (`MDB_RPAGE_CACHE`, in-memory only; the source of
 lmdb-go#45).
 
@@ -363,12 +363,12 @@ setting, no load-time code). All three export the same functions: 0.9's
 `lmdb.h`'s, the 13 that LMDB 1.0's `lmdb.h` adds, and `rlmdb.h`'s. (At
 first `rlmdb.h` declared the 13 too, for rlmdb's 0.9 `lmdb.h`; with 1.0's
 `lmdb.h` shipped instead, it holds only the `rlmdb_*` functions.)
-`mdb_env_set_pagesize`, `mdb_txn_flags`, `mdb_cursor_is_db` and
-two-phase commit (`mdb_txn_prepare`, `mdb_env_rollback`, stage 7) are
-implemented; the functions of the other features of stage 7
-(`mdb_env_set_encrypt`, `mdb_env_set_checksum`), the
+`mdb_env_set_pagesize`, `mdb_txn_flags`, `mdb_cursor_is_db`,
+two-phase commit (`mdb_txn_prepare`, `mdb_env_rollback`, stage 7) and the
 incremental backups (`mdb_env_incr_dump`, `mdb_env_incr_dumpfd`,
-`mdb_env_incr_loadfd`) and the crypto modules (`mdb_modload`,
+`mdb_env_incr_loadfd`, stage 7, 1.0 environments) are implemented; the
+functions of the other features of stage 7 (`mdb_env_set_encrypt`,
+`mdb_env_set_checksum`) and the crypto modules (`mdb_modload`,
 `mdb_modunload`, `mdb_modsetup`) make C 1.0's argument checks and return
 `ENOTSUP` (`mdb_modload` NULL, `mdb_modunload` nothing; after
 `mdb_modsetup` asked for encryption or checksums, `mdb_env_open` returns
@@ -595,8 +595,8 @@ Later decisions (owner, 2026-11-03), for the three C libraries:
 6. Soon after: the format-converting copy (`convert-copy`), replacing
    `lmdbconvert`.
 7. Later: checksums, encryption. Their C functions are exported already
-   and return `ENOTSUP` until then (§4.4); so do the incremental backups
-   and the crypto modules, which are not planned.
+   and return `ENOTSUP` until then (§4.4); so do the crypto modules,
+   which are not planned.
    Done: two-phase commit, in both formats: `RwTxn::prepare` and
    `PreparedTxn` (`mdb_txn_prepare`: the commit split before its meta
    page write, which `PreparedTxn::commit` does) and
@@ -619,3 +619,25 @@ Later decisions (owner, 2026-11-03), for the three C libraries:
    the environment reports the previous snapshot), and then ends the
    flag, where C keeps it and reports the page the rollback wrote
    (row 71).
+   Done: incremental backups of 1.0 environments (they select pages by
+   `mp_txnid`, which 0.9 pages lack: `ENOTSUP` there):
+   `Environment::incr_dump` and `incr_dump_to_path`
+   (`mdb_env_incr_dumpfd`, `mdb_env_incr_dump`, `mdb_dump -i`) scan the
+   file as C 1.0 does, `Environment::incr_load` (`mdb_env_incr_loadfd`,
+   `mdb_load -i`) applies a dump of either side; a chain restores the
+   source byte for byte (`interop/tests/incr10.rs`). C 1.0's dump steps
+   from header to header through free pages, and after a freed overflow
+   run is partly reused it dumps stale bytes as pages that no load
+   restores correctly, steps over live pages or fails (`KNOWN_C_BUGS.md`
+   row 72). rlmdb's records are only pages whose header names their own
+   position with a txnid between the base and the snapshot, so each is
+   the file's own bytes and every page of the snapshot written since is
+   among them; where no stale page is involved the dumps are C's bytes. A
+   dump of only the pages the trees reach (random access, not a copy of
+   the file's blocks) may come later as an optional mode. The load
+   checks what C's does not (rows 65 and 66: cut or malformed input, the
+   environment's transactions and readers, `mti_txnid` published), writes
+   each dump's meta pages after its data pages, synced as a commit's
+   (row 65: the base's meta pages survive an interrupted load), and
+   needs no `MDB_WRITEMAP`, which `lmdb.h` asks for and C's code does not
+   use.

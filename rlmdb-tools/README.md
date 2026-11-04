@@ -29,8 +29,8 @@ repository). In short:
 
 ```text
 mdb_stat [-V] [-n] [-e] [-r[r]] [-f[f[f]]] [-v] [-a|-s subdb] dbpath
-mdb_dump [-V] [-f output] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath
-mdb_load [-V] [-a] [-f input] [-F 0.9|1.0] [-n] [-s name] [-N] [-T] dbpath
+mdb_dump [-V] [-f output] [-i txnid] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath
+mdb_load [-V] [-a] [-f input] [-F 0.9|1.0] [-i] [-n] [-s name] [-N] [-T] dbpath
 mdb_copy [-V] [-c] [-n] [-v] srcpath [dstpath]
 mdb_drop [-V] [-n] [-d] [-s subdb] dbpath
 ```
@@ -44,14 +44,16 @@ mdb_drop [-V] [-n] [-d] [-s subdb] dbpath
   before the latest commit (`MDB_PREVSNAPSHOT`).
 * `mdb_dump`: writes the main DB (or `-s subdb`, or with `-a` every named
   database) in the BDB-compatible dump format; `-p` prints printable bytes
-  as text, `-l` lists the named databases, `-f` writes to a file.
+  as text, `-l` lists the named databases, `-f` writes to a file. `-i
+  txnid` (LMDB 1.0 environments) writes an incremental dump instead: the
+  pages written since transaction `txnid` (see "LMDB 1.0 environments").
 * `mdb_load`: reads that format (or with `-T` plain pairs of text lines)
   into an environment, creating it if needed; `-s` names the target
   database (a `database=` header line overrides it), `-N` keeps existing
   records, `-a` appends records in input order without sorting (for dumps
   of databases with custom comparators), `-f` reads a file. `-F 0.9` or
   `-F 1.0` is the format of a new environment (rlmdb's own option; see
-  below).
+  below). `-i` loads an incremental dump of `mdb_dump -i` instead.
 * `mdb_copy`: copies an environment to an empty directory, or to standard
   output without `dstpath`; `-c` compacts (only pages in use, renumbered).
 * `mdb_drop`: empties a database (the main DB, or `-s subdb`); `-d`
@@ -80,7 +82,7 @@ Each C release's tools are the oracle for their own format: for an LMDB
   of `mdb_env_set_pagesize`) and a record with an empty key is skipped
   with `zero-length key(ignored)`; for a 0.9 environment `db_pagesize=` is
   an unrecognized keyword and an empty key fails, as in C 0.9. The usage
-  line names `-F`, the one difference from C 0.9's.
+  line names `-F` (and `-i`, below), where it differs from C 0.9's.
 * `mdb_stat` of a 1.0 environment prints the page size in every
   database's block (`  Page size: 4096`, as 1.0's `prstat` does), and
   `mdb_stat`/`mdb_dump` say `mdb_dbi_open failed` where 0.9's say
@@ -92,9 +94,9 @@ Each C release's tools are the oracle for their own format: for an LMDB
 * `mdb_drop` without `-s` on a 1.0 environment deletes the named databases
   first, as C 1.0 does, so their pages are freed (0.9 leaks them,
   `../KNOWN_C_BUGS.md` row 21).
-* The options are 0.9's and 1.0's `-v` (see above), which the tools take
-  for 0.9 environments too; 1.0's `-L`, `-i`, `-m`/`-w` are not there. The
-  usage lines name `-v`, as C 1.0's do.
+* The options are 0.9's, 1.0's `-v` (see above), which the tools take
+  for 0.9 environments too, and 1.0's `-i` (below); 1.0's `-L`, `-m`/`-w`
+  are not there. The usage lines name `-v` and `-i`, as C 1.0's do.
 * `-v` next to other processes: C 1.0's tools publish the previous
   snapshot in the lock file that the other processes use, so the next
   commit of one of them overwrites the latest one; the Rust tools leave
@@ -105,6 +107,42 @@ Each C release's tools are the oracle for their own format: for an LMDB
   (row 70). And `mdb_copy -v`
   without `-c` is a copy of the previous snapshot, where C 1.0's keeps the
   latest commit's meta page and lacks pages it names (row 69).
+* Incremental backups, 1.0's `mdb_dump -i txnid` and `mdb_load -i`, as
+  C 1.0's tools do them: the same dump on standard output
+  or with `-f` in a new file (which must not exist); the same messages
+  and exit codes, among them `<prog>: <arg>: invalid txnid: <strerror>`
+  for a txnid that is 0 or not a number (it is read as `sscanf("%zu")`
+  reads it: `5x` is 5, `-1` the largest); the other options are ignored
+  but `-n` (and `-f`, `-F` of `mdb_load`). A chain is a copy
+  (`mdb_copy`), then dumps since its txnid and since each dump's (`mdb_stat
+  -e` shows the last txnid), loaded in order into a copy of the copy. C
+  1.0's dump reads the headers of free pages, and after a large value is
+  deleted and its pages partly reused it dumps the old value's bytes as
+  pages, which no load restores correctly, or skips live pages
+  (`../KNOWN_C_BUGS.md` row 72); rlmdb's dump holds only pages whose
+  header names their own position (so it differs from C's there, and C
+  1.0's `mdb_load -i` restores the source from it), and its load refuses
+  C's stale pages where their number is impossible. With `-v` the dump is
+  one of the previous snapshot (C 1.0's holds the latest commit's meta
+  page and pages). Not as in C:
+  `mdb_load -i` reports a dump cut short (`mdb_env_incr_load failed,
+  error 5 Input/output error`; C reports success, or reads for ever, row
+  66; on Windows C 1.0's fails at the end of a pipe with "error -1", having
+  loaded the dump, where rlmdb's reads a pipe to its end) and fails with
+  `EBUSY` while a reader of another process pins a snapshot (row 65).
+  `-i` always means 1.0: `mdb_load -i` creates a new environment in
+  format 1.0 whatever the experimental variable says (C 1.0's creates 1.0
+  files), and `-F 0.9` with `-i` is a usage error. Like
+  C's it opens the environment with `MDB_NOSYNC`, but its load writes
+  each dump's meta pages after the data pages, syncing before and after
+  them (C writes them first, unsynced; row 65): an interrupted load
+  leaves the base's meta pages, and the base snapshot whole if the dump
+  spans at most two commits (a third may reuse pages the base tree
+  names). A dump cut at a record boundary looks whole in C's format. So
+  load onto a copy you can throw away, or keep the base until the load
+  has succeeded; loading the same dump again completes an interrupted
+  one. On an LMDB 0.9 environment both fail with `ENOTSUP` (0.9 pages
+  record no txnid; C 1.0's tools do not open 0.9 files).
 * Not reproduced from C 1.0: its `mdb_env_info` reports the process's map
   address when the file records none, so `mdb_stat10 -e` prints it and
   every `mdb_dump10` output has a `mapaddr=` line (which makes `mdb_load`
@@ -248,4 +286,6 @@ sub-pages and sub-databases, a `MDB_NOSUBDIR` environment.
 The comparison with C 1.0's tools needs the 1.0 oracle, which only
 `../interop` builds: `interop/tests/tools10.rs` runs these tools (as
 `rtools <tool>`, one executable built from this crate's library) next to
-`mdb_load10`, `mdb_stat10`, `mdb_dump10`, `mdb_drop10` and `mdb_copy10`.
+`mdb_load10`, `mdb_stat10`, `mdb_dump10`, `mdb_drop10` and `mdb_copy10`,
+`-i` included (`interop/tests/incr10.rs` restores chains of incremental
+dumps with either side's tools).

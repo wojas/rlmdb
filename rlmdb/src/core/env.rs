@@ -74,7 +74,7 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 
 use crate::cmp::CmpFn;
 use crate::consts::*;
@@ -894,6 +894,25 @@ impl Environment {
     /// its whole life (which also makes `RwTxn` `!Send`).
     pub(crate) fn lock_writer_state(&self) -> MutexGuard<'_, WriterState> {
         self.writer.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// [`Environment::lock_writer_state`] if no thread holds it (a write
+    /// transaction of this handle, `set_map_size`), `None` otherwise.
+    pub(crate) fn try_lock_writer_state(&self) -> Option<MutexGuard<'_, WriterState>> {
+        match self.writer.try_lock() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// Locks the current data map for the holder alone: while the guard
+    /// lives, no transaction of this handle begins or renews (each takes a
+    /// share of the map first) and no meta page is read through the map
+    /// ([`Environment::read_meta`] and everything built on it wait). The
+    /// holder must not call those itself.
+    pub(crate) fn lock_map(&self) -> RwLockWriteGuard<'_, Arc<DataMap>> {
+        self.map.write().unwrap_or_else(|e| e.into_inner())
     }
 
     // --- public API -------------------------------------------------------
