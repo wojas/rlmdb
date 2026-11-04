@@ -8,8 +8,13 @@
 name: CI
 
 on:
+  # Pushes to main and pull requests, not both for a branch with a pull
+  # request (that ran every check twice). A branch without a pull request
+  # runs nothing; start it by hand with workflow_dispatch.
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
