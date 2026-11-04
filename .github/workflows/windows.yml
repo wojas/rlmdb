@@ -1,5 +1,7 @@
-# Windows x86-64: lints and rustdoc with both Rust toolchains, the whole
-# test suite with MSVC's, the primary one. With MinGW-w64's only what
+# Windows x86-64: lints and rustdoc with both Rust toolchains, the tests
+# with MSVC's, the primary one: the platform suite (RLMDB_TEST_SCOPE=
+# platform, see interop/README.md; nightly.yml runs the whole suite on
+# Windows, and ci.yml on Linux x86-64). With MinGW-w64's only what
 # depends on the compilers: that everything compiles (clippy, rustdoc), that
 # the three C libraries build, and that C programs compile, link and run
 # against them (the rlmdb-capi tests, the install test included); the
@@ -69,9 +71,10 @@ jobs:
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-      - name: test
+      - name: test (platform suite)
         run: cargo test --workspace --no-fail-fast
         env:
+          RLMDB_TEST_SCOPE: platform
           TMP: ${{ runner.temp }}
           TEMP: ${{ runner.temp }}
           INTEROP_TIMEOUT_SECS: "900"
