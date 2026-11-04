@@ -206,10 +206,12 @@ pub fn scan_unsigned(s: &[u8], radix: u32) -> Option<u64> {
 /// Whether `sscanf` leaves `ERANGE` in `errno` after a number that
 /// overflows. The BSD C library does (measured on macOS; FreeBSD's
 /// `vfscanf`, which macOS's comes from, and those of the other BSDs
-/// convert with `strtoumax`); glibc's `sscanf` does not (C 1.0's `mdb_dump
-/// -i 99999999999999999999 -i 0` says "Success" there). The Windows
-/// runtimes are not measured and taken not to.
+/// convert with `strtoumax`), and so do the C runtimes of both Windows
+/// toolchains (measured with C 1.0's `mdb_dump` built by MSVC and by
+/// MinGW-w64); glibc's `sscanf` does not (C 1.0's `mdb_dump -i
+/// 99999999999999999999 -i 0` says "Success" there).
 pub const SSCANF_KEEPS_ERANGE: bool = cfg!(any(
+    windows,
     target_vendor = "apple",
     target_os = "freebsd",
     target_os = "openbsd",

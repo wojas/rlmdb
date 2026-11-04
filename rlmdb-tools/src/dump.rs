@@ -25,8 +25,8 @@
 //! one), as `tests/lmdb-c/1.0/mdb_dump.c` does: the txnid is read as
 //! `sscanf("%zu")` reads it (`5x` is 5, `-1` is `SIZE_MAX`), and one that
 //! is not a number or is 0 is "invalid txnid" with the C library's
-//! `strerror(errno)` (of 0, or with the BSD C library of `ERANGE` after an
-//! earlier `-i` overflowed: [`crate::cfmt::SSCANF_KEEPS_ERANGE`],
+//! `strerror(errno)` (of 0, or with the BSD C library and on Windows of
+//! `ERANGE` after an earlier `-i` overflowed: [`crate::cfmt::SSCANF_KEEPS_ERANGE`],
 //! [`crate::cfmt::crt_strerror`]);
 //! the other options but `-n` are ignored. With `-i` the options follow
 //! 1.0's tool, which opens `-f`'s file only after the environment; without
