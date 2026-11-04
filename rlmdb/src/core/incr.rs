@@ -5,42 +5,57 @@
 //!
 //! # The dump
 //!
-//! An incremental dump is a run of raw pages of the data file, each as the
-//! file holds it, without any framing: first the meta pages whose
-//! `mm_txnid` is above the given txnid (page 0 before page 1), then, in file
-//! order from page 2 to the snapshot's last page, every page whose
-//! `mp_txnid` is above it, an overflow run whole (its header's `mp_pages`
-//! pages). A page's number is in its own header (`mp_pgno`), which is where
-//! the load writes it. From txnid 0 the dump holds every page ever written
-//! (a full backup; `lmdb.h` asks for a txnid above zero, `mdb.c` takes 0);
-//! from the txnid of an earlier backup, the pages written since, which turn
-//! a copy of the file as it was then into the file as it is. LMDB 0.9 pages
-//! have no `mp_txnid`, so a 0.9 environment cannot be dumped (`ENOTSUP`, as
-//! for the load).
+//! An incremental dump is a run of page records without any other framing:
+//! each is a page, or an overflow run, as the data file holds it, starting
+//! with its page header, whose page number (`mp_pgno`) is where the load
+//! writes it. First come the meta pages whose `mm_txnid` is above the given
+//! txnid (page 0 before page 1), then pages from 2 to the snapshot's last
+//! page in file order. From txnid 0 the dump holds every page that has been
+//! written (a full backup; `lmdb.h` asks for a txnid above zero, `mdb.c`
+//! takes 0); from the txnid of an earlier backup, the pages written since,
+//! which turn a copy of the file as it was then into the file as it is.
+//! LMDB 0.9 pages have no `mp_txnid`, so a 0.9 environment cannot be dumped
+//! (`ENOTSUP`, as for the load).
 //!
 //! The meta pages are copied while holding the writer lock, after starting
 //! the read transaction that pins the snapshot, as for a plain copy
 //! (`Environment::begin_with_meta_pages`); the pages follow without the
-//! lock. They are read with `pread` (C reads its map; the bytes are the
-//! same), because the dump reads free pages too, which writers may change
-//! while it reads them.
+//! lock. They are read with `pread`, not borrowed from the map, because the
+//! dump reads free pages too, which writers may change while it reads them.
 //!
-//! The output is byte for byte C 1.0's, also where C's walk goes wrong
-//! (`KNOWN_C_BUGS.md` row 72). C steps from header to header: one page, or
-//! `mp_pages` pages after an overflow header. Free pages keep whatever was
-//! last written to them, so after an overflow run is freed and its first
-//! page reused, the walk reads the run's other pages, which hold the old
-//! value's bytes, as page headers: it dumps them (with the page number the
-//! bytes give) when the bytes taken for `mp_txnid` are above the txnid, and
-//! steps by the bytes taken for `mp_pages` when they set `P_OVERFLOW`. The
-//! walk here takes the same steps and writes the same pages. Where C's
-//! would not finish, it fails with `MDB_CORRUPTED` after the pages before:
-//! a run to dump that ends past the end of the file (C's `write` fails with
-//! `EFAULT`, after writing the part it could read) and a step of zero or
-//! backwards (`mp_pages` 0 or above `INT_MAX`; C loops for ever). A page
-//! past the end of the file, which a commit allocated but never wrote, ends
-//! the walk: C reads it from its map as zeros, which it never dumps, or
-//! dies of `SIGBUS`.
+//! Every record is the file's own bytes at their own position, so applying
+//! one is never wrong: it makes those bytes of the target the source's.
+//! The dump looks at every page position `pg` of the snapshot (up to the
+//! end of the file: past it nothing was ever written) and takes the page
+//! there for a record if
+//!
+//! * its header names it: `mp_pgno == pg`;
+//! * `txnid < mp_txnid <= snapshot`: written after `txnid` and part of the
+//!   snapshot this dump pins (a larger `mp_txnid` is a free page that a
+//!   writer rewrote since, or a page of an aborted transaction);
+//! * for an overflow header, its run of `mp_pages` pages is not empty and
+//!   ends by the snapshot's last page and the end of the file;
+//!
+//! and the record reaches past what earlier records hold (it is then
+//! written whole, overlapping them where it begins inside one). The meta
+//! pages follow the same bound (`mm_txnid <= snapshot`).
+//!
+//! Every page of the snapshot written after `txnid` is in the dump: C 1.0
+//! and rlmdb stamp each page they write with the writing transaction's
+//! txnid, so such a page carries a txnid in the range and its own number,
+//! and the body of an overflow run comes with its header. Records for
+//! other pages (free pages, stale headers of freed runs, by a remote
+//! chance a page of a value that looks like a header naming its own
+//! position) only add bytes that the source's file holds there, which the
+//! snapshot does not use.
+//!
+//! C 1.0 steps from header to header instead, one page or `mp_pages`, from
+//! whatever free pages hold (`KNOWN_C_BUGS.md` row 72): after an overflow
+//! run is freed and partly reused it takes the old value's bytes for
+//! headers, dumps them under the page numbers they give, steps over live
+//! pages, or fails (`EFAULT`, an endless loop). Where no such page is
+//! involved, and no page of a transaction after the snapshot, the two dumps
+//! are the same bytes.
 //!
 //! # The load
 //!
@@ -76,6 +91,7 @@ use crate::consts::NUM_METAS;
 use crate::core::copy::{read_exact_at, AlignedBuf};
 use crate::core::env::{Environment, WriterState};
 use crate::core::reader::{LocalReadersGuard, LockRegion};
+use crate::core::txn::Transaction;
 use crate::error::{Error, MdbError, Result};
 use crate::format::layout::{Format, Layout, META_TXNID, V10};
 use crate::format::meta::{pick_newest, Meta};
@@ -100,12 +116,13 @@ impl Environment {
     /// `mdb_env_incr_dumpfd`: write an incremental dump of the environment
     /// since transaction `txnid` to `out`: the meta pages and the pages
     /// written by transactions after `txnid`, as they are in the data file
-    /// (see the module documentation of `incr`; the bytes are C 1.0's).
-    /// `txnid` is normally the txnid of an earlier backup (the
-    /// `last_txnid` of [`Environment::info`] then, or of the copy that the
-    /// chain starts from); 0 dumps every page (`lmdb.h` asks for more than
-    /// 0, C takes it). [`Environment::incr_load`] applies the dump to a copy
-    /// of the file at `txnid`.
+    /// (see the module documentation of `incr` for which pages, and where
+    /// the dump differs from C 1.0's). `txnid` is normally the txnid of an
+    /// earlier backup (the `last_txnid` of [`Environment::info`] then, or
+    /// of the copy that the chain starts from); 0 dumps every page
+    /// (`lmdb.h` asks for more than 0, C takes it).
+    /// [`Environment::incr_load`], or C 1.0's `mdb_env_incr_loadfd`,
+    /// applies the dump to a copy of the file at `txnid`.
     ///
     /// Writers may continue while the dump runs; it shows the snapshot
     /// current when it began, which it pins with a read transaction (so a
@@ -116,11 +133,9 @@ impl Environment {
     /// call it while it has a write transaction of the environment open.
     ///
     /// LMDB 1.0 environments only: `ENOTSUP` for an LMDB 0.9 one, whose
-    /// pages do not record the transaction that wrote them. `MDB_CORRUPTED`
-    /// where C's walk over the pages would not finish (module
-    /// documentation), after the pages before. A write to `out` that
-    /// writes nothing is `MDB_SHORT_WRITE`, as in C. `out` is flushed at
-    /// the end.
+    /// pages do not record the transaction that wrote them. A write to
+    /// `out` that writes nothing is `MDB_SHORT_WRITE`, as in C. `out` is
+    /// flushed at the end.
     pub fn incr_dump(&self, mut out: impl Write, txnid: u64) -> Result<()> {
         if self.format() != Format::V10 {
             return Err(Error::errno(libc::ENOTSUP));
@@ -130,15 +145,23 @@ impl Environment {
         let mut buf = AlignedBuf::new(DUMP_CHUNK.max(2 * ps));
         // Pins the snapshot until the walk is done.
         let txn = self.begin_with_meta_pages(&mut buf.as_mut()[..2 * ps])?;
+        let snapshot = txn.id();
         for i in 0..NUM_METAS {
             let page = &buf.as_mut()[i * ps..(i + 1) * ps];
             let meta_txnid = get_u64(page, l.meta_offset() + META_TXNID).unwrap_or(0);
-            if meta_txnid > txnid {
+            // A newer meta page (a commit whose meta page write failed, or
+            // without a lock file one of another process) names pages the
+            // dump does not hold.
+            if txnid < meta_txnid && meta_txnid <= snapshot {
                 write_all(&mut out, page)?;
             }
         }
+        let range = Range {
+            since: txnid,
+            snapshot,
+        };
         let mut file = FileView::new(self.data_file(), ps, buf)?;
-        walk(l, &mut file, txn.core().next_pgno, txnid, &mut out)?;
+        walk(l, &mut file, txn.core().next_pgno, range, &mut out)?;
         drop(txn);
         out.flush()?;
         Ok(())
@@ -271,7 +294,7 @@ struct FileView<'f> {
     start: u64,
     /// How many bytes of `buf` hold the file's.
     len: usize,
-    /// The file's size as last read.
+    /// The file's size when the dump began (its snapshot is all below).
     size: u64,
 }
 
@@ -287,117 +310,97 @@ impl<'f> FileView<'f> {
         })
     }
 
-    /// Whether the file reaches `end`; its size is read again before the
-    /// answer is no (writers may have grown it).
-    fn reaches(&mut self, end: u64) -> Result<bool> {
-        if end > self.size {
-            self.size = os::file_size(self.file)?;
-        }
-        Ok(end <= self.size)
+    /// The number of whole pages of the file.
+    fn pages(&self) -> u64 {
+        self.size / self.ps as u64
     }
 
-    /// Up to `n` bytes of the file at `pos` (fewer where the file ends,
-    /// none past it; `n` at most the buffer's size).
+    /// `n` bytes of the file at `pos` (`pos + n` at most the file's size,
+    /// `n` at most the buffer's size).
     fn bytes(&mut self, pos: u64, n: usize) -> Result<&[u8]> {
         let held = self.start + self.len as u64;
-        let want = pos.saturating_add(n as u64).min(self.size);
-        if pos < self.start || want > held {
-            let len = (self.buf.len() as u64).min(self.size.saturating_sub(pos)) as usize;
+        if pos < self.start || pos + n as u64 > held {
+            let len = (self.buf.len() as u64).min(self.size - pos) as usize;
             read_exact_at(self.file, &mut self.buf.as_mut()[..len], pos)?;
             self.start = pos;
             self.len = len;
         }
         let off = (pos - self.start) as usize;
-        let avail = (self.len - off).min(n);
-        Ok(&self.buf.as_mut()[off..off + avail])
+        Ok(&self.buf.as_mut()[off..off + n])
     }
 
-    /// Writes the file's bytes from `pos` to `end` (which the file reaches)
-    /// to `out`.
+    /// Writes the file's bytes from `pos` to `end` (within the file) to
+    /// `out`.
     fn copy(&mut self, mut pos: u64, end: u64, out: &mut impl Write) -> Result<()> {
         while pos < end {
             let n = (end - pos).min(self.buf.len() as u64) as usize;
-            let bytes = self.bytes(pos, n)?;
-            if bytes.is_empty() {
-                // The file shrank since `reaches`.
-                return Err(Error::errno(libc::EIO));
-            }
-            let len = bytes.len();
-            write_all(out, bytes)?;
-            pos += len as u64;
+            write_all(out, self.bytes(pos, n)?)?;
+            pos += n as u64;
         }
         Ok(())
     }
 }
 
-/// The page walk of `mdb_env_incr_dumpfd`: pages 2 to `next_pgno - 1` of
-/// `file`, header by header, writing to `out` those whose `mp_txnid` is
-/// above `txnid` (see the module documentation for the steps C takes and
-/// where this one fails instead).
+/// The transactions whose pages a dump holds: written after `since`, at
+/// most `snapshot` (the snapshot the dump pins).
+#[derive(Debug, Clone, Copy)]
+struct Range {
+    since: u64,
+    snapshot: u64,
+}
+
+/// The page walk of the dump (see the module documentation): every page
+/// position from 2 to `next_pgno - 1` (or the end of the file), writing to
+/// `out` the records [`record_pages`] finds that reach past the records
+/// before.
 fn walk(
     l: &Layout,
     file: &mut FileView<'_>,
     next_pgno: u64,
-    txnid: u64,
+    range: Range,
     out: &mut impl Write,
 ) -> Result<()> {
-    let corrupted = || Error::from(MdbError::Corrupted);
     let ps = file.ps as u64;
-    let mut pg = NUM_METAS as u64;
-    while pg < next_pgno {
-        let pos = pg.checked_mul(ps).ok_or_else(corrupted)?;
-        if !file.reaches(pos + 1)? {
-            // Never written (C: zeros, or SIGBUS): neither are the pages
-            // after it.
-            break;
-        }
+    // Pages past the end of the file were never written: no page of the
+    // snapshot is there, and C reads them as zeros, or dies of SIGBUS.
+    let last = next_pgno.min(file.pages());
+    // The first page the records so far do not hold.
+    let mut covered = NUM_METAS as u64;
+    for pg in NUM_METAS as u64..last {
         let mut hdr = [0u8; V10.page_hdr];
-        let bytes = file.bytes(pos, l.page_hdr)?;
-        hdr[..bytes.len()].copy_from_slice(bytes);
-        let flags = get_u16(&hdr, l.flags_offset()).unwrap_or(0);
-        let page_txnid = l
-            .txnid_offset()
-            .and_then(|off| get_u64(&hdr, off))
-            .unwrap_or(0);
-        // C: `int npgs = mp->mp_pages` (the step) and `wsize = psize *
-        // mp->mp_pages` (the pages written).
-        let (step, pages) = if flags & P_OVERFLOW != 0 {
-            let n = get_u32(&hdr, l.pages_offset()).unwrap_or(0);
-            (i64::from(n as i32), u64::from(n))
-        } else {
-            (1, 1)
+        hdr[..l.page_hdr].copy_from_slice(file.bytes(pg * ps, l.page_hdr)?);
+        let Some(pages) = record_pages(l, &hdr, pg, last, range) else {
+            continue;
         };
-        if page_txnid > txnid {
-            if pages == 0 {
-                // C writes nothing and steps by 0, for ever.
-                return Err(corrupted());
-            }
-            let end = pages
-                .checked_mul(ps)
-                .and_then(|n| pos.checked_add(n))
-                .ok_or_else(corrupted)?;
-            if !file.reaches(end)? {
-                // C's write from its map fails with EFAULT past the file.
-                return Err(corrupted());
-            }
-            file.copy(pos, end, out)?;
-        }
-        match step {
-            1.. => pg = pg.wrapping_add(step as u64),
-            // C steps by 0 for ever.
-            0 => return Err(corrupted()),
-            _ => {
-                // `pg += npgs` with a negative int: C ends the walk if the
-                // sum wraps past the end, else goes back over pages it has
-                // seen, usually for ever.
-                if pg.wrapping_add(step as u64) < next_pgno {
-                    return Err(corrupted());
-                }
-                break;
-            }
+        let end = pg + pages;
+        if end > covered {
+            file.copy(pg * ps, end * ps, out)?;
+            covered = end;
         }
     }
     Ok(())
+}
+
+/// The length in pages of the record that the page at `pg` with header
+/// `hdr` starts, if it is one: its header names it (`mp_pgno`), its
+/// `mp_txnid` is in `range`, and an overflow run is not empty and ends by
+/// page `last` (the snapshot's end or the file's). `None` for any other
+/// page: a free page that holds something else (a page of a freed run's
+/// value, a header from a later transaction), or one of the snapshot that
+/// was not written in the range.
+fn record_pages(l: &Layout, hdr: &[u8], pg: u64, last: u64, range: Range) -> Option<u64> {
+    if get_u64(hdr, 0)? != pg {
+        return None;
+    }
+    let txnid = get_u64(hdr, l.txnid_offset()?)?;
+    if txnid <= range.since || txnid > range.snapshot {
+        return None;
+    }
+    if get_u16(hdr, l.flags_offset())? & P_OVERFLOW == 0 {
+        return Some(1);
+    }
+    let pages = u64::from(get_u32(hdr, l.pages_offset())?);
+    (pages >= 1 && pg.checked_add(pages)? <= last).then_some(pages)
 }
 
 /// What the load holds while it runs (see [`Environment::incr_load`]).

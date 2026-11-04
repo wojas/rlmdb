@@ -274,8 +274,9 @@ impl Read for Handle {
 /// `mdb_env_incr_dumpfd` (C 1.0, `mdb.c` line 11825): write an incremental
 /// dump of the environment since transaction `txnid` to `fd`, from its
 /// current position (not closed, not synced): the meta pages and pages
-/// that later transactions wrote, byte for byte as C 1.0 writes them
-/// ([`rlmdb::Environment::incr_dump`]). `EINVAL` for NULL or an
+/// that later transactions wrote, as C 1.0 writes them but for the stale
+/// pages C takes for pages (`KNOWN_C_BUGS.md` row 72;
+/// [`rlmdb::Environment::incr_dump`]). `EINVAL` for NULL or an
 /// environment that is not open (C would crash); `ENOTSUP` for an LMDB 0.9
 /// environment. A descriptor that cannot be one (-1; on Windows NULL or
 /// `INVALID_HANDLE_VALUE`) gives the error of the first write, as in C:

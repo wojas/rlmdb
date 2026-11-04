@@ -2,8 +2,10 @@
 //! (`Environment::incr_dump`, `incr_dump_to_path`, `incr_load`; C 1.0's
 //! `mdb_env_incr_dumpfd`, `mdb_env_incr_dump`, `mdb_env_incr_loadfd`): a
 //! chain of dumps turns an old copy, or an empty environment, into the
-//! source byte for byte at every page size; the walk over free pages that
-//! C has (`KNOWN_C_BUGS.md` row 72); malformed input to the load (row 66);
+//! source byte for byte at every page size; free pages that C's walk
+//! takes for pages, which are no records here, and every page of the
+//! snapshot in the dump (`KNOWN_C_BUGS.md` row 72); malformed input to the
+//! load (row 66);
 //! what the load needs (the environment to itself) and leaves (the loaded
 //! snapshot current, row 65).
 //!
@@ -80,9 +82,8 @@ fn records(dump: &[u8], ps: usize) -> Vec<(u64, u64, u64)> {
     out
 }
 
-/// The dump's data pages come in file order, each where the one before
-/// ends: the walk read no stale page as a header (row 72), so loading the
-/// dump puts back exactly what the source holds.
+/// The dump's data pages come in file order, none beginning inside a
+/// record before it: no stale header made a record overlap (row 72).
 fn assert_sane(dump: &[u8], ps: usize) {
     let mut next = 2;
     for (pgno, _, pages) in records(dump, ps).into_iter().filter(|r| r.0 >= 2) {
@@ -132,9 +133,11 @@ fn create_dbs(env: &Environment) -> Dbs {
 /// databases, with values that fit their pages and, now and then, a value
 /// on overflow pages under a new key. Nothing frees an overflow run: the
 /// big values are never overwritten or deleted, and transactions free few
-/// enough pages that the free list keeps its records on its leaves. A
-/// freed run, partly reused, makes the walk read stale pages as headers
-/// (row 72), in C as here, and the restore then differs from the source.
+/// enough pages that the free list keeps its records on its leaves. The
+/// pages of a run freed after the copy change without a header of their
+/// own, so no dump holds them, and the restored file would differ from the
+/// source there (on pages its snapshot does not use); with C (row 72) the
+/// dump would also differ from rlmdb's.
 fn work(env: &Environment, dbs: &Dbs, rng: &mut Rng, txns: usize) {
     let ps = env.page_size() as u64;
     for _ in 0..txns {
@@ -288,16 +291,20 @@ fn lmdb_0_9_environments_are_not_supported() {
     assert!(data(dir.path()) == before);
 }
 
-/// An environment whose first overflow run (a value of `byte`s in the
-/// named database "big", txn 2) is freed (txn 3) and partly reused by four
-/// small transactions, as `interop/tests/incr10.rs` builds it with C.
-fn freed_run(dir: &Path, byte: u8) -> Environment {
-    let env = v10(4096).open(dir).unwrap();
+/// An environment in `dir/src` whose first overflow run (a value of
+/// `byte`s in the named database "big", txn 1) is freed (txn 2) and partly
+/// reused by four small transactions, as `interop/tests/incr10.rs` builds
+/// it with C; and a plain copy of it after txn 1 in `dir/base`.
+fn freed_run(dir: &Path, byte: u8) -> (Environment, std::path::PathBuf) {
+    let src = dir.join("src");
+    std::fs::create_dir(&src).unwrap();
+    let env = v10(4096).open(&src).unwrap();
     let mut txn = env.begin_rw_txn().unwrap();
     let big = txn.create_db(Some("big"), DatabaseFlags::CREATE).unwrap();
     txn.put(big, b"bigkey", &vec![byte; 100_000], WriteFlags::empty())
         .unwrap();
     txn.commit().unwrap();
+    let base = copy(&env, dir, "base");
     let mut txn = env.begin_rw_txn().unwrap();
     txn.drop_db(big).unwrap();
     txn.commit().unwrap();
@@ -308,38 +315,214 @@ fn freed_run(dir: &Path, byte: u8) -> Environment {
             .unwrap();
         txn.commit().unwrap();
     }
-    env
+    (env, base)
 }
 
-/// Row 61: the walk reads the pages of a freed overflow run as headers,
-/// as C does. With 'a's (no `P_OVERFLOW` in the bytes taken for the
-/// flags) each such page is a record of page 0x6161616161616161, which no
-/// load can place; with 'e's the "run" reaches past the file and the dump
-/// fails (C: `EFAULT`).
+/// Row 72: after an overflow run is freed and its first pages reused, C's
+/// walk takes the rest of the old value for headers (records of page
+/// 0x6161616161616161 with 'a's; with 'e's, which set `P_OVERFLOW` in the
+/// bytes taken for the flags, a "run" past the file and `EFAULT`). Here
+/// those pages name no page of their own position: no record. The reused
+/// pages, which hold their own headers, are dumped, and the dump restores
+/// the source.
 #[test]
-fn the_walk_reads_stale_pages_as_headers() {
-    let dir = tmp();
-    let env = freed_run(dir.path(), b'a');
-    let d = dump(&env, 1);
-    let garbage = records(&d, 4096)
-        .iter()
-        .filter(|r| r.0 == 0x6161_6161_6161_6161)
-        .count();
-    assert!(garbage > 0, "{:x?}", records(&d, 4096));
-    drop(env);
-    let e = reopen(dir.path()).incr_load(&d[..]).unwrap_err();
-    assert!(matches!(e, Error::Mdb(MdbError::Corrupted)), "{e:?}");
+fn stale_overflow_pages_are_not_records() {
+    for byte in *b"ae" {
+        let dir = tmp();
+        let (env, base) = freed_run(dir.path(), byte);
+        let d = dump(&env, 1);
+        let next = env.info().unwrap().last_pgno as u64 + 1;
+        let recs = records(&d, 4096);
+        assert!(recs.iter().all(|r| r.0 < next), "{recs:x?}");
+        // The pages the four commits and the drop wrote.
+        assert!(recs.iter().filter(|r| r.0 >= 2).count() >= 5, "{recs:x?}");
+        assert_sane(&d, 4096);
+        drop(env);
+        load_chain(&base, &[&d]);
+        assert!(
+            data(&base) == data(&dir.path().join("src")),
+            "'{}'",
+            byte as char
+        );
+    }
+}
 
+/// The free pages of the snapshot of `env` (the page numbers in its free
+/// list).
+fn free_pages(env: &Environment) -> std::collections::BTreeSet<u64> {
+    let txn = env.begin_ro_txn().unwrap();
+    let mut c = txn.cursor(Dbi::FREE).unwrap();
+    let mut free = std::collections::BTreeSet::new();
+    while let Some((_, idl)) = c.next().unwrap() {
+        let ids: Vec<u64> = idl
+            .chunks_exact(8)
+            .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
+            .collect();
+        free.extend(&ids[1..=ids[0] as usize]);
+    }
+    free
+}
+
+/// A source with free pages below a live overflow run written after its
+/// base copy: `(source, base, base txnid, the run's head, its pages, a free
+/// page below it, next page)`. Txn 1 fills a database, txn 2 drops it (its
+/// pages become free), two small commits make them reusable, the copy
+/// follows, then a value of 64 pages, which no free range holds, goes to
+/// the end of the file.
+struct LiveRun {
+    src: std::path::PathBuf,
+    base: std::path::PathBuf,
+    base_txnid: u64,
+    head: u64,
+    pages: u64,
+    free: u64,
+    next: u64,
+}
+
+fn live_run(dir: &Path) -> LiveRun {
+    let src = dir.join("src");
+    std::fs::create_dir(&src).unwrap();
+    let env = v10(4096).open(&src).unwrap();
+    let mut txn = env.begin_rw_txn().unwrap();
+    let low = txn.create_db(Some("low"), DatabaseFlags::CREATE).unwrap();
+    for i in 0..400u32 {
+        txn.put(low, &i.to_be_bytes(), &[7; 100], WriteFlags::empty())
+            .unwrap();
+    }
+    txn.commit().unwrap();
+    let mut txn = env.begin_rw_txn().unwrap();
+    txn.drop_db(low).unwrap();
+    txn.commit().unwrap();
+    for i in 0..2u8 {
+        let mut txn = env.begin_rw_txn().unwrap();
+        txn.put(Dbi::MAIN, &[i], b"v", WriteFlags::empty()).unwrap();
+        txn.commit().unwrap();
+    }
+    let base = copy(&env, dir, "base");
+    let base_txnid = last_txnid(&env);
+    let mut txn = env.begin_rw_txn().unwrap();
+    txn.put(
+        Dbi::MAIN,
+        b"big",
+        &vec![b'z'; 64 * 4096 - 100],
+        WriteFlags::empty(),
+    )
+    .unwrap();
+    txn.commit().unwrap();
+    let next = env.info().unwrap().last_pgno as u64 + 1;
+    let free = free_pages(&env);
+    let file = data(&src);
+    let u64_at = |o: usize| u64::from_ne_bytes(file[o..o + 8].try_into().unwrap());
+    let (head, pages) = (2..next)
+        .filter(|p| !free.contains(p))
+        .find_map(|p| {
+            let o = p as usize * 4096;
+            let flags = u16::from_ne_bytes([file[o + 18], file[o + 19]]);
+            let pages = u32::from_ne_bytes(file[o + 20..o + 24].try_into().unwrap());
+            (u64_at(o) == p && flags & 0x04 != 0 && u64_at(o + 8) > base_txnid)
+                .then_some((p, u64::from(pages)))
+        })
+        .expect("a live overflow run written after the copy");
+    assert!(pages >= 64, "{pages}");
+    let free = *free
+        .range(..head)
+        .next_back()
+        .expect("a free page below the run");
+    LiveRun {
+        src,
+        base,
+        base_txnid,
+        head,
+        pages,
+        free,
+        next,
+    }
+}
+
+/// A copy of `run`'s source in `dir/name` whose free page `run.free`
+/// starts with `hdr`, and its data file.
+fn crafted(run: &LiveRun, dir: &Path, name: &str, hdr: &[u8]) -> (std::path::PathBuf, Vec<u8>) {
+    let path = dir.join(name);
+    std::fs::create_dir(&path).unwrap();
+    let mut file = data(&run.src);
+    let at = run.free as usize * 4096;
+    file[at..at + hdr.len()].copy_from_slice(hdr);
+    std::fs::write(path.join("data.mdb"), &file).unwrap();
+    (path, file)
+}
+
+/// The base copy of `run` in `dir/name`, loaded with `dump`; its data file.
+fn restored(run: &LiveRun, dir: &Path, name: &str, dump: &[u8]) -> Vec<u8> {
+    let path = dir.join(name);
+    std::fs::create_dir(&path).unwrap();
+    std::fs::copy(run.base.join("data.mdb"), path.join("data.mdb")).unwrap();
+    load_chain(&path, &[dump]);
+    data(&path)
+}
+
+/// `a` and `b` are the same but for page `except` (of 4 KiB).
+fn same_but(a: &[u8], b: &[u8], except: u64) -> bool {
+    let (lo, hi) = (except as usize * 4096, (except as usize + 1) * 4096);
+    a.len() == b.len() && a[..lo] == b[..lo] && a[hi..] == b[hi..]
+}
+
+/// Free pages that hold headers C's walk follows (crafted here as they
+/// arise from freed and reused runs): every page of the snapshot written
+/// since the copy is still dumped, and the dump restores the source.
+///
+/// * A stale overflow header in the range whose run covers the head of a
+///   live run that goes on past it: both runs are dumped (the live one
+///   overlapping), not just the bytes up to the stale run's end.
+/// * A stale overflow header older than the copy over the live run: not a
+///   record, and the walk goes on page by page (C steps over the live run
+///   and leaves it out).
+/// * A stale header whose run ends past the snapshot, one of 0 pages (C:
+///   `EFAULT`, an endless loop), and a page from a transaction after the
+///   snapshot (a free page a writer rewrote): no record.
+///
+/// Where the crafted page itself is no record, the restored file lacks it
+/// (it is free in the snapshot).
+#[test]
+fn every_page_of_the_snapshot_is_dumped() {
     let dir = tmp();
-    let env = freed_run(dir.path(), b'e');
-    let mut out = Vec::new();
-    let e = env.incr_dump(&mut out, 1).unwrap_err();
-    assert!(matches!(e, Error::Mdb(MdbError::Corrupted)), "{e:?}");
-    // The pages before the stale one were written.
-    assert!(!out.is_empty() && out.len() % 4096 == 0);
-    // As from any txnid: the bytes taken for mp_txnid are huge.
-    let e = env.incr_dump(Vec::new(), last_txnid(&env)).unwrap_err();
-    assert!(matches!(e, Error::Mdb(MdbError::Corrupted)), "{e:?}");
+    let run = live_run(dir.path());
+    let snapshot = run.base_txnid + 1;
+    let (f, h, n) = (run.free, run.head, run.pages);
+    let cases: [(&str, Vec<u8>, bool); 5] = [
+        (
+            "covers-head",
+            header(f, snapshot, 0x04, (h - f + 1) as u32),
+            true,
+        ),
+        (
+            "old-over-run",
+            header(f, 1, 0x04, (h + n - f) as u32),
+            false,
+        ),
+        (
+            "past-end",
+            header(f, snapshot, 0x04, (run.next - f + 5) as u32),
+            false,
+        ),
+        ("empty-run", header(f, snapshot, 0x04, 0), false),
+        ("future", header(f, snapshot + 3, 0x02, 0), false),
+    ];
+    for (name, hdr, record) in cases {
+        let (src, file) = crafted(&run, dir.path(), name, &hdr);
+        let env = reopen(&src);
+        assert_eq!(last_txnid(&env), snapshot);
+        let d = dump(&env, run.base_txnid);
+        drop(env);
+        let recs = records(&d, 4096);
+        assert_eq!(recs.iter().any(|r| r.0 == f), record, "{name}: {recs:?}");
+        assert!(recs.contains(&(h, snapshot, n)), "{name}: {recs:?}");
+        let got = restored(&run, dir.path(), &format!("{name}-restored"), &d);
+        if record {
+            assert!(got == file, "{name}");
+        } else {
+            assert!(same_but(&got, &file, f), "{name}");
+        }
+    }
 }
 
 /// A 1.0 environment with a few commits, and its data file.

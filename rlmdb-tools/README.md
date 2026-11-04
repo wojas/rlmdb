@@ -108,7 +108,7 @@ Each C release's tools are the oracle for their own format: for an LMDB
   without `-c` is a copy of the previous snapshot, where C 1.0's keeps the
   latest commit's meta page and lacks pages it names (row 69).
 * Incremental backups, 1.0's `mdb_dump -i txnid` and `mdb_load -i`, as
-  C 1.0's tools do them: the same dump, byte for byte, on standard output
+  C 1.0's tools do them: the same dump on standard output
   or with `-f` in a new file (which must not exist); the same messages
   and exit codes, among them `<prog>: <arg>: invalid txnid: <strerror>`
   for a txnid that is 0 or not a number (it is read as `sscanf("%zu")`
@@ -118,9 +118,11 @@ Each C release's tools are the oracle for their own format: for an LMDB
   -e` shows the last txnid), loaded in order into a copy of the copy. C
   1.0's dump reads the headers of free pages, and after a large value is
   deleted and its pages partly reused it dumps the old value's bytes as
-  pages, which no load restores correctly (`../KNOWN_C_BUGS.md` row 72);
-  rlmdb's dump does the same, to stay byte for byte C's, and its load
-  refuses such pages where their number is impossible. Not as in C:
+  pages, which no load restores correctly, or skips live pages
+  (`../KNOWN_C_BUGS.md` row 72); rlmdb's dump holds only pages whose
+  header names their own position (so it differs from C's there, and C
+  1.0's `mdb_load -i` restores the source from it), and its load refuses
+  C's stale pages where their number is impossible. Not as in C:
   `mdb_load -i` reports a dump cut short (`mdb_env_incr_load failed,
   error 5 Input/output error`; C reports success, or reads for ever, row
   66) and fails with `EBUSY` while a reader of another process pins a

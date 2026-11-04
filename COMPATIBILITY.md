@@ -395,8 +395,9 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
   differences, `KNOWN_C_BUGS.md` rows 61 to 64, are in
   `rlmdb-capi/README.md`), incremental backups (`mdb_env_incr_dumpfd`,
   `mdb_env_incr_dump`, `mdb_env_incr_loadfd`, 1.0 environments only:
-  dumps byte for byte C 1.0's, which C 1.0 and rlmdb load into each
-  other's copies with the same result, `interop/tests/incr10.rs`; the
+  dumps that C 1.0 and rlmdb load into each other's copies with the same
+  result, the source's file, and that are C 1.0's bytes but where C's
+  dump takes stale free pages for pages, `interop/tests/incr10.rs`; the
   differences, rows 65, 66 and 72 to 74, are in `rlmdb-capi/README.md`). Every C
   library (`librlmdb` and the two stubs) exports all 13 functions LMDB
   1.0's `lmdb.h` adds; those of 1.0's encryption, checksums and crypto

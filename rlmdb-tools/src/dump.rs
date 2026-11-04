@@ -18,7 +18,9 @@
 //!
 //! `-i txnid` is LMDB 1.0's: instead of the text dump it writes an
 //! incremental dump since transaction `txnid`
-//! ([`rlmdb::Environment::incr_dump`]) to standard output or, with
+//! ([`rlmdb::Environment::incr_dump`]: C 1.0's bytes but where C's walk
+//! takes stale free pages for pages, `KNOWN_C_BUGS.md` row 72) to
+//! standard output or, with
 //! `-f`, into a new file (`mdb_env_incr_dump`, which refuses an existing
 //! one), as `tests/lmdb-c/1.0/mdb_dump.c` does: the txnid is read as
 //! `sscanf("%zu")` reads it (`5x` is 5, `-1` is `SIZE_MAX`), and one that

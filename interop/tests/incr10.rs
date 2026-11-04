@@ -5,13 +5,16 @@
 //! * dumps of one environment, written in turns by the C 1.0 and the Rust
 //!   peer, at several txnids and at 256 B, 1 KiB, the OS page size and
 //!   64 KiB pages: `mdb_dump10 -i`, rlmdb's `mdb_dump -i` and
-//!   `Environment::incr_dump` write the same bytes;
+//!   `Environment::incr_dump` write the same bytes where no freed overflow
+//!   run is involved;
 //! * a chain (a plain copy, then two increments) loaded by rlmdb and by C
 //!   1.0 into copies of the copy: both give the source's data file, byte
 //!   for byte, which the C 1.0 page audit and `cpeer10 verify` accept;
 //! * C's walk over free pages (`KNOWN_C_BUGS.md` row 72): after a freed
-//!   overflow run is partly reused both dump its stale pages, and rlmdb's
-//!   load refuses them;
+//!   overflow run is partly reused C dumps its stale pages (rlmdb's load
+//!   refuses them) or fails, and steps over a live run under a stale
+//!   header; rlmdb's dump holds neither, and C 1.0's `mdb_load -i` restores
+//!   the source from it;
 //! * what rlmdb's load checks that C's does not (row 65): a C 1.0 reader
 //!   makes it fail with `EBUSY`, a C 1.0 writer makes it wait, and a C 1.0
 //!   process that has the environment open afterwards reads the loaded
@@ -84,16 +87,11 @@ fn s(p: &Path) -> &str {
     p.to_str().expect("a UTF-8 temp path")
 }
 
-/// `mdb_dump10 -i txnid env` and rlmdb's `mdb_dump -i` and
-/// `Environment::incr_dump` must write the same bytes; returns them.
-fn dump_both(env: &Path, txnid: u64) -> Vec<u8> {
+/// rlmdb's `mdb_dump -i txnid env`, which must write what
+/// `Environment::incr_dump` writes; returns it.
+fn dump_rust(env: &Path, txnid: u64) -> Vec<u8> {
     let t = txnid.to_string();
-    let c = ok(
-        run(bins::mdb_dump10(), "mdb_dump", &["-i", &t, s(env)], b""),
-        "mdb_dump10 -i",
-    );
     let r = ok(rust("mdb_dump", &["-i", &t, s(env)], b""), "mdb_dump -i");
-    assert!(c == r, "mdb_dump -i {t}: C 1.0 and rlmdb differ");
     let e = rlmdb::Environment::builder()
         .flags(rlmdb::EnvironmentFlags::READ_ONLY)
         .max_dbs(8)
@@ -101,7 +99,26 @@ fn dump_both(env: &Path, txnid: u64) -> Vec<u8> {
         .unwrap();
     let mut api = Vec::new();
     e.incr_dump(&mut api, txnid).unwrap();
-    assert!(api == c, "Environment::incr_dump({t}) and C 1.0 differ");
+    assert!(
+        api == r,
+        "Environment::incr_dump({t}) and mdb_dump -i differ"
+    );
+    r
+}
+
+/// `mdb_dump10 -i txnid env` and rlmdb's `mdb_dump -i` and
+/// `Environment::incr_dump` must write the same bytes (environments where
+/// no stale page is involved, row 72); returns them.
+fn dump_both(env: &Path, txnid: u64) -> Vec<u8> {
+    let t = txnid.to_string();
+    let c = ok(
+        run(bins::mdb_dump10(), "mdb_dump", &["-i", &t, s(env)], b""),
+        "mdb_dump10 -i",
+    );
+    assert!(
+        dump_rust(env, txnid) == c,
+        "mdb_dump -i {t}: C 1.0 and rlmdb differ"
+    );
     c
 }
 
@@ -335,18 +352,17 @@ fn chain_at_64k_pages() {
     chain(Some(65536));
 }
 
-/// Row 72, as `rlmdb/tests/incr_dump.rs` shows it with rlmdb alone: C
-/// 1.0's tools build the environment (4 KiB pages, a 25-page value in a
-/// named database, dropped, then four small commits that reuse the run's
-/// first pages). Both dumps hold the stale pages, as records of page
-/// 0x6161616161616161 (the value was 'a's); rlmdb's load refuses them
-/// (`MDB_CORRUPTED`) after the pages before, as C's fails at them (with
-/// `EFBIG` where the file system refuses such an offset). With 'e's the
-/// bytes taken for the flags have `P_OVERFLOW`: C's dump fails with
-/// `EFAULT` after writing part of the "run", rlmdb's with `MDB_CORRUPTED`
-/// before it.
+/// Row 72: C 1.0's tools build the environment (4 KiB pages, a 25-page
+/// value in a named database, dropped, then four small commits that reuse
+/// the run's first pages). C's dump takes the rest of the old value for
+/// headers: records of page 0x6161616161616161 with 'a's, which rlmdb's
+/// load refuses (`MDB_CORRUPTED`) as C's fails at them (`EFBIG` where the
+/// file system refuses such an offset); with 'e's, whose bytes set
+/// `P_OVERFLOW`, a "run" past the file and `EFAULT`. rlmdb's dump holds
+/// the reused pages and nothing of the old value, and C 1.0's
+/// `mdb_load -i` makes the copy the source with it.
 #[test]
-fn stale_overflow_pages_are_dumped_as_c_dumps_them() {
+fn c10_restores_the_source_from_rlmdbs_dump_of_a_freed_run() {
     for byte in *b"ae" {
         let env = TestEnv::new().unwrap().with_format(Format::V10);
         let value: String = std::iter::repeat_n(format!("{byte:02x}"), 100_000).collect();
@@ -380,13 +396,24 @@ fn stale_overflow_pages_are_dumped_as_c_dumps_them() {
             &["-i", "1", s(env.path())],
             b"",
         );
-        let r = rust("mdb_dump", &["-i", "1", s(env.path())], b"");
+        let r = ok(
+            rust("mdb_dump", &["-i", "1", s(env.path())], b""),
+            "mdb_dump -i 1",
+        );
+        assert!(sane(&r, 4096), "'{}'", byte as char);
         if byte == b'a' {
             let c = ok(c, "mdb_dump10 -i 1");
-            assert!(ok(r, "mdb_dump -i 1") == c);
             let garbage = 0x6161_6161_6161_6161u64.to_ne_bytes();
             assert!(c.chunks(4096).any(|p| p[..8] == garbage));
-            let target = copy_of(&base, "r-loads");
+            // rlmdb's dump is C's without the stale records.
+            let kept: Vec<u8> = c
+                .chunks(4096)
+                .filter(|p| p[..8] != garbage)
+                .flatten()
+                .copied()
+                .collect();
+            assert!(kept == r);
+            let target = copy_of(&base, "r-loads-c");
             let l = rust("mdb_load", &["-i", s(target.path())], &c);
             assert_eq!(l.code, 1);
             assert!(
@@ -402,17 +429,133 @@ fn stale_overflow_pages_are_dumped_as_c_dumps_them() {
                 "{}",
                 c.stderr
             );
-            assert_eq!(r.code, 1);
-            assert!(
-                r.stderr
-                    .starts_with("mdb_env_incr_dump failed, error -30796 MDB_CORRUPTED"),
-                "{}",
-                r.stderr
-            );
-            assert!(!r.stdout.is_empty() && c.stdout.starts_with(&r.stdout));
-            assert!(c.stdout.len() > r.stdout.len());
+            // Before the stale "run" C wrote what rlmdb writes.
+            let stale = 0x6565_6565_6565_6565u64.to_ne_bytes();
+            let k = c.stdout.chunks(4096).position(|p| p[..8] == stale).unwrap() * 4096;
+            assert!(k > 0 && r.len() > k && r[..k] == c.stdout[..k]);
+        }
+        let target = copy_of(&base, "c-loads-r");
+        load_chain(true, &target, &[&r]);
+        let what = format!("'{}'", byte as char);
+        assert!(
+            std::fs::read(target.data_file()).unwrap() == std::fs::read(env.data_file()).unwrap(),
+            "{what}"
+        );
+        if let Err(e) = audit10(target.path()) {
+            panic!("{what}: {e}");
         }
     }
+}
+
+/// The free pages of the newest snapshot of `env` (its free list).
+fn free_pages(env: &Path) -> std::collections::BTreeSet<u64> {
+    let e = rlmdb::Environment::builder()
+        .flags(rlmdb::EnvironmentFlags::READ_ONLY)
+        .max_dbs(8)
+        .open(env)
+        .unwrap();
+    let txn = e.begin_ro_txn().unwrap();
+    let mut c = rlmdb::Transaction::cursor(&txn, rlmdb::Dbi::FREE).unwrap();
+    let mut free = std::collections::BTreeSet::new();
+    while let Some((_, idl)) = c.next().unwrap() {
+        let ids: Vec<u64> = idl
+            .chunks_exact(8)
+            .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
+            .collect();
+        free.extend(&ids[1..=ids[0] as usize]);
+    }
+    free
+}
+
+/// Row 72's other half: a free page whose stale overflow header, older
+/// than the copy, covers a live run written after it (a freed run's head
+/// left over while the run's pages were reused; written into the file
+/// here). C's walk steps over the live run, so C's own chain restores a
+/// file without it; rlmdb's walk goes on page by page, and C 1.0's
+/// `mdb_load -i` of rlmdb's dump restores the source (but for the stale
+/// page, which is free and no record), which C 1.0 audits and verifies.
+#[test]
+fn c10_restores_a_live_run_c10s_dump_steps_over() {
+    let env = TestEnv::new()
+        .unwrap()
+        .with_format(Format::V10)
+        .with_page_size(Some(4096));
+    peer(Peer::C10, "create", &env, &["67108864", "8"]);
+    peer(Peer::C10, "fill", &env, &["low", "400", "1"]);
+    peer(Peer::C10, "drop", &env, &["low", "--delete"]);
+    peer(Peer::C10, "fill", &env, &["m", "1", "2"]);
+    peer(Peer::C10, "fill", &env, &["n", "1", "3"]);
+    let base = copy10(&env, "base");
+    let t0 = last_txnid(env.path());
+    peer(
+        Peer::Rust,
+        "fill",
+        &env,
+        &["big", "1", "4", "--big", "262000"],
+    );
+    let t1 = last_txnid(env.path());
+
+    // The live run and a free page below it.
+    let free = free_pages(env.path());
+    let mut file = std::fs::read(env.data_file()).unwrap();
+    let u64_at = |f: &[u8], o: usize| u64::from_ne_bytes(f[o..o + 8].try_into().unwrap());
+    let (head, pages) = (2..(file.len() / 4096) as u64)
+        .filter(|p| !free.contains(p))
+        .find_map(|p| {
+            let o = p as usize * 4096;
+            let flags = u16::from_ne_bytes([file[o + 18], file[o + 19]]);
+            let n = u32::from_ne_bytes(file[o + 20..o + 24].try_into().unwrap());
+            (u64_at(&file, o) == p && flags & 0x04 != 0 && u64_at(&file, o + 8) > t0)
+                .then_some((p, u64::from(n)))
+        })
+        .expect("a live overflow run written after the copy");
+    let stale = *free
+        .range(..head)
+        .next_back()
+        .expect("a free page below it");
+    let mut hdr = Vec::new();
+    hdr.extend_from_slice(&stale.to_ne_bytes());
+    hdr.extend_from_slice(&1u64.to_ne_bytes());
+    hdr.extend_from_slice(&0u16.to_ne_bytes());
+    hdr.extend_from_slice(&0x04u16.to_ne_bytes());
+    hdr.extend_from_slice(&((head + pages - stale) as u32).to_ne_bytes());
+    let at = stale as usize * 4096;
+    file[at..at + hdr.len()].copy_from_slice(&hdr);
+    std::fs::write(env.data_file(), &file).unwrap();
+    assert_eq!(last_txnid(env.path()), t1);
+
+    let c = ok(
+        run(
+            bins::mdb_dump10(),
+            "mdb_dump",
+            &["-i", &t0.to_string(), s(env.path())],
+            b"",
+        ),
+        "mdb_dump10 -i",
+    );
+    let r = dump_rust(env.path(), t0);
+    let run_bytes = head as usize * 4096..(head + pages) as usize * 4096;
+    // C's chain: the live run is missing.
+    let c_target = copy_of(&base, "c-loads-c");
+    load_chain(true, &c_target, &[&c]);
+    let got = std::fs::read(c_target.data_file()).unwrap();
+    assert!(got.len() < run_bytes.end || got[run_bytes.clone()] != file[run_bytes.clone()]);
+    // rlmdb's dump, loaded by C 1.0.
+    let r_target = copy_of(&base, "c-loads-r");
+    load_chain(true, &r_target, &[&r]);
+    let got = std::fs::read(r_target.data_file()).unwrap();
+    assert_eq!(got.len(), file.len());
+    assert!(got[..at] == file[..at] && got[at + 4096..] == file[at + 4096..]);
+    if let Err(e) = audit10(r_target.path()) {
+        panic!("{e}");
+    }
+    peer(
+        Peer::C10,
+        "verify",
+        &r_target,
+        &["big", "1", "4", "--big", "262000"],
+    );
+    peer(Peer::C10, "verify", &r_target, &["m", "1", "2"]);
 }
 
 /// The source, a C 1.0 copy of it and the dump that brings the copy up to

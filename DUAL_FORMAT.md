@@ -622,14 +622,19 @@ Later decisions (owner, 2026-11-03), for the three C libraries:
    Done: incremental backups of 1.0 environments (they select pages by
    `mp_txnid`, which 0.9 pages lack: `ENOTSUP` there):
    `Environment::incr_dump` and `incr_dump_to_path`
-   (`mdb_env_incr_dumpfd`, `mdb_env_incr_dump`, `mdb_dump -i`) write C
-   1.0's bytes, `Environment::incr_load` (`mdb_env_incr_loadfd`,
+   (`mdb_env_incr_dumpfd`, `mdb_env_incr_dump`, `mdb_dump -i`) scan the
+   file as C 1.0 does, `Environment::incr_load` (`mdb_env_incr_loadfd`,
    `mdb_load -i`) applies a dump of either side; a chain restores the
-   source byte for byte (`interop/tests/incr10.rs`). C 1.0's dump walks
-   the headers of free pages, and after a freed overflow run is partly
-   reused it dumps stale bytes as pages that no load restores correctly
-   (`KNOWN_C_BUGS.md` row 72): ported, since a dump that walks the trees
-   would be another format (an opt-in feature, issue #2). The load
+   source byte for byte (`interop/tests/incr10.rs`). C 1.0's dump steps
+   from header to header through free pages, and after a freed overflow
+   run is partly reused it dumps stale bytes as pages that no load
+   restores correctly, steps over live pages or fails (`KNOWN_C_BUGS.md`
+   row 72). rlmdb's records are only pages whose header names their own
+   position with a txnid between the base and the snapshot, so each is
+   the file's own bytes and every page of the snapshot written since is
+   among them; where no stale page is involved the dumps are C's bytes. A
+   dump of only the pages the trees reach (random access, not a copy of
+   the file's blocks) may come later as an optional mode. The load
    checks what C's does not (rows 65 and 66: cut or malformed input, the
    environment's transactions and readers, `mti_txnid` published) and
    needs no `MDB_WRITEMAP`, which `lmdb.h` asks for and C's code does not
