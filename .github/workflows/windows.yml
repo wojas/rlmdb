@@ -49,6 +49,15 @@ jobs:
     steps:
       - name: line endings as committed
         run: git config --global core.autocrlf false
+      # Microsoft Defender scans every file the build and the tests write
+      # and every program they start (each interop test binary starts
+      # hundreds of peer processes, and C's write-through commits write
+      # the tests' environments page by page): not in the workspace (the
+      # build), the runner's temp directory (the tests' environments, and
+      # MSYS2) and the toolchain.
+      - name: no Defender scans of the build and the tests
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}", "${{ runner.temp }}", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -74,6 +83,10 @@ jobs:
     steps:
       - name: line endings as committed
         run: git config --global core.autocrlf false
+      # As in the MSVC job.
+      - name: no Defender scans of the build and the tests
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}", "${{ runner.temp }}", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
       - uses: actions/checkout@v5
       - uses: msys2/setup-msys2@v2
         id: msys2
