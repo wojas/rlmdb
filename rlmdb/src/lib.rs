@@ -149,8 +149,9 @@
 //! named semaphores, and SysV semaphores for LMDB 1.0 lock files, on all
 //! but FreeBSD); they compile but are untested (`COMPATIBILITY.md`).
 //! Windows and 32-bit targets are out of scope, as
-//! are the LMDB 1.0 features (`MDB_VL32`, encryption, checksums,
-//! `MDB_PREVSNAPSHOT`).
+//! are the LMDB 1.0 features (`MDB_VL32`, encryption, checksums);
+//! `MDB_PREVSNAPSHOT` works for environments of both formats
+//! ([`EnvironmentFlags::PREV_SNAPSHOT`]).
 //! `MDB_FIXEDMAP`, `MDB_MAPASYNC` and `MDB_NOMEMINIT` are accepted and
 //! ignored; `MDB_WRITEMAP` is accepted without a writable map, with C's
 //! limits (no nested transactions), and refused for writing on OpenBSD

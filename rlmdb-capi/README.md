@@ -232,7 +232,7 @@ open), the result is `EINVAL`. The functions rlmdb does not implement
 | `mdb_txn_flags` | Implemented | `MDB_RDONLY` or 0 in `*flags`; `EINVAL` for NULL (also NULL `flags`, where C crashes). |
 | `mdb_cursor_is_db` | Implemented | 1 if the cursor is on the record of a named database (`F_SUBDATA` without `F_DUPDATA`), else 0, also for NULL and for a cursor whose transaction cannot be used. Where C reads a node the cursor is still on after `MDB_NOTFOUND` (past either end, a failed `MDB_SET`), so does rlmdb. |
 | `mdb_txn_prepare` | Implemented (two-phase commit, `rlmdb::RwTxn::prepare`), both formats | As C 1.0: writes and syncs everything but the meta page and keeps the writer lock; the transaction's cursors are closed; then every call that checks `MDB_TXN_BLOCKED` returns `MDB_BAD_TXN` after its handle checks (`mdb_get`, `mdb_put`, `mdb_del`, `mdb_drop`, `mdb_cursor_open`, `mdb_dbi_open`, `mdb_stat`, a child's `mdb_txn_begin`), `mdb_dbi_flags`, `mdb_set_compare`, `mdb_set_dupsort`, `mdb_cmp`, `mdb_dcmp`, `mdb_txn_id`, `mdb_txn_flags` work, a second prepare returns `MDB_TXN_PENDING`, and `mdb_txn_commit` (the meta page) or `mdb_txn_abort` end it. An active child is committed first; a read-only or nested transaction is committed (and freed); a transaction with nothing to write ends at once as an empty commit (the writer lock is released). `EINVAL` for NULL (C crashes). Differences below. |
-| `mdb_env_rollback` | Implemented (two-phase commit, `rlmdb::Environment::rollback`), both formats | As C 1.0: under the writer lock, `MDB_CANT_ROLLBACK` unless `txnid` is the newest snapshot and a previous one exists; else the newest meta page is overwritten with C 1.0's bytes (no snapshot: zero records but the page size and flags, `mm_last_pg` 2^64-1, `mm_txnid` `txnid & 1`), synced per `MDB_NOSYNC`/`MDB_NOMETASYNC`, and the previous snapshot is current (`mti_txnid`). Also `MDB_CANT_ROLLBACK` if the previous meta page is not a snapshot or a reader uses `txnid`, and `EACCES` for a read-only environment (differences below). `EINVAL` for NULL or an environment that is not open (C crashes). |
+| `mdb_env_rollback` | Implemented (two-phase commit, `rlmdb::Environment::rollback`), both formats | As C 1.0: under the writer lock, `MDB_CANT_ROLLBACK` unless `txnid` is the newest snapshot and a previous one exists; else the newest meta page is overwritten with C 1.0's bytes (no snapshot: zero records but the page size and flags, `mm_last_pg` 2^64-1, `mm_txnid` `txnid & 1`), synced per `MDB_NOSYNC`/`MDB_NOMETASYNC`, and the previous snapshot is current (`mti_txnid`). Also `MDB_CANT_ROLLBACK` if the previous meta page is not a snapshot or a reader uses `txnid`, and `EACCES` for a read-only environment (differences below). `EINVAL` for NULL or an environment that is not open (C crashes). With `MDB_PREVSNAPSHOT` (before the first commit, `mdb_env_info` reports the previous snapshot, so the txnid to roll back is that plus one) the rollback then ends the flag, which C keeps (row 71). |
 | `mdb_env_set_encrypt` | Not implemented | `EINVAL` if `env`, `func` or `key` is NULL or the environment is open (C 1.0's checks), else `ENOTSUP`; the environment stays plain. |
 | `mdb_env_set_checksum` | Not implemented | `EINVAL` if `env` or `func` is NULL, `size` is 0 or the environment is open (C 1.0's checks), else `ENOTSUP`. |
 | `mdb_env_incr_dump`, `mdb_env_incr_dumpfd`, `mdb_env_incr_loadfd` | Not implemented (incremental backups) | `EINVAL` for NULL arguments or an environment that is not open, else `ENOTSUP`; nothing is written, created or read (C's `mdb_env_incr_dump` also sets `MDB_NOSUBDIR` on the handle). |
@@ -367,8 +367,7 @@ What changes with an LMDB 1.0 environment:
   they are deleted first (their pages are freed), and it fails with
   `MDB_DBIS_BUSY` while a handle of a named database is open (0.9 leaves
   their pages behind, `../KNOWN_C_BUGS.md` row 21).
-* Not implemented: `MDB_PREVSNAPSHOT` (`mdb_env_open` gives `EINVAL`, for
-  both formats), `MDB_ENCRYPT` and `MDB_REMAP_CHUNKS` (`EINVAL` from
+* Not implemented: `MDB_ENCRYPT` and `MDB_REMAP_CHUNKS` (`EINVAL` from
   `mdb_env_open`; `MDB_ENCRYPT` also from `mdb_env_set_flags`), encrypted
   or checksummed 1.0 files (`MDB_ENV_ENCRYPTION`, `MDB_BAD_CHECKSUM`), and
   1.0's encryption, checksums, incremental backups and crypto modules
@@ -379,6 +378,30 @@ What changes with an LMDB 1.0 environment:
 * Return codes stay 0.9's: a write in a read-only transaction is `EACCES`
   where C 1.0 says `MDB_IS_READONLY`, and a nested transaction in an
   `MDB_WRITEMAP` environment is `MDB_BAD_TXN` where C 1.0 says `EINVAL`.
+
+LMDB 1.0's `MDB_PREVSNAPSHOT` (`mdb_env_open`: the previous snapshot, the
+older meta page, until the first commit that writes) works for
+environments of both formats, also through a library built with 0.9's
+`lmdb.h`, whose programs pass `0x2000000`. As in C 1.0: a writer must be
+the only user (`MDB_ENV_BUSY` while another process has the environment
+open) and keeps the exclusive lock on the lock file until that commit,
+which shares it and ends the flag (an empty commit, an abort or a failed
+commit keep both); a read-only handle may share the environment, and keeps
+the lock until it is closed if it got it exclusively; `mdb_env_get_flags`
+reports the flag while it lasts, `mdb_env_set_flags` refuses it,
+`mdb_env_info` and `mdb_env_stat` report the older meta page. Not as in
+C 1.0 (see "Differences" below): its first commit publishes its own txnid
+(row 67), a read-only handle next to other processes leaves the lock file
+alone (row 68), a plain copy is one of the previous snapshot (row 69), a
+handle that closes holding the exclusive lock publishes the latest
+snapshot for the processes that waited (row 70), `mdb_env_rollback`
+while the flag lasts ends it after C's rollback (row 71), and an
+`MDB_NOLOCK` handle with the flag has the file to itself in the process
+until its first commit. With the flag `mdb_env_info` reports the previous
+snapshot's txnid, so the newest commit, the one `mdb_env_rollback` takes,
+is that plus one. With two-phase commit, `mdb_txn_commit` of a
+prepared transaction is the commit that ends the flag, as in C 1.0
+(`mdb_txn_prepare` alone does not).
 
 ## Write side
 
@@ -462,6 +485,7 @@ point into the memory map or the transaction's dirty pages (zero copy).
 | Threads | Without `MDB_NOTLS` a thread may hold one read transaction at a time (`MDB_BAD_RSLOT` otherwise) and a read transaction is tied to its thread. | Always behaves like `MDB_NOTLS`: any number of read transactions per thread, usable from any thread (one at a time). `MDB_NOTLS` is accepted. A superset of C. |
 | Opening one environment twice in a process | Allowed but unsafe (setting the lock file up again re-initialises the reader table under the first handle's readers; closing one handle drops the other's locks). | `mdb_env_open` fails with `EBUSY`, also under another name (a symlink, hard links of its files, a bind mount) and before it touches the lock file, except under `MDB_NOLOCK`, where handles share one in-process reader table and writer lock (see "Several handles and `dlopen`"). |
 | Read transactions with `MDB_NOLOCK` | Not tracked: a write transaction of the same process reuses pages a live read transaction still reads (`lmdb.h` asks the caller to prevent that), and writers of different handles are not serialised. | Tracked in memory (`../KNOWN_C_BUGS.md` row 35), in one table for all `MDB_NOLOCK` handles of the environment in the process, which also share a writer lock: writers of the process never reuse pages its readers read. `mdb_env_info` (`me_numreaders` 0), `mdb_reader_list` (`(no reader locks)`) and `mdb_reader_check` (none cleared) report what C reports. Other processes remain the caller's job, as in C. |
+| `MDB_PREVSNAPSHOT` (LMDB 1.0's, see "Data-file formats") | 0.9: unknown, `EINVAL`. C 1.0: the first commit after the open publishes the older meta page's txnid in the lock file, so the commit is invisible and the next one overwrites it (`../KNOWN_C_BUGS.md` row 67); a read-only handle next to other processes publishes it there too, and their next commit overwrites the latest one (row 68); a plain copy keeps the latest commit's meta page but not its pages (row 69); a handle that closes holding the exclusive lock (read-only, or a writer without a commit) leaves the older txnid to the processes that waited, whose next commit overwrites the latest one (row 70); `mdb_env_rollback` while the flag lasts keeps the flag, which then picks the page the rollback wrote: `mdb_env_info` and `mdb_env_stat` report txnid 0 and an empty main DB until the next commit, and without a lock file its transactions read that page (C 1.0's read aborts on an assertion) (row 71). Two `MDB_NOLOCK` handles of one file may use it, uncoordinated. | For both formats. The commit's txnid stays published; a read-only handle next to other processes copies the older meta page holding the writer mutex for a moment and pins it in its reader slot, leaving `mti_txnid` alone; a plain copy is a copy of the previous snapshot; a handle that closes holding the exclusive lock publishes the newest txnid first; `mdb_env_rollback` while the flag lasts is C's, then ends the flag (the data file and `mti_txnid` are C's; the handle reports the snapshot that is now the newest). An `MDB_NOLOCK` handle with the flag has the file to itself in the process until its first commit (until it is closed, read-only): `EBUSY` for its open while the process has the file open, and for other opens meanwhile. |
 | `MDB_WRITEMAP` | Writes through a writable map; extends the data file to the map size (`ftruncate` in `mdb_env_open` and `mdb_env_set_mapsize`). | Accepted, but pages are written with `pwrite` as without the flag: the files are those written without it, and the data file is not extended. Its limits are C's: `mdb_env_get_flags` reports it, `mdb_env_set_flags` cannot change it (`EINVAL`), `MDB_RDONLY` drops it, nested transactions are refused (`MDB_BAD_TXN`, also in the 1.0 stub, where C 1.0 returns `EINVAL`). On OpenBSD, whose maps do not see `pwrite`s, `mdb_env_open` with it and without `MDB_RDONLY` fails with `ENOTSUP` (`../COMPATIBILITY.md`, "Flags"). |
 | `MDB_FIXEDMAP`, `MDB_MAPASYNC`, `MDB_NOMEMINIT` | Honoured. | Accepted and ignored (`mdb_env_get_flags` reports them). A new environment records map address 0 (`KNOWN_C_BUGS.md` row 9); a C-created `MDB_FIXEDMAP` environment's recorded address is reported by `mdb_env_info`. |
 | Handles of existing databases opened in a transaction | Visible to other transactions only after that transaction commits; closed if it aborts (read or write transaction). | Published at once and kept after commit or abort. Handles of databases *created* by a write transaction follow C (published at commit, closed on abort). |
@@ -722,6 +746,24 @@ environments.
   after an odd txnid, a reader of the snapshot, a read-only environment).
   The 1.0 files are C 1.0's byte for byte, the files between the phases
   included; C 1.0's `mdb_stat` reads them, and C 0.9's the 0.9 ones.
+* `tests/capi_prevsnapshot.rs`: `tests/c/capi_prevsnapshot.c`,
+  `MDB_PREVSNAPSHOT`, a program for LMDB 1.0's API, against C LMDB 1.0
+  (the oracle), the 1.0 stub and `librlmdb` (`include`) on 1.0 and on 0.9
+  environments: the same checks and trace for a new environment, the
+  previous snapshot before and after an empty commit, an abort and a
+  nested commit, the first commit (the flag ends), read-only handles,
+  copies, `MDB_NOLOCK`, a prepared transaction's commit (it ends the flag)
+  and its rollback, and a rollback while the flag is set (which ends the
+  flag in rlmdb); each build's own
+  result where C 1.0 has a bug rlmdb does not port (rows 67, 69 and 71) or
+  rlmdb refuses a second `MDB_NOLOCK` handle. The files a commit on the
+  previous snapshot leaves (plain and prepared, and after the rollback of
+  the prepared one), and a compacting copy of a previous snapshot, are
+  byte for byte C 1.0's; C's peer of each format audits every
+  environment. A second run, against an
+  environment the test holds open: `MDB_ENV_BUSY` for a writer, the
+  previous snapshot read-only, and the holder's next commit intact (lost
+  with C 1.0, row 68).
 * `tests/capi_headers.rs`: `tests/c/capi_headers.c` compiled with warnings
   as errors, as C and as C++, three ways, and linked against `librlmdb`:
   with `include` alone (1.0's `lmdb.h`, then `rlmdb.h`), with `rlmdb.h`
@@ -755,8 +797,9 @@ environments.
   of a page of items, `mdb_del`, and inputs (keys, data, a database name)
   that point into the transaction's dirty pages; a 1.0 file reopened
   without a request; `MDB_VERSION_MISMATCH` both ways; `mdb_strerror` of
-  every 1.0 code; `MDB_PREVSNAPSHOT` and `MDB_ENCRYPT` refused. That C 1.0
-  reads and writes what the C API writes is `../interop/tests/capi10.rs`.
+  every 1.0 code; `MDB_ENCRYPT` refused, and `MDB_PREVSNAPSHOT` by
+  `mdb_env_set_flags`. That C 1.0 reads and writes what the C API writes
+  is `../interop/tests/capi10.rs`.
 * `tests/capi_write.rs`: `tests/c/capi_write.c` checks every write-side
   function and its error codes against both libraries: transactions
   (visibility, empty commits, read-only environments), database handles

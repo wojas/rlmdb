@@ -417,6 +417,7 @@ with `cpeer: ` (or `rpeer: `).
 | `--maxreaders N` | `mdb_env_set_maxreaders` (default: LMDB's, 126) |
 | `--format 0.9\|1.0` | the data-file format to create or open: `rlmdb_env_set_format` (`cpeer_capi`), `EnvironmentBuilder::format` (`rpeer`); `cpeer` accepts only `0.9`, `cpeer10` only `1.0` (usage error otherwise). Without it an existing file is opened in its format and a new one is 0.9 (`cpeer10`: 1.0) |
 | `--pagesize N` | the page size of a new LMDB 1.0 environment: `mdb_env_set_pagesize` (`cpeer10`), `rlmdb_env_set_pagesize` (`cpeer_capi`), `EnvironmentBuilder::page_size` (`rpeer`); an existing environment keeps its own; `cpeer` (0.9) refuses it |
+| `--prevsnapshot` | `MDB_PREVSNAPSHOT` (LMDB 1.0's): open the previous snapshot; `cpeer10`, and `rpeer` and `cpeer_capi` for both formats; `cpeer` (0.9) refuses it |
 
 Commands that only read open the environment with `MDB_RDONLY`: `verify`,
 `dump`, `stat`, `readers`, `reader-check`, `hold-reader`, `hold-env`,

@@ -203,10 +203,15 @@ fn acceptance10(prog: &str) {
         );
         // The stub reads the file it wrote as C 1.0 does (but for the map
         // address: C 1.0 reports its own where the file records none,
-        // KNOWN_C_BUGS.md, LMDB 1.0 section, `mdb_env_info`).
+        // KNOWN_C_BUGS.md, LMDB 1.0 section, `mdb_env_info`), also the
+        // previous snapshot (`-v`, `MDB_PREVSNAPSHOT`).
+        let dump = dump_args(Lib::C10, &rust_env);
+        let dump_v: Vec<&str> = ["-v"].iter().chain(dump).copied().collect();
         for (tool, args) in [
             ("mdb_stat", &["-e", "-f", "-ff", "-a"][..]),
-            ("mdb_dump", dump_args(Lib::C10, &rust_env)),
+            ("mdb_stat", &["-v", "-e", "-f", "-ff", "-a"][..]),
+            ("mdb_dump", dump),
+            ("mdb_dump", &dump_v),
         ] {
             assert_eq!(
                 without_map_address(&tool_output(tool, Lib::C10, args, &rust_env)),

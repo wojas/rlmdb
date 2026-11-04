@@ -21,6 +21,12 @@
 //! rollback of an odd `N`, C's own meta page has `mm_txnid` 1, which C's
 //! check takes for a snapshot), and no reader may still use `N`.
 //!
+//! An environment opened with `MDB_PREVSNAPSHOT` that has not committed
+//! yet presents `N - 1` already; the rollback of `N` writes the same page
+//! and publishes the same txnid, and then ends the flag, as the first
+//! commit would. C keeps the flag, whose rule (the older meta page) then
+//! picks the page the rollback wrote (`KNOWN_C_BUGS.md` row 71).
+//!
 //! The order is chosen for readers that begin meanwhile (they take no
 //! lock): first `mti_txnid` names `N - 1`, so new readers take that
 //! snapshot, whose meta page is not touched; then the reader table is
@@ -109,6 +115,20 @@ impl Environment {
     /// the writer lock and the reader check cover this process only, as
     /// for write transactions.
     ///
+    /// With [`PREV_SNAPSHOT`](crate::EnvironmentFlags::PREV_SNAPSHOT),
+    /// before the environment's first commit, it reads the previous
+    /// snapshot and reports its txnid ([`Environment::info`]), one less
+    /// than the newest commit: the meta pages hold consecutive txnids, so
+    /// the txnid to roll back is the reported one plus one. The rollback
+    /// is the one without the flag (the same checks, the same page written,
+    /// the previous txnid published), after which the flag ends as after
+    /// the first commit: the exclusive lock on the lock file is shared, and
+    /// the environment reports and reads the snapshot that is now the
+    /// newest, the one it read already. A rollback of the reported txnid
+    /// fails, as it is not the newest commit. C keeps the flag, which then
+    /// picks the page the rollback wrote, without a snapshot, until the
+    /// next commit (`KNOWN_C_BUGS.md` row 71).
+    ///
     /// [`RwTxn`]: crate::RwTxn
     /// [`RwTxn::prepare`]: crate::RwTxn::prepare
     /// [`PreparedTxn`]: crate::PreparedTxn
@@ -134,10 +154,13 @@ impl Environment {
             return Err(MdbError::CantRollback.into());
         }
         // New readers take the previous snapshot from here on; then no
-        // reader may be left on `txnid` (see the module documentation).
+        // reader may be left on `txnid` (see the module documentation). A
+        // failure puts back what was published: `txnid`, or with
+        // PREV_SNAPSHOT the previous one already.
+        let published = self.published_txnid();
         self.publish_txnid(previous.txnid);
         if self.readers().pins(txnid) {
-            self.publish_txnid(txnid);
+            self.publish_txnid(published);
             return Err(MdbError::CantRollback.into());
         }
         let free = current.dbs[0];
@@ -161,10 +184,24 @@ impl Environment {
             txnid: txnid & 1,
         };
         if let Err(e) = write_meta_page(self, newest, &rolled_back, Some(&current)) {
-            self.publish_txnid(txnid);
+            self.publish_txnid(published);
             return Err(e);
         }
-        Ok(())
+        // With PREV_SNAPSHOT the environment stepped back from `txnid`
+        // already, and now it is gone: the flag has done its work. End it
+        // as the first commit does (share the lock, report the newest meta
+        // page); C keeps it (row 71).
+        self.end_prev_snapshot(previous.txnid)
+    }
+
+    /// The last committed txnid that new read transactions take
+    /// (`mti_txnid`, or without a lock file the state the file's handles in
+    /// this process share).
+    fn published_txnid(&self) -> u64 {
+        match self.readers() {
+            ReaderTable::Shared(lock) => lock.txnid(),
+            ReaderTable::Local(local) => local.txnid(),
+        }
     }
 
     /// Sets the last committed txnid that new read transactions take

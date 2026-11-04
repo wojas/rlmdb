@@ -2,8 +2,15 @@
 //! statistics (`tests/lmdb-c/0.9/mdb_stat.c`).
 //!
 //! ```text
-//! mdb_stat [-V] [-n] [-e] [-r[r]] [-f[f[f]]] [-a|-s subdb] dbpath
+//! mdb_stat [-V] [-n] [-e] [-r[r]] [-f[f[f]]] [-v] [-a|-s subdb] dbpath
 //! ```
+//!
+//! `-v` (C 1.0's option, here for both formats) opens the previous
+//! snapshot (`MDB_PREVSNAPSHOT`); the usage line names it, where C 0.9's
+//! does not know it. C 1.0's tool publishes the previous snapshot in the
+//! lock file of an environment other processes use, which makes their
+//! next commit overwrite the latest one; this one does not
+//! (`KNOWN_C_BUGS.md` row 68).
 //!
 //! Output and messages are those of the C tool of the environment's format:
 //! for an LMDB 1.0 environment those of 1.0's `mdb_stat` (a `Page size` line
@@ -22,7 +29,7 @@ use crate::common::{
 use crate::getopt::{GetOpt, Opt};
 use crate::output::{eprint_bytes, Output};
 
-const SYNOPSIS: &str = "[-V] [-n] [-e] [-r[r]] [-f[f[f]]] [-a|-s subdb] dbpath";
+const SYNOPSIS: &str = "[-V] [-n] [-e] [-r[r]] [-f[f[f]]] [-v] [-a|-s subdb] dbpath";
 
 /// `MDB_NOTFOUND`.
 const NOTFOUND: i32 = rlmdb::consts::MDB_NOTFOUND;
@@ -40,6 +47,8 @@ struct Options {
     reader_info: u32,
     /// `-n`.
     no_sub_dir: bool,
+    /// `-v`: `MDB_PREVSNAPSHOT`.
+    prev_snapshot: bool,
     /// `-s subdb`.
     subname: Option<Vec<u8>>,
 }
@@ -50,7 +59,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         return tool.usage(SYNOPSIS);
     }
     let mut o = Options::default();
-    let mut getopt = GetOpt::new(args, "Vaefnrs:");
+    let mut getopt = GetOpt::new(args, "Vaefnrs:v");
     while let Some(opt) = getopt.next() {
         match opt {
             Opt::Flag(b'V') => return tool.version(),
@@ -63,6 +72,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
             Opt::Flag(b'e') => o.env_info += 1,
             Opt::Flag(b'f') => o.free_info += 1,
             Opt::Flag(b'n') => o.no_sub_dir = true,
+            Opt::Flag(b'v') => o.prev_snapshot = true,
             Opt::Flag(b'r') => o.reader_info += 1,
             Opt::Arg(b's', name) => {
                 if o.all_dbs > 0 {
@@ -90,6 +100,9 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     let mut flags = EnvironmentFlags::READ_ONLY;
     if o.no_sub_dir {
         flags |= EnvironmentFlags::NO_SUB_DIR;
+    }
+    if o.prev_snapshot {
+        flags |= EnvironmentFlags::PREV_SNAPSHOT;
     }
     builder.flags(flags);
     let env = match builder.open_with_permissions(path_of(envname), 0o664) {

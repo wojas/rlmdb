@@ -222,7 +222,7 @@ impl<'env> WriterLock<'env> {
         let state = env.lock_writer_state();
         let shared = env.lock_region();
         if let Some(lock) = shared {
-            lock.lock_writer(|| env.pick_meta().map(|m| m.txnid))?;
+            lock.lock_writer(|| env.published_meta().map(|m| m.txnid))?;
         }
         Ok(WriterLock {
             state,
@@ -321,6 +321,7 @@ impl<'env> RwTxn<'env> {
                 (t, env.read_meta((t & 1) as usize)?)
             }
             None => {
+                // With PREV_SNAPSHOT the older one, as in C.
                 let m = env.pick_meta()?;
                 (m.txnid, m)
             }

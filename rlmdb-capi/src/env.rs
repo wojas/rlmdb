@@ -59,18 +59,22 @@ pub unsafe fn env_create(profile: Profile, env: *mut *mut MDB_env) -> c_int {
 /// `mdb_env_open`: open an environment handle.
 ///
 /// Flags set earlier with `mdb_env_set_flags` are added to `flags`, as in
-/// C. Unknown flags give `EINVAL`, among them LMDB 1.0's
-/// `MDB_PREVSNAPSHOT` for environments of either format (it is not
-/// implemented) and `MDB_ENCRYPT`. `MDB_FIXEDMAP`, `MDB_MAPASYNC` and
-/// `MDB_NOMEMINIT` are accepted and ignored; `MDB_WRITEMAP` is accepted
-/// without a writable map but with C's limits (no nested transactions),
-/// and on OpenBSD refused with `ENOTSUP` unless `MDB_RDONLY` drops it;
-/// `MDB_NOTLS` is accepted and is how this implementation always behaves.
-/// Opening an environment that this process already has open fails with
-/// `EBUSY`, except that any number of `MDB_NOLOCK` handles may open one
-/// environment: they share one in-process reader table and writer lock
-/// (a handle with a lock file and a `MDB_NOLOCK` one still refuse each
-/// other).
+/// C. Unknown flags give `EINVAL`, among them LMDB 1.0's `MDB_ENCRYPT` and
+/// `MDB_REMAP_CHUNKS`. LMDB 1.0's `MDB_PREVSNAPSHOT` works for
+/// environments of either format, as in C 1.0 (`MDB_ENV_BUSY` for a
+/// writer while another process has the environment open), with the
+/// differences of [`rlmdb::EnvironmentFlags::PREV_SNAPSHOT`] (C 1.0's bugs
+/// not ported: `KNOWN_C_BUGS.md` rows 67 to 71). `MDB_FIXEDMAP`,
+/// `MDB_MAPASYNC` and `MDB_NOMEMINIT` are accepted and ignored;
+/// `MDB_WRITEMAP` is accepted without a writable map but with C's limits
+/// (no nested transactions), and on OpenBSD refused with `ENOTSUP` unless
+/// `MDB_RDONLY` drops it; `MDB_NOTLS` is accepted and is how this
+/// implementation always behaves. Opening an environment that this
+/// process already has open fails with `EBUSY`, except that any number of
+/// `MDB_NOLOCK` handles may open one environment: they share one
+/// in-process reader table and writer lock (a handle with a lock file and
+/// a `MDB_NOLOCK` one still refuse each other, as does a `MDB_NOLOCK`
+/// handle with `MDB_PREVSNAPSHOT` until its first commit).
 ///
 /// An existing data file is opened in its format (LMDB 0.9 or 1.0); a
 /// format requested with `rlmdb_env_set_format` that differs from it gives

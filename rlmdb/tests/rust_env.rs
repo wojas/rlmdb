@@ -518,11 +518,15 @@ fn read_only_open_requires_existing_files() {
 #[test]
 fn invalid_flags_and_options() {
     let dir = tmp();
-    let err = Environment::builder()
-        .flags(EnvironmentFlags::PREV_SNAPSHOT)
-        .open(dir.path())
-        .unwrap_err();
-    assert_eq!(err.to_err_code(), libc::EINVAL);
+    // Bits that are no environment flag (LMDB 1.0's MDB_REMAP_CHUNKS
+    // among them, which rlmdb does not implement).
+    for bits in [0x4000000, 0x2000, 0x8000_0000] {
+        let err = Environment::builder()
+            .flags(EnvironmentFlags::from_bits_retain(bits))
+            .open(dir.path())
+            .unwrap_err();
+        assert_eq!(err.to_err_code(), libc::EINVAL);
+    }
     let err = Environment::builder()
         .max_readers(0)
         .open(dir.path())

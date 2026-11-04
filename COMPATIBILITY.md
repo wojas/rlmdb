@@ -219,13 +219,16 @@ Environment flags (`mdb_env_open`, `EnvironmentFlags`):
 | `MDB_MAPASYNC` | accepted and ignored: it only changes how C flushes a writable map; commits and `mdb_env_sync` sync as without it |
 | `MDB_FIXEDMAP` | accepted and ignored (the bit is recorded in a new file, the address is 0) |
 | `MDB_NOMEMINIT` | accepted and ignored (buffers are always zeroed) |
-| `MDB_PREVSNAPSHOT`, `MDB_ENCRYPT` (1.0) | `EINVAL`, as 0.9 does for flags it does not know, also for LMDB 1.0 environments (not implemented); `mdb_env_set_flags` refuses `MDB_ENCRYPT` too |
+| `MDB_PREVSNAPSHOT` (1.0) | honoured as in C 1.0, for environments of both formats: the older meta page until the first commit that writes; a writer must be alone (`MDB_ENV_BUSY`) and keeps the exclusive lock on the lock file until that commit, a read-only handle that got it until it is closed. Not ported from C 1.0: its first commit publishing the older txnid (`KNOWN_C_BUGS.md` row 67), a read-only handle next to other processes publishing it in their lock file (row 68), a plain copy naming the latest commit (row 69), a handle that closes holding the exclusive lock leaving it to the processes that waited (row 70). A prepared transaction's commit (two-phase commit) ends the flag as a plain commit does; `mdb_env_rollback` while the flag lasts is C's (the newest commit, the reported txnid plus one) and then ends the flag, where C keeps it and reports the page the rollback wrote (row 71). A `NO_LOCK` handle with it has the data file to itself in the process until its first commit (row 35) |
+| `MDB_ENCRYPT`, `MDB_REMAP_CHUNKS` (1.0) | `EINVAL`, as 0.9 does for flags it does not know, also for LMDB 1.0 environments (not implemented); `mdb_env_set_flags` refuses `MDB_ENCRYPT` too |
 
 `mdb_env_set_flags` changes the same flags as C (`MDB_NOSYNC`,
 `MDB_NOMETASYNC`, `MDB_MAPASYNC`, `MDB_NOMEMINIT`). All of these are
 per-process choices that the files do not depend on (except
 `MDB_NOSUBDIR`, which names the files), so a C peer cannot tell which a
-Rust process uses.
+Rust process uses; with `MDB_PREVSNAPSHOT` it sees what a C 1.0 process
+with the flag does to the lock file and the data file (it waits for the
+first commit, which discards the latest one), for 0.9 files too.
 
 `MDB_WRITEMAP` is the one that changes how a process writes, and
 `lmdb.h` says not to mix processes with and without it on one
@@ -429,10 +432,12 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
 | `RoCursor::is_db` and `RwCursor::is_db` say what C 1.0's `mdb_cursor_is_db` says, in both formats (named databases and plain items of the main DB, a 48-byte plain value, named, empty and `DUPSORT` databases, cursors past either end and after a failed `MDB_SET`) | `rlmdb/tests/cursor_is_db.rs` (C 1.0's results from `capi_v10`) |
 | Programs built for C LMDB 1.0 run on the 1.0 stub as on C 1.0 (1.0's `mtest*.c`: same output, same environments for C 1.0's `mdb_stat` and `mdb_dump`) | `rlmdb-capi/tests/mtest.rs` (`mtest_1_0` .. `mtest5_1_0`) |
 | The installed layout; programs built against shared C LMDB 0.9 and 1.0 run on the stubs through `LD_LIBRARY_PATH`, `LD_PRELOAD` or `DYLD_LIBRARY_PATH` | `rlmdb-capi/tests/install.rs` |
-| `rlmdb.h` format functions and 1.0's constants; `mdb_env_get_maxkeysize` before and after the open; `MDB_PREVSNAPSHOT`/`MDB_ENCRYPT` refused; `mdb_strerror` of 1.0's codes | `rlmdb-capi/tests/capi_format.rs` (`tests/c/capi_format.c`), `rlmdb-capi/src/version.rs` and `src/format.rs` unit tests |
+| `rlmdb.h` format functions and 1.0's constants; `mdb_env_get_maxkeysize` before and after the open; `MDB_ENCRYPT` refused; `mdb_strerror` of 1.0's codes | `rlmdb-capi/tests/capi_format.rs` (`tests/c/capi_format.c`), `rlmdb-capi/src/version.rs` and `src/format.rs` unit tests |
 | The C API with 1.0 environments at 1, 4 and 64 KiB pages: keys longer than 511 bytes, inline data above 16 KiB, `MDB_RESERVE`, `MDB_MULTIPLE`, `MDB_CURRENT`, inputs that point into dirty pages | `rlmdb-capi/tests/c/capi_format.c` (`test_large_items`) |
 | C 1.0 reads what the C API writes (data sets verified by `cpeer10`, its page audit, `mdb_dump10`, `mdb_stat10`) and the C API reads what C 1.0 writes (`cpeer_capi verify`, keys over 511 bytes from `mdb_load10`) | `interop/tests/capi10.rs` |
 | The tools on 1.0 files print what C 1.0's print and leave the files C 1.0's leave (`mdb_load -F 1.0`, `mdb_stat`, `mdb_dump`, `mdb_drop`, `mdb_copy`, on `mdb_load10` and `mtest*10` environments) | `interop/tests/tools10.rs` |
+| `MDB_PREVSNAPSHOT` as in C 1.0, in both formats: the previous snapshot until the first commit, the flag reported until then, `MDB_ENV_BUSY` for a writer next to another process, other processes waiting for the first commit, read-only handles alone and shared, `NO_LOCK`, copies; the file a commit on the previous snapshot leaves and a compacting copy of a previous snapshot byte for byte C 1.0's; C 0.9 and C 1.0 audit what Rust writers leave; C 1.0's bugs (rows 67 to 69) shown in its build; a peer that waited for a handle holding the exclusive lock builds on the latest snapshot (row 70); a prepared transaction's commit ends the flag, its rollback, a rollback while the flag lasts, which ends it (row 71) | `rlmdb/tests/prev_snapshot.rs`, `rlmdb-capi/tests/capi_prevsnapshot.rs` (`tests/c/capi_prevsnapshot.c` against C 1.0, the 1.0 stub and `librlmdb` on both formats, two-phase commit included), `interop` scenario `prev_snapshot` (every pair with a peer that has the flag, 0.9 and 1.0, 256 B to 64 KiB pages) |
+| The tools' `-v` as C 1.0's (`mdb_stat`, `mdb_dump`, `mdb_copy -c` byte for byte; `mdb_copy -v` a copy of the previous snapshot, row 69); on 0.9 files, what C 0.9's tools said before the last commit; C 1.0's tools on the 1.0 stub with `-v` | `interop/tests/tools10.rs` (`dash_v_matches_c10`), `rlmdb-tools/tests/prev_snapshot.rs`, `rlmdb-capi/tests/mtest.rs` (`mtest*_1_0`) |
 | The tools' `-F` and `RLMDB_DEFAULT_FORMAT` handling; nothing changes for 0.9 files | `rlmdb-tools/tests/format.rs` |
 | `mdb_drop` of the main DB in a 1.0 environment as C 1.0's (named databases deleted, `MDB_DBIS_BUSY`) | `rlmdb/tests/format_v10.rs` (`emptying_the_main_db_with_named_dbs`), `interop/tests/tools10.rs` (`mdb_drop_matches_mdb_drop10`) |
 | `MDB_DUPFIXED` items over a quarter page (1.0's small pages) written as C 1.0 writes them | `interop/tests/write_differential10.rs` (`diff10_dupfixed_items_over_a_quarter_page`) |

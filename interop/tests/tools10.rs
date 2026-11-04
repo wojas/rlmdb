@@ -4,8 +4,8 @@
 //! The Rust tools run as `rtools <tool>` (`src/bin/rtools.rs`); both sides
 //! run with `argv[0]` set to the tool's name, so messages that name the
 //! program compare byte for byte. The tools' options and usage lines are
-//! those of 0.9 (`rlmdb-tools/tests` compares them with C 0.9's), so only
-//! options both releases have are compared here.
+//! those of 0.9 (`rlmdb-tools/tests` compares them with C 0.9's) and 1.0's
+//! `-v`, so only those options are compared here.
 //!
 //! One difference is not ported (`KNOWN_C_BUGS.md`, section "LMDB 1.0"):
 //! C 1.0's `mdb_env_info` reports the process's own map address when the
@@ -121,8 +121,9 @@ fn rust(tool: &str, args: &[&str], stdin: &[u8]) -> Run {
 }
 
 /// Runs `tool args` (the environment last) on both sides and requires the
-/// same result, but for the exit code of `mdb_stat -r` alone, which is 1 in
-/// C 1.0 as in 0.9 and 0 in rlmdb (`KNOWN_C_BUGS.md` row 2).
+/// same result, but for the exit code of `mdb_stat -r` without `-a`, `-s`
+/// or `-f`, which is 1 in C 1.0 as in 0.9 and 0 in rlmdb
+/// (`KNOWN_C_BUGS.md` row 2).
 fn assert_same(tool: &str, args: &[&str]) -> Run {
     let env = Path::new(args.last().expect("an environment"));
     let mut c = if recorded_map_address(env) == 0 {
@@ -130,7 +131,12 @@ fn assert_same(tool: &str, args: &[&str]) -> Run {
     } else {
         c10_raw(tool, args, b"")
     };
-    if tool == "mdb_stat" && args.len() == 2 && args[0].starts_with("-r") && c.code == 1 {
+    let opts = &args[..args.len() - 1];
+    if tool == "mdb_stat"
+        && opts.iter().any(|a| a.starts_with("-r"))
+        && opts.iter().all(|a| matches!(*a, "-r" | "-rr" | "-v"))
+        && c.code == 1
+    {
         c.code = 0;
     }
     let r = rust(tool, args, b"");
@@ -517,6 +523,81 @@ fn mdb_copy_matches_mdb_copy10() {
                 files[0] == files[1],
                 "mdb_copy (page size {ps}, compact {compact}): files differ"
             );
+        }
+    }
+}
+
+/// `-v` (`MDB_PREVSNAPSHOT`) of `mdb_stat`, `mdb_dump` and `mdb_copy`
+/// against C 1.0's, on environments whose last commit (C 1.0's `mdb_drop`)
+/// freed pages: the same output, and with `mdb_copy -v -c` the same file.
+/// `mdb_copy -v` without `-c` differs (`KNOWN_C_BUGS.md` row 69): C 1.0's
+/// copy keeps the latest commit's meta page, rlmdb's is a copy of the
+/// previous snapshot; the two files differ in that page only.
+#[test]
+fn dash_v_matches_c10() {
+    let dir = tmp();
+    for ps in [1024, 65536] {
+        let env = c10_env(dir.path(), ps);
+        for (tool, args) in read_tool_runs(s(&env)) {
+            let mut args = args.clone();
+            args.insert(0, "-v");
+            assert_same(tool, &args);
+        }
+        // The previous snapshot still has the dropped database.
+        let r = assert_same("mdb_stat", &["-v", "-s", "intk", s(&env)]);
+        assert_eq!(r.code, 0, "{r:?}");
+        assert_ne!(assert_same("mdb_stat", &["-s", "intk", s(&env)]).code, 0);
+
+        let latest = {
+            let e = rlmdb::Environment::builder()
+                .flags(EnvironmentFlags::READ_ONLY | EnvironmentFlags::NO_LOCK)
+                .open(&env)
+                .unwrap();
+            e.info().unwrap().last_txnid
+        };
+        for compact in [false, true] {
+            let mut files = Vec::new();
+            for side in ["c", "r"] {
+                let dst = new_env(dir.path(), &format!("v-{side}-{ps}-{compact}"));
+                let mut args = vec!["-v"];
+                if compact {
+                    args.push("-c");
+                }
+                args.extend([s(&env), s(&dst)]);
+                let run = if side == "c" {
+                    c10("mdb_copy", &args, b"")
+                } else {
+                    rust("mdb_copy", &args, b"")
+                };
+                assert_eq!((run.code, run.stderr.as_str()), (0, ""), "{run:?}");
+                files.push(std::fs::read(dst.join("data.mdb")).unwrap());
+                if side == "r" {
+                    // A copy of the previous snapshot, for C 1.0 too.
+                    if let Err(e) = audit10(&dst) {
+                        panic!("mdb_copy -v (compact {compact}): {e}");
+                    }
+                    assert_eq!(
+                        c10("mdb_dump", &["-a", s(&dst)], b"").stdout,
+                        c10("mdb_dump", &["-v", "-a", s(&env)], b"").stdout,
+                        "mdb_copy -v (page size {ps}, compact {compact})"
+                    );
+                }
+            }
+            if compact {
+                assert!(
+                    files[0] == files[1],
+                    "mdb_copy -v -c (page size {ps}): files differ"
+                );
+            } else {
+                assert_eq!(files[0].len(), files[1].len());
+                let newer = latest & 1;
+                for (i, (c, r)) in files[0].chunks(ps).zip(files[1].chunks(ps)).enumerate() {
+                    assert!(
+                        i == newer || c == r,
+                        "mdb_copy -v (page size {ps}): page {i} differs"
+                    );
+                }
+            }
         }
     }
 }

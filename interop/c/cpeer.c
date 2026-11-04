@@ -14,6 +14,15 @@
 
 #include "cpeer.h"
 
+/* --prevsnapshot: LMDB 1.0's flag, which 0.9's lmdb.h (cpeer, and
+ * cpeer_capi, built with it) does not define; rlmdb takes it in both
+ * formats. */
+#ifdef MDB_PREVSNAPSHOT
+#define CPEER_PREVSNAPSHOT	MDB_PREVSNAPSHOT
+#else
+#define CPEER_PREVSNAPSHOT	0x2000000
+#endif
+
 /* The open top-level write transaction, if any. die() aborts it so that a
  * failing peer releases the writer lock instead of leaving other processes
  * blocked on it (named semaphores, used on macOS, are not robust). */
@@ -189,6 +198,8 @@ open_env(const struct opts *o, unsigned int extra_flags)
 		flags |= MDB_NOSYNC;
 	if (o->nometasync)
 		flags |= MDB_NOMETASYNC;
+	if (o->prevsnapshot)
+		flags |= CPEER_PREVSNAPSHOT;
 
 	CHECK(mdb_env_create(&env));
 #ifdef LMDB_RUST
@@ -343,7 +354,7 @@ usage(void)
 		fprintf(stderr, "  %s\n", c->usage);
 	fprintf(stderr,
 		"env options: --nosubdir --notls --nosync --nometasync --mapsize N"
-		" --maxdbs N --maxreaders N --format 0.9|1.0 --pagesize N\n"
+		" --maxdbs N --maxreaders N --format 0.9|1.0 --pagesize N --prevsnapshot\n"
 		"data options: --dupsort --dupfixed --intkey --intdup --revkey --revdup"
 		" --valsize N --big N --dups N --deleted-every N --per-txn N --append --reserve\n");
 	exit(EXIT_USAGE);
@@ -391,6 +402,12 @@ parse_args(int argc, char **argv, struct opts *o)
 			o->pagesize = parse_u32(optval(argc, argv, &k), a);
 #if !defined(LMDB_RUST) && MDB_VERSION_MAJOR < 1
 			die(EXIT_USAGE, "--pagesize: LMDB 0.9 has no mdb_env_set_pagesize");
+#endif
+		}
+		else if (!strcmp(a, "--prevsnapshot")) {
+			o->prevsnapshot = 1;
+#if !defined(LMDB_RUST) && MDB_VERSION_MAJOR < 1
+			die(EXIT_USAGE, "--prevsnapshot: LMDB 0.9 has no MDB_PREVSNAPSHOT");
 #endif
 		}
 		/* data set options */

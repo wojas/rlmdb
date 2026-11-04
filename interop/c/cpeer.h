@@ -103,6 +103,7 @@ struct opts {
 
 	/* environment options, valid for every command */
 	int		nosubdir, notls, nosync, nometasync;
+	int		prevsnapshot;	/* --prevsnapshot: MDB_PREVSNAPSHOT (LMDB 1.0's) */
 	size_t		mapsize;	/* 0: keep the environment's size */
 	unsigned int	maxdbs, maxreaders;
 	int		format;		/* --format: 0 (not given), 9 (0.9) or 10 (1.0) */

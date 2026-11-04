@@ -35,19 +35,24 @@ pub const MDB_NOLOCK: u32 = 0x400000;
 pub const MDB_NORDAHEAD: u32 = 0x800000;
 /// `MDB_NOMEMINIT`: do not zero malloc'd pages (accepted, ignored).
 pub const MDB_NOMEMINIT: u32 = 0x1000000;
-/// `MDB_PREVSNAPSHOT` from LMDB 1.0 / mdb.master3. Not part of 0.9; rejected.
+/// `MDB_PREVSNAPSHOT` (LMDB 1.0): open the previous snapshot rather than the
+/// latest one, until the first write transaction commits. Not part of 0.9's
+/// `lmdb.h`; rlmdb takes it for environments of both formats.
 pub const MDB_PREVSNAPSHOT: u32 = 0x2000000;
 
 /// Env flags that may be changed on an open environment (`CHANGEABLE`).
 pub const CHANGEABLE: u32 = MDB_NOSYNC | MDB_NOMETASYNC | MDB_MAPASYNC | MDB_NOMEMINIT;
-/// Env flags that can only be given at open time (`CHANGELESS`).
+/// Env flags that can only be given at open time (`CHANGELESS`). LMDB
+/// 1.0's also holds `MDB_PREVSNAPSHOT`, which 0.9 does not know, and
+/// `MDB_REMAP_CHUNKS`, which rlmdb does not implement.
 pub const CHANGELESS: u32 = MDB_FIXEDMAP
     | MDB_NOSUBDIR
     | MDB_RDONLY
     | MDB_WRITEMAP
     | MDB_NOTLS
     | MDB_NOLOCK
-    | MDB_NORDAHEAD;
+    | MDB_NORDAHEAD
+    | MDB_PREVSNAPSHOT;
 
 // ---------------------------------------------------------------------------
 // Database flags (`mdb_dbi_open`), lmdb.h "mdb_dbi_open Database Flags".

@@ -67,8 +67,47 @@ bitflags::bitflags! {
         const NO_READ_AHEAD = MDB_NORDAHEAD;
         /// `MDB_NOMEMINIT`. Accepted and ignored (we always zero buffers).
         const NO_MEM_INIT = MDB_NOMEMINIT;
-        /// `MDB_PREVSNAPSHOT` (LMDB 1.0 only). Rejected with `EINVAL` at
-        /// open time, as LMDB 0.9 rejects unknown flags.
+        /// `MDB_PREVSNAPSHOT` (LMDB 1.0's flag, for environments of both
+        /// formats here): open the previous snapshot, the older of the two
+        /// meta pages, rather than the latest one. The latest transaction
+        /// is lost once a write transaction commits on top of the previous
+        /// snapshot; this may help to get past some kinds of damage.
+        ///
+        /// The flag lasts until the first write transaction that changes
+        /// something commits, also through two-phase commit (the
+        /// [`PreparedTxn::commit`], not the prepare): from then on the
+        /// environment works as if opened without it, and
+        /// [`Environment::flags`] no longer reports it (an empty commit,
+        /// an abort or a failed commit keep it). A read-only environment
+        /// keeps it until it is closed. While it lasts, the environment
+        /// reports the previous snapshot's txnid, one less than the newest
+        /// commit's (the meta pages hold consecutive txnids): to roll the
+        /// newest commit back ([`Environment::rollback`]), pass the
+        /// reported txnid plus one. The rollback is the one without the
+        /// flag, and then ends the flag as the first commit does (C keeps
+        /// it, and then reports the page the rollback wrote:
+        /// `KNOWN_C_BUGS.md` row 71).
+        ///
+        /// Opened for writing, the environment must be the only user of
+        /// its files, as in C: the open fails with `MDB_ENV_BUSY` if
+        /// another process has the environment open, and other processes
+        /// that open it wait until the first commit (C's exclusive lock on
+        /// the lock file is kept until then). Read-only, it may share the
+        /// environment: if it is the only user it keeps the exclusive lock
+        /// until it is closed, as C does; otherwise its read transactions
+        /// take the older meta page while holding the writer lock for a
+        /// moment, and leave the lock file as it is (`KNOWN_C_BUGS.md` row
+        /// 68). A handle that is closed holding the exclusive lock (also a
+        /// writer that never committed) publishes the latest snapshot for
+        /// the processes that waited, where C leaves them the previous one
+        /// (row 70). With [`NO_LOCK`](Self::NO_LOCK) the handle has the
+        /// data file to itself in this process until then: the open fails
+        /// with `EBUSY` if the process has it open, and other opens of it
+        /// fail with `EBUSY` meanwhile.
+        ///
+        /// [`Environment::flags`]: crate::Environment::flags
+        /// [`Environment::rollback`]: crate::Environment::rollback
+        /// [`PreparedTxn::commit`]: crate::PreparedTxn::commit
         const PREV_SNAPSHOT = MDB_PREVSNAPSHOT;
     }
 }

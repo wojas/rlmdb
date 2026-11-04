@@ -21,6 +21,13 @@
 //! * A handle with a lock file and a `NO_LOCK` handle never share a file
 //!   (their readers would be invisible to each other's writers): whichever
 //!   comes second gets `EBUSY`.
+//! * A `NO_LOCK` handle opened with `PREV_SNAPSHOT` claims the file as a
+//!   handle with a lock file does, until its first commit
+//!   ([`Registration::share`]): it reads and writes on top of the previous
+//!   snapshot, which the other handles' readers and writers know nothing
+//!   of. This is the in-process counterpart of the exclusive lock that C
+//!   keeps on the lock file until then (C coordinates nothing without
+//!   one).
 //!
 //! There are three keys, each claimed before the step it guards. The
 //! canonical path is claimed first, before any file is opened. The identity
@@ -176,7 +183,8 @@ struct FileId {
 #[derive(Debug)]
 enum Use<S> {
     /// By one handle with a lock file (or none, but without `NO_LOCK`: a
-    /// read-only environment on a read-only file system).
+    /// read-only environment on a read-only file system), or by a `NO_LOCK`
+    /// handle opened with `PREV_SNAPSHOT` until its first commit.
     Exclusive,
     /// By `handles` `NO_LOCK` handles, sharing `state`.
     Shared { handles: usize, state: S },
@@ -366,6 +374,34 @@ impl Registration {
         reg.files.insert(id, Use::Lock);
         self.lock = Some(id);
         Ok(lock_file)
+    }
+
+    /// Turns the exclusive claims of a `NO_LOCK` handle opened with
+    /// `PREV_SNAPSHOT` into the shared claims of a `NO_LOCK` handle, with
+    /// `state` (the handle's own) as the state the data file's handles
+    /// share: at the handle's first commit, where C shares the locks of a
+    /// lock file (`mdb_env_share_locks` in `mdb_txn_commit`). From then on
+    /// other `NO_LOCK` handles may open the file.
+    pub(crate) fn share(&self, state: &Arc<LocalShared>) {
+        let mut reg = registry();
+        if let Some(u) = reg.paths.get_mut(&self.path) {
+            if matches!(u, Use::Exclusive) {
+                *u = Use::Shared {
+                    handles: 1,
+                    state: (),
+                };
+            }
+        }
+        for id in &self.data {
+            if let Some(u) = reg.files.get_mut(id) {
+                if matches!(u, Use::Exclusive) {
+                    *u = Use::Shared {
+                        handles: 1,
+                        state: Arc::clone(state),
+                    };
+                }
+            }
+        }
     }
 
     /// Gives the lock file's claim back, for an open that closed the lock

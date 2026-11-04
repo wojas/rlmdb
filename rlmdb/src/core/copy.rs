@@ -16,7 +16,11 @@
 //! page newer than the snapshot, which only a commit whose meta page write
 //! or sync failed leaves (or, without a lock file, a writer of another
 //! process racing the copy), is copied as the snapshot's own meta, where C
-//! copies it as it is and its copy names pages it lacks.
+//! copies it as it is and its copy names pages it lacks. With
+//! `MDB_PREVSNAPSHOT` the snapshot is the previous one and the newer meta
+//! page is the latest commit's, so a plain copy is a copy of the previous
+//! snapshot, as a compacting one is; C's names the latest commit, cut off
+//! at the end of the previous snapshot (`KNOWN_C_BUGS.md` row 69).
 //!
 //! # Compacting copy
 //!
@@ -150,8 +154,8 @@ impl Environment {
                 let inactive = self.begin_ro_txn()?.reset();
                 // Temporarily block writers until we snapshot the meta
                 // pages; the read transaction must start after that.
-                lock.lock_writer(|| self.pick_meta().map(|m| m.txnid))?;
-                let snapshot = inactive.renew().and_then(|txn| {
+                lock.lock_writer(|| self.published_meta().map(|m| m.txnid))?;
+                let snapshot = inactive.renew_holding_writer().and_then(|txn| {
                     read_exact_at(self.data_file(), &mut buf.as_mut()[..2 * ps], 0)?;
                     Ok(txn)
                 });
@@ -260,7 +264,9 @@ impl Environment {
 /// macOS leaves such a page after a failed `F_FULLFSYNC`,
 /// `KNOWN_C_BUGS.md` row 41; C and rlmdb when writing the old txnid back
 /// failed too), or, without a lock file, a writer of another process that
-/// races the copy.
+/// races the copy. With `MDB_PREVSNAPSHOT` it always is (the latest
+/// commit's, `KNOWN_C_BUGS.md` row 69): the copy is one of the previous
+/// snapshot.
 fn hide_newer_meta(l: &Layout, ps: usize, metas: &mut [u8], txnid: u64) {
     let own = (txnid & 1) as usize * ps + l.meta_offset();
     let other = (!txnid & 1) as usize * ps + l.meta_offset();

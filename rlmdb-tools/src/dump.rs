@@ -3,8 +3,12 @@
 //! [`crate::dumpfmt`]).
 //!
 //! ```text
-//! mdb_dump [-V] [-f output] [-l] [-n] [-p] [-a|-s subdb] dbpath
+//! mdb_dump [-V] [-f output] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath
 //! ```
+//!
+//! `-v` (C 1.0's option, here for both formats) dumps the previous
+//! snapshot (`MDB_PREVSNAPSHOT`), without C 1.0's effect on other
+//! processes (`KNOWN_C_BUGS.md` row 68).
 //!
 //! Output and messages are those of the C tool of the environment's format.
 //! The dump format is the same for LMDB 0.9 and 1.0 environments; for a 1.0
@@ -33,7 +37,7 @@ use crate::dumpfmt::encode_line;
 use crate::getopt::{GetOpt, Opt};
 use crate::output::{eprint_bytes, Output};
 
-const SYNOPSIS: &str = "[-V] [-f output] [-l] [-n] [-p] [-a|-s subdb] dbpath";
+const SYNOPSIS: &str = "[-V] [-f output] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath";
 
 const NOTFOUND: i32 = rlmdb::consts::MDB_NOTFOUND;
 const EINTR: i32 = 4;
@@ -57,6 +61,8 @@ struct Options {
     list: bool,
     no_sub_dir: bool,
     print: bool,
+    /// `-v`: `MDB_PREVSNAPSHOT`.
+    prev_snapshot: bool,
     subname: Option<Vec<u8>>,
 }
 
@@ -66,7 +72,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         return tool.usage(SYNOPSIS);
     }
     let mut o = Options::default();
-    let mut getopt = GetOpt::new(args, "af:lnps:V");
+    let mut getopt = GetOpt::new(args, "af:lnps:vV");
     while let Some(opt) = getopt.next() {
         match opt {
             Opt::Flag(b'V') => return tool.version(),
@@ -96,6 +102,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
             }
             Opt::Flag(b'n') => o.no_sub_dir = true,
             Opt::Flag(b'p') => o.print = true,
+            Opt::Flag(b'v') => o.prev_snapshot = true,
             Opt::Arg(b's', name) => {
                 if o.all_dbs > 0 {
                     return tool.usage(SYNOPSIS);
@@ -122,6 +129,9 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     let mut flags = EnvironmentFlags::READ_ONLY;
     if o.no_sub_dir {
         flags |= EnvironmentFlags::NO_SUB_DIR;
+    }
+    if o.prev_snapshot {
+        flags |= EnvironmentFlags::PREV_SNAPSHOT;
     }
     builder.flags(flags);
     let env = match builder.open_with_permissions(path_of(envname), 0o664) {

@@ -252,7 +252,7 @@ fn usage() -> Fail {
     }
     s.push_str(
         "env options: --nosubdir --notls --nosync --nometasync --mapsize N --maxdbs N \
-         --maxreaders N --format 0.9|1.0 --pagesize N\n\
+         --maxreaders N --format 0.9|1.0 --pagesize N --prevsnapshot\n\
          data options: --dupsort --dupfixed --intkey --intdup --revkey --revdup --valsize N --big N \
          --dups N --deleted-every N --per-txn N --append --reserve\n\
          command options: --every N --keys N --max-commits N --compact --all --until-stdin \
