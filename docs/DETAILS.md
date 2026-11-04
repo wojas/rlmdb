@@ -24,12 +24,13 @@ The design is in [`DESIGN.md`](../DESIGN.md), the two formats in
   `mdb_copy -c` write.
 
 From LMDB 1.0 it has the data file (below), two-phase commit and
-`MDB_PREVSNAPSHOT`, for files of either format.
+`MDB_PREVSNAPSHOT`, for files of either format, and incremental backups,
+for 1.0 files.
 
 `rlmdb-capi`, the C library, has all 56 functions of LMDB 0.9.37's
-`lmdb.h` and the 13 that 1.0 adds. Of those 13, encryption, checksums,
-incremental backups and crypto modules check their arguments as C 1.0
-does and return `ENOTSUP`. It is built three times:
+`lmdb.h` and the 13 that 1.0 adds. Of those 13, encryption, checksums
+and crypto modules check their arguments as C 1.0 does and return
+`ENOTSUP`. It is built three times:
 
 | Library | Package | `mdb_version()` | New environments |
 |---|---|---|---|
@@ -173,8 +174,7 @@ scripts/          check-all.sh, linux-test.sh, install-libs.sh, ...
 
 ## Not implemented
 
-* The rest of LMDB 1.0: encryption, checksums, incremental backups,
-  crypto modules.
+* The rest of LMDB 1.0: encryption, checksums, crypto modules.
 * A copy that converts between 0.9 and 1.0 (planned).
 * The typed API modelled on `heed`, after the byte-level API.
 * A writable map for `MDB_WRITEMAP`: the flag is accepted, pages are

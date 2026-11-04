@@ -1,0 +1,31 @@
+mdb_dump -i: report the errno of this txnid, not an earlier one's
+
+Why: `mdb_dump -i txnid` prints "invalid txnid: strerror(errno)" for a
+txnid that is 0 or not a number, but nothing clears errno before the
+sscanf. After an earlier `-i` whose number overflowed, the BSD C library
+and both Windows C runtimes leave ERANGE there, and the message says
+"Result too large" for `-i 0` (glibc's sscanf does not set it: "Success").
+rlmdb's mdb_dump reports the errno of the txnid it rejects on every
+platform (KNOWN_C_BUGS.md row 76); with this patch C's does too, and the
+interop tests compare the two directly.
+
+What: errno is set to 0 before each `-i`'s sscanf. The line count of the
+file is unchanged, so line numbers cited elsewhere stay valid.
+
+Upstream: not reported; not fixed upstream at the pinned commit.
+
+diff --git a/mdb_dump.c b/mdb_dump.c
+index 5a6734ba..89dc15f7 100644
+--- a/mdb_dump.c
++++ b/mdb_dump.c
+@@ -211,8 +211,8 @@ int main(int argc, char *argv[])
+ 		case 'f':
+ 			outname = optarg;
+ 			break;
+-		case 'i':
+-			if (sscanf(optarg, "%" Yu "i", &txnid) != 1 || !txnid) {
++		case 'i':	/* errno = 0: rlmdb's patch 0001 */
++			if ((errno = 0, sscanf(optarg, "%" Yu "i", &txnid)) != 1 || !txnid) {
+ 				fprintf(stderr, "%s: %s: invalid txnid: %s\n",
+ 					prog, optarg, strerror(errno));
+ 				exit(EXIT_FAILURE);

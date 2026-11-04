@@ -9,10 +9,12 @@
  * for LMDB 1.0 environments with rlmdb_env_set_format (librlmdb's new
  * environments are 0.9). Every environment is LMDB 1.0.
  *
- * mdb_env_set_pagesize, mdb_txn_flags and mdb_cursor_is_db are
- * implemented: every build must pass the same checks and print the same
- * trace ("T ..." lines); so are mdb_txn_prepare and mdb_env_rollback,
- * which capi_2pc.c tests. The others are not implemented in rlmdb: the
+ * mdb_env_set_pagesize, mdb_txn_flags, mdb_cursor_is_db and the
+ * incremental backups (mdb_env_incr_dump, mdb_env_incr_dumpfd,
+ * mdb_env_incr_loadfd) are implemented: every build must pass the same
+ * checks and print the same trace ("T ..." lines; for the backups, the
+ * dumps' checksums); so are mdb_txn_prepare and mdb_env_rollback, which
+ * capi_2pc.c tests. The others are not implemented in rlmdb: the
  * Rust builds check that they return ENOTSUP after C 1.0's argument
  * checks and change nothing; DIFFERS() checks the C result in the C build
  * and ENOTSUP in the Rust builds; RUST_ONLY() marks calls that C 1.0
@@ -501,57 +503,194 @@ static void test_crypto(void)
 /* Incremental backups                                               */
 /* ---------------------------------------------------------------- */
 
+/* FNV-1a of a file's bytes and its length, for the trace. */
+static unsigned long file_sum(const char *name, size_t *len)
+{
+	unsigned long h = 2166136261u;
+	unsigned char buf[4096];
+	size_t n;
+	FILE *f = fopen(name, "rb");
+	*len = 0;
+	if (!f)
+		return 0;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+		size_t i;
+		for (i = 0; i < n; i++)
+			h = ((h ^ buf[i]) * 16777619u) & 0xffffffffu;
+		*len += n;
+	}
+	fclose(f);
+	return h;
+}
+
+/* Commits puts of keys first..last, one transaction each; every fifth
+ * also deletes the key ten below. */
+static void incr_work(MDB_env *env, int first, int last)
+{
+	int i;
+	for (i = first; i <= last; i++) {
+		MDB_txn *txn;
+		MDB_dbi dbi;
+		char k[16], d[64];
+		OK(mdb_txn_begin(env, NULL, 0, &txn));
+		OK(mdb_dbi_open(txn, NULL, 0, &dbi));
+		snprintf(k, sizeof(k), "k%03d", i);
+		snprintf(d, sizeof(d), "value of %d, a little longer", i);
+		put(txn, dbi, k, d);
+		if (i % 5 == 0 && i > 10) {
+			MDB_val key;
+			snprintf(k, sizeof(k), "k%03d", i - 10);
+			key = sv(k);
+			OK(mdb_del(txn, dbi, &key, NULL));
+		}
+		OK(mdb_txn_commit(txn));
+	}
+}
+
+/* The descriptor error of the first write or read on an unusable one. */
+#ifdef _WIN32
+#define BAD_FILEHANDLE	6	/* ERROR_INVALID_HANDLE */
+#else
+#define BAD_FILEHANDLE	EBADF
+#endif
+
 static void test_incremental(void)
 {
-#ifdef LMDB_RUST
 	MDB_env *env;
-	char path[1200], file[1300];
+	MDB_envinfo info;
+	MDB_txn *txn;
+	char path[1200], base[1200], file[1300], file2[1300], data[1300], bdata[1300];
+	unsigned long sum, sum2;
+	size_t t0, len, len2;
+	unsigned flags;
 	int fd;
 
+#ifdef LMDB_RUST
+	/* NULL and environments that are not open: EINVAL (C would crash). */
 	RC(mdb_env_incr_dumpfd(NULL, COMPAT_NO_FILEHANDLE, 1), EINVAL);
 	RC(mdb_env_incr_dump(NULL, "x", 1), EINVAL);
 	RC(mdb_env_incr_loadfd(NULL, COMPAT_NO_FILEHANDLE), EINVAL);
-	/* Not open: EINVAL (C would crash). */
 	env = create_env();
 	RC(mdb_env_incr_dumpfd(env, COMPAT_NO_FILEHANDLE, 1), EINVAL);
 	RC(mdb_env_incr_dump(env, "x", 1), EINVAL);
 	RC(mdb_env_incr_loadfd(env, COMPAT_NO_FILEHANDLE), EINVAL);
 	mdb_env_close(env);
+#endif
 
+	/* A source with 1000 records and 20 more commits, a copy of it, 20
+	 * more commits, which leave most pages as they were. */
 	env = new_env("incr", 4);
-	RC(mdb_env_incr_dump(env, NULL, 1), EINVAL);
+	RUST_ONLY(RC(mdb_env_incr_dump(env, NULL, 1), EINVAL));
 	snprintf(path, sizeof(path), "%s/incr", scratch);
-	snprintf(file, sizeof(file), "%s/incr.dump", scratch);
-	RC(mdb_env_incr_dump(env, file, 1), ENOTSUP);
 	{
-		FILE *f = fopen(file, "rb");
-		CHECK(f == NULL);
-		if (f)
-			fclose(f);
-	}
-	fd = open(file, O_RDWR | O_CREAT | O_TRUNC | O_BINARY, COMPAT_CREATE_MODE);
-	CHECK(fd >= 0);
-	RC(mdb_env_incr_dumpfd(env, COMPAT_FILEHANDLE(fd), 1), ENOTSUP);
-	CHECK(compat_filehandle_size(COMPAT_FILEHANDLE(fd)) == 0);
-	RC(mdb_env_incr_loadfd(env, COMPAT_FILEHANDLE(fd)), ENOTSUP);
-	close(fd);
-	/* The environment is untouched: still a directory environment that
-	 * reads and writes (C's mdb_env_incr_dump sets MDB_NOSUBDIR). */
-	{
-		unsigned flags;
-		MDB_txn *txn;
 		MDB_dbi dbi;
-		OK(mdb_env_get_flags(env, &flags));
-		CHECK(!(flags & MDB_NOSUBDIR));
+		int i;
 		OK(mdb_txn_begin(env, NULL, 0, &txn));
 		OK(mdb_dbi_open(txn, NULL, 0, &dbi));
-		put(txn, dbi, "k", "v");
+		for (i = 0; i < 1000; i++) {
+			char k[16], d[100];
+			snprintf(k, sizeof(k), "b%04d", i);
+			snprintf(d, sizeof(d), "bulk value %d, %060d", i, i);
+			put(txn, dbi, k, d);
+		}
 		OK(mdb_txn_commit(txn));
-		CHECK(has_key(env, "k"));
 	}
-	(void)path;
-	mdb_env_close(env);
+	incr_work(env, 1, 20);
+	OK(mdb_env_info(env, &info));
+	t0 = info.me_last_txnid;
+	env_path(base, sizeof(base), "incr-base");
+	OK(mdb_env_copy(env, base));
+	incr_work(env, 21, 40);
+
+	/* The dump since the copy, to a file and to a descriptor: the same
+	 * bytes, C 1.0's (the trace). */
+	snprintf(file, sizeof(file), "%s/incr.dump", scratch);
+	OK(mdb_env_incr_dump(env, file, t0));
+	sum = file_sum(file, &len);
+	T("incr: dump since %zu: %zu bytes, sum %08lx", t0, len, sum);
+	{
+		MDB_stat st;
+		OK(mdb_env_info(env, &info));
+		OK(mdb_env_stat(env, &st));
+		CHECK(len > 0 && len < (info.me_last_pgno + 1) * st.ms_psize);
+	}
+	T("incr: dump to an existing file: %d", mdb_env_incr_dump(env, file, t0));
+	snprintf(file2, sizeof(file2), "%s/incr.dump2", scratch);
+	fd = open(file2, O_RDWR | O_CREAT | O_TRUNC | O_BINARY, COMPAT_CREATE_MODE);
+	CHECK(fd >= 0);
+	OK(mdb_env_incr_dumpfd(env, COMPAT_FILEHANDLE(fd), t0));
+	close(fd);
+	sum2 = file_sum(file2, &len2);
+	CHECK(sum2 == sum && len2 == len);
+	/* From txnid 0 every page; nothing since the last commit. */
+	OK(mdb_env_info(env, &info));
+	fd = open(file2, O_RDWR | O_CREAT | O_TRUNC | O_BINARY, COMPAT_CREATE_MODE);
+	OK(mdb_env_incr_dumpfd(env, COMPAT_FILEHANDLE(fd), 0));
+	close(fd);
+	sum2 = file_sum(file2, &len2);
+	T("incr: dump since 0: %zu bytes, sum %08lx", len2, sum2);
+	fd = open(file2, O_RDWR | O_CREAT | O_TRUNC | O_BINARY, COMPAT_CREATE_MODE);
+	OK(mdb_env_incr_dumpfd(env, COMPAT_FILEHANDLE(fd), info.me_last_txnid));
+	close(fd);
+	file_sum(file2, &len2);
+	T("incr: dump since %zu: %zu bytes", (size_t)info.me_last_txnid, len2);
+	/* An unusable descriptor: the error of the first write, none if
+	 * there is nothing to write. */
+	RC(mdb_env_incr_dumpfd(env, COMPAT_NO_FILEHANDLE, 0), BAD_FILEHANDLE);
+	OK(mdb_env_incr_dumpfd(env, COMPAT_NO_FILEHANDLE, info.me_last_txnid));
+	/* C's mdb_env_incr_dump sets MDB_NOSUBDIR in the environment's flags
+	 * for good; rlmdb leaves them (KNOWN_C_BUGS.md row 74). */
+	OK(mdb_env_get_flags(env, &flags));
+#ifdef LMDB_RUST
+	CHECK(!(flags & MDB_NOSUBDIR));
+#else
+	CHECK(flags & MDB_NOSUBDIR);
 #endif
+	mdb_env_close(env);
+
+	/* The dump loaded into the copy makes it the source, byte for byte
+	 * (the environment need not use MDB_WRITEMAP, which lmdb.h asks
+	 * for: neither C nor rlmdb needs it). */
+	env = create_env();
+	OK(mdb_env_open(env, base, MDB_NOTLS, 0664));
+#ifdef LMDB_RUST
+	/* A read transaction of the process: EBUSY (C loads under it). */
+	OK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
+	fd = open(file, O_RDONLY | O_BINARY);
+	RC(mdb_env_incr_loadfd(env, COMPAT_FILEHANDLE(fd)), EBUSY);
+	close(fd);
+	mdb_txn_abort(txn);
+	/* An unusable descriptor is an error, on every platform (C on Unix
+	 * reads nothing and succeeds: KNOWN_C_BUGS.md row 66). */
+	RC(mdb_env_incr_loadfd(env, COMPAT_NO_FILEHANDLE), BAD_FILEHANDLE);
+#else
+	(void)txn;
+#ifdef _WIN32
+	/* The oracle's patch 0003 returns the read's error (row 66). */
+	RC(mdb_env_incr_loadfd(env, COMPAT_NO_FILEHANDLE), BAD_FILEHANDLE);
+#else
+	/* A failed read of a page header ends C's load with success. */
+	OK(mdb_env_incr_loadfd(env, COMPAT_NO_FILEHANDLE));
+#endif
+#endif
+	fd = open(file, O_RDONLY | O_BINARY);
+	CHECK(fd >= 0);
+	OK(mdb_env_incr_loadfd(env, COMPAT_FILEHANDLE(fd)));
+	close(fd);
+	mdb_env_close(env);
+	snprintf(data, sizeof(data), "%s/data.mdb", path);
+	snprintf(bdata, sizeof(bdata), "%s/data.mdb", base);
+	sum = file_sum(data, &len);
+	sum2 = file_sum(bdata, &len2);
+	CHECK(sum2 == sum && len2 == len);
+	T("incr: loaded copy: %zu bytes, sum %08lx, same as the source %d", len2, sum2,
+		sum2 == sum && len2 == len);
+	env = create_env();
+	OK(mdb_env_open(env, base, MDB_NOTLS, 0664));
+	OK(mdb_env_info(env, &info));
+	T("incr: loaded copy: last txnid %zu, k040 %d, k001 %d", (size_t)info.me_last_txnid,
+		has_key(env, "k040"), has_key(env, "k001"));
+	mdb_env_close(env);
 }
 
 /* ---------------------------------------------------------------- */

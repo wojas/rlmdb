@@ -49,7 +49,7 @@ use crate::core::dbi::Dbi;
 use crate::core::env::Environment;
 use crate::core::freelist::next_txnid_key;
 use crate::core::page_ops;
-use crate::core::txn::{Transaction, TxnCore};
+use crate::core::txn::{RoTxn, Transaction, TxnCore};
 use crate::error::{Error, MdbError, Result};
 use crate::format::layout::{Format, Layout, OverflowRef, META_MAPSIZE, META_SIZE, META_TXNID};
 use crate::format::meta::Meta;
@@ -125,7 +125,32 @@ impl Environment {
     fn copy_plain(&self, out: &mut impl Write) -> Result<()> {
         let ps = self.page_size();
         let mut buf = AlignedBuf::new(PLAIN_CHUNK.max(2 * ps));
-        let txn = match self.lock_region() {
+        let txn = self.begin_with_meta_pages(&mut buf.as_mut()[..2 * ps])?;
+        hide_newer_meta(self.layout(), ps, &mut buf.as_mut()[..2 * ps], txn.id());
+        out.write_all(&buf.as_mut()[..2 * ps])?;
+
+        let fsize = os::file_size(self.data_file())?;
+        let end = (txn.core().next_pgno.saturating_mul(ps as u64)).min(fsize);
+        let mut pos = 2 * ps as u64;
+        while pos < end {
+            let n = ((end - pos) as usize).min(buf.len()).min(MAX_WRITE);
+            let chunk = &mut buf.as_mut()[..n];
+            read_exact_at(self.data_file(), chunk, pos)?;
+            out.write_all(chunk)?;
+            pos += n as u64;
+        }
+        Ok(())
+    }
+
+    /// The start of `mdb_env_copyfd0` and `mdb_env_incr_dumpfd`: begins the
+    /// read transaction that pins the snapshot to copy and reads the two
+    /// meta pages into `metas` (two pages) while no commit can change them,
+    /// so that the transaction's snapshot is the newest of them (while the
+    /// environment has `PREV_SNAPSHOT`, the older one).
+    pub(crate) fn begin_with_meta_pages(&self, metas: &mut [u8]) -> Result<RoTxn<'_>> {
+        let ps = self.page_size();
+        let metas = &mut metas[..2 * ps];
+        Ok(match self.lock_region() {
             None => {
                 // No lock file: the in-process writer lock, which every
                 // NO_LOCK handle of the file shares, keeps this process's
@@ -144,7 +169,7 @@ impl Environment {
                     None => None,
                 };
                 let txn = self.begin_ro_txn()?;
-                read_exact_at(self.data_file(), &mut buf.as_mut()[..2 * ps], 0)?;
+                read_exact_at(self.data_file(), metas, 0)?;
                 txn
             }
             Some(lock) => {
@@ -156,27 +181,13 @@ impl Environment {
                 // pages; the read transaction must start after that.
                 lock.lock_writer(|| self.published_meta().map(|m| m.txnid))?;
                 let snapshot = inactive.renew_holding_writer().and_then(|txn| {
-                    read_exact_at(self.data_file(), &mut buf.as_mut()[..2 * ps], 0)?;
+                    read_exact_at(self.data_file(), metas, 0)?;
                     Ok(txn)
                 });
                 lock.unlock_writer();
                 snapshot?
             }
-        };
-        hide_newer_meta(self.layout(), ps, &mut buf.as_mut()[..2 * ps], txn.id());
-        out.write_all(&buf.as_mut()[..2 * ps])?;
-
-        let fsize = os::file_size(self.data_file())?;
-        let end = (txn.core().next_pgno.saturating_mul(ps as u64)).min(fsize);
-        let mut pos = 2 * ps as u64;
-        while pos < end {
-            let n = ((end - pos) as usize).min(buf.len()).min(MAX_WRITE);
-            let chunk = &mut buf.as_mut()[..n];
-            read_exact_at(self.data_file(), chunk, pos)?;
-            out.write_all(chunk)?;
-            pos += n as u64;
-        }
-        Ok(())
+        })
     }
 
     /// `mdb_env_copyfd1`.
@@ -278,7 +289,7 @@ fn hide_newer_meta(l: &Layout, ps: usize, metas: &mut [u8], txnid: u64) {
 }
 
 /// `pread` exactly `buf.len()` bytes (`EIO` at end of file).
-fn read_exact_at(file: &File, buf: &mut [u8], pos: u64) -> Result<()> {
+pub(crate) fn read_exact_at(file: &File, buf: &mut [u8], pos: u64) -> Result<()> {
     if os::read_at(file, buf, pos)? != buf.len() {
         return Err(Error::errno(libc::EIO));
     }
@@ -287,14 +298,14 @@ fn read_exact_at(file: &File, buf: &mut [u8], pos: u64) -> Result<()> {
 
 /// A zeroed buffer aligned to the OS page size, as `O_DIRECT` writes need
 /// (C uses `memalign`).
-struct AlignedBuf {
+pub(crate) struct AlignedBuf {
     storage: Vec<u8>,
     start: usize,
     len: usize,
 }
 
 impl AlignedBuf {
-    fn new(len: usize) -> AlignedBuf {
+    pub(crate) fn new(len: usize) -> AlignedBuf {
         let align = os::os_page_size();
         let storage = vec![0u8; len + align];
         let start = storage.as_ptr().align_offset(align).min(align);
@@ -305,11 +316,11 @@ impl AlignedBuf {
         }
     }
 
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.len
     }
 
-    fn as_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn as_mut(&mut self) -> &mut [u8] {
         &mut self.storage[self.start..self.start + self.len]
     }
 }

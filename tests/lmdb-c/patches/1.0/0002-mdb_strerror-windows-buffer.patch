@@ -1,0 +1,43 @@
+mdb_strerror on Windows: keep the system's message in a thread's buffer
+
+Why: on Windows mdb_strerror formats the text of a system error into a
+buffer on its own stack and returns the buffer's address (the "HACK"
+comment: the caller is to read it before anything overwrites it). The
+address is not valid in the caller, and MinGW-w64's gcc at -O2 (the
+upstream Makefile's flags, which the tests use) warns
+(-Wreturn-local-addr) and returns a null pointer instead: the MinGW-w64
+build's tools print "(null)" for the text of every system error, and a
+program that reads the text crashes (KNOWN_C_BUGS.md row 75). The
+interop tests compare C 1.0's tool messages with rlmdb's, which carry
+the system's text, on both Windows toolchains.
+
+What: the buffer is a thread-local static array of the same size; the
+4 KiB pad is gone. The line count of the file is unchanged, so line
+numbers cited elsewhere stay valid.
+
+Upstream: not reported; not fixed upstream at the pinned commit.
+
+diff --git a/mdb.c b/mdb.c
+index 54e15a15..6cf577cb 100644
+--- a/mdb.c
++++ b/mdb.c
+@@ -1942,13 +1942,13 @@ char *
+ mdb_strerror(int err)
+ {
+ #ifdef _WIN32
+-	/** HACK: pad 4KB on stack over the buf. Return system msgs in buf.
+-	 *	This works as long as no function between the call to mdb_strerror
+-	 *	and the actual use of the message uses more than 4K of stack.
+-	 */
++	/* rlmdb's patch 0002: system messages in a buffer of the thread */
+ #define MSGSIZE	1024
+-#define PADSIZE	4096
+-	char buf[MSGSIZE+PADSIZE], *ptr = buf;
++#ifdef _MSC_VER
++	static __declspec(thread) char buf[MSGSIZE]; char *ptr = buf;
++#else
++	static __thread char buf[MSGSIZE]; char *ptr = buf;
++#endif
+ #endif
+ 	int i;
+ 	if (!err)

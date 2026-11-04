@@ -14,6 +14,22 @@ pub fn strerror(code: i32) -> String {
     rlmdb::strerror(code)
 }
 
+/// `strerror(0)` of the C runtime, which [`strerror`] (`mdb_strerror`)
+/// calls "Successful return: 0": glibc says "Success", macOS "Undefined
+/// error: 0", the Windows runtimes "No error".
+pub fn crt_strerror_0() -> String {
+    if cfg!(windows) {
+        return "No error".to_owned();
+    }
+    // The C library's text, as std formats an OS error: "<text> (os error
+    // 0)".
+    let text = std::io::Error::from_raw_os_error(0).to_string();
+    match text.strip_suffix(" (os error 0)") {
+        Some(t) => t.to_owned(),
+        None => text,
+    }
+}
+
 /// The C return code of an LMDB error (what the C function would return).
 pub fn err_code(e: &Error) -> i32 {
     e.to_err_code()
@@ -177,9 +193,42 @@ pub fn scan_unsigned(s: &[u8], radix: u32) -> Option<u64> {
     Some(if negative { m.wrapping_neg() } else { m })
 }
 
+/// `sscanf(s, "%zu", &v) == 1` as glibc and macOS read it (`strtoull`):
+/// the value (`SIZE_MAX` for one that overflows, whatever the sign), or
+/// `None` when there are no digits. A minus sign negates modulo 2^64.
+pub fn scan_size(s: &[u8]) -> Option<u64> {
+    let (negative, digits) = split_number(cstr(s), 10);
+    if digits.is_empty() {
+        return None;
+    }
+    let exact = digits.iter().try_fold(0u64, |acc, &d| {
+        acc.checked_mul(10)?
+            .checked_add(u64::from((d as char).to_digit(10)?))
+    });
+    Some(match exact {
+        Some(m) if negative => m.wrapping_neg(),
+        Some(m) => m,
+        None => u64::MAX,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes() {
+        assert_eq!(scan_size(b"5x"), Some(5));
+        assert_eq!(scan_size(b"  +3"), Some(3));
+        assert_eq!(scan_size(b"-1"), Some(u64::MAX));
+        assert_eq!(scan_size(b"0x10"), Some(0));
+        assert_eq!(scan_size(b"18446744073709551615"), Some(u64::MAX));
+        assert_eq!(scan_size(b"18446744073709551616"), Some(u64::MAX));
+        assert_eq!(scan_size(b"-99999999999999999999"), Some(u64::MAX));
+        assert_eq!(scan_size(b""), None);
+        assert_eq!(scan_size(b"-"), None);
+        assert_eq!(scan_size(b"abc"), None);
+    }
 
     #[test]
     fn numbers() {
