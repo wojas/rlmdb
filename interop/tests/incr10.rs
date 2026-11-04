@@ -666,3 +666,38 @@ fn the_load_waits_for_a_c10_writer() {
     ok(loader.join().unwrap(), "mdb_load -i");
     assert!(std::fs::read(target.data_file()).unwrap() == std::fs::read(src.data_file()).unwrap());
 }
+
+/// Row 65 with `MDB_PREVSNAPSHOT`: rlmdb opens the copy with the flag,
+/// which holds the lock file exclusively (no other process can open the
+/// environment), and loads the dump, which ends the flag as a commit does:
+/// a C 1.0 reader can then open the environment while rlmdb's handle is
+/// still open, and reads the loaded snapshot.
+#[test]
+fn a_load_ends_prev_snapshot_for_other_processes() {
+    let (src, base, dump, t1) = source_copy_and_dump();
+    let target = copy_of(&base, "target");
+    let mut env = rlmdb::Environment::builder()
+        .max_dbs(8)
+        .flags(rlmdb::EnvironmentFlags::PREV_SNAPSHOT)
+        .open(target.path())
+        .unwrap();
+    env.incr_load(&dump[..]).unwrap();
+    assert!(!env.flags().contains(rlmdb::EnvironmentFlags::PREV_SNAPSHOT));
+    let mut reader = Peer::C10
+        .on("hold-reader", &target)
+        .args(["60", "--until-stdin"])
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        ready_txnid(
+            &reader
+                .wait_for_line("READY", Duration::from_secs(30))
+                .unwrap()
+        ),
+        t1
+    );
+    reader.release().unwrap();
+    reader.finish().unwrap().ok().unwrap();
+    drop(env);
+    assert!(std::fs::read(target.data_file()).unwrap() == std::fs::read(src.data_file()).unwrap());
+}

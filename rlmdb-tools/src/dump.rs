@@ -31,7 +31,10 @@
 //! the other options but `-n` are ignored. With `-i` the options follow
 //! 1.0's tool, which opens `-f`'s file only after the environment; without
 //! it, 0.9's, which reopens standard output on it when it reads the
-//! option. An LMDB 0.9 environment cannot be dumped this way:
+//! option. With `-v` the incremental dump is one of the previous
+//! snapshot (C 1.0's holds the latest commit's meta page and pages,
+//! `KNOWN_C_BUGS.md` row 72). An LMDB 0.9 environment cannot be dumped
+//! this way:
 //! "mdb_env_incr_dump failed, error 45 Operation not supported" (the
 //! number is the platform's `ENOTSUP`).
 //!

@@ -32,7 +32,9 @@
 //! * its header names it: `mp_pgno == pg`;
 //! * `txnid < mp_txnid <= snapshot`: written after `txnid` and part of the
 //!   snapshot this dump pins (a larger `mp_txnid` is a free page that a
-//!   writer rewrote since, or a page of an aborted transaction);
+//!   writer rewrote since, or a page of an aborted transaction; with
+//!   `PREV_SNAPSHOT` the latest commit's, whose meta page is left out
+//!   too: the dump is one of the previous snapshot, as a plain copy is);
 //! * for an overflow header, its run of `mp_pages` pages is not empty and
 //!   ends by the snapshot's last page and the end of the file;
 //!
@@ -146,6 +148,12 @@ impl Environment {
     /// this process's `NO_LOCK` handles of the file), so a thread must not
     /// call it while it has a write transaction of the environment open.
     ///
+    /// While the environment has
+    /// [`PREV_SNAPSHOT`](crate::EnvironmentFlags::PREV_SNAPSHOT) the dump
+    /// is one of the previous snapshot, without the latest commit's meta
+    /// page and pages (C 1.0's holds them, cut off at the previous
+    /// snapshot's end: `KNOWN_C_BUGS.md` row 72).
+    ///
     /// LMDB 1.0 environments only: `ENOTSUP` for an LMDB 0.9 one, whose
     /// pages do not record the transaction that wrote them. A write to
     /// `out` that writes nothing is `MDB_SHORT_WRITE`, as in C. `out` is
@@ -253,10 +261,13 @@ impl Environment {
     ///   begin a transaction meanwhile are still the caller's business, as
     ///   in C.
     ///
-    /// After the load, the newest of the two meta pages in the file is the
-    /// current snapshot: it is published in the lock file (`mti_txnid`)
-    /// where C publishes nothing (`KNOWN_C_BUGS.md` row 65), so the next
-    /// transaction of every process reads it. One that needs a larger map
+    /// After a load that wrote meta pages, the newest of the two meta pages
+    /// in the file is the current snapshot: it is published in the lock
+    /// file (`mti_txnid`) where C publishes nothing (`KNOWN_C_BUGS.md` row
+    /// 65), so the next transaction of every process reads it, and
+    /// [`PREV_SNAPSHOT`](crate::EnvironmentFlags::PREV_SNAPSHOT) ends as at
+    /// a commit (the lock file is shared again). A load that wrote none
+    /// leaves both alone. One that needs a larger map
     /// fails with `MDB_MAP_RESIZED`; [`Environment::set_map_size`] with 0
     /// adopts the loaded map size.
     ///
@@ -285,12 +296,10 @@ impl Environment {
         }
         let mut excl = Exclusive::take(self)?;
         let mut input = BufReader::with_capacity(LOAD_BUFFER, input);
-        let mut written = false;
-        let rc = load(self, &excl.map, &mut input, &mut written);
-        if written {
-            excl.publish(self);
-        }
-        rc
+        let mut loaded = Loaded::default();
+        let rc = load(self, &excl.map, &mut input, &mut loaded);
+        let published = excl.publish(self, loaded);
+        rc.and(published)
     }
 }
 
@@ -468,7 +477,7 @@ impl<'e> Exclusive<'e> {
         let state = env.try_lock_writer_state().ok_or_else(busy)?;
         let writer = match (env.lock_region(), env.local_shared()) {
             (Some(lock), _) => {
-                lock.lock_writer(|| env.pick_meta().map(|m| m.txnid))?;
+                lock.lock_writer(|| env.published_meta().map(|m| m.txnid))?;
                 SharedWriter::Lock(lock)
             }
             // Held by a write transaction of another handle, maybe on this
@@ -499,25 +508,36 @@ impl<'e> Exclusive<'e> {
         })
     }
 
-    /// Publishes the newest meta page in the file as the current snapshot
-    /// (if both meta pages are valid; otherwise the next transaction fails
-    /// on them), and forgets the oldest reader this handle's writer saw.
-    fn publish(&mut self, env: &Environment) {
-        if let Ok(newest) = newest_meta(env) {
-            match (env.lock_region(), env.local_shared()) {
-                (Some(lock), _) => lock.set_txnid(newest.txnid),
-                (None, Some(local)) => local.set_txnid(newest.txnid),
-                (None, None) => {}
-            }
+    /// After a load that wrote meta pages, publishes the newest meta page
+    /// in the file as the current snapshot (if both meta pages are valid;
+    /// otherwise the next transaction fails on them) and ends
+    /// `PREV_SNAPSHOT` as a commit does; after one that wrote pages, forgets
+    /// the oldest reader this handle's writer saw.
+    fn publish(&mut self, env: &Environment, loaded: Loaded) -> Result<()> {
+        if loaded.pages || loaded.metas {
+            // It only grows otherwise, and the loaded txnids may be lower.
+            self.state.pg_oldest = 0;
         }
-        // It only grows otherwise, and the loaded txnids may be lower.
-        self.state.pg_oldest = 0;
+        if !loaded.metas {
+            return Ok(());
+        }
+        let Ok(newest) = newest_meta_on_file(env) else {
+            return Ok(());
+        };
+        match (env.lock_region(), env.local_shared()) {
+            (Some(lock), _) => lock.set_txnid(newest.txnid),
+            (None, Some(local)) => local.set_txnid(newest.txnid),
+            (None, None) => {}
+        }
+        env.end_prev_snapshot(newest.txnid)
     }
 }
 
 /// The newer of the two meta pages of the data file, read with `pread` as
-/// an open reads them; an error if either is not a valid meta page.
-fn newest_meta(env: &Environment) -> Result<Meta> {
+/// an open reads them (the load holds the map, through which
+/// `Environment::newest_meta` reads); an error if either is not a valid
+/// meta page.
+fn newest_meta_on_file(env: &Environment) -> Result<Meta> {
     let l = env.layout();
     let ps = env.page_size();
     let mut page = vec![0u8; l.meta_offset() + crate::format::layout::META_SIZE];
@@ -529,10 +549,25 @@ fn newest_meta(env: &Environment) -> Result<Meta> {
     Ok(metas[pick_newest(&metas)])
 }
 
+/// What a load wrote.
+#[derive(Debug, Default, Clone, Copy)]
+struct Loaded {
+    /// Data pages.
+    pages: bool,
+    /// Meta pages (of at least one dump of the stream, all of its data
+    /// pages before them).
+    metas: bool,
+}
+
 /// The record loop of `mdb_env_incr_loadfd` (see the module documentation
-/// for what is checked, and for the order of the writes). Sets `written`
-/// once a page was written.
-fn load(env: &Environment, map: &DataMap, input: &mut impl Read, written: &mut bool) -> Result<()> {
+/// for what is checked, and for the order of the writes); `loaded` says
+/// what it wrote, also when it fails.
+fn load(
+    env: &Environment,
+    map: &DataMap,
+    input: &mut impl Read,
+    loaded: &mut Loaded,
+) -> Result<()> {
     let l = env.layout();
     let ps = env.page_size();
     let file = env.data_file();
@@ -577,14 +612,14 @@ fn load(env: &Environment, map: &DataMap, input: &mut impl Read, written: &mut b
             }
             // A meta page after data pages begins the next dump of the
             // stream: the one before is complete.
-            if metas.data_since {
-                metas.commit(file, map, ps)?;
+            if metas.data_since && metas.commit(file, map, ps)? {
+                loaded.metas = true;
             }
             metas.pages[pgno as usize] = Some(buf[..ps].to_vec());
             continue;
         }
         write_page_bytes(file, map, &buf[..ps], pos)?;
-        *written = true;
+        loaded.pages = true;
         metas.data_since = true;
         let mut at = pos + ps as u64;
         while at < end {
@@ -595,7 +630,7 @@ fn load(env: &Environment, map: &DataMap, input: &mut impl Read, written: &mut b
         }
     }
     if metas.commit(file, map, ps)? {
-        *written = true;
+        loaded.metas = true;
     }
     Ok(())
 }

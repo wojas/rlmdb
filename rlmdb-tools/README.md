@@ -122,7 +122,9 @@ Each C release's tools are the oracle for their own format: for an LMDB
   (`../KNOWN_C_BUGS.md` row 72); rlmdb's dump holds only pages whose
   header names their own position (so it differs from C's there, and C
   1.0's `mdb_load -i` restores the source from it), and its load refuses
-  C's stale pages where their number is impossible. Not as in C:
+  C's stale pages where their number is impossible. With `-v` the dump is
+  one of the previous snapshot (C 1.0's holds the latest commit's meta
+  page and pages). Not as in C:
   `mdb_load -i` reports a dump cut short (`mdb_env_incr_load failed,
   error 5 Input/output error`; C reports success, or reads for ever, row
   66) and fails with `EBUSY` while a reader of another process pins a

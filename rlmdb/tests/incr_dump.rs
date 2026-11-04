@@ -1059,3 +1059,83 @@ fn dumps_back_to_back_commit_one_by_one() {
     reopen(&whole).incr_load(&both[..]).unwrap();
     assert!(data(&whole) == data(&src));
 }
+
+/// `PREV_SNAPSHOT`: the dump is one of the previous snapshot (no meta
+/// page or page of the latest commit), which restores it; a load into an
+/// environment opened with the flag ends it as a commit does once it has
+/// written meta pages (an empty or cut stream leaves it), with a lock file
+/// and without.
+#[test]
+fn prev_snapshot_dumps_and_loads() {
+    for no_lock in [false, true] {
+        let dir = tmp();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let env = v10(4096).open(&src).unwrap();
+        let dbs = create_dbs(&env);
+        let mut rng = Rng(61);
+        work(&env, &dbs, &mut rng, 30);
+        let base = copy(&env, dir.path(), "base");
+        let t0 = last_txnid(&env);
+        work(&env, &dbs, &mut rng, 5);
+        let (prev, at_prev) = (last_txnid(&env), contents(&env));
+        let mut txn = env.begin_rw_txn().unwrap();
+        txn.put(Dbi::MAIN, b"latest", b"commit", WriteFlags::empty())
+            .unwrap();
+        txn.commit().unwrap();
+        let latest = last_txnid(&env);
+        assert_eq!(latest, prev + 1);
+        let full = dump(&env, t0);
+        drop(env);
+        let mut flags = EnvironmentFlags::PREV_SNAPSHOT;
+        if no_lock {
+            flags |= EnvironmentFlags::NO_LOCK;
+        }
+        let open_prev = |path: &Path| {
+            Environment::builder()
+                .max_dbs(8)
+                .flags(flags)
+                .open(path)
+                .unwrap()
+        };
+
+        // The dump of the previous snapshot.
+        let env = open_prev(&src);
+        assert_eq!(last_txnid(&env), prev);
+        let d = dump(&env, t0);
+        drop(env);
+        let recs = records(&d, 4096);
+        assert!(recs.iter().all(|r| r.1 <= prev), "{recs:?}");
+        let target = dir.path().join("prev");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::copy(base.join("data.mdb"), target.join("data.mdb")).unwrap();
+        reopen(&target).incr_load(&d[..]).unwrap();
+        let env = reopen(&target);
+        assert_eq!(last_txnid(&env), prev);
+        assert!(contents(&env) == at_prev, "no_lock {no_lock}");
+        drop(env);
+
+        // A load with the flag: kept while no meta page is written, ended
+        // after.
+        let target = dir.path().join("flag");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::copy(base.join("data.mdb"), target.join("data.mdb")).unwrap();
+        let mut env = open_prev(&target);
+        env.incr_load(&b""[..]).unwrap();
+        assert!(env.flags().contains(EnvironmentFlags::PREV_SNAPSHOT));
+        assert!(env.incr_load(&full[..full.len() - 2048]).is_err());
+        assert!(env.flags().contains(EnvironmentFlags::PREV_SNAPSHOT));
+        assert_eq!(last_txnid(&env), t0 - 1);
+        env.incr_load(&full[..]).unwrap();
+        assert!(!env.flags().contains(EnvironmentFlags::PREV_SNAPSHOT));
+        assert_eq!(last_txnid(&env), latest);
+        assert_eq!(env.begin_ro_txn().unwrap().id(), latest);
+        let mut w = env.begin_rw_txn().unwrap();
+        assert_eq!(w.id(), latest + 1);
+        w.put(Dbi::MAIN, b"after", b"load", WriteFlags::empty())
+            .unwrap();
+        w.commit().unwrap();
+        drop(env);
+        assert_eq!(last_txnid(&reopen(&target)), latest + 1);
+    }
+}
