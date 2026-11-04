@@ -676,12 +676,22 @@ fn is_mdb(e: &Option<Error>, want: MdbError) -> bool {
     matches!(e, Some(Error::Mdb(x)) if *x == want)
 }
 
+/// The crafted-file cases run in the full scope (Linux x86-64 CI, nightly,
+/// scripts/check-all.sh), with the mutation suite: they test the parser,
+/// not the platform (and take minutes on Windows).
+fn full_scope() -> bool {
+    common::full_scope_only("pylmdb_patch_audit")
+}
+
 // ---------------------------------------------------------------------------
 // The cases, one group per py-lmdb patch
 // ---------------------------------------------------------------------------
 
 #[test]
 fn base_is_well_formed() {
+    if full_scope() {
+        return;
+    }
     let b = base();
     let img = Img {
         buf: b.data.clone(),
@@ -716,6 +726,9 @@ fn base_is_well_formed() {
 /// power of two, or absurd divides by zero / addresses outside the map.
 #[test]
 fn cve_2019_16228_page_size() {
+    if full_scope() {
+        return;
+    }
     for (what, v) in [
         ("zero", 0u32),
         ("odd", 4097),
@@ -768,6 +781,9 @@ fn cve_2019_16228_page_size() {
 /// `md_flags` makes C build `P_LEAF2` pages for a DB without a sub-cursor.
 #[test]
 fn cve_2019_16224_db_flags() {
+    if full_scope() {
+        return;
+    }
     for flags in [MDB_DUPFIXED, 0x20, 0x40, 0x70, 0x7e] {
         // In the meta page's main DB record.
         check(&format!("dbflags-main-{flags:#x}"), |img| {
@@ -801,6 +817,9 @@ fn cve_2019_16224_db_flags() {
 /// modifies the previous snapshot in place (`abort` does not roll back).
 #[test]
 fn cve_2019_16225_dirty_flag_on_disk() {
+    if full_scope() {
+        return;
+    }
     let (outcome, r, _) = run_case(
         "p-dirty",
         |img| {
@@ -857,6 +876,9 @@ fn cve_2019_16225_dirty_flag_on_disk() {
 /// runs past the page is read, memmoved, copied and split by C.
 #[test]
 fn cve_2019_16226_node_data_size() {
+    if full_scope() {
+        return;
+    }
     for (what, size) in [
         ("max", 0xffff_ffffu32),
         ("page", 0x1_0000),
@@ -901,6 +923,9 @@ fn cve_2019_16226_node_data_size() {
 /// `MDB_DUPSORT` makes C follow a NULL sub-cursor pointer.
 #[test]
 fn cve_2019_16227_dupdata_in_plain_db() {
+    if full_scope() {
+        return;
+    }
     for flags in [F_DUPDATA, F_DUPDATA | F_SUBDATA, F_SUBDATA, F_BIGDATA, 0x07] {
         check(&format!("plainflags-{flags:#x}"), |img| {
             for n in img.main_nodes() {
@@ -923,6 +948,9 @@ fn cve_2019_16227_dupdata_in_plain_db() {
 /// underflows.
 #[test]
 fn validate_page_bounds() {
+    if full_scope() {
+        return;
+    }
     let ps = base().ps as u16;
     for (what, lower, upper) in [
         ("lower0", Some(0u16), None),
@@ -961,6 +989,9 @@ fn validate_page_bounds() {
 /// them agree.
 #[test]
 fn validate_leaf2_key_size() {
+    if full_scope() {
+        return;
+    }
     let ps = base().ps as u32;
     for v in [
         0u32,
@@ -1016,6 +1047,9 @@ fn validate_leaf2_key_size() {
 /// page stack in C.
 #[test]
 fn validate_md_depth() {
+    if full_scope() {
+        return;
+    }
     for v in [0u16, 1, 32, 33, 100, 0xffff] {
         check(&format!("md_depth-{v}"), |img| {
             let m = img.meta();
@@ -1035,6 +1069,9 @@ fn validate_md_depth() {
 /// the other bogus roots and child pointers the Rust port must reject.
 #[test]
 fn validate_md_root() {
+    if full_scope() {
+        return;
+    }
     let np = base().data.len() as u64 / base().ps as u64;
     for (what, v) in [
         ("meta0", 0u64),
@@ -1100,6 +1137,9 @@ fn validate_md_root() {
 /// underflow and the sub-page growth `memcpy` wrap.
 #[test]
 fn validate_subpage_bounds() {
+    if full_scope() {
+        return;
+    }
     for (what, field, v) in [
         ("lower0", 12usize, Some(0u16)),
         ("lower-max", 12, Some(0xffff)),
@@ -1137,6 +1177,9 @@ fn validate_subpage_bounds() {
 /// a header into a too-short slice).
 #[test]
 fn validate_xcursor_node_data_size() {
+    if full_scope() {
+        return;
+    }
     for size in [0u32, 1, 8, 12, 15, 16, 20, 47] {
         check(&format!("subdb-dsize-{size}"), |img| {
             for n in img.leaf_nodes_with(|f| f & F_SUBDATA != 0) {
@@ -1167,6 +1210,9 @@ fn validate_xcursor_node_data_size() {
 /// 32-bit arithmetic.
 #[test]
 fn validate_overflow_pages() {
+    if full_scope() {
+        return;
+    }
     let np = base().data.len() as u32 / base().ps as u32;
     for (what, v) in [
         ("zero", 0u32),
@@ -1229,6 +1275,9 @@ fn validate_overflow_pages() {
 /// aborts on a duplicate.
 #[test]
 fn validate_freedb_record() {
+    if full_scope() {
+        return;
+    }
     let np = base().data.len() as u64 / base().ps as u64;
     for (what, count) in [
         ("count-plus1", None),
@@ -1331,6 +1380,9 @@ fn validate_freedb_record() {
 /// must not loop forever or panic.
 #[test]
 fn cursor_next_after_delete_leaves_tree_empty() {
+    if full_scope() {
+        return;
+    }
     let dir = common::tempdir();
     let env = open(dir.path()).unwrap();
     let mut txn = env.begin_rw_txn().unwrap();
@@ -1364,6 +1416,9 @@ fn cursor_next_after_delete_leaves_tree_empty() {
 /// `mm_txnid` lies (the Rust port reads them at every transaction begin).
 #[test]
 fn meta_page_lies() {
+    if full_scope() {
+        return;
+    }
     let np = base().data.len() as u64 / base().ps as u64;
     for (what, off, v) in [
         ("last_pg-0", 16 + 120usize, 0u64),

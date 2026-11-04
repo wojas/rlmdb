@@ -13,7 +13,8 @@
 //! sub-DBs, sub-pages and overflow values and as many transactions.
 //!
 //! Test names are `<pair>::<scenario>`, e.g.
-//! `c10_writes_rust_reads_1k::concurrent_writers_readers`.
+//! `c10_writes_rust_reads_1k::concurrent_writers_readers`. In the platform
+//! suite (`$RLMDB_TEST_SCOPE=platform`) every test here is SKIPPED.
 
 mod c10_writes_rust_reads_256 {
     interop::scenario_tests!(

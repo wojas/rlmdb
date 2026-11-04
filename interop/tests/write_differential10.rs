@@ -147,7 +147,11 @@ fn for_page_size(mut p: Profile, ps: usize) -> Profile {
 
 /// Runs `p` (rebuilt by `p()` for each page size) at every page size.
 fn run_profiles(p: impl Fn() -> Profile, seed: u64, rounds: usize, n: usize) {
-    for ps in PAGE_SIZES {
+    let test = std::thread::current()
+        .name()
+        .unwrap_or("run_profiles")
+        .to_owned();
+    for ps in interop::scope::page_sizes(&test, PAGE_SIZES) {
         eprintln!("page size {ps}");
         let p = for_page_size(p(), ps);
         differential::run_profile(&C10::new(ps), p, seed + ps as u64, rounds, n);
@@ -240,6 +244,9 @@ fn diff10_dupfixed_items_over_a_quarter_page() {
         (65536, 20000),
         (65536, 32698),
     ] {
+        if !interop::scope::at_page_size("diff10_dupfixed_items_over_a_quarter_page", ps) {
+            continue;
+        }
         eprintln!("page size {ps}, items of {size} bytes");
         let p = for_page_size(
             Profile {
@@ -262,7 +269,10 @@ fn diff10_dupfixed_items_over_a_quarter_page() {
 /// of them; the larger pages keep them on sub-pages.
 #[test]
 fn diff10_dupfixed_small_items() {
-    for ps in [256, 512].into_iter().chain(PAGE_SIZES) {
+    for ps in interop::scope::page_sizes(
+        "diff10_dupfixed_small_items",
+        [256, 512].into_iter().chain(PAGE_SIZES),
+    ) {
         for size in [1, 2, 3] {
             eprintln!("page size {ps}, items of {size} bytes");
             let p = for_page_size(
@@ -277,6 +287,9 @@ fn diff10_dupfixed_small_items() {
     }
     // One key at 256-byte pages: its 1-byte items fill the 232 slots of a
     // `P_LEAF2` page of its sub-DB, which splits (and merges again).
+    if !interop::scope::at_page_size("diff10_dupfixed_small_items, one key", 256) {
+        return;
+    }
     eprintln!("page size 256, items of 1 byte, one key");
     let p = for_page_size(
         Profile {
@@ -294,7 +307,10 @@ fn diff10_dupfixed_small_items() {
 #[test]
 fn diff10_dupfixed_1byte_script() {
     let p = Profile::new(MDB_DUPSORT | MDB_DUPFIXED, 0);
-    for ps in [256, 512].into_iter().chain(PAGE_SIZES) {
+    for ps in interop::scope::page_sizes(
+        "diff10_dupfixed_1byte_script",
+        [256, 512].into_iter().chain(PAGE_SIZES),
+    ) {
         let ops = differential::dupfixed_1byte_script();
         assert_eq!(
             differential::run_round(&C10::new(ps), &p, 2, Ops::List(ops), "1byte"),
@@ -327,6 +343,9 @@ fn diff10_dupfixed_1byte_script() {
 #[test]
 fn diff10_dupfixed_1byte_upper_wraps() {
     const PS: usize = 65536;
+    if !interop::scope::at_page_size("diff10_dupfixed_1byte_upper_wraps", PS) {
+        return;
+    }
     let key = vec![b'K'; nodemax(PS) - 8 - 48];
     assert_eq!(key.len(), 32698, "mdb_env_get_maxkeysize");
     let p = Profile::new(MDB_DUPSORT | MDB_DUPFIXED, 0);
@@ -353,7 +372,10 @@ fn diff10_dupfixed_1byte_upper_wraps() {
 #[test]
 fn diff10_current_single_item() {
     let p = Profile::new(MDB_DUPSORT, 0);
-    for ps in [256, 512].into_iter().chain(PAGE_SIZES) {
+    for ps in interop::scope::page_sizes(
+        "diff10_current_single_item",
+        [256, 512].into_iter().chain(PAGE_SIZES),
+    ) {
         let maxkey = nodemax(ps) - 56;
         let ops =
             differential::current_single_item_script(nodemax(ps), maxkey, true, maxkey.min(103));
@@ -375,7 +397,10 @@ fn diff10_current_single_item() {
 /// audits and reads every result.
 #[test]
 fn c10_single_item_on_overflow_pages() {
-    for ps in [256, 1024, 4096, 65536] {
+    for ps in interop::scope::page_sizes(
+        "c10_single_item_on_overflow_pages",
+        [256, 1024, 4096, 65536],
+    ) {
         let maxkey = nodemax(ps) - 56;
         for flags in [MDB_DUPSORT, MDB_DUPSORT | MDB_DUPFIXED] {
             eprintln!("page size {ps}, flags {flags:#x}");
@@ -402,7 +427,9 @@ fn c10_single_item_on_overflow_pages() {
 /// also with a dirty limit of 16 pages on the Rust side.
 #[test]
 fn diff10_current_dup_outside_leaf() {
-    for ps in [256, 1024, 4096, 65536] {
+    for ps in
+        interop::scope::page_sizes("diff10_current_dup_outside_leaf", [256, 1024, 4096, 65536])
+    {
         let maxkey = nodemax(ps) - 56;
         let item_len = (ps / 24).min(maxkey - 1).max(8);
         for dbflags in [MDB_DUPSORT, MDB_DUPSORT | MDB_DUPFIXED] {
@@ -441,7 +468,7 @@ fn diff10_current_dup_outside_leaf() {
 /// `MDB_DUPFIXED` DB, also with a dirty limit of 16 pages on the Rust side.
 #[test]
 fn diff10_current_other_key() {
-    for ps in [256, 1024, 4096, 65536] {
+    for ps in interop::scope::page_sizes("diff10_current_other_key", [256, 1024, 4096, 65536]) {
         let maxkey = nodemax(ps) - 56;
         for dbflags in [0, MDB_DUPSORT, MDB_DUPSORT | MDB_DUPFIXED] {
             let p = Profile::new(dbflags, 0);
@@ -559,7 +586,7 @@ fn diff10_nested_dupfixed() {
 /// the files must still agree.
 #[test]
 fn diff10_spilling_rust_side() {
-    for ps in PAGE_SIZES {
+    for ps in interop::scope::page_sizes("diff10_spilling_rust_side", PAGE_SIZES) {
         for (p, seed) in [
             (
                 Profile {
@@ -628,7 +655,7 @@ fn diff10_nested_script() {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    for ps in PAGE_SIZES {
+    for ps in interop::scope::page_sizes("diff10_nested_script", PAGE_SIZES) {
         let p = Profile::new(0, 0);
         assert_eq!(
             differential::run_round(&C10::new(ps), &p, 2, Ops::List(ops.clone()), "script"),
@@ -644,7 +671,7 @@ fn diff10_nested_script() {
 fn diff10_overwrites() {
     let k = |i: u32| hex(format!("key{i:03}{}", "z".repeat(i as usize % 3)).as_bytes());
     let v = |n: usize, b: u8| hex(&vec![b; n]);
-    for ps in PAGE_SIZES {
+    for ps in interop::scope::page_sizes("diff10_overwrites", PAGE_SIZES) {
         let big = 3 * ps + 7;
         let mut ops: Vec<String> = Vec::new();
         for i in 0..60u32 {
@@ -728,7 +755,7 @@ fn diff10_spill_full_size() {
 /// at the end. Also when the Rust side spills.
 #[test]
 fn diff10_two_phase_commit() {
-    for ps in [256, 1024, 4096, 65536] {
+    for ps in interop::scope::page_sizes("diff10_two_phase_commit", [256, 1024, 4096, 65536]) {
         for (dbflags, dirty_limit) in [(0, None), (MDB_DUPSORT, None), (0, Some(64))] {
             let o = C10 {
                 dirty_limit,

@@ -62,6 +62,25 @@ open in one process (`rpeer formats-loop`).
 
 ## Running
 
+### Scope
+
+`RLMDB_TEST_SCOPE=platform` (read at test time, by every crate's tests)
+selects the platform suite, which the CI of macOS, Windows (MSVC) and
+Linux arm64 runs; Linux x86-64's CI, the nightly runs on every platform
+and `scripts/check-all.sh` run everything. The platform suite keeps what
+depends on the platform: of the scenario matrix, every pair at the OS
+page size with the scenarios of `scenarios::PLATFORM_SCENARIOS` (the
+reader table, the lock file, the writer lock, concurrency, two-phase
+commit, and a smoke set of the generic ones: `fill_verify_named`,
+`delete_verify`, `copy_dump_equal`, `dump_load_roundtrip`, `map_full`);
+`write_differential10.rs` at the OS page size only; and the other test
+files. Left out, each with a `SKIPPED ... full scope only` note so that
+the test counts stay the same: the other scenarios, all of
+`pagesize10.rs`, the differential tests of other page sizes, and in
+`rlmdb` the mutation suite (`robust_mutation.rs`), the crafted-file cases
+(`pylmdb_patch_audit.rs`) and the model test (`model.rs`). The switch is
+`interop::scope` (and `common::full_scope_only` in `rlmdb/tests`).
+
 ```sh
 cargo test -p rlmdb-interop                       # everything: 9 pairs per format, three peers, layout, rpeer, the 1.0 tests (~5 min)
 cargo test -p rlmdb-interop --test c_vs_c         # every scenario with C on both sides
@@ -123,6 +142,8 @@ placeholders); or a peer completes a command but prints a
 
 | variable | meaning |
 |---|---|
+| `RLMDB_TEST_SCOPE` | `platform`: the platform suite (see "Scope" below); unset: everything |
+| `RLMDB_TEST_SCRATCH` | directory for the environments (a file system in memory in CI); unset: the system's temporary directory. Copy targets stay in `target/tmp` (`TestEnv::derived_on_disk`) |
 | `INTEROP_LOOP_SECS` | duration of `writer-loop`/`reader-loop` runs in the scenarios (default 1.5) |
 | `INTEROP_TIMEOUT_SECS` | a peer running longer is killed and the test fails (default 120) |
 | `INTEROP_RPEER` | path of the Rust peer (else found via `CARGO_BIN_EXE_rpeer` or next to the test binary) |

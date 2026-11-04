@@ -45,6 +45,7 @@ pub mod pagecmp;
 mod peer;
 pub mod report;
 pub mod scenarios;
+pub mod scope;
 mod testenv;
 pub mod tools;
 

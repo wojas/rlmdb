@@ -1338,6 +1338,11 @@ fn run_case(base: &'static Base, seed: u64, scratch: &Path) -> (Outcome, Vec<Str
 }
 
 fn run_base(name: &'static str, first_seed: u64) {
+    // The mutation suite runs in the full scope (Linux x86-64 CI, nightly,
+    // scripts/check-all.sh): it tests the parser, not the platform.
+    if common::full_scope_only(&format!("robust_mutation base {name}")) {
+        return;
+    }
     install_hook();
     let base = base(name);
     let scratch = common::tempdir();

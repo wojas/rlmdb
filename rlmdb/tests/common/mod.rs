@@ -64,6 +64,22 @@ pub fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir_in(scratch_root()).expect("scratch directory")
 }
 
+/// For a test of the full scope only (`interop::scope`, which this crate
+/// cannot use): `true`, after a SKIPPED note naming `what` on the real
+/// stderr, when `$RLMDB_TEST_SCOPE` is `platform` (the platform suite of
+/// the CI of macOS, Windows and Linux arm64; the test then returns);
+/// `false` otherwise.
+pub fn full_scope_only(what: &str) -> bool {
+    if std::env::var_os("RLMDB_TEST_SCOPE").is_some_and(|v| v == "platform") {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "SKIPPED {what}: full scope only ($RLMDB_TEST_SCOPE=platform)"
+        );
+        return true;
+    }
+    false
+}
+
 /// A new directory under `target/tmp` (`CARGO_TARGET_TMPDIR`, on the disk
 /// of the build) whatever `$RLMDB_TEST_SCRATCH` says, for the target of a
 /// copy (`copy_to_path`, `mdb_copy`): rlmdb and C open it with `O_DIRECT`

@@ -1582,6 +1582,56 @@ pub const GEN_VECTORS: &[(&str, &str)] = &[
 
 // ---- The scenario list -------------------------------------------------------------
 
+/// The scenarios of the platform suite (`$RLMDB_TEST_SCOPE=platform`, see
+/// [`crate::scope`]), at the OS page size: those about the reader table,
+/// the lock file, the writer lock and concurrency, which depend on the
+/// platform, and a smoke set of the generic ones for the file I/O paths
+/// (a fill of several kinds of DBs, deletes, copies by the peers and
+/// `mdb_copy`, the C tools' dump and load, a full map). The others run in
+/// the full scope only (Linux x86-64 CI, the nightly runs, and
+/// `scripts/check-all.sh`).
+pub const PLATFORM_SCENARIOS: &[&str] = &[
+    // The reader table, the lock file, the writer lock, concurrency.
+    "create_stat",
+    "readers_list",
+    "notls_readers",
+    "reader_creates_lock_file",
+    "stale_reader_cleared_by_reader",
+    "stale_reader_cleared_by_mdb_stat",
+    "reader_loop_during_nested",
+    "killed_writer",
+    "concurrent_writers_readers",
+    "mvcc_hold_reader",
+    "two_phase_commit",
+    // Smoke set of the generic scenarios.
+    "fill_verify_named",
+    "delete_verify",
+    "copy_dump_equal",
+    "dump_load_roundtrip",
+    "map_full",
+];
+
+/// Why scenario `name` does not run for `pair` in this run, if it does
+/// not: in the platform suite ([`crate::scope::platform`]) every scenario
+/// not in [`PLATFORM_SCENARIOS`], and every scenario at a page size of its
+/// own (`pagesize10.rs`).
+pub fn outside_scope(name: &str, pair: &Pair) -> Option<String> {
+    if !crate::scope::platform() {
+        return None;
+    }
+    let what = if pair.page_size.is_some() {
+        "a page size other than the OS's"
+    } else if !PLATFORM_SCENARIOS.contains(&name) {
+        "not in the platform suite"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "{what}: full scope only (${}=platform)",
+        crate::scope::SCOPE_VAR
+    ))
+}
+
 /// Calls `$callback!` with `$args` and the names of all scenarios. The one
 /// list of scenarios: add new ones here.
 #[doc(hidden)]
@@ -1666,6 +1716,14 @@ macro_rules! __scenario_tests_impl {
                 $crate::register_rpeer(option_env!("CARGO_BIN_EXE_rpeer"));
                 $crate::register_target_tmpdir(option_env!("CARGO_TARGET_TMPDIR"));
                 let pair = $pair;
+                if let Some(why) = $crate::scenarios::outside_scope(stringify!($name), &pair) {
+                    $crate::scenarios::skipped(format_args!(
+                        "scenario {} ({}): {why}",
+                        stringify!($name),
+                        pair
+                    ));
+                    return;
+                }
                 if let Some(why) = pair.unavailable() {
                     $crate::scenarios::skipped(format_args!(
                         "scenario {} ({}): {why}",
@@ -1702,3 +1760,20 @@ macro_rules! __scenario_table {
 }
 
 crate::__scenario_list!(__scenario_table!(()));
+
+#[cfg(test)]
+mod tests {
+    use super::{ALL, PLATFORM_SCENARIOS};
+
+    /// Every scenario of the platform suite exists: a renamed one would
+    /// leave the suite without telling.
+    #[test]
+    fn platform_scenarios_exist() {
+        for name in PLATFORM_SCENARIOS {
+            assert!(
+                ALL.iter().any(|(n, _)| n == name),
+                "PLATFORM_SCENARIOS names {name}, which is not a scenario"
+            );
+        }
+    }
+}
