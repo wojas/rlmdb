@@ -2,12 +2,13 @@
 
 `scripts/update-c-sources.sh` applies the `*.patch` files of `0.9/` to the
 upstream files of `tests/lmdb-c/0.9`, and those of `1.0/` to
-`tests/lmdb-c/1.0`, in name order. There are none at the moment; prefer
-none: the C sources are the oracle, and every change to them is a change to
-what rlmdb is tested against.
+`tests/lmdb-c/1.0`, in name order (`../README.md` lists them). Prefer few:
+the C sources are the oracle, and every change to them is a change to what
+rlmdb is tested against.
 
 When a change is unavoidable (a build fix for a new compiler or platform, a
-diagnostic the tests need):
+diagnostic the tests need, a C bug that keeps the tests from a working C
+side, which then also has its `KNOWN_C_BUGS.md` row naming the patch):
 
 * One patch per change, named `NNNN-short-name.patch` with a four-digit
   sequence number (`0001-fix-build-with-gcc-15.patch`).
@@ -15,6 +16,8 @@ diagnostic the tests need):
   and whether it has been reported upstream (ITS number) or is fixed in a
   later upstream commit, so it can be dropped when the pin moves past it.
   `git apply` ignores text before the first `diff` line.
+* Keep the line count of the file where you can: the repository cites
+  upstream's line numbers in many places.
 * Paths are relative to the version directory with one leading component
   (`a/mdb.c`, `b/mdb.c`); the script applies each patch with `git apply
   -p1` inside the directory. Edit the file in `tests/lmdb-c/<version>/`

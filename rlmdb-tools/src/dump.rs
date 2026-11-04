@@ -25,10 +25,10 @@
 //! one), as `tests/lmdb-c/1.0/mdb_dump.c` does: the txnid is read as
 //! `sscanf("%zu")` reads it (`5x` is 5, `-1` is `SIZE_MAX`), and one that
 //! is not a number or is 0 is "invalid txnid" with the C library's
-//! `strerror(errno)` (of 0, or with the BSD C library and on Windows of
-//! `ERANGE` after an earlier `-i` overflowed: [`crate::cfmt::SSCANF_KEEPS_ERANGE`],
-//! [`crate::cfmt::crt_strerror`]);
-//! the other options but `-n` are ignored. With `-i` the options follow
+//! `strerror(errno)` of the rejected txnid's parse, 0
+//! ([`crate::cfmt::crt_strerror_0`]; C's tool keeps an earlier `-i`'s
+//! `ERANGE` there with the BSD C library and on Windows,
+//! `KNOWN_C_BUGS.md` row 76); the other options but `-n` are ignored. With `-i` the options follow
 //! 1.0's tool, which opens `-f`'s file only after the environment; without
 //! it, 0.9's, which reopens standard output on it when it reads the
 //! option. With `-v` the incremental dump is one of the previous
@@ -51,9 +51,7 @@ use std::fs::OpenOptions;
 
 use rlmdb::{DatabaseFlags, Dbi, Environment, EnvironmentFlags, RoTxn, Transaction};
 
-use crate::cfmt::{
-    crt_errno, crt_strerror, err_code, io_errno, pointer, scan_size, strerror, SSCANF_KEEPS_ERANGE,
-};
+use crate::cfmt::{crt_errno, crt_strerror_0, err_code, io_errno, pointer, scan_size, strerror};
 use crate::common::{
     db_name_of, dbi_open_name, open_db, path_of, report_failed, Tool, EXIT_FAILURE,
 };
@@ -65,9 +63,6 @@ const SYNOPSIS: &str = "[-V] [-f output] [-i txnid] [-l] [-n] [-p] [-v] [-a|-s s
 
 /// The options `getopt` takes.
 const OPTSTRING: &str = "af:i:lnps:vV";
-
-/// `ERANGE`, which `sscanf` leaves in `errno` when a number overflows.
-const ERANGE: i32 = 34;
 
 const NOTFOUND: i32 = rlmdb::consts::MDB_NOTFOUND;
 const EINTR: i32 = 4;
@@ -117,8 +112,6 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         }
         found
     };
-    // `errno` as C's sscanf leaves it, for the "invalid txnid" message.
-    let mut errno = 0;
     let mut getopt = GetOpt::new(args, OPTSTRING);
     while let Some(opt) = getopt.next() {
         match opt {
@@ -134,17 +127,11 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
             }
             Opt::Arg(b'f', path) if incremental => o.outname = Some(path),
             Opt::Arg(b'i', arg) => match scan_size(&arg) {
-                Some((txnid, overflow)) if txnid != 0 => {
-                    if overflow && SSCANF_KEEPS_ERANGE {
-                        errno = ERANGE;
-                    }
-                    o.txnid = Some(txnid);
-                }
-                parsed => {
-                    if parsed.is_some_and(|(_, overflow)| overflow) && SSCANF_KEEPS_ERANGE {
-                        errno = ERANGE;
-                    }
-                    let text = crt_strerror(errno);
+                Some(txnid) if txnid != 0 => o.txnid = Some(txnid),
+                _ => {
+                    // The parse of this txnid set no errno (one that
+                    // overflows is SIZE_MAX, a valid txnid).
+                    let text = crt_strerror_0();
                     tool.eprint_prog(&[&arg, b": invalid txnid: ", text.as_bytes(), b"\n"]);
                     return EXIT_FAILURE;
                 }

@@ -147,6 +147,9 @@ sources are vendored in `../tests/lmdb-c/1.0` (`../tests/lmdb-c/README.md`).
   ITS#10643 (commit `4865523`), then the release. Do not pin the
   `LMDB_1.0.2` tag: it still has that bug, which would be baked into the
   oracle. The pin is `LMDB10_COMMIT` in `../scripts/update-c-sources.sh`.
+  The vendored files carry the patches of `../tests/lmdb-c/patches/1.0`,
+  fixes of C bugs the tests need fixed (listed in
+  `../tests/lmdb-c/README.md`, each with its `KNOWN_C_BUGS.md` row).
 * **Sources.** `build.rs` compiles the files of `LMDB10_LIB_FILES` (the
   library: `mdb.c`, `midl.[ch]`, `lmdb.h`, `module.c`, `chacha8.[ch]`) and
   of `UPSTREAM10_PROGRAMS` (the tools and the `mtest*` programs) where

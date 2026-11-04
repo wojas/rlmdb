@@ -211,8 +211,8 @@ int main(int argc, char *argv[])
 		case 'f':
 			outname = optarg;
 			break;
-		case 'i':
-			if (sscanf(optarg, "%" Yu "i", &txnid) != 1 || !txnid) {
+		case 'i':	/* errno = 0: rlmdb's patch 0001 */
+			if ((errno = 0, sscanf(optarg, "%" Yu "i", &txnid)) != 1 || !txnid) {
 				fprintf(stderr, "%s: %s: invalid txnid: %s\n",
 					prog, optarg, strerror(errno));
 				exit(EXIT_FAILURE);

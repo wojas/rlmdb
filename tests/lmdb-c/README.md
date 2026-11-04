@@ -62,8 +62,17 @@ ChaCha implementation, as in upstream.
 ## Patches
 
 The files are always upstream's at the pinned commit with the patches of
-`patches/0.9/` and `patches/1.0/` applied in name order; there are none at
-the moment. `patches/README.md` describes the convention.
+`patches/0.9/` and `patches/1.0/` applied in name order.
+`patches/README.md` describes the convention. `patches/0.9/` is empty;
+`patches/1.0/` fixes C bugs that kept the tests from a working C side,
+each with its `KNOWN_C_BUGS.md` row:
+
+| Patch | Fixes |
+|-------|-------|
+| `0001-mdb_dump-i-stale-errno.patch` | `mdb_dump -i`: "invalid txnid" with the `errno` an earlier `-i` left (row 76) |
+
+Each keeps the line count of its file, so the line numbers this
+repository cites are upstream's.
 
 ## Updating
 

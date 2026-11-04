@@ -2,7 +2,10 @@
 
 Policy (see DESIGN.md): plain bugs are not reimplemented, but every deviation
 must keep C and Rust processes interoperable on the same environment. Each
-entry says whether it touches on-disk or lock-file state.
+entry says whether it touches on-disk or lock-file state. Where the tests
+need a working C side, the vendored C sources carry a patch
+(`tests/lmdb-c/patches/`), which the entry names; the other columns
+describe upstream C.
 
 | # | Where in C | Behaviour | Rust behaviour | Interop impact |
 |---|---|---|---|---|
@@ -81,6 +84,7 @@ entry says whether it touches on-disk or lock-file state.
 | 73 | `mdb.c` 1.0 `mdb_env_incr_dumpfd` (the meta pages: `DO_WRITE(rc, fd, mp, env->me_psize, len)` without looking at `len`) | A short `write` of a meta page (a signal, a full disk) is taken for a whole one: the dump lacks the rest of the page and every record after it is out of step. The data pages' writes loop on short writes, as `mdb_env_copyfd0`'s do. | The meta pages are written whole, as the other pages are (a write that takes nothing is `MDB_SHORT_WRITE`, C 1.0's code for it). | None: the same bytes whenever C's writes are whole. |
 | 74 | `mdb.c` 1.0 `mdb_env_incr_dump` (line 11958: `env->me_flags \|= MDB_NOSUBDIR`) | Sets `MDB_NOSUBDIR` in the environment's flags for good, to name the dump file: `mdb_env_get_flags` reports it afterwards, and a later `mdb_env_copy`/`mdb_env_copy2` of the handle takes its path for the file (and fails with `EEXIST` on the directory a program passes). | The path names the dump file; the flags stay as they were. | None: per handle. |
 | 75 | `mdb.c` `mdb_strerror` on Windows (1.0 lines 1951 and 1979, 0.9 lines 1552 and 1585: `char buf[MSGSIZE+PADSIZE], *ptr = buf;` … `return ptr;`) | The text of a system error (every code but 0, LMDB's own, `ENOMEM` and `EINVAL`) is `FormatMessageA`'s, written to a buffer on `mdb_strerror`'s own stack, whose address it returns (the "HACK" comment counts on the caller reading it before anything overwrites it). With the upstream Makefile's `-O2`, MinGW-w64's gcc (seen with gcc 16) warns (`-Wreturn-local-addr`) and compiles the return to a null pointer: the MinGW-w64 build returns `NULL` for every such code, its tools print "(null)" for the message (C 1.0's `mdb_load -i` at the end of a pipe, row 66: "error -1 (null)"), and a caller that reads the text crashes. The MSVC build returns the stack buffer; for a code the system has no text for (-1) it holds an empty string. | Returns the system's text, kept for the life of the process (`rlmdb-capi/README.md`), with either toolchain. | Messages only. `interop/tests/tools10.rs` expects "(null)" from the MinGW-w64 build of C 1.0's `mdb_load -i`. |
+| 76 | `mdb_dump.c` 1.0 `main`, option `-i` (lines 215–217: `if (sscanf(optarg, "%" Yu "i", &txnid) != 1 \|\| !txnid)` … `strerror(errno)`) | A txnid that is 0 or not a number is "invalid txnid" with `strerror(errno)`, but neither case sets `errno`, and nothing clears it before the `sscanf`: the text is of whatever an earlier call left there. After an earlier `-i` whose number overflowed (taken as `SIZE_MAX`), the BSD C library's `sscanf` (measured on macOS) and the C runtimes of both Windows toolchains (MSVC's and MinGW-w64's, measured) leave `ERANGE`, so `mdb_dump -i 99999999999999999999 -i 0` says "invalid txnid: Result too large"; glibc's `sscanf` does not set it ("Success"). | Reports the `errno` of the rejected txnid's own parse, which sets none: the C library's `strerror(0)` ("Success", "Undefined error: 0", "No error") on every platform (`rlmdb-tools/src/dump.rs`). | Messages only. The C 1.0 oracle carries `tests/lmdb-c/patches/1.0/0001-mdb_dump-i-stale-errno.patch` (`errno` cleared before each `-i`'s `sscanf`), so `interop/tests/tools10.rs` compares the messages directly. |
 
 ## LMDB 1.0
 
