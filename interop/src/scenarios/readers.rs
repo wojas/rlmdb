@@ -14,7 +14,7 @@ use super::{
 };
 use crate::report::{HoldReady, WriterLoopReport};
 use crate::{ensure, tools, Error, Format, Peer, Result, TestEnv};
-use rlmdb::format::lockfile::{LOCK_V09, LOCK_V10};
+use rlmdb::format::lockfile::{LockObjects, LOCK_V09, LOCK_V10};
 
 /// Reader slots are visible across processes and implementations; the
 /// lock table works whoever opened it first.
@@ -488,10 +488,13 @@ pub fn notls_readers(pair: Pair) -> Result<()> {
 ///    keeps the exclusive lock until it closes), while the other peer's
 ///    writer waits to open it; that writer then commits on top of the
 ///    latest snapshot, which the holder published when it closed: it
-///    deletes every second of the 450 keys. (C 1.0 leaves the previous snapshot in the lock
-///    file, and the waiting writer overwrites the latest one,
-///    `KNOWN_C_BUGS.md` row 70: not run with `cpeer10` as the holder.) The
-///    auditors audit the file.
+///    deletes every second of the 450 keys. (C 1.0 leaves the previous
+///    snapshot in the lock file, and the waiting writer overwrites the
+///    latest one, `KNOWN_C_BUGS.md` row 70: not run with `cpeer10` as the
+///    holder.) Where the shared locks die with their last user (not
+///    Linux or FreeBSD), the holder's peer waits instead of a C peer,
+///    whose open fails when the holder closes (row 47). The auditors audit
+///    the file.
 pub fn prev_snapshot(pair: Pair) -> Result<()> {
     let first = |peers: [Peer; 2]| peers.into_iter().find(Peer::opens_prev_snapshot);
     let (Some(reader), Some(writer)) = (
@@ -562,16 +565,20 @@ pub fn prev_snapshot(pair: Pair) -> Result<()> {
             .args([hold_secs().as_str(), "--until-stdin", "--prevsnapshot"])
             .spawn()?;
         holder.wait_ready()?;
-        // Where the last user removes the shared locks (semaphores), a C
-        // peer that waited fails its open once the holder is gone
-        // (KNOWN_C_BUGS.md row 47; rlmdb probes again): an rlmdb peer
-        // waits there.
+        // The holder is the last user. Where the shared locks do not
+        // outlive their last user, a C peer that waited fails its open once
+        // the holder is gone (KNOWN_C_BUGS.md row 47; rlmdb probes again),
+        // so an rlmdb peer waits there: semaphores, which the last user
+        // removes (macOS, OpenBSD, NetBSD, DragonFly), and Windows' named
+        // mutexes, which the kernel destroys with the last handle (C 1.0
+        // holder and waiter fail alike there). Only mutexes in the lock file
+        // (Linux, FreeBSD) outlive it.
         let lock = match pair.format {
             Format::V09 => &LOCK_V09,
             Format::V10 => &LOCK_V10,
         };
         let mut waiter_peer = pair.other(reader);
-        if lock.objects.removed_by_last_user() && !waiter_peer.is_rust() {
+        if lock.objects != LockObjects::PthreadMutexes && !waiter_peer.is_rust() {
             waiter_peer = reader;
         }
         // Deleting keys of the 450 fails outright on the 300-key snapshot.
