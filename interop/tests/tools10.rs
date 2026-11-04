@@ -645,6 +645,53 @@ fn rust_bin_run(tool: &str, args: &[&str], stdin: &[u8]) -> BinRun {
     run_bin(cmd, stdin)
 }
 
+/// `r` (rlmdb's tool) and `c` (C 1.0's) are the same run. The MinGW-w64
+/// build of C's `mdb_strerror` returns a null pointer for the system's
+/// errors, and the tools print "(null)" for the text (`KNOWN_C_BUGS.md`
+/// row 75): there rlmdb's text of the same code stands in its place.
+fn assert_same_run(r: &BinRun, c: &BinRun, what: &str) {
+    if cfg!(all(windows, target_env = "gnu")) {
+        if let Some(head) = c.stderr.strip_suffix("(null)\r\n") {
+            let code: i32 = head.trim_end().rsplit(' ').next().unwrap().parse().unwrap();
+            let text = rlmdb::strerror(code).replace('\n', "\r\n");
+            let stderr = format!("{head}{text}\r\n");
+            assert_eq!(
+                (r.code, &r.stdout, &r.stderr),
+                (c.code, &c.stdout, &stderr),
+                "{what}"
+            );
+            return;
+        }
+    }
+    assert_eq!(r, c, "{what}");
+}
+
+/// rlmdb's `mdb_load -i` against C 1.0's: the same run, but where C 1.0
+/// read the dump from a pipe on Windows. Its load there takes only
+/// `ERROR_HANDLE_EOF` for the end of the input, and the end of a pipe is
+/// `ERROR_BROKEN_PIPE`: it loads the whole dump, then fails with "error -1"
+/// (`KNOWN_C_BUGS.md` row 66; the MinGW-w64 build's `mdb_strerror`
+/// returns a null pointer there, which `printf` prints "(null)", row 75),
+/// where rlmdb's succeeds.
+fn assert_same_load(r: &BinRun, c: &BinRun, from_pipe: bool, what: &str) {
+    if cfg!(windows) && from_pipe {
+        let message = if cfg!(target_env = "gnu") {
+            "mdb_env_incr_load failed, error -1 (null)"
+        } else {
+            "mdb_env_incr_load failed, error -1"
+        };
+        assert_eq!((c.code, c.stderr.trim_end()), (1, message), "{what}");
+        assert_eq!(
+            (r.code, r.stderr.as_str(), r.stdout.len()),
+            (0, "", 0),
+            "{what}"
+        );
+    } else {
+        assert_same_run(r, c, what);
+        assert_eq!(c.code, 0, "{what}: {c:?}");
+    }
+}
+
 /// The newest txnid of the environment at `env`.
 fn last_txnid(env: &Path) -> u64 {
     let e = rlmdb::Environment::builder()
@@ -705,7 +752,7 @@ fn mdb_dump_i_matches_mdb_dump10() {
     for args in &cases {
         let c = c10_bin_run("mdb_dump", args, b"");
         let r = rust_bin_run("mdb_dump", args, b"");
-        assert_eq!(r, c, "mdb_dump {args:?}");
+        assert_same_run(&r, &c, &format!("mdb_dump {args:?}"));
     }
     let since_mid = c10_bin_run("mdb_dump", &["-i", &mid, e], b"");
     assert!(since_mid.code == 0 && !since_mid.stdout.is_empty());
@@ -734,7 +781,7 @@ fn mdb_dump_i_matches_mdb_dump10() {
             let ar: Vec<&str> = ar.iter().map(String::as_str).collect();
             let c = c10_bin_run("mdb_dump", &ac, b"");
             let r = rust_bin_run("mdb_dump", &ar, b"");
-            assert_eq!(r, c, "mdb_dump {ar:?}");
+            assert_same_run(&r, &c, &format!("mdb_dump {ar:?}"));
         }
         assert_eq!(
             std::fs::read(&out_r).unwrap(),
@@ -745,7 +792,7 @@ fn mdb_dump_i_matches_mdb_dump10() {
     let (in_missing_c, in_missing_r) = (missing.join("c.incr"), missing.join("r.incr"));
     let c = c10_bin_run("mdb_dump", &["-i", "1", "-f", s(&in_missing_c), e], b"");
     let r = rust_bin_run("mdb_dump", &["-i", "1", "-f", s(&in_missing_r), e], b"");
-    assert_eq!(r, c);
+    assert_same_run(&r, &c, "mdb_dump -f in a missing directory");
     assert_eq!(c.code, 1, "{c:?}");
 }
 
@@ -791,8 +838,7 @@ fn mdb_load_i_matches_mdb_load10() {
         );
         let c = c10_bin_run("mdb_load", &ac, input);
         let r = rust_bin_run("mdb_load", &ar, input);
-        assert_eq!(r, c, "-f: {with_f}");
-        assert_eq!(c.code, 0, "{c:?}");
+        assert_same_load(&r, &c, !with_f, &format!("-f: {with_f}"));
         assert_eq!(
             std::fs::read(tr.join("data.mdb")).unwrap(),
             std::fs::read(tc.join("data.mdb")).unwrap()
@@ -811,7 +857,7 @@ fn mdb_load_i_matches_mdb_load10() {
     let (nc, nr) = (new_env(dir.path(), "new-c"), new_env(dir.path(), "new-r"));
     let c = c10_bin_run("mdb_load", &["-i", s(&nc)], &full.stdout);
     let r = rust_bin_run("mdb_load", &["-i", s(&nr)], &full.stdout);
-    assert_eq!(r, c);
+    assert_same_load(&r, &c, true, "a new environment");
     assert_eq!(format_of(&nr), Some(Format::V10));
     assert_eq!(
         std::fs::read(nr.join("data.mdb")).unwrap(),
@@ -827,7 +873,7 @@ fn mdb_load_i_matches_mdb_load10() {
     ] {
         let c = c10_bin_run("mdb_load", &args, &dump.stdout);
         let r = rust_bin_run("mdb_load", &args, &dump.stdout);
-        assert_eq!(r, c, "mdb_load {args:?}");
+        assert_same_run(&r, &c, &format!("mdb_load {args:?}"));
         assert_eq!(c.code, 1, "{c:?}");
     }
 }
@@ -857,7 +903,7 @@ fn incremental_tools_beyond_c10() {
         let t = copy_env(&base, dir.path(), &format!("cut{cut}"));
         let r = rust_bin_run("mdb_load", &["-i", s(&t)], &dump[..cut]);
         assert_eq!(
-            (r.code, r.stderr.as_str()),
+            (r.code, r.stderr.replace("\r\n", "\n").as_str()),
             (1, eio.as_str()),
             "cut at {cut}"
         );
@@ -876,9 +922,11 @@ fn incremental_tools_beyond_c10() {
         )
     };
     let r = rust_bin_run("mdb_dump", &["-i", "1", s(&v09)], b"");
-    assert_eq!((r.code, r.stderr), (1, enotsup("mdb_env_incr_dump")));
+    let stderr = r.stderr.replace("\r\n", "\n");
+    assert_eq!((r.code, stderr), (1, enotsup("mdb_env_incr_dump")));
     let r = rust_bin_run("mdb_load", &["-i", s(&v09)], &dump);
-    assert_eq!((r.code, r.stderr), (1, enotsup("mdb_env_incr_load")));
+    let stderr = r.stderr.replace("\r\n", "\n");
+    assert_eq!((r.code, stderr), (1, enotsup("mdb_env_incr_load")));
     // -i always means 1.0: -F 0.9 with it is a usage error before
     // anything is opened, in either order.
     let new09 = new_env(dir.path(), "new09");

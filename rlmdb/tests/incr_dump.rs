@@ -46,6 +46,17 @@ fn data(path: &Path) -> Vec<u8> {
     std::fs::read(path.join("data.mdb")).unwrap()
 }
 
+/// Whether two data files hold the same pages: the same bytes as far as
+/// both go, and only zeros past the shorter one's end. On Windows a 1.0
+/// writer grows the file by whole OS pages as it takes pages from the end
+/// of the map (C 1.0's `VirtualAlloc(MEM_COMMIT)`), so with pages smaller
+/// than the OS's a source can end in zeros past its last page, which no
+/// dump holds: no page was ever written there.
+fn same_pages(a: &[u8], b: &[u8]) -> bool {
+    let n = a.len().min(b.len());
+    a[..n] == b[..n] && a[n..].iter().chain(&b[n..]).all(|&x| x == 0)
+}
+
 fn last_txnid(env: &Environment) -> u64 {
     env.info().unwrap().last_txnid as u64
 }
@@ -236,14 +247,20 @@ fn chains_of_dumps_restore_the_source() {
 
         // The copy at t0 plus the increments.
         load_chain(&base, &[&d1, &d2]);
-        assert!(data(&base) == data(&src_path), "page size {ps}: copy");
+        assert!(
+            same_pages(&data(&base), &data(&src_path)),
+            "page size {ps}: copy"
+        );
 
         // An empty environment plus the full dump and the increments.
         let empty = dir.path().join("empty");
         std::fs::create_dir(&empty).unwrap();
         drop(v10(ps).map_size(1 << 20).open(&empty).unwrap());
         load_chain(&empty, &[&full, &d1, &d2]);
-        assert!(data(&empty) == data(&src_path), "page size {ps}: full");
+        assert!(
+            same_pages(&data(&empty), &data(&src_path)),
+            "page size {ps}: full"
+        );
 
         // The restored environment opens and reads as the source.
         let env = reopen(&empty);
@@ -340,7 +357,7 @@ fn stale_overflow_pages_are_not_records() {
         drop(env);
         load_chain(&base, &[&d]);
         assert!(
-            data(&base) == data(&dir.path().join("src")),
+            same_pages(&data(&base), &data(&dir.path().join("src"))),
             "'{}'",
             byte as char
         );
@@ -460,10 +477,18 @@ fn restored(run: &LiveRun, dir: &Path, name: &str, dump: &[u8]) -> Vec<u8> {
     data(&path)
 }
 
-/// `a` and `b` are the same but for page `except` (of 4 KiB).
+/// `a` and `b` hold the same pages ([`same_pages`]) but for page
+/// `except` (of 4 KiB).
 fn same_but(a: &[u8], b: &[u8], except: u64) -> bool {
     let (lo, hi) = (except as usize * 4096, (except as usize + 1) * 4096);
-    a.len() == b.len() && a[..lo] == b[..lo] && a[hi..] == b[hi..]
+    let mut a = a.to_vec();
+    let mut b = b.to_vec();
+    for f in [&mut a, &mut b] {
+        if f.len() >= hi {
+            f[lo..hi].fill(0);
+        }
+    }
+    same_pages(&a, &b)
 }
 
 /// Free pages that hold headers C's walk follows (crafted here as they
@@ -518,7 +543,7 @@ fn every_page_of_the_snapshot_is_dumped() {
         assert!(recs.contains(&(h, snapshot, n)), "{name}: {recs:?}");
         let got = restored(&run, dir.path(), &format!("{name}-restored"), &d);
         if record {
-            assert!(got == file, "{name}");
+            assert!(same_pages(&got, &file), "{name}");
         } else {
             assert!(same_but(&got, &file, f), "{name}");
         }
@@ -670,7 +695,7 @@ fn the_load_needs_the_environment_to_itself() {
     let inactive = txn.reset();
     assert!(data(&base) != data(&src_path));
     load_shared(&env, &d).unwrap();
-    assert!(data(&base) == data(&src_path));
+    assert!(same_pages(&data(&base), &data(&src_path)));
     let txn = inactive.renew().unwrap();
     assert_eq!(txn.id(), t1);
     drop(txn);
@@ -720,7 +745,7 @@ fn without_a_lock_file_other_handles_count() {
     a.incr_load(&d[..]).unwrap();
     assert_eq!(b.begin_ro_txn().unwrap().id(), t1);
     assert_eq!(a.begin_ro_txn().unwrap().id(), t1);
-    assert!(data(&base) == data(&src_path));
+    assert!(same_pages(&data(&base), &data(&src_path)));
 }
 
 /// A dump whose meta pages raise the map size: the load writes the pages
@@ -757,7 +782,7 @@ fn the_load_may_grow_the_file_past_the_map() {
     let mut env = reopen(&base);
     assert_eq!(env.map_size(), 1 << 20);
     env.incr_load(&d[..]).unwrap();
-    assert!(data(&base) == data(&src_path));
+    assert!(same_pages(&data(&base), &data(&src_path)));
     let e = env.begin_ro_txn().unwrap_err();
     assert!(matches!(e, Error::Mdb(MdbError::MapResized)), "{e:?}");
     env.set_map_size(0).unwrap();
@@ -862,7 +887,10 @@ fn the_load_writes_the_same_with_write_map() {
         env.incr_load(&d[..]).unwrap();
         assert_eq!(env.begin_ro_txn().unwrap().id(), last_txnid(&src));
         drop(env);
-        assert!(data(&target) == data(&src_path), "WRITE_MAP: {write_map}");
+        assert!(
+            same_pages(&data(&target), &data(&src_path)),
+            "WRITE_MAP: {write_map}"
+        );
     }
 }
 
@@ -984,7 +1012,7 @@ fn an_interrupted_load_keeps_the_base_snapshot() {
     let mut env = env;
     env.incr_load(&inc.dump[..]).unwrap();
     drop(env);
-    assert!(data(&path) == source);
+    assert!(same_pages(&data(&path), &source));
 
     // The last record dropped: a "whole" stream, the new snapshot, the
     // dropped page as the base copy had it.
@@ -996,7 +1024,7 @@ fn an_interrupted_load_keeps_the_base_snapshot() {
     let at = last.0 as usize * 4096;
     assert!(got.len() < at + 4096 || got[at..at + 4096] != source[at..at + 4096]);
     reopen(&path).incr_load(&inc.dump[..]).unwrap();
-    assert!(data(&path) == source);
+    assert!(same_pages(&data(&path), &source));
 }
 
 /// With more commits since the base, the increment may hold pages the base
@@ -1014,7 +1042,7 @@ fn a_longer_interrupted_increment_needs_the_dump_again() {
     assert!(data(&path)[..2 * 4096] == data(&inc.base)[..2 * 4096]);
     assert_eq!(last_txnid(&reopen(&path)), inc.base_txnid);
     reopen(&path).incr_load(&inc.dump[..]).unwrap();
-    assert!(data(&path) == data(&inc.src));
+    assert!(same_pages(&data(&path), &data(&inc.src)));
 }
 
 /// Two dumps back to back in one stream: each dump's meta pages are
@@ -1057,7 +1085,7 @@ fn dumps_back_to_back_commit_one_by_one() {
     drop(env);
     let whole = target("whole");
     reopen(&whole).incr_load(&both[..]).unwrap();
-    assert!(data(&whole) == data(&src));
+    assert!(same_pages(&data(&whole), &data(&src)));
 }
 
 /// `PREV_SNAPSHOT`: the dump is one of the previous snapshot (no meta

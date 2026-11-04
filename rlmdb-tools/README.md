@@ -127,10 +127,12 @@ Each C release's tools are the oracle for their own format: for an LMDB
   page and pages). Not as in C:
   `mdb_load -i` reports a dump cut short (`mdb_env_incr_load failed,
   error 5 Input/output error`; C reports success, or reads for ever, row
-  66) and fails with `EBUSY` while a reader of another process pins a
-  snapshot (row 65). `-i` always means 1.0: `mdb_load -i` creates a new
-  environment in format 1.0 whatever the experimental variable says (C
-  1.0's creates 1.0 files), and `-F 0.9` with `-i` is a usage error. Like
+  66; on Windows C 1.0's fails at the end of a pipe with "error -1", having
+  loaded the dump, while rlmdb's reads a pipe to its end) and fails with
+  `EBUSY` while a reader of another process pins a snapshot (row 65).
+  `-i` always means 1.0: `mdb_load -i` creates a new environment in
+  format 1.0 whatever the experimental variable says (C 1.0's creates 1.0
+  files), and `-F 0.9` with `-i` is a usage error. Like
   C's it opens the environment with `MDB_NOSYNC`, but its load writes
   each dump's meta pages after the data pages, syncing before and after
   them (C writes them first, unsynced; row 65): an interrupted load

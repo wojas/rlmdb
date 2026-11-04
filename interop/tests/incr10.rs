@@ -87,6 +87,24 @@ fn s(p: &Path) -> &str {
     p.to_str().expect("a UTF-8 temp path")
 }
 
+/// Whether two data files hold the same pages: the same bytes as far as
+/// both go, and only zeros past the shorter one's end. On Windows a 1.0
+/// writer grows the file by whole OS pages as it takes pages from the end
+/// of the map (`VirtualAlloc(MEM_COMMIT)`), so with pages smaller than the
+/// OS's a source can end in zeros past its last page, which no dump holds.
+fn same_pages(a: &[u8], b: &[u8]) -> bool {
+    let n = a.len().min(b.len());
+    a[..n] == b[..n] && a[n..].iter().chain(&b[n..]).all(|&x| x == 0)
+}
+
+/// [`same_pages`] of two environments' data files.
+fn same_files(a: &TestEnv, b: &TestEnv) -> bool {
+    same_pages(
+        &std::fs::read(a.data_file()).unwrap(),
+        &std::fs::read(b.data_file()).unwrap(),
+    )
+}
+
 /// rlmdb's `mdb_dump -i txnid env`, which must write what
 /// `Environment::incr_dump` writes; returns it.
 fn dump_rust(env: &Path, txnid: u64) -> Vec<u8> {
@@ -165,19 +183,28 @@ fn page_size(env: &Path) -> usize {
     e.page_size()
 }
 
-/// A plain copy of `env` by C 1.0 into the new directory `name` next to it.
+/// A plain copy of `env` by C 1.0 (by rlmdb where C's fails on Windows)
+/// into the new directory `name` next to it.
 fn copy10(env: &TestEnv, name: &str) -> TestEnv {
     let dst = env.derived(name);
     std::fs::create_dir(dst.path()).unwrap();
-    ok(
-        run(
-            bins::mdb_copy10(),
-            "mdb_copy",
-            &[s(env.path()), s(dst.path())],
-            b"",
-        ),
-        "mdb_copy10",
-    );
+    let args = [s(env.path()), s(dst.path())];
+    let c = run(bins::mdb_copy10(), "mdb_copy", &args, b"");
+    // On Windows C opens the copy target unbuffered, and writes of pages
+    // smaller than the disk's sectors fail (KNOWN_C_BUGS.md row 34):
+    // rlmdb's mdb_copy makes the base then.
+    if cfg!(windows) && c.code != 0 && c.stderr.contains("copying failed, error 87 ") {
+        eprintln!(
+            "SKIPPED: C 1.0's mdb_copy cannot write {}-byte pages unbuffered \
+             (KNOWN_C_BUGS.md row 34); the base is rlmdb's copy",
+            page_size(env.path())
+        );
+        std::fs::remove_dir_all(dst.path()).unwrap();
+        std::fs::create_dir(dst.path()).unwrap();
+        ok(rust("mdb_copy", &args, b""), "mdb_copy");
+    } else {
+        ok(c, "mdb_copy10");
+    }
     dst
 }
 
@@ -251,12 +278,20 @@ fn history(env: &TestEnv, step: usize, big: &str, per_txn: &str) {
     }
 }
 
-/// Loads `dumps` into `target` with `loader` (`mdb_load10` or rlmdb's
-/// `mdb_load`), each from standard input.
+/// Loads `dumps` into `target`, each with `mdb_load -i`: C 1.0's from a
+/// file (`-f`; its load fails at the end of a pipe on Windows,
+/// `KNOWN_C_BUGS.md` row 66), or rlmdb's from standard input.
 fn load_chain(c_loads: bool, target: &TestEnv, dumps: &[&[u8]]) {
     for d in dumps {
         let r = if c_loads {
-            run(bins::mdb_load10(), "mdb_load", &["-i", s(target.path())], d)
+            let file = target.path().with_extension("incr");
+            std::fs::write(&file, d).unwrap();
+            run(
+                bins::mdb_load10(),
+                "mdb_load",
+                &["-f", s(&file), "-i", s(target.path())],
+                b"",
+            )
         } else {
             rust("mdb_load", &["-i", s(target.path())], d)
         };
@@ -278,7 +313,10 @@ fn assert_restored(target: &TestEnv, src: &TestEnv, big: &str, what: &str) {
         std::fs::read(target.data_file()).unwrap(),
         std::fs::read(src.data_file()).unwrap(),
     );
-    assert!(a == b, "{what}: the restored file differs from the source");
+    assert!(
+        same_pages(&a, &b),
+        "{what}: the restored file differs from the source"
+    );
     compare_data_files(&target.data_file(), &src.data_file()).unwrap();
     if let Err(e) = audit10(target.path()) {
         panic!("{what}: {e}");
@@ -358,7 +396,8 @@ fn chain_at_64k_pages() {
 /// headers: records of page 0x6161616161616161 with 'a's, which rlmdb's
 /// load refuses (`MDB_CORRUPTED`) as C's fails at them (`EFBIG` where the
 /// file system refuses such an offset); with 'e's, whose bytes set
-/// `P_OVERFLOW`, a "run" past the file and `EFAULT`. rlmdb's dump holds
+/// `P_OVERFLOW`, a "run" past the file and `EFAULT` (`ERROR_NOACCESS` on
+/// Windows). rlmdb's dump holds
 /// the reused pages and nothing of the old value, and C 1.0's
 /// `mdb_load -i` makes the copy the source with it.
 #[test]
@@ -424,23 +463,30 @@ fn c10_restores_the_source_from_rlmdbs_dump_of_a_freed_run() {
             );
         } else {
             assert_eq!(c.code, 1);
+            // The write from the map past its end: EFAULT, on Windows
+            // ERROR_NOACCESS.
+            let error = if cfg!(windows) { 998 } else { 14 };
             assert!(
-                c.stderr.contains("mdb_env_incr_dump failed, error 14 "),
+                c.stderr
+                    .contains(&format!("mdb_env_incr_dump failed, error {error} ")),
                 "{}",
                 c.stderr
             );
-            // Before the stale "run" C wrote what rlmdb writes.
+            // Before the stale "run" C wrote what rlmdb writes. A `write`
+            // copies the run's bytes up to the end of the map first;
+            // Windows's `WriteFile` fails without writing any.
             let stale = 0x6565_6565_6565_6565u64.to_ne_bytes();
-            let k = c.stdout.chunks(4096).position(|p| p[..8] == stale).unwrap() * 4096;
+            let k = match c.stdout.chunks(4096).position(|p| p[..8] == stale) {
+                Some(i) => i * 4096,
+                None if cfg!(windows) => c.stdout.len(),
+                None => panic!("C's dump holds no stale run"),
+            };
             assert!(k > 0 && r.len() > k && r[..k] == c.stdout[..k]);
         }
         let target = copy_of(&base, "c-loads-r");
         load_chain(true, &target, &[&r]);
         let what = format!("'{}'", byte as char);
-        assert!(
-            std::fs::read(target.data_file()).unwrap() == std::fs::read(env.data_file()).unwrap(),
-            "{what}"
-        );
+        assert!(same_files(&target, &env), "{what}");
         if let Err(e) = audit10(target.path()) {
             panic!("{what}: {e}");
         }
@@ -544,8 +590,10 @@ fn c10_restores_a_live_run_c10s_dump_steps_over() {
     let r_target = copy_of(&base, "c-loads-r");
     load_chain(true, &r_target, &[&r]);
     let got = std::fs::read(r_target.data_file()).unwrap();
-    assert_eq!(got.len(), file.len());
-    assert!(got[..at] == file[..at] && got[at + 4096..] == file[at + 4096..]);
+    let (mut got, mut file) = (got, file);
+    got[at..at + 4096].fill(0);
+    file[at..at + 4096].fill(0);
+    assert!(same_pages(&got, &file));
     if let Err(e) = audit10(r_target.path()) {
         panic!("{e}");
     }
@@ -611,7 +659,7 @@ fn a_c10_reader_keeps_the_load_out_and_then_sees_its_result() {
     assert_eq!(r.code, 1);
     let busy = rlmdb::strerror(libc::EBUSY);
     assert_eq!(
-        r.stderr,
+        r.stderr.replace("\r\n", "\n"),
         format!("mdb_env_incr_load failed, error {} {busy}\n", libc::EBUSY)
     );
     assert!(std::fs::read(target.data_file()).unwrap() == before);
@@ -639,7 +687,7 @@ fn a_c10_reader_keeps_the_load_out_and_then_sees_its_result() {
     peer(Peer::C10, "verify", &target, &["b", "300", "2"]);
     holder.release().unwrap();
     holder.finish().unwrap().ok().unwrap();
-    assert!(std::fs::read(target.data_file()).unwrap() == std::fs::read(src.data_file()).unwrap());
+    assert!(same_files(&target, &src));
 }
 
 /// Row 65: rlmdb's load waits for a write transaction of another process
@@ -664,7 +712,7 @@ fn the_load_waits_for_a_c10_writer() {
     writer.release().unwrap();
     writer.finish().unwrap().ok().unwrap();
     ok(loader.join().unwrap(), "mdb_load -i");
-    assert!(std::fs::read(target.data_file()).unwrap() == std::fs::read(src.data_file()).unwrap());
+    assert!(same_files(&target, &src));
 }
 
 /// Row 65 with `MDB_PREVSNAPSHOT`: rlmdb opens the copy with the flag,
@@ -699,5 +747,5 @@ fn a_load_ends_prev_snapshot_for_other_processes() {
     reader.release().unwrap();
     reader.finish().unwrap().ok().unwrap();
     drop(env);
-    assert!(std::fs::read(target.data_file()).unwrap() == std::fs::read(src.data_file()).unwrap());
+    assert!(same_files(&target, &src));
 }
