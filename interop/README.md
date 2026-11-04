@@ -55,8 +55,10 @@ pairs per format. Every scenario runs for every pair, so each
 implementation writes what each implementation reads, concurrently where
 the scenario says so; the C peer of the format always verifies and audits
 too. The 1.0 pairs also run at 256 B, 1 KiB and 64 KiB pages
-(`--pagesize`), and one scenario has environments of both formats open in
-one process (`rpeer formats-loop`).
+(`--pagesize`; below 4 KiB the scenarios scale their item counts down
+with the page size, `Pair::scaled`, so that they write about as many
+pages as at 4 KiB), and one scenario has environments of both formats
+open in one process (`rpeer formats-loop`).
 
 ## Running
 

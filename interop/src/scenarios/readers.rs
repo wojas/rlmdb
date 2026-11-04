@@ -165,7 +165,7 @@ fn rewrite(pair: &Pair, env: &TestEnv, old: &DataSet, new: &DataSet) -> Result<u
 fn stale_reader(pair: &Pair, holder: Peer, clearer: Clearer) -> Result<()> {
     let env = new_env(pair, 512 * MIB)?;
     let sets: Vec<DataSet> = (0..3)
-        .map(|k| DataSet::new("data", 3000, 41 + k).with(&["--valsize", "400"]))
+        .map(|k| DataSet::new("data", pair.scaled(3000), 41 + k).with(&["--valsize", "400"]))
         .collect();
     sets[0].fill(pair.writer, &env, &[])?;
 
@@ -276,7 +276,7 @@ pub fn stale_reader_cleared_by_mdb_stat(pair: Pair) -> Result<()> {
 /// loop and a held snapshot interoperate.
 pub fn reader_creates_lock_file(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 1024 * MIB)?;
-    let ds = DataSet::new("data", 1500, 51).with(&["--dupsort", "--dups", "4"]);
+    let ds = DataSet::new("data", pair.scaled(1500), 51).with(&["--dupsort", "--dups", "4"]);
     ds.fill(pair.writer, &env, &[])?;
     pair.writer
         .on("writer-loop", &env)
@@ -404,7 +404,7 @@ pub fn reader_loop_during_nested(pair: Pair) -> Result<()> {
 /// writer loops.
 pub fn notls_readers(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 1024 * MIB)?;
-    let ds = DataSet::new("data", 1000, 61).with(&["--intkey"]);
+    let ds = DataSet::new("data", pair.scaled(1000), 61).with(&["--intkey"]);
     ds.fill(pair.writer, &env, &[])?;
     pair.writer
         .on("writer-loop", &env)

@@ -7,6 +7,11 @@
 //! `mp_upper`, values of 20 KB inline), with C 1.0 (`cpeer10`) and the Rust
 //! peer (`rpeer`) in both roles.
 //!
+//! Below 4 KiB the scenarios scale their item counts down with the page
+//! size (`Pair::scaled`): they write about as many pages as at 4 KiB, not
+//! 4 or 16 times as many, in trees at least as deep, with the same
+//! sub-DBs, sub-pages and overflow values and as many transactions.
+//!
 //! Test names are `<pair>::<scenario>`, e.g.
 //! `c10_writes_rust_reads_1k::concurrent_writers_readers`.
 

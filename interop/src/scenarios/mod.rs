@@ -163,15 +163,51 @@ impl Pair {
         }
     }
 
-    /// At least `n` duplicates of `valsize` bytes per key, enough for keys
-    /// with many of them to need a sub-DB: `n` at the OS page size, more
-    /// on a larger page size the pair asks for (a sub-page grows to half a
-    /// page).
+    /// `n`, a number of keys, of duplicates per key or of items per
+    /// transaction chosen for 4 KiB pages, for the pair's page size, so
+    /// that a scenario writes about as many pages whatever the page size,
+    /// not as many items: `n` at the OS page size (the files are those of
+    /// the other pairs of the format) and on larger pages, `n * page_size
+    /// / 4096` on smaller ones. At 256-byte pages that is a sixteenth: as
+    /// many leaves as at 4 KiB, so trees at least as deep (branch pages
+    /// hold fewer keys too), sub-DBs of as many pages and overflow values
+    /// in as many overflow pages, where 16 times the items made 16 times
+    /// the pages. Never below `MIN_SCALED` (6; or `n` if that is smaller):
+    /// at least two overflow values in a `--big` set (every third item),
+    /// several items per transaction.
+    ///
+    /// Scale the dimension that makes the pages: the keys of a plain DB
+    /// or of DUPSORT keys with a few duplicates each (sub-pages), the
+    /// duplicates per key where each key has a sub-DB (their keys are how
+    /// many sub-DBs there are), and the items per transaction with the
+    /// items, which keeps about as many transactions.
+    pub fn scaled(&self, n: u32) -> u32 {
+        match self.page_size {
+            Some(ps) if ps < SIZES_PAGE_SIZE => {
+                let scaled = u64::from(n) * u64::from(ps) / u64::from(SIZES_PAGE_SIZE);
+                // At most `n`, so it fits.
+                (scaled as u32).max(n.min(MIN_SCALED))
+            }
+            _ => n,
+        }
+    }
+
+    /// At least `n` duplicates (chosen for 4 KiB pages, see
+    /// [`scaled`](Self::scaled)) of `valsize` bytes per key, enough for
+    /// keys with many of them to need a sub-DB: `n` at the OS page size,
+    /// `n` [`scaled`](Self::scaled) on smaller pages, but at least a page
+    /// of them on every page size the pair asks for (a sub-page grows to
+    /// half a page), which is more than `n` on 64 KiB pages.
     fn subdb_dups(&self, n: u32, valsize: u32) -> u32 {
         match self.page_size {
-            Some(ps) => n.max(ps / valsize),
+            Some(ps) => self.scaled(n).max(ps / valsize),
             None => n,
         }
+    }
+
+    /// [`scaled`](Self::scaled) as a peer argument.
+    fn scaled_arg(&self, n: u32) -> String {
+        self.scaled(n).to_string()
     }
 
     /// `peer` if it implements `command`, else the reference C peer (which
@@ -286,6 +322,13 @@ pub fn writer_lock_recovers(format: Format) -> bool {
 }
 
 const MIB: u64 = 1 << 20;
+
+/// The page size that the item counts of the scenarios are chosen for
+/// ([`Pair::scaled`]).
+const SIZES_PAGE_SIZE: u32 = 4096;
+
+/// The smallest count [`Pair::scaled`] makes of a larger one.
+const MIN_SCALED: u32 = 6;
 
 fn log(msg: impl fmt::Display) {
     println!("[interop] {msg}");
@@ -700,9 +743,16 @@ pub fn create_stat(pair: Pair) -> Result<()> {
 /// The main DB, filled in several transactions.
 pub fn fill_verify_plain(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 256 * MIB)?;
-    let ds = DataSet::new("-", 3000, 11);
-    let filled = fill_verify(&pair, &env, &ds, &["--per-txn", "700"])?;
-    ensure!(filled.txns == 5, "fill used {} txns", filled.txns);
+    let ds = DataSet::new("-", pair.scaled(3000), 11);
+    let per_txn = pair.scaled(700);
+    let filled = fill_verify(&pair, &env, &ds, &["--per-txn", &per_txn.to_string()])?;
+    // 5 at every page size.
+    let txns = ds.count.div_ceil(per_txn);
+    ensure!(
+        filled.txns == u64::from(txns),
+        "fill used {} txns, not {txns}",
+        filled.txns
+    );
     audit(&pair, &env)?;
     Ok(())
 }
@@ -712,10 +762,10 @@ pub fn fill_verify_plain(pair: Pair) -> Result<()> {
 pub fn fill_verify_named(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 256 * MIB)?;
     let sets = [
-        DataSet::new("plain", 1500, 1),
-        DataSet::new("dups", 800, 2).with(&["--dupsort", "--dups", "6"]),
-        DataSet::new("big", 60, 3).with(&["--big", "40000"]),
-        DataSet::new("ik", 500, 4).with(&["--intkey"]),
+        DataSet::new("plain", pair.scaled(1500), 1),
+        DataSet::new("dups", pair.scaled(800), 2).with(&["--dupsort", "--dups", "6"]),
+        DataSet::new("big", pair.scaled(60), 3).with(&["--big", "40000"]),
+        DataSet::new("ik", pair.scaled(500), 4).with(&["--intkey"]),
     ];
     for ds in &sets {
         fill_verify(&pair, &env, ds, &[])?;
@@ -739,13 +789,13 @@ pub fn fill_verify_intkey(pair: Pair) -> Result<()> {
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("ik", 4000, 5).with(&["--intkey"]),
-        &["--per-txn", "1000"],
+        &DataSet::new("ik", pair.scaled(4000), 5).with(&["--intkey"]),
+        &["--per-txn", &pair.scaled_arg(1000)],
     )?;
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("ik_big", 90, 6).with(&["--intkey", "--big", "30000"]),
+        &DataSet::new("ik_big", pair.scaled(90), 6).with(&["--intkey", "--big", "30000"]),
         &[],
     )?;
     audit(&pair, &env)?;
@@ -758,13 +808,13 @@ pub fn fill_verify_revkey(pair: Pair) -> Result<()> {
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("rk", 3000, 7).with(&["--revkey"]),
+        &DataSet::new("rk", pair.scaled(3000), 7).with(&["--revkey"]),
         &[],
     )?;
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("rk_res", 500, 8).with(&["--revkey", "--valsize", "200"]),
+        &DataSet::new("rk_res", pair.scaled(500), 8).with(&["--revkey", "--valsize", "200"]),
         &["--reserve"],
     )?;
     audit(&pair, &env)?;
@@ -777,20 +827,21 @@ pub fn fill_verify_dupsort(pair: Pair) -> Result<()> {
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("ds", 1500, 9).with(&["--dupsort", "--dups", "8"]),
-        &["--per-txn", "400"],
+        &DataSet::new("ds", pair.scaled(1500), 9).with(&["--dupsort", "--dups", "8"]),
+        &["--per-txn", &pair.scaled_arg(400)],
     )?;
-    // Up to 1500 values of up to 40 bytes per key: sub-DBs.
+    // Up to 1500 values (at 4 KiB pages) of up to 40 bytes per key: sub-DBs.
+    let dups = pair.scaled_arg(1500);
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("ds_sub", 30, 10).with(&["--dupsort", "--dups", "1500", "--valsize", "40"]),
+        &DataSet::new("ds_sub", 30, 10).with(&["--dupsort", "--dups", &dups, "--valsize", "40"]),
         &[],
     )?;
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("ds_rev", 300, 11).with(&["--revdup", "--dups", "10"]),
+        &DataSet::new("ds_rev", pair.scaled(300), 11).with(&["--revdup", "--dups", "10"]),
         &[],
     )?;
     let a = audit(&pair, &env)?;
@@ -815,7 +866,13 @@ pub fn fill_verify_dupfixed(pair: Pair) -> Result<()> {
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("df_small", 500, 13).with(&["--dupfixed", "--dups", "5", "--valsize", "8"]),
+        &DataSet::new("df_small", pair.scaled(500), 13).with(&[
+            "--dupfixed",
+            "--dups",
+            "5",
+            "--valsize",
+            "8",
+        ]),
         &[],
     )?;
     for size in [1u32, 2, 3] {
@@ -853,13 +910,19 @@ pub fn fill_verify_intdup(pair: Pair) -> Result<()> {
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("id8", 60, 14).with(&["--intdup", "--dups", "1500"]),
+        &DataSet::new("id8", 60, 14).with(&["--intdup", "--dups", &pair.scaled_arg(1500)]),
         &[],
     )?;
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("id4", 300, 15).with(&["--intdup", "--valsize", "4", "--dups", "20"]),
+        &DataSet::new("id4", pair.scaled(300), 15).with(&[
+            "--intdup",
+            "--valsize",
+            "4",
+            "--dups",
+            "20",
+        ]),
         &[],
     )?;
     audit(&pair, &env)?;
@@ -873,8 +936,8 @@ pub fn fill_verify_overflow(pair: Pair) -> Result<()> {
     let f = fill_verify(
         &pair,
         &env,
-        &DataSet::new("ov", 300, 16).with(&["--big", &big]),
-        &["--per-txn", "50"],
+        &DataSet::new("ov", pair.scaled(300), 16).with(&["--big", &big]),
+        &["--per-txn", &pair.scaled_arg(50)],
     )?;
     ensure!(
         f.kv.num::<u64>("overflow_pages")? > 0,
@@ -884,13 +947,13 @@ pub fn fill_verify_overflow(pair: Pair) -> Result<()> {
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("ov_huge", 12, 17).with(&["--big", "300000"]),
+        &DataSet::new("ov_huge", pair.scaled(12), 17).with(&["--big", "300000"]),
         &[],
     )?;
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("ov_res", 100, 18).with(&["--big", "9000"]),
+        &DataSet::new("ov_res", pair.scaled(100), 18).with(&["--big", "9000"]),
         &["--reserve"],
     )?;
     audit(&pair, &env)?;
@@ -903,25 +966,25 @@ pub fn fill_verify_append(pair: Pair) -> Result<()> {
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("ap", 6000, 19),
-        &["--append", "--per-txn", "2000"],
+        &DataSet::new("ap", pair.scaled(6000), 19),
+        &["--append", "--per-txn", &pair.scaled_arg(2000)],
     )?;
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("ap_dups", 400, 20).with(&["--dupsort", "--dups", "20"]),
+        &DataSet::new("ap_dups", pair.scaled(400), 20).with(&["--dupsort", "--dups", "20"]),
         &["--append"],
     )?;
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("ap_ik", 3000, 21).with(&["--intkey"]),
+        &DataSet::new("ap_ik", pair.scaled(3000), 21).with(&["--intkey"]),
         &["--append"],
     )?;
     fill_verify(
         &pair,
         &env,
-        &DataSet::new("ap_df", 50, 22).with(&["--dupfixed", "--dups", "800"]),
+        &DataSet::new("ap_df", 50, 22).with(&["--dupfixed", "--dups", &pair.scaled_arg(800)]),
         &["--append"],
     )?;
     audit(&pair, &env)?;
@@ -931,21 +994,26 @@ pub fn fill_verify_append(pair: Pair) -> Result<()> {
 /// Deleting keys, single duplicates and overflow values, then everything.
 pub fn delete_verify(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 256 * MIB)?;
+    let deldf_dups = pair.scaled_arg(1500);
     let sets = [
-        (DataSet::new("del", 3000, 23), 3),
+        (DataSet::new("del", pair.scaled(3000), 23), 3),
         (
-            DataSet::new("deld", 600, 24).with(&["--dupsort", "--dups", "30"]),
+            DataSet::new("deld", pair.scaled(600), 24).with(&["--dupsort", "--dups", "30"]),
             4,
         ),
-        (DataSet::new("delbig", 200, 25).with(&["--big", "20000"]), 2),
         (
-            DataSet::new("deldf", 40, 26).with(&["--dupfixed", "--dups", "1500"]),
+            DataSet::new("delbig", pair.scaled(200), 25).with(&["--big", "20000"]),
+            2,
+        ),
+        (
+            DataSet::new("deldf", 40, 26).with(&["--dupfixed", "--dups", &deldf_dups]),
             3,
         ),
     ];
+    let per_txn = pair.scaled_arg(100);
     for (ds, every) in &sets {
         ds.fill(pair.writer, &env, &[])?;
-        ds.delete(pair.writer, &env, *every, &["--per-txn", "100"])?;
+        ds.delete(pair.writer, &env, *every, &["--per-txn", &per_txn])?;
         for peer in pair.peers() {
             ds.after_delete(*every).verify(peer, &env)?;
         }
@@ -957,7 +1025,10 @@ pub fn delete_verify(pair: Pair) -> Result<()> {
     del.after_delete(*every).delete(pair.writer, &env, 1, &[])?;
     for peer in pair.peers() {
         let v = del.after_delete(1).verify(peer, &env)?;
-        ensure!(v.entries == 0 && v.absent == 3000, "{peer}: {v:?}");
+        ensure!(
+            v.entries == 0 && v.absent == u64::from(del.count),
+            "{peer}: {v:?}"
+        );
     }
     let a = audit(&pair, &env)?;
     ensure!(a.pages_free > 0, "deleting freed no pages");
@@ -1036,9 +1107,9 @@ pub fn tool_copy_or_skip(pair: &Pair, out: Output, scenario: &str) -> Result<Opt
 pub fn copy_dump_equal(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 256 * MIB)?;
     let sets = [
-        DataSet::new("plain", 2000, 27),
-        DataSet::new("dups", 300, 28).with(&["--dupsort", "--dups", "40"]),
-        DataSet::new("big", 80, 29).with(&["--big", "25000"]),
+        DataSet::new("plain", pair.scaled(2000), 27),
+        DataSet::new("dups", pair.scaled(300), 28).with(&["--dupsort", "--dups", "40"]),
+        DataSet::new("big", pair.scaled(80), 29).with(&["--big", "25000"]),
     ];
     for ds in &sets {
         ds.fill(pair.writer, &env, &[])?;
@@ -1122,7 +1193,7 @@ pub fn copy_dump_equal(pair: Pair) -> Result<()> {
 /// still shows the old data, and its pages were not reused.
 pub fn mvcc_hold_reader(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 1024 * MIB)?;
-    let old = DataSet::new("data", 2000, 1);
+    let old = DataSet::new("data", pair.scaled(2000), 1);
     old.fill(pair.writer, &env, &[])?;
 
     let mut holder = pair
@@ -1134,8 +1205,8 @@ pub fn mvcc_hold_reader(pair: Pair) -> Result<()> {
     let ready = HoldReady::parse(&holder.wait_ready()?)?;
 
     old.delete(pair.writer, &env, 1, &[])?;
-    let new = DataSet::new("data", 2500, 2);
-    new.fill(pair.writer, &env, &["--per-txn", "500"])?;
+    let new = DataSet::new("data", pair.scaled(2500), 2);
+    new.fill(pair.writer, &env, &["--per-txn", &pair.scaled_arg(500)])?;
     let wl = pair
         .writer
         .on("writer-loop", &env)
@@ -1169,7 +1240,8 @@ pub fn mvcc_hold_reader(pair: Pair) -> Result<()> {
     holder.release()?;
     let out = holder.finish()?.ok()?;
     ensure!(
-        out.stdout.contains("verified db=data keys=2000"),
+        out.stdout
+            .contains(&format!("verified db=data keys={} ", old.count)),
         "held snapshot did not verify the old data:\n{out}"
     );
     new.verify(pair.reader, &env)?;
@@ -1308,8 +1380,8 @@ pub fn nosubdir(pair: Pair) -> Result<()> {
         env.lock_file().display()
     );
     // (`verify -` would count the named DB's record in the main DB.)
-    let main = DataSet::new("plain", 1000, 31);
-    let named = DataSet::new("named", 200, 32).with(&["--dupsort"]);
+    let main = DataSet::new("plain", pair.scaled(1000), 31);
+    let named = DataSet::new("named", pair.scaled(200), 32).with(&["--dupsort"]);
     fill_verify(&pair, &env, &main, &[])?;
     fill_verify(&pair, &env, &named, &[])?;
     audit(&pair, &env)?;
@@ -1347,10 +1419,16 @@ pub fn nosubdir(pair: Pair) -> Result<()> {
 pub fn dump_load_roundtrip(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 256 * MIB)?;
     let sets = [
-        DataSet::new("a_plain", 400, 33),
-        DataSet::new("dups", 150, 34).with(&["--dupsort", "--dups", "7"]),
-        DataSet::new("ik", 300, 35).with(&["--intkey"]),
-        DataSet::new("fx", 40, 36).with(&["--dupfixed", "--dups", "50", "--valsize", "8"]),
+        DataSet::new("a_plain", pair.scaled(400), 33),
+        DataSet::new("dups", pair.scaled(150), 34).with(&["--dupsort", "--dups", "7"]),
+        DataSet::new("ik", pair.scaled(300), 35).with(&["--intkey"]),
+        DataSet::new("fx", 40, 36).with(&[
+            "--dupfixed",
+            "--dups",
+            &pair.scaled_arg(50),
+            "--valsize",
+            "8",
+        ]),
     ];
     for ds in &sets {
         ds.fill(pair.writer, &env, &[])?;
