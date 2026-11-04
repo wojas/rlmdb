@@ -62,7 +62,21 @@
 //! [`Environment::incr_load`] reads such page records (a page header, then
 //! the rest of the page, or of the run of `mp_pages` pages) up to the end of
 //! the input and writes each at `mp_pgno * page size` into the data file,
-//! as C does through the environment's descriptor. C checks nothing, and
+//! as C does through the environment's descriptor, but not in the stream's
+//! order: C writes the meta pages first, which come first in a dump, and
+//! does not sync, so a load that stops early leaves meta pages naming
+//! pages never written. Here a dump's meta pages are held back until its
+//! data pages are written and synced, then written and synced in turn, as
+//! a commit writes its meta page (a meta page that follows data pages
+//! begins the next dump of a stream of several, whose meta pages are then
+//! held back in the same way). The finished file is the same bytes. An
+//! interrupted load leaves the base's meta pages, and the base snapshot
+//! whole only if the dump spans at most two commits after it: from the
+//! third on, a commit may reuse pages the base tree still names, and the
+//! dump holds their new bytes. Loading the dump again completes the load
+//! (each record is written at its own position). A stream cut at a record
+//! boundary cannot be told from a whole one: C's format has neither a
+//! count nor a checksum. C checks nothing, and
 //! `lmdb.h` asks that no other task use the environment meanwhile. Here
 //! the load holds the writer lock, makes sure no transaction of this
 //! process can see the file change under it (see the method), and
@@ -192,11 +206,22 @@ impl Environment {
     /// where its header says, up to the end of the input. Applied to a
     /// copy of the file at the dump's `txnid` (a plain copy, or the result
     /// of the earlier loads of a chain), it makes the file the dumped
-    /// environment's as it was when the dump began, unless the dump holds
-    /// stale pages that C's walk took for headers (`KNOWN_C_BUGS.md` row
-    /// 72); nothing checks that the dump fits the file (C checks nothing
-    /// either). Not synced: call
-    /// [`Environment::sync`] to make the result durable.
+    /// environment's as it was when the dump began, unless the dump is C
+    /// 1.0's and holds stale pages its walk took for headers
+    /// (`KNOWN_C_BUGS.md` row 72); nothing checks that the dump fits the
+    /// file (C checks nothing either).
+    ///
+    /// Each dump's meta pages are written after its data pages, each step
+    /// synced, whatever [`NO_SYNC`](crate::EnvironmentFlags::NO_SYNC) says
+    /// (C writes the meta pages first and does not sync; row 65). An
+    /// interrupted load (an error, a crash) leaves the base's meta pages,
+    /// and its snapshot whole only if the dump spans at most two commits
+    /// after the base: a third may reuse pages the base tree still names.
+    /// Loading the same dump again completes it. A stream cut at a record
+    /// boundary cannot be told from a whole one (C's format has neither a
+    /// count nor a checksum) and loads as if it were. So load onto a copy
+    /// that can be thrown away, or keep a copy of the base (or at least
+    /// have it synced) until the load has succeeded.
     ///
     /// `lmdb.h` asks that no other task access the environment while the
     /// load runs, and that it be opened with `MDB_WRITEMAP`, which neither
@@ -505,7 +530,8 @@ fn newest_meta(env: &Environment) -> Result<Meta> {
 }
 
 /// The record loop of `mdb_env_incr_loadfd` (see the module documentation
-/// for what is checked). Sets `written` once a page was written.
+/// for what is checked, and for the order of the writes). Sets `written`
+/// once a page was written.
 fn load(env: &Environment, map: &DataMap, input: &mut impl Read, written: &mut bool) -> Result<()> {
     let l = env.layout();
     let ps = env.page_size();
@@ -513,10 +539,11 @@ fn load(env: &Environment, map: &DataMap, input: &mut impl Read, written: &mut b
     let corrupted = || Error::from(MdbError::Corrupted);
     let mut limit = (env.map_size() as u64).max(os::file_size(file)?);
     let mut buf = vec![0u8; LOAD_CHUNK.max(ps)];
+    let mut metas = HeldMetas::default();
     loop {
         let hdr = l.page_hdr;
         match read_full(input, &mut buf[..hdr])? {
-            0 => return Ok(()),
+            0 => break,
             n if n < hdr => return Err(truncated()),
             _ => {}
         }
@@ -527,7 +554,8 @@ fn load(env: &Environment, map: &DataMap, input: &mut impl Read, written: &mut b
         } else {
             1
         };
-        if pages == 0 {
+        // No run is empty, and none starts at a meta page.
+        if pages == 0 || (pgno < NUM_METAS as u64 && pages != 1) {
             return Err(corrupted());
         }
         let pos = pgno.checked_mul(ps as u64).ok_or_else(corrupted)?;
@@ -539,15 +567,25 @@ fn load(env: &Environment, map: &DataMap, input: &mut impl Read, written: &mut b
             return Err(corrupted());
         }
         read_exact(input, &mut buf[hdr..ps])?;
-        // The pages of a dump whose meta pages raise the map size lie past
-        // the map and the file; the meta pages come first.
-        if pgno < NUM_METAS as u64 && pages == 1 && flags & P_META != 0 {
-            if let Ok(meta) = Meta::read_page_with_layout(&buf[..ps], l) {
-                limit = limit.max(meta.map_size);
+        if pgno < NUM_METAS as u64 {
+            // The pages of a dump whose meta pages raise the map size lie
+            // past the map and the file; the meta pages come first.
+            if flags & P_META != 0 {
+                if let Ok(meta) = Meta::read_page_with_layout(&buf[..ps], l) {
+                    limit = limit.max(meta.map_size);
+                }
             }
+            // A meta page after data pages begins the next dump of the
+            // stream: the one before is complete.
+            if metas.data_since {
+                metas.commit(file, map, ps)?;
+            }
+            metas.pages[pgno as usize] = Some(buf[..ps].to_vec());
+            continue;
         }
         write_page_bytes(file, map, &buf[..ps], pos)?;
         *written = true;
+        metas.data_since = true;
         let mut at = pos + ps as u64;
         while at < end {
             let n = (end - at).min(buf.len() as u64) as usize;
@@ -555,6 +593,40 @@ fn load(env: &Environment, map: &DataMap, input: &mut impl Read, written: &mut b
             write_page_bytes(file, map, &buf[..n], at)?;
             at += n as u64;
         }
+    }
+    if metas.commit(file, map, ps)? {
+        *written = true;
+    }
+    Ok(())
+}
+
+/// The meta pages of the dump being loaded, held back until its data pages
+/// are written (`KNOWN_C_BUGS.md` row 65).
+#[derive(Default)]
+struct HeldMetas {
+    /// Meta pages 0 and 1, as the dump holds them.
+    pages: [Option<Vec<u8>>; NUM_METAS],
+    /// Whether data pages were written since the meta pages arrived.
+    data_since: bool,
+}
+
+impl HeldMetas {
+    /// Writes the held meta pages as a commit does its meta page: after a
+    /// sync of the data pages written before them, then synced in turn
+    /// (whatever `NO_SYNC` says). Returns whether there were any.
+    fn commit(&mut self, file: &File, map: &DataMap, ps: usize) -> Result<bool> {
+        self.data_since = false;
+        if self.pages.iter().all(Option::is_none) {
+            return Ok(false);
+        }
+        os::fdatasync(file)?;
+        for (i, page) in self.pages.iter_mut().enumerate() {
+            if let Some(page) = page.take() {
+                write_page_bytes(file, map, &page, (i * ps) as u64)?;
+            }
+        }
+        os::fdatasync(file)?;
+        Ok(true)
     }
 }
 

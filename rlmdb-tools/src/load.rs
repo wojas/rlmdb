@@ -28,8 +28,15 @@
 //! which [`rlmdb::Environment::incr_load`] applies to the environment, as
 //! `tests/lmdb-c/1.0/mdb_load.c` does (no header, no text; `-a`, `-s`,
 //! `-N` and `-T` are ignored). The environment is opened (and created if
-//! need be) with `MDB_NOSYNC` and the defaults, and not synced afterwards,
-//! as in C. Incremental dumps exist only for LMDB 1.0, so `-i` always means
+//! need be) with `MDB_NOSYNC` and the defaults, as in C; the load itself
+//! writes each dump's meta pages after its data pages and syncs before and
+//! after them, where C writes the meta pages first and does not sync
+//! (`KNOWN_C_BUGS.md` row 65). An interrupted load keeps the base's meta
+//! pages, and the base snapshot whole only if the dump spans at most two
+//! commits; a dump cut at a record boundary looks whole. So load onto a
+//! copy that can be thrown away, or keep the base until the load has
+//! succeeded; loading the same dump again completes an interrupted one.
+//! Incremental dumps exist only for LMDB 1.0, so `-i` always means
 //! 1.0: a new environment is a 1.0 one with the default page size (C 1.0's
 //! tool creates 1.0 files), whatever the experimental
 //! `RLMDB_DEFAULT_FORMAT` says; `-F 0.9` with `-i` is a usage error, before

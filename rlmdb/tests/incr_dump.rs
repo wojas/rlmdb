@@ -889,3 +889,173 @@ fn a_read_only_environment_fails_at_the_first_write() {
     drop(ro);
     assert!(data(dir.path()) == before);
 }
+
+/// What the databases of [`work`] (and the main DB's records of the named
+/// ones) hold in the newest snapshot of `env`.
+fn contents(env: &Environment) -> Vec<(u8, Vec<u8>, Vec<u8>)> {
+    let txn = env.begin_ro_txn().unwrap();
+    let mut out = Vec::new();
+    for (i, name) in [None, Some("dup"), Some("fix")].into_iter().enumerate() {
+        let db = txn.open_db(name).unwrap();
+        let mut c = txn.cursor(db).unwrap();
+        while let Some((k, v)) = c.next().unwrap() {
+            out.push((i as u8, k.to_vec(), v.to_vec()));
+        }
+    }
+    out
+}
+
+/// A source after 30 write transactions, its copy and contents then, and
+/// after `commits` more (some may change nothing, and commit no txnid) the
+/// dump since the copy.
+struct Increment {
+    src: std::path::PathBuf,
+    base: std::path::PathBuf,
+    base_txnid: u64,
+    base_contents: Vec<(u8, Vec<u8>, Vec<u8>)>,
+    dump: Vec<u8>,
+    /// The source's newest txnid, the dump's snapshot.
+    txnid: u64,
+}
+
+fn increment(dir: &Path, commits: usize) -> Increment {
+    let src = dir.join("src");
+    std::fs::create_dir(&src).unwrap();
+    let env = v10(4096).open(&src).unwrap();
+    let dbs = create_dbs(&env);
+    let mut rng = Rng(41);
+    work(&env, &dbs, &mut rng, 30);
+    let base = copy(&env, dir, "base");
+    let base_txnid = last_txnid(&env);
+    let base_contents = contents(&env);
+    work(&env, &dbs, &mut rng, commits);
+    let dump = dump(&env, base_txnid);
+    let txnid = last_txnid(&env);
+    assert!(txnid > base_txnid && txnid <= base_txnid + commits as u64);
+    Increment {
+        src,
+        base,
+        base_txnid,
+        base_contents,
+        dump,
+        txnid,
+    }
+}
+
+/// A copy of the base in `dir/name`, loaded with `input`: the result.
+fn load_copy(
+    inc: &Increment,
+    dir: &Path,
+    name: &str,
+    input: &[u8],
+) -> (std::path::PathBuf, Result<(), Error>) {
+    let path = dir.join(name);
+    std::fs::create_dir(&path).unwrap();
+    std::fs::copy(inc.base.join("data.mdb"), path.join("data.mdb")).unwrap();
+    let rc = reopen(&path).incr_load(input);
+    (path, rc)
+}
+
+/// Row 65: the meta pages are written last, after a sync, so a load that
+/// stops inside a page leaves the base copy's meta pages, and with an
+/// increment of two commits (which cannot reuse a page the base tree
+/// names) the base snapshot whole. A stream cut at a record boundary
+/// cannot be told from a whole one (C's format has neither a count nor a
+/// checksum): the load commits the new snapshot without the dropped page.
+/// Loading the whole dump again completes either.
+#[test]
+fn an_interrupted_load_keeps_the_base_snapshot() {
+    let dir = tmp();
+    let inc = increment(dir.path(), 2);
+    let recs = records(&inc.dump, 4096);
+    let last = recs.last().unwrap();
+    assert!(recs.len() > 3 && last.0 >= 2, "{recs:?}");
+    let source = data(&inc.src);
+
+    // Cut inside the last page: an error, and the base snapshot.
+    let cut = inc.dump.len() - 2048;
+    let (path, rc) = load_copy(&inc, dir.path(), "cut", &inc.dump[..cut]);
+    let e = rc.unwrap_err();
+    assert_eq!(code(&e), libc::EIO, "{e:?}");
+    let env = reopen(&path);
+    assert_eq!(last_txnid(&env), inc.base_txnid);
+    assert_eq!(env.begin_ro_txn().unwrap().id(), inc.base_txnid);
+    assert!(contents(&env) == inc.base_contents);
+    let mut env = env;
+    env.incr_load(&inc.dump[..]).unwrap();
+    drop(env);
+    assert!(data(&path) == source);
+
+    // The last record dropped: a "whole" stream, the new snapshot, the
+    // dropped page as the base copy had it.
+    let boundary = inc.dump.len() - last.2 as usize * 4096;
+    let (path, rc) = load_copy(&inc, dir.path(), "dropped", &inc.dump[..boundary]);
+    rc.unwrap();
+    assert_eq!(last_txnid(&reopen(&path)), inc.txnid);
+    let got = data(&path);
+    let at = last.0 as usize * 4096;
+    assert!(got.len() < at + 4096 || got[at..at + 4096] != source[at..at + 4096]);
+    reopen(&path).incr_load(&inc.dump[..]).unwrap();
+    assert!(data(&path) == source);
+}
+
+/// With more commits since the base, the increment may hold pages the base
+/// tree still names (LMDB reuses a page from the third commit after it
+/// was freed on): a load cut inside a page leaves the base meta pages, but
+/// not necessarily the base tree. Loading the whole dump again makes the
+/// file the source's.
+#[test]
+fn a_longer_interrupted_increment_needs_the_dump_again() {
+    let dir = tmp();
+    let inc = increment(dir.path(), 20);
+    let cut = inc.dump.len() - 2048;
+    let (path, rc) = load_copy(&inc, dir.path(), "cut", &inc.dump[..cut]);
+    assert_eq!(code(&rc.unwrap_err()), libc::EIO);
+    assert!(data(&path)[..2 * 4096] == data(&inc.base)[..2 * 4096]);
+    assert_eq!(last_txnid(&reopen(&path)), inc.base_txnid);
+    reopen(&path).incr_load(&inc.dump[..]).unwrap();
+    assert!(data(&path) == data(&inc.src));
+}
+
+/// Two dumps back to back in one stream: each dump's meta pages are
+/// written once its data pages are (a meta page after data pages begins
+/// the next dump), so a stream cut inside the second leaves the first
+/// loaded; the whole stream gives what the two loads in turn give.
+#[test]
+fn dumps_back_to_back_commit_one_by_one() {
+    let dir = tmp();
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    let env = v10(4096).open(&src).unwrap();
+    let dbs = create_dbs(&env);
+    let mut rng = Rng(51);
+    work(&env, &dbs, &mut rng, 30);
+    let base = copy(&env, dir.path(), "base");
+    let t0 = last_txnid(&env);
+    work(&env, &dbs, &mut rng, 2);
+    let (t1, at_t1) = (last_txnid(&env), contents(&env));
+    let d1 = dump(&env, t0);
+    work(&env, &dbs, &mut rng, 2);
+    let d2 = dump(&env, t1);
+    drop(env);
+    let both = [&d1[..], &d2[..]].concat();
+
+    let target = |name: &str| {
+        let path = dir.path().join(name);
+        std::fs::create_dir(&path).unwrap();
+        std::fs::copy(base.join("data.mdb"), path.join("data.mdb")).unwrap();
+        path
+    };
+    let cut = target("cut");
+    let e = reopen(&cut)
+        .incr_load(&both[..both.len() - 2048])
+        .unwrap_err();
+    assert_eq!(code(&e), libc::EIO);
+    let env = reopen(&cut);
+    assert_eq!(last_txnid(&env), t1);
+    assert!(contents(&env) == at_t1);
+    drop(env);
+    let whole = target("whole");
+    reopen(&whole).incr_load(&both[..]).unwrap();
+    assert!(data(&whole) == data(&src));
+}

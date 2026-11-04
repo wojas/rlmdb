@@ -128,10 +128,17 @@ Each C release's tools are the oracle for their own format: for an LMDB
   66) and fails with `EBUSY` while a reader of another process pins a
   snapshot (row 65). `-i` always means 1.0: `mdb_load -i` creates a new
   environment in format 1.0 whatever the experimental variable says (C
-  1.0's creates 1.0 files), and `-F 0.9` with `-i` is a usage error; like
-  C's it opens the environment with `MDB_NOSYNC` and does not sync it. On an LMDB 0.9 environment both fail
-  with `ENOTSUP` (0.9 pages record no txnid; C 1.0's tools do not open
-  0.9 files).
+  1.0's creates 1.0 files), and `-F 0.9` with `-i` is a usage error. Like
+  C's it opens the environment with `MDB_NOSYNC`, but its load writes
+  each dump's meta pages after the data pages, syncing before and after
+  them (C writes them first, unsynced; row 65): an interrupted load
+  leaves the base's meta pages, and the base snapshot whole if the dump
+  spans at most two commits (a third may reuse pages the base tree
+  names). A dump cut at a record boundary looks whole in C's format. So
+  load onto a copy you can throw away, or keep the base until the load
+  has succeeded; loading the same dump again completes an interrupted
+  one. On an LMDB 0.9 environment both fail with `ENOTSUP` (0.9 pages
+  record no txnid; C 1.0's tools do not open 0.9 files).
 * Not reproduced from C 1.0: its `mdb_env_info` reports the process's map
   address when the file records none, so `mdb_stat10 -e` prints it and
   every `mdb_dump10` output has a `mapaddr=` line (which makes `mdb_load`

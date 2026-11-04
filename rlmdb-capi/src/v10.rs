@@ -341,7 +341,13 @@ pub unsafe extern "C" fn mdb_env_incr_dump(
 /// checked where C's is not: a read error, an input that ends inside a page
 /// (`EIO`), a page that would land past the map (`MDB_CORRUPTED`) fail the
 /// load (`KNOWN_C_BUGS.md` row 66), so does a descriptor that cannot be
-/// one, which C takes for an empty input.
+/// one, which C takes for an empty input. Each dump's meta pages are
+/// written after its data pages, each step synced (C writes them first and
+/// does not sync, row 65): an interrupted load keeps the base's meta
+/// pages, and its snapshot whole only if the dump spans at most two
+/// commits; a stream cut at a record boundary cannot be detected. Load
+/// onto a copy that can be thrown away, or keep the base until the load
+/// has succeeded.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_env_incr_loadfd(env: *mut MDB_env, fd: mdb_filehandle_t) -> c_int {
     // SAFETY: env is NULL or a live handle (lmdb.h).

@@ -636,6 +636,8 @@ Later decisions (owner, 2026-11-03), for the three C libraries:
    dump of only the pages the trees reach (random access, not a copy of
    the file's blocks) may come later as an optional mode. The load
    checks what C's does not (rows 65 and 66: cut or malformed input, the
-   environment's transactions and readers, `mti_txnid` published) and
+   environment's transactions and readers, `mti_txnid` published), writes
+   each dump's meta pages after its data pages, synced as a commit's
+   (row 65: the base's meta pages survive an interrupted load), and
    needs no `MDB_WRITEMAP`, which `lmdb.h` asks for and C's code does not
    use.
