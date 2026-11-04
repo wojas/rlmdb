@@ -660,16 +660,14 @@ static void test_incremental(void)
 	RC(mdb_env_incr_loadfd(env, COMPAT_FILEHANDLE(fd)), EBUSY);
 	close(fd);
 	mdb_txn_abort(txn);
-	/* An unusable descriptor is an error, on every platform (C reads
-	 * nothing and succeeds on Unix, returns -1 on Windows: KNOWN_C_BUGS.md
-	 * row 66). */
+	/* An unusable descriptor is an error, on every platform (C on Unix
+	 * reads nothing and succeeds: KNOWN_C_BUGS.md row 66). */
 	RC(mdb_env_incr_loadfd(env, COMPAT_NO_FILEHANDLE), BAD_FILEHANDLE);
 #else
 	(void)txn;
 #ifdef _WIN32
-	/* C 1.0's Windows read takes any ReadFile failure but ERROR_HANDLE_EOF
-	 * for the end of the load and returns -1, not the error. */
-	RC(mdb_env_incr_loadfd(env, COMPAT_NO_FILEHANDLE), -1);
+	/* The oracle's patch 0003 returns the read's error (row 66). */
+	RC(mdb_env_incr_loadfd(env, COMPAT_NO_FILEHANDLE), BAD_FILEHANDLE);
 #else
 	/* A failed read of a page header ends C's load with success. */
 	OK(mdb_env_incr_loadfd(env, COMPAT_NO_FILEHANDLE));

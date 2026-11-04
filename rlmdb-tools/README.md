@@ -128,7 +128,7 @@ Each C release's tools are the oracle for their own format: for an LMDB
   `mdb_load -i` reports a dump cut short (`mdb_env_incr_load failed,
   error 5 Input/output error`; C reports success, or reads for ever, row
   66; on Windows C 1.0's fails at the end of a pipe with "error -1", having
-  loaded the dump, while rlmdb's reads a pipe to its end) and fails with
+  loaded the dump, where rlmdb's reads a pipe to its end) and fails with
   `EBUSY` while a reader of another process pins a snapshot (row 65).
   `-i` always means 1.0: `mdb_load -i` creates a new environment in
   format 1.0 whatever the experimental variable says (C 1.0's creates 1.0

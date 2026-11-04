@@ -278,20 +278,14 @@ fn history(env: &TestEnv, step: usize, big: &str, per_txn: &str) {
     }
 }
 
-/// Loads `dumps` into `target`, each with `mdb_load -i`: C 1.0's from a
-/// file (`-f`; its load fails at the end of a pipe on Windows,
-/// `KNOWN_C_BUGS.md` row 66), or rlmdb's from standard input.
+/// Loads `dumps` into `target`, each with `mdb_load -i` (C 1.0's or
+/// rlmdb's) from standard input, a pipe (C 1.0's takes the end of a pipe
+/// for the end of the input on Windows only with the oracle's patch 0003,
+/// `KNOWN_C_BUGS.md` row 66).
 fn load_chain(c_loads: bool, target: &TestEnv, dumps: &[&[u8]]) {
     for d in dumps {
         let r = if c_loads {
-            let file = target.path().with_extension("incr");
-            std::fs::write(&file, d).unwrap();
-            run(
-                bins::mdb_load10(),
-                "mdb_load",
-                &["-f", s(&file), "-i", s(target.path())],
-                b"",
-            )
+            run(bins::mdb_load10(), "mdb_load", &["-i", s(target.path())], d)
         } else {
             rust("mdb_load", &["-i", s(target.path())], d)
         };

@@ -1,0 +1,38 @@
+mdb_env_incr_loadfd on Windows: the end of a pipe ends the input
+
+Why: the Windows read of a page header takes only ERROR_HANDLE_EOF for
+the end of the input and turns every other ReadFile failure into -1.
+The end of a pipe whose writer closed it is ERROR_BROKEN_PIPE, so
+`mdb_load -i` from a pipe loads the whole dump and then fails with
+"error -1"; a handle that cannot be read returns -1, not its error; and
+a successful read sets rc to the byte count, so a dump cut inside a
+page header returns that count as an error code (KNOWN_C_BUGS.md row
+66). rlmdb takes the end of a pipe for the end of the input on Windows;
+the interop tests feed C 1.0's `mdb_load -i` its dumps through a pipe on
+every platform.
+
+What: ERROR_BROKEN_PIPE ends the input as ERROR_HANDLE_EOF does, any
+other failure of the header read returns its error code, and a
+successful read leaves rc 0 (a short header then ends the load as on
+Unix). The read of the rest of a record is unchanged. The line count of
+the file is unchanged, so line numbers cited elsewhere stay valid.
+
+Upstream: not reported; not fixed upstream at the pinned commit.
+
+diff --git a/mdb.c b/mdb.c
+index 6cf577cb..c8f5feb8 100644
+--- a/mdb.c
++++ b/mdb.c
+@@ -12003,9 +12003,9 @@ mdb_env_incr_loadfd(MDB_env *env, HANDLE fd)
+ 
+ 	for (;;) {
+ #ifdef _WIN32
+-		rc = ReadFile(fd, buf, sizeof(buf), &rlen, NULL) ? (int)rlen : -1;
+-		if (rc == -1 && ErrCode() == ERROR_HANDLE_EOF)
+-			rc = 0;
++		if (!ReadFile(fd, buf, sizeof(buf), &rlen, NULL) && (rc = ErrCode()) != ERROR_HANDLE_EOF
++			&& rc != ERROR_BROKEN_PIPE) break;	/* rlmdb's patch 0003 */
++		rc = 0;
+ #else
+ 		rlen = read(fd, buf, sizeof(buf));
+ #endif
