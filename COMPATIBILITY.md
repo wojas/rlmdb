@@ -14,7 +14,7 @@ table below), 64-bit.
 |---|---|---|
 | macOS (arm64) | POSIX named semaphores `/MDBr…`, `/MDBw…`; reader slots at offset 128 | tested |
 | Linux, glibc, aarch64 | process-shared robust `pthread_mutex_t` (48 bytes) in the lock file; slots at 192 | tested (Docker, `scripts/linux-test.sh`) |
-| Linux, glibc, x86-64 | as above, 40-byte mutex; slots at 128 | layout follows `size_of::<pthread_mutex_t>()`; not run in CI here |
+| Linux, glibc, x86-64 | as above, 40-byte mutex; slots at 128 | tested in CI (`.github/workflows/ci.yml`, Linux x86-64 job: the workspace suite, the interop matrix included); layout follows `size_of::<pthread_mutex_t>()` |
 | Linux, glibc, s390x (big-endian) | as above, 40-byte mutex; slots at 128 | tested under QEMU user emulation (`LINUX_TEST_TARGET=s390x-unknown-linux-gnu scripts/linux-test.sh`, nightly CI); see *Byte order* |
 | Android | robust pthread mutex layout | compiles in principle; untested |
 | FreeBSD 13+ (64-bit) | as Linux: process-shared robust `pthread_mutex_t` in the lock file, 8 bytes there (a pointer to a kernel object keyed by its address); slots at 128 in both lock-file versions; `fdatasync`; meta fd `O_DSYNC` | tested by hand in a FreeBSD 15.1 arm64 VM (2 vCPUs, 2 GB): the workspace suite passes (`cargo test --workspace`), the interop matrix with C 0.9.37 and 1.0.3 built by the base clang included, and `layout_dump` there confirms the lock-file layouts and `MDB_LOCK_FORMAT`; `bsd.yml` runs the `rlmdb` and `rlmdb-capi` tests in a FreeBSD VM (weekly and on demand, experimental); compiles and lints in CI (`Check BSD targets`) |
