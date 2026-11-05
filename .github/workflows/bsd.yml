@@ -1,12 +1,18 @@
-# EXPERIMENTAL: the tests of rlmdb and rlmdb-capi in a FreeBSD virtual
-# machine, the way to run them on a BSD without a BSD machine. FreeBSD is
-# marked untested in COMPATIBILITY.md until this has passed and someone has
-# read the results; until then a failure does not fail the workflow.
+# EXPERIMENTAL: the whole test suite in FreeBSD and OpenBSD virtual
+# machines, the way to run it on the BSDs without a BSD machine. Both have
+# been tested by hand (COMPATIBILITY.md, "Platforms"); these jobs are new,
+# so for now a failure does not fail the workflow: read the job's result,
+# not the workflow's.
 #
-# The VM gets Rust from the FreeBSD packages; the C compiler the tests use
-# to build the reference library is the base system's cc (clang). The
-# interop suite is not run here (it needs the C 1.0 build as well and has
-# not been ported to the BSDs).
+# Each VM gets Rust from the system's packages; the C compiler that builds
+# the reference libraries (C 0.9 and 1.0) is the base system's cc (clang).
+# The suite runs as in nightly.yml: everything (RLMDB_TEST_SCOPE unset),
+# the interop matrix and the tools included, with the tests' environments
+# on the VM's disk. The VMs get 2 GiB of memory, the budget every test
+# must fit in (AGENTS.md, section 8), and all of the runner's cores.
+#
+# The commands run as root. Nothing in the suite depends on that: its
+# EACCES cases come from read-only environments, not file permissions.
 name: BSD (experimental)
 
 on:
@@ -21,14 +27,15 @@ jobs:
   freebsd:
     name: FreeBSD tests (experimental)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - name: cargo test in a FreeBSD VM
         uses: vmactions/freebsd-vm@v1
         with:
-          usesh: true
+          release: "15.1"
+          mem: 2048
           copyback: false
           prepare: |
             pkg install -y rust
@@ -36,4 +43,31 @@ jobs:
             freebsd-version
             cc --version
             rustc --version
-            cargo test -p rlmdb -p rlmdb-capi --no-fail-fast
+            cargo test --workspace --no-fail-fast
+
+  openbsd:
+    name: OpenBSD tests (experimental)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: cargo test in an OpenBSD VM
+        uses: vmactions/openbsd-vm@v1
+        with:
+          release: "7.9"
+          mem: 2048
+          copyback: false
+          prepare: |
+            pkg_add rust
+          # An environment with an LMDB 1.0 lock file takes a SysV
+          # semaphore set, and an open fails with ENOSPC when none is left.
+          # OpenBSD allows 10 sets by default; the suite passed with that on
+          # 2 cores by hand, but here the tests of all the runner's cores
+          # hold environments at once.
+          run: |
+            uname -srm
+            cc --version
+            rustc --version
+            sysctl kern.seminfo.semmni=128 kern.seminfo.semmns=512 kern.seminfo.semmnu=128
+            cargo test --workspace --no-fail-fast

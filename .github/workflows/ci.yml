@@ -95,7 +95,8 @@ jobs:
     # this only checks that the workspace, its tests included, compiles for
     # them. The runner has no BSD sysroot for the C reference library, so
     # the interop and bench build scripts skip it (RLMDB_SKIP_C_BUILD, see
-    # interop/build.rs). bsd.yml runs the tests in a FreeBSD VM.
+    # interop/build.rs). bsd.yml runs the tests in FreeBSD and OpenBSD
+    # VMs.
     name: Check BSD targets
     runs-on: ubuntu-latest
     timeout-minutes: 30
