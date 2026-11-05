@@ -209,9 +209,11 @@ order, same as lmdb-go: per-environment setter,
 then process default setter, then the environment variable
 `RLMDB_DEFAULT_FORMAT` (`0.9` | `1.0`), then V09 (the C API's LMDB 1.0
 stub, which stands in for C 1.0, ends the chain with V10 instead,
-`EnvironmentBuilder::fallback_format`; §4.4). The variable is honoured
-everywhere, including the C libraries, and is documented as
-**experimental**: it may be removed or restricted in a later release, so
+`EnvironmentBuilder::fallback_format`; §4.4). The variable is read where
+rlmdb's environment variables are read at all: by default in the C
+libraries and the tools, in the Rust API only on request
+(`EnvironmentBuilder::read_environment`), nowhere with `RLMDB_IGNORE_ENV`
+(issue 3). It is documented as **experimental**: it may be removed or restricted in a later release, so
 programs and deployments should prefer the setters. The reason for the
 caveat: a stray variable in a service's environment silently creates 1.0
 files. An unparseable value is ignored (V09), never an error.
@@ -222,9 +224,10 @@ handles; no rlmdb-specific error codes are added. `rlmdb_sniff_format` and
 `rlmdb_env_get_format` let a program find out which format the file has.
 
 Implemented as described: `rlmdb::sniff_format`, then `choose_format` in
-`core/env.rs`, then the lock file. The defaults are `rlmdb::default_format`
-(`set_default_format`, then `RLMDB_DEFAULT_FORMAT`, read at every open of
-a new environment, then 0.9); they never apply to an existing file, so a
+`core/env.rs`, then the lock file. The defaults are
+`EnvironmentBuilder::new_env_format` (`set_default_format`, then
+`RLMDB_DEFAULT_FORMAT` if the builder reads the variables, read at every
+open of a new environment, then the fallback, 0.9 unless set); they never apply to an existing file, so a
 default never causes `MDB_VERSION_MISMATCH`. Tests:
 `rlmdb/tests/default_format.rs` (its own test binary, serialised, because
 the variable and the process default are process-wide),
@@ -319,14 +322,15 @@ const char *rlmdb_version_string(void);			/* static, one line */
   The one-line string prints everything a bug report needs:
 
 ```
-rlmdb 0.0.0 (mdb_version 0.0.0; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3)
+rlmdb 0.0.0 (mdb_version 0.0.0; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3; features: test-feature)
 ```
 
   (from `librlmdb`; the stubs say `mdb_version 0.9.85` and `1.0.85`)
 
   Programs read the version numbers from the struct instead of parsing
-  the string; opt-in features, once there are any, will be listed by name
-  (issue #2). The Rust side is `rlmdb::version_info()` (§4.3); the C
+  the string. The opt-in features come last (`a b* c!`: `*` on by
+  default, `!` fixed; left out without features); programs list them with
+  `rlmdb_features()`. The Rust side is `rlmdb::version_info()` (§4.3); the C
   struct is filled from it once at first call.
 
 Behaviour of existing functions:
@@ -530,7 +534,9 @@ the Rust and C peers open without it.
    with the rlmdb version and the 0.9 and 1.0 C releases each format
    matches; `rlmdb_version_string()` prints all of it on one line. (§4.4)
 2. `RLMDB_DEFAULT_FORMAT` is honoured everywhere, marked experimental so it
-   can be removed if it causes trouble. (§4.2)
+   can be removed if it causes trouble. (§4.2) Narrowed later (issue 3,
+   2026-11-05): read where rlmdb's variables are read, by default in the C
+   API and the tools, in the Rust API on request.
 3. No new error codes: a format conflict is `MDB_VERSION_MISMATCH`. (§4.2,
    §4.4)
 4. No copy of the 1.0 sources in the tree: the build extracts them from a

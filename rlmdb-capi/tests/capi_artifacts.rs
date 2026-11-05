@@ -62,9 +62,15 @@ fn api_functions() -> BTreeSet<String> {
     assert_eq!(
         ours,
         set([
+            "rlmdb_env_disable_feature",
+            "rlmdb_env_enable_feature",
+            "rlmdb_env_feature_enabled",
             "rlmdb_env_get_format",
+            "rlmdb_env_read_environment",
             "rlmdb_env_set_format",
             "rlmdb_env_set_pagesize",
+            "rlmdb_feature_default",
+            "rlmdb_features",
             "rlmdb_set_default_format",
             "rlmdb_sniff_format",
             "rlmdb_version",

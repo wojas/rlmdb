@@ -189,7 +189,8 @@ impl MdbError {
 /// The text `mdb_strerror` returns for `err`.
 ///
 /// For LMDB codes this is the `mdb_errstr[]` table (the 0.9 codes, then the
-/// ones LMDB 1.0 adds, with 1.0's texts); for positive values it is the C
+/// ones LMDB 1.0 adds, with 1.0's texts), then rlmdb's own codes
+/// (`RLMDB_UNKNOWN_FEATURE`, `RLMDB_FEATURE_IS_FIXED`, in the same form); for positive values it is the C
 /// library's `strerror`; other negative values give
 /// `"Invalid error code"`, and `0` gives `"Successful return: 0"`. On
 /// Windows codes other than LMDB's are the system's, as in C there: the C
@@ -232,6 +233,9 @@ pub fn strerror(err: c_int) -> String {
         MDB_ENV_BUSY => "MDB_ENV_BUSY: Environment is busy, can't use previous snapshot",
         MDB_IS_READONLY => "MDB_IS_READONLY: Can't write in readonly txn or environment",
         MDB_ADDR_BUSY => "MDB_ADDR_BUSY: Requested map address is unavailable",
+        // rlmdb's own codes (`rlmdb.h`).
+        RLMDB_UNKNOWN_FEATURE => "RLMDB_UNKNOWN_FEATURE: Unknown feature",
+        RLMDB_FEATURE_IS_FIXED => "RLMDB_FEATURE_IS_FIXED: Feature cannot be disabled",
         // C on Windows asks the system (FormatMessage), which has no text
         // for these: an empty string.
         e if e < 0 && !cfg!(windows) => "Invalid error code",
@@ -271,26 +275,60 @@ pub enum Error {
     /// for the file. A `NO_LOCK` handle and one with a lock file of the
     /// same file still refuse each other.
     EnvAlreadyOpened,
+    /// A feature name this build does not know ([`crate::feature`];
+    /// `RLMDB_UNKNOWN_FEATURE` in C), given by the program or, if
+    /// `from_variable`, in the `RLMDB_FEATURES` variable.
+    UnknownFeature {
+        /// The name.
+        name: String,
+        /// The name came from `RLMDB_FEATURES`.
+        from_variable: bool,
+    },
+    /// A request to disable a fixed feature ([`crate::feature`];
+    /// `RLMDB_FEATURE_IS_FIXED` in C), by the program or, if
+    /// `from_variable`, in the `RLMDB_FEATURES` variable.
+    FeatureIsFixed {
+        /// The feature's name.
+        name: String,
+        /// The request came from `RLMDB_FEATURES`.
+        from_variable: bool,
+    },
 }
 
 impl Error {
     /// The C return code for this error (as `mdb_*` would have returned it).
     ///
     /// `Io` errors without an OS code map to `EIO`; `Encoding`/`Decoding`
-    /// map to `EINVAL`; `EnvAlreadyOpened` maps to `EBUSY`.
+    /// map to `EINVAL`; `EnvAlreadyOpened` maps to `EBUSY`; the feature
+    /// errors to rlmdb's codes `RLMDB_UNKNOWN_FEATURE` and
+    /// `RLMDB_FEATURE_IS_FIXED`.
     pub fn to_err_code(&self) -> c_int {
         match self {
             Error::Io(e) => e.raw_os_error().unwrap_or(libc::EIO),
             Error::Mdb(e) => e.to_err_code(),
             Error::Encoding(_) | Error::Decoding(_) => libc::EINVAL,
             Error::EnvAlreadyOpened => libc::EBUSY,
+            Error::UnknownFeature { .. } => RLMDB_UNKNOWN_FEATURE,
+            Error::FeatureIsFixed { .. } => RLMDB_FEATURE_IS_FIXED,
         }
     }
 
     /// Converts a non-zero C return code: LMDB codes become [`Error::Mdb`],
-    /// anything else [`Error::Io`].
+    /// rlmdb's feature codes the feature errors (with an empty name), anything
+    /// else [`Error::Io`].
     pub fn from_err_code(code: c_int) -> Error {
-        MdbError::from_err_code(code).into()
+        let (name, from_variable) = (String::new(), false);
+        match code {
+            RLMDB_UNKNOWN_FEATURE => Error::UnknownFeature {
+                name,
+                from_variable,
+            },
+            RLMDB_FEATURE_IS_FIXED => Error::FeatureIsFixed {
+                name,
+                from_variable,
+            },
+            code => MdbError::from_err_code(code).into(),
+        }
     }
 
     /// Returns `true` if this is `Error::Mdb(MdbError::NotFound)`.
@@ -320,6 +358,22 @@ impl fmt::Display for Error {
                 "environment already open in this program; \
                 close it to be able to open it again with different options",
             ),
+            Error::UnknownFeature {
+                name,
+                from_variable,
+            } => write!(
+                f,
+                "unknown feature \"{name}\"{}",
+                in_variable(*from_variable)
+            ),
+            Error::FeatureIsFixed {
+                name,
+                from_variable,
+            } => write!(
+                f,
+                "feature \"{name}\" cannot be disabled{}",
+                in_variable(*from_variable)
+            ),
         }
     }
 }
@@ -330,8 +384,19 @@ impl std::error::Error for Error {
             Error::Io(e) => Some(e),
             Error::Mdb(e) => Some(e),
             Error::Encoding(e) | Error::Decoding(e) => Some(e.as_ref()),
-            Error::EnvAlreadyOpened => None,
+            Error::EnvAlreadyOpened
+            | Error::UnknownFeature { .. }
+            | Error::FeatureIsFixed { .. } => None,
         }
+    }
+}
+
+/// Where a feature error came from, for its message.
+fn in_variable(from_variable: bool) -> &'static str {
+    if from_variable {
+        " in RLMDB_FEATURES"
+    } else {
+        ""
     }
 }
 
@@ -374,6 +439,19 @@ mod tests {
             Error::from_err_code(libc::EACCES).to_err_code(),
             libc::EACCES
         );
+        for code in [RLMDB_UNKNOWN_FEATURE, RLMDB_FEATURE_IS_FIXED] {
+            assert_eq!(Error::from_err_code(code).to_err_code(), code);
+        }
+        let e = Error::UnknownFeature {
+            name: "x".into(),
+            from_variable: true,
+        };
+        assert_eq!(e.to_string(), "unknown feature \"x\" in RLMDB_FEATURES");
+        let e = Error::FeatureIsFixed {
+            name: "y".into(),
+            from_variable: false,
+        };
+        assert_eq!(e.to_string(), "feature \"y\" cannot be disabled");
     }
 
     #[test]
@@ -401,6 +479,16 @@ mod tests {
             "Invalid error code"
         };
         assert_eq!(strerror(MDB_ADDR_BUSY + 1), invalid);
+        assert_eq!(
+            strerror(RLMDB_UNKNOWN_FEATURE),
+            "RLMDB_UNKNOWN_FEATURE: Unknown feature"
+        );
+        assert_eq!(
+            strerror(RLMDB_FEATURE_IS_FIXED),
+            "RLMDB_FEATURE_IS_FIXED: Feature cannot be disabled"
+        );
+        assert_eq!(strerror(RLMDB_UNKNOWN_FEATURE + 1), invalid);
+        assert_eq!(strerror(RLMDB_FEATURE_IS_FIXED - 1), invalid);
         assert_eq!(strerror(0), "Successful return: 0");
         assert_eq!(strerror(-1), invalid);
         assert_eq!(strerror(libc::EACCES), "Permission denied");

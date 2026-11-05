@@ -234,6 +234,16 @@ pub const MDB_ADDR_BUSY: c_int = -30769;
 /// `MDB_LAST_ERRCODE` of LMDB 1.0 (`MDB_ADDR_BUSY`).
 pub const MDB_LAST_ERRCODE_V10: c_int = MDB_ADDR_BUSY;
 
+// rlmdb's own codes (`rlmdb.h`), from -30600 downwards: the range -30600
+// ..= -30699 is reserved for them, clear of LMDB's (-30799 ..= -30769).
+
+/// `RLMDB_UNKNOWN_FEATURE`: a feature name this build does not know
+/// ([`Error::UnknownFeature`](crate::Error::UnknownFeature)).
+pub const RLMDB_UNKNOWN_FEATURE: c_int = -30600;
+/// `RLMDB_FEATURE_IS_FIXED`: a fixed feature cannot be disabled
+/// ([`Error::FeatureIsFixed`](crate::Error::FeatureIsFixed)).
+pub const RLMDB_FEATURE_IS_FIXED: c_int = -30601;
+
 /// `MDB_ENCRYPT` (LMDB 1.0 environment flag, also recorded in the meta
 /// page's `mm_flags`): the pages are encrypted.
 pub const MDB_ENCRYPT: u32 = 0x2000;

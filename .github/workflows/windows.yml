@@ -15,8 +15,8 @@
 # The checkout keeps the repository's line endings (no core.autocrlf): the
 # tests compare files and outputs byte for byte.
 #
-# RLMDB_DEFAULT_FORMAT is deliberately not set: the tests assume it is unset
-# (see scripts/check-all.sh).
+# RLMDB_DEFAULT_FORMAT, RLMDB_FEATURES and RLMDB_IGNORE_ENV are deliberately
+# not set: the tests assume they are unset (see scripts/check-all.sh).
 #
 # The tests' environments go to the runner's local disk (TMP and TEMP set to
 # runner.temp, on D: with the workspace) instead of the user's temp

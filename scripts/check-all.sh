@@ -11,11 +11,13 @@
 set -u
 here=$(cd "$(dirname "$0")/.." && pwd)
 cd "$here" || exit 1
-# The experimental default-format variable would make the tests create LMDB
-# 1.0 environments where they expect 0.9 ones (the tests that need it set
-# it for their own processes). The checks run everything: not the CI's
-# platform suite (RLMDB_TEST_SCOPE, interop/README.md).
-unset RLMDB_DEFAULT_FORMAT RLMDB_TEST_SCOPE
+# rlmdb's variables would change what the tests see: the experimental
+# default-format variable makes them create LMDB 1.0 environments where
+# they expect 0.9 ones, RLMDB_FEATURES turns features on, RLMDB_IGNORE_ENV
+# hides the variables from the tests of them (those tests set them for
+# their own processes). The checks run everything: not the CI's platform
+# suite (RLMDB_TEST_SCOPE, interop/README.md).
+unset RLMDB_DEFAULT_FORMAT RLMDB_FEATURES RLMDB_IGNORE_ENV RLMDB_TEST_SCOPE
 
 linux=1
 for arg in "$@"; do

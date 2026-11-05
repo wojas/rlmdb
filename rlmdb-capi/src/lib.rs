@@ -37,6 +37,10 @@
 //!   `rlmdb_env_get_format`, `rlmdb_sniff_format`,
 //!   `rlmdb_set_default_format`, `rlmdb_env_set_pagesize`) in
 //!   [`format`](mod@format).
+//! * `rlmdb.h`'s feature functions (`rlmdb_features`,
+//!   `rlmdb_feature_default`, `rlmdb_env_enable_feature`,
+//!   `rlmdb_env_disable_feature`, `rlmdb_env_feature_enabled`) and
+//!   `rlmdb_env_read_environment` in [`feature`].
 //! * `mdb_env_*`, `mdb_reader_list`, `mdb_reader_check` in [`env`](mod@env)
 //!   (`mdb_env_create` through [`env::env_create`]).
 //! * The functions of LMDB 1.0's `lmdb.h` that 0.9's lacks
@@ -84,6 +88,7 @@ pub mod cursor;
 pub mod dbi;
 pub mod env;
 mod erased;
+pub mod feature;
 pub mod format;
 pub mod handles;
 mod platform;

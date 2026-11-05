@@ -28,8 +28,14 @@ const V10_RELEASE: (i32, i32, i32) = (1, 0, 3);
 /// stub; `librlmdb` and the 1.0 stub put their own `mdb_version` in it):
 ///
 /// ```text
-/// rlmdb 0.0.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3)
+/// rlmdb 0.0.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3; features: test-feature)
 /// ```
+///
+/// The opt-in features of the build ([`crate::features`]) come last, each
+/// name followed by `*` if it is on by default and `!` if it is fixed
+/// ([`FeatureDefault::marker`](crate::FeatureDefault::marker)); the part is
+/// left out in a build without features. The line is for humans and logs:
+/// programs use [`crate::features`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct VersionInfo {
@@ -64,12 +70,17 @@ impl fmt::Display for VersionInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "rlmdb {} (mdb_version {}; format 0.9 = LMDB {}; format 1.0 = LMDB {})",
+            "rlmdb {} (mdb_version {}; format 0.9 = LMDB {}; format 1.0 = LMDB {}",
             Dotted(self.rlmdb),
             Dotted(self.lmdb),
             Dotted(self.v09),
             Dotted(self.v10)
-        )
+        )?;
+        let features = crate::feature::version_list();
+        if !features.is_empty() {
+            write!(f, "; features: {features}")?;
+        }
+        f.write_str(")")
     }
 }
 
@@ -139,7 +150,7 @@ mod tests {
         let v = version_info();
         let expected = format!(
             "rlmdb {} (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; \
-             format 1.0 = LMDB 1.0.3)",
+             format 1.0 = LMDB 1.0.3; features: test-feature)",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(v.to_string(), expected);
@@ -157,7 +168,7 @@ mod tests {
         assert_eq!(
             v.to_string(),
             "rlmdb 0.2.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; \
-             format 1.0 = LMDB 1.0.3)"
+             format 1.0 = LMDB 1.0.3; features: test-feature)"
         );
     }
 

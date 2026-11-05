@@ -26,6 +26,21 @@ use rlmdb::{
     RwTxn, Transaction, WriteFlags,
 };
 
+/// Puts `builder` in plain compatibility mode, as the comparisons with C
+/// byte for byte need: every feature that is on by default
+/// (`rlmdb::features`) disabled. (Programs never need this; none is on by
+/// default so far.)
+fn plain(builder: &mut rlmdb::EnvironmentBuilder) -> &mut rlmdb::EnvironmentBuilder {
+    for f in rlmdb::features() {
+        if f.default == rlmdb::FeatureDefault::On {
+            builder
+                .disable(f.feature)
+                .expect("an on feature can be disabled");
+        }
+    }
+    builder
+}
+
 /// A new directory for the environments of a round: under
 /// `$RLMDB_TEST_SCRATCH` if set, else in the system's temporary directory
 /// (`common::tempdir` of rlmdb's tests, which this file cannot use).
@@ -774,7 +789,7 @@ fn sub_db_leaf_firsts(o: &dyn Oracle, dbflags: u32, key: &[u8], items: &[Vec<u8>
         std::fs::write(dir.path().join("data.mdb"), &file).unwrap();
     }
     let mut builder = Environment::builder();
-    builder
+    plain(&mut builder)
         .format(o.format())
         .map_size(64 << 20)
         .max_dbs(8)
@@ -1255,7 +1270,10 @@ pub fn single_item_on_overflow_pages(o: &dyn Oracle, dbflags: u32, klen: usize, 
     };
     let open = |dir: &Path| {
         let mut b = Environment::builder();
-        b.format(o.format()).max_dbs(8).map_size(64 << 20);
+        plain(&mut b)
+            .format(o.format())
+            .max_dbs(8)
+            .map_size(64 << 20);
         if let (None, Some(ps)) = (o.data_file(), o.page_size()) {
             b.page_size(ps);
         }
@@ -2003,7 +2021,7 @@ pub fn run_round_sized(
         std::fs::write(rdir.path().join("data.mdb"), &file).unwrap();
     }
     let mut builder = Environment::builder();
-    builder
+    plain(&mut builder)
         .format(o.format())
         .map_size(map_size)
         .max_dbs(8)

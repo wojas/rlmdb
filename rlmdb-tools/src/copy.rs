@@ -55,7 +55,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     }
 
     let mut act = "opening environment";
-    let mut builder = Environment::builder();
+    let mut builder = crate::common::env_builder();
     builder.flags(flags);
     let result = builder
         .open_with_permissions(path_of(&rest[0]), 0o600)

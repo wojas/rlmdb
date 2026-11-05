@@ -1025,8 +1025,22 @@ pub fn run_mtest_seeded(prog: &str, lib: Lib, dir: &Path, seed: u32) -> Output {
     run_ok(
         Command::new(exe)
             .current_dir(dir)
-            .env("MTEST_SEED", seed.to_string()),
+            .env("MTEST_SEED", seed.to_string())
+            .env("RLMDB_FEATURES", plain_features()),
     )
+}
+
+/// The value of `RLMDB_FEATURES` that puts an unmodified C program on the
+/// Rust library in plain compatibility mode, for the tests that compare
+/// what it writes with what C writes byte for byte: every feature that is
+/// on by default (`rlmdb::features`) disabled (empty while there is none).
+pub fn plain_features() -> String {
+    let off: Vec<String> = rlmdb::features()
+        .iter()
+        .filter(|f| f.default == rlmdb::FeatureDefault::On)
+        .map(|f| format!("-{}", f.name))
+        .collect();
+    off.join(",")
 }
 
 /// Runs C `mtest`-style program `prog` (C library, default seed) in `dir`

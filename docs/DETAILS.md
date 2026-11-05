@@ -132,6 +132,10 @@ method are in [`bench/RESULTS.md`](../bench/RESULTS.md).
 * `RLMDB_DEFAULT_FORMAT=1.0` is experimental and may be removed: a stray
   variable creates files C 0.9 cannot open. To run an unchanged program
   on 1.0 files, use the 1.0 stub.
+* The C libraries and the tools read rlmdb's environment variables
+  (`RLMDB_FEATURES`, `RLMDB_DEFAULT_FORMAT`); the Rust API reads them only
+  if the program asks for it. `RLMDB_IGNORE_ENV=1` switches all of them
+  off.
 
 ## Testing
 
@@ -147,7 +151,8 @@ cargo test -p rlmdb-interop   # C and Rust processes on one environment
 cargo test -p rlmdb --release -- --ignored   # long tests, after write-path changes
 ```
 
-Leave `RLMDB_DEFAULT_FORMAT` unset while testing. `scripts/linux-test.sh`
+Leave `RLMDB_DEFAULT_FORMAT`, `RLMDB_FEATURES` and `RLMDB_IGNORE_ENV`
+unset while testing. `scripts/linux-test.sh`
 runs cargo in a Linux container limited to 2 GiB of memory;
 `scripts/windows-test.sh` on a Windows machine over ssh.
 

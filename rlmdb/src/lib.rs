@@ -28,6 +28,24 @@
 //! * [`cmp`]: LMDB's comparison functions, which define the sort order on
 //!   disk and therefore must match C bit for bit.
 //! * [`idl`]: sorted page-number lists (free lists, dirty lists).
+//! * [`feature`]: opt-in features, enabled by name
+//!   ([`EnvironmentBuilder::enable_feature`], [`features`]).
+//!
+//! # Environment variables
+//!
+//! The Rust API reads no environment variable unless the program asks for
+//! it, per environment, with [`EnvironmentBuilder::read_environment`] (the
+//! C API and the tools do by default). Then an open reads, in this order:
+//!
+//! * `RLMDB_IGNORE_ENV` ([`IGNORE_ENV`]): if set to anything but the empty
+//!   string, none of the others is read, whatever the program asked for;
+//! * `RLMDB_FEATURES` ([`FEATURES_ENV`]): features to enable or disable
+//!   ([`feature`]);
+//! * `RLMDB_DEFAULT_FORMAT` ([`DEFAULT_FORMAT_ENV`], experimental): the
+//!   format of a new environment that asks for none.
+//!
+//! What the program sets explicitly always wins over a variable. A setuid
+//! or setgid process reads none of them (`secure_getenv` semantics).
 //!
 //! # Example
 //!
@@ -171,6 +189,8 @@ pub mod core;
 #[forbid(unsafe_code)]
 pub mod error;
 #[forbid(unsafe_code)]
+pub mod feature;
+#[forbid(unsafe_code)]
 pub mod flags;
 #[forbid(unsafe_code)]
 pub mod format;
@@ -182,6 +202,9 @@ pub mod version;
 
 pub use crate::core::*;
 pub use crate::error::{strerror, BoxedError};
+pub use crate::feature::{
+    features, Feature, FeatureDefault, FeatureInfo, FeatureRequests, FEATURES_ENV,
+};
 pub use crate::format::Format;
 #[doc(hidden)]
 pub use crate::os::{flush_file_maps, invalidate_file};

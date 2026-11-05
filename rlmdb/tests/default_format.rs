@@ -1,14 +1,15 @@
 //! The format of new environments that do not ask for one
 //! (`DUAL_FORMAT.md` §4.2): the process default of
 //! `rlmdb::set_default_format`, then the experimental `RLMDB_DEFAULT_FORMAT`
-//! variable, then the builder's fallback (`fallback_format`, LMDB 0.9
-//! unless set); and that none of them changes what an existing file is
-//! opened as.
+//! variable (read only by builders that read the environment, and not
+//! with `RLMDB_IGNORE_ENV`), then the builder's fallback
+//! (`fallback_format`, LMDB 0.9 unless set); and that none of them changes
+//! what an existing file is opened as.
 //!
-//! The process default and the variable are process-wide, so every test of
-//! this file holds [`SERIAL`] and resets both before it returns. They are
+//! The process default and the variables are process-wide, so every test of
+//! this file holds [`SERIAL`] and resets them before it returns. They are
 //! in a test binary of their own: no other test opens an environment while
-//! one of them has the variable set.
+//! one of them has a variable set.
 
 mod common;
 
@@ -16,8 +17,8 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use rlmdb::{
-    default_format, default_format_or, process_default_format, set_default_format, Environment,
-    EnvironmentFlags, Error, Format, MdbError, DEFAULT_FORMAT_ENV,
+    process_default_format, set_default_format, Environment, EnvironmentBuilder, EnvironmentFlags,
+    Error, Format, MdbError, DEFAULT_FORMAT_ENV, IGNORE_ENV,
 };
 
 /// Serialises the tests of this file (see the module documentation).
@@ -31,7 +32,7 @@ impl Defaults {
     fn take() -> Defaults {
         let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         set_default_format(None);
-        std::env::remove_var(DEFAULT_FORMAT_ENV);
+        clear_vars();
         Defaults(guard)
     }
 
@@ -43,8 +44,31 @@ impl Defaults {
 impl Drop for Defaults {
     fn drop(&mut self) {
         set_default_format(None);
-        std::env::remove_var(DEFAULT_FORMAT_ENV);
+        clear_vars();
     }
+}
+
+/// Removes the variables the tests set.
+fn clear_vars() {
+    std::env::remove_var(DEFAULT_FORMAT_ENV);
+    std::env::remove_var(IGNORE_ENV);
+}
+
+/// A builder that reads the environment variables.
+fn builder() -> EnvironmentBuilder {
+    let mut b = Environment::builder();
+    b.read_environment(true);
+    b
+}
+
+/// The format a new environment opened by [`builder`] would get.
+fn default_format() -> Format {
+    builder().new_env_format()
+}
+
+/// [`default_format`] with the fallback `fallback`.
+fn default_format_or(fallback: Format) -> Format {
+    builder().fallback_format(fallback).new_env_format()
 }
 
 fn tmp() -> tempfile::TempDir {
@@ -54,10 +78,10 @@ fn tmp() -> tempfile::TempDir {
         .unwrap()
 }
 
-/// Creates an environment at `dir` without a format request and returns
-/// its format.
+/// Creates an environment at `dir` without a format request, reading the
+/// variables, and returns its format.
 fn create(dir: &Path) -> Format {
-    Environment::builder().open(dir).unwrap().format()
+    builder().open(dir).unwrap().format()
 }
 
 #[test]
@@ -77,10 +101,7 @@ fn process_default() {
     assert_eq!(create(tmp().path()), Format::V10);
     // A request of the builder wins.
     let dir = tmp();
-    let env = Environment::builder()
-        .format(Format::V09)
-        .open(dir.path())
-        .unwrap();
+    let env = builder().format(Format::V09).open(dir.path()).unwrap();
     assert_eq!(env.format(), Format::V09);
     drop(env);
     set_default_format(Some(Format::V09));
@@ -103,6 +124,40 @@ fn environment_variable() {
     assert_eq!(create(tmp().path()), Format::V10);
     std::env::remove_var(DEFAULT_FORMAT_ENV);
     assert_eq!(create(tmp().path()), Format::V09);
+}
+
+#[test]
+fn the_rust_api_reads_the_variable_only_on_request() {
+    let d = Defaults::take();
+    d.set_var("1.0");
+    let dir = tmp();
+    let env = Environment::builder().open(dir.path()).unwrap();
+    assert_eq!(env.format(), Format::V09);
+    assert_eq!(Environment::builder().new_env_format(), Format::V09);
+    let mut off = builder();
+    off.read_environment(false);
+    assert_eq!(off.new_env_format(), Format::V09);
+    assert_eq!(off.open(tmp().path()).unwrap().format(), Format::V09);
+    // The process default does not depend on it.
+    set_default_format(Some(Format::V10));
+    assert_eq!(Environment::builder().new_env_format(), Format::V10);
+}
+
+#[test]
+fn rlmdb_ignore_env_blocks_the_variable() {
+    let d = Defaults::take();
+    d.set_var("1.0");
+    for value in ["1", "0", "no", " "] {
+        std::env::set_var(IGNORE_ENV, value);
+        assert_eq!(default_format(), Format::V09, "{value:?}");
+        assert_eq!(create(tmp().path()), Format::V09, "{value:?}");
+    }
+    // Empty means unset.
+    std::env::set_var(IGNORE_ENV, "");
+    assert_eq!(default_format(), Format::V10);
+    assert_eq!(create(tmp().path()), Format::V10);
+    std::env::remove_var(IGNORE_ENV);
+    assert_eq!(create(tmp().path()), Format::V10);
 }
 
 #[test]
@@ -142,10 +197,7 @@ fn order_builder_then_process_default_then_variable() {
     assert_eq!(default_format(), Format::V09);
     assert_eq!(create(tmp().path()), Format::V09);
     let dir = tmp();
-    let env = Environment::builder()
-        .format(Format::V10)
-        .open(dir.path())
-        .unwrap();
+    let env = builder().format(Format::V10).open(dir.path()).unwrap();
     assert_eq!(env.format(), Format::V10);
     drop(env);
     set_default_format(None);
@@ -166,7 +218,7 @@ fn defaults_never_apply_to_existing_files() {
         d.set_var(var);
         for (dir, format) in [(&old09, Format::V09), (&old10, Format::V10)] {
             assert_eq!(create(dir.path()), format);
-            let env = Environment::builder()
+            let env = builder()
                 .flags(EnvironmentFlags::READ_ONLY)
                 .open(dir.path())
                 .unwrap();
@@ -175,7 +227,7 @@ fn defaults_never_apply_to_existing_files() {
     }
     // An explicit request for the other format is still refused.
     set_default_format(Some(Format::V10));
-    let err = Environment::builder()
+    let err = builder()
         .format(Format::V10)
         .open(old09.path())
         .unwrap_err();
@@ -188,7 +240,7 @@ fn defaults_never_apply_to_existing_files() {
 /// Creates an environment at `dir` without a format request, with
 /// fallback `fallback`, and returns its format.
 fn create_with_fallback(dir: &Path, fallback: Format) -> Format {
-    Environment::builder()
+    builder()
         .fallback_format(fallback)
         .open(dir)
         .unwrap()
@@ -213,7 +265,7 @@ fn fallback_format_comes_last() {
     std::env::remove_var(DEFAULT_FORMAT_ENV);
     // A request of the builder wins.
     let dir = tmp();
-    let env = Environment::builder()
+    let env = builder()
         .fallback_format(Format::V10)
         .format(Format::V09)
         .open(dir.path())
@@ -234,16 +286,10 @@ fn page_size_with_a_default_of_1_0() {
     // format decides whether a new environment is one.
     set_default_format(Some(Format::V10));
     let dir = tmp();
-    let env = Environment::builder()
-        .page_size(1024)
-        .open(dir.path())
-        .unwrap();
+    let env = builder().page_size(1024).open(dir.path()).unwrap();
     assert_eq!((env.format(), env.page_size()), (Format::V10, 1024));
     drop(env);
     set_default_format(None);
-    let err = Environment::builder()
-        .page_size(1024)
-        .open(tmp().path())
-        .unwrap_err();
+    let err = builder().page_size(1024).open(tmp().path()).unwrap_err();
     assert_eq!(err.to_err_code(), libc::EINVAL, "{err:?}");
 }

@@ -123,6 +123,72 @@ pub fn check_write_map() -> std::io::Result<()> {
     Ok(())
 }
 
+/// The value of the environment variable `name` with `secure_getenv`
+/// semantics: `None` in a process that runs with privileges its user does
+/// not have (setuid or setgid, file capabilities: what glibc's
+/// `secure_getenv` checks, `AT_SECURE`, on Linux and Android; `issetugid`
+/// on macOS and the BSDs; real and effective ids elsewhere on Unix), so
+/// that whoever starts it cannot steer it through rlmdb's variables;
+/// otherwise [`std::env::var_os`]. Windows has no such processes.
+pub fn secure_var(name: &str) -> Option<std::ffi::OsString> {
+    if runs_privileged() {
+        None
+    } else {
+        std::env::var_os(name)
+    }
+}
+
+/// Whether the process runs with privileges its user does not have (see
+/// [`secure_var`]).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn runs_privileged() -> bool {
+    // SAFETY: getauxval reads the process's auxiliary vector; it takes and
+    // returns plain integers (0 for an unknown type).
+    unsafe { libc::getauxval(libc::AT_SECURE) != 0 }
+}
+
+/// Whether the process runs with privileges its user does not have (see
+/// [`secure_var`]).
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+fn runs_privileged() -> bool {
+    // SAFETY: issetugid takes no arguments and only reports process state.
+    unsafe { libc::issetugid() != 0 }
+}
+
+/// Whether the process runs with privileges its user does not have (see
+/// [`secure_var`]).
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))
+))]
+fn runs_privileged() -> bool {
+    // SAFETY: the id getters take no arguments and cannot fail.
+    unsafe { libc::getuid() != libc::geteuid() || libc::getgid() != libc::getegid() }
+}
+
+/// Whether the process runs with privileges its user does not have (see
+/// [`secure_var`]): never on Windows.
+#[cfg(windows)]
+fn runs_privileged() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     /// The `MDB_WRITEMAP` policy: refused on OpenBSD, accepted elsewhere.
@@ -134,5 +200,16 @@ mod tests {
         } else {
             checked.unwrap();
         }
+    }
+
+    /// A test process runs without extra privileges, so `secure_var`
+    /// reads the environment as `var_os` does. (That a setuid process
+    /// reads nothing needs a setuid binary, which tests cannot make.)
+    #[test]
+    fn secure_var_in_an_unprivileged_process() {
+        assert!(!super::runs_privileged());
+        let path = std::env::var_os("PATH");
+        assert_eq!(super::secure_var("PATH"), path);
+        assert_eq!(super::secure_var("RLMDB_NO_SUCH_VARIABLE_EVER"), None);
     }
 }

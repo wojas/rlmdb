@@ -11,9 +11,9 @@ use std::ptr;
 use std::sync::atomic::Ordering;
 
 use rlmdb::consts::{CHANGEABLE, CHANGELESS};
-use rlmdb::{Environment, EnvironmentFlags};
+use rlmdb::{Environment, EnvironmentBuilder, EnvironmentFlags};
 
-use crate::handles::{lock, MDB_env};
+use crate::handles::{lock, EnvConfig, MDB_env};
 use crate::types::*;
 use crate::{rc, Profile, SUCCESS};
 
@@ -36,11 +36,37 @@ fn code(r: Result<(), c_int>) -> c_int {
     r.err().unwrap_or(SUCCESS)
 }
 
+/// The builder `mdb_env_open` opens with the settings `config` (and the
+/// flags given to it, `flags`): also what decides the format of a new
+/// environment before the open ([`mdb_env_get_maxkeysize`]).
+fn builder_of(config: &EnvConfig, flags: c_uint) -> EnvironmentBuilder {
+    let mut builder = Environment::builder();
+    builder
+        .map_size(config.map_size)
+        .max_readers(config.max_readers)
+        .max_dbs(config.max_dbs)
+        .flags(EnvironmentFlags::from_bits_retain(flags | config.flags))
+        .fallback_format(config.fallback_format)
+        .read_environment(config.read_environment)
+        .set_feature_requests(config.features);
+    if let Some(format) = config.format {
+        builder.format(format);
+    }
+    if let Some(page_size) = config.page_size {
+        builder.page_size(page_size);
+    }
+    builder
+}
+
 /// `mdb_env_create` of the library of `profile`: create an LMDB
 /// environment handle. A new environment opened through it that asks for
 /// no format, with neither a process default nor `RLMDB_DEFAULT_FORMAT`,
 /// gets the profile's format ([`Profile::default_format`]: LMDB 1.0 in
-/// the LMDB 1.0 stub, else 0.9). Each artifact exports it as
+/// the LMDB 1.0 stub, else 0.9). The handle reads rlmdb's environment
+/// variables at the open (`RLMDB_FEATURES`, `RLMDB_DEFAULT_FORMAT`)
+/// unless the program turns that off with
+/// [`rlmdb_env_read_environment`](crate::feature::rlmdb_env_read_environment)
+/// or `RLMDB_IGNORE_ENV` is set. Each artifact exports it as
 /// `mdb_env_create` ([`artifact_symbols!`](crate::artifact_symbols)).
 ///
 /// # Safety
@@ -85,7 +111,15 @@ pub unsafe fn env_create(profile: Profile, env: *mut *mut MDB_env) -> c_int {
 /// page size set with `mdb_env_set_pagesize` applies to a new 1.0
 /// environment ([`rlmdb::EnvironmentBuilder::format`],
 /// [`rlmdb::EnvironmentBuilder::fallback_format`],
-/// [`rlmdb::EnvironmentBuilder::page_size`]).
+/// [`rlmdb::EnvironmentBuilder::page_size`]). The variable is read only
+/// if the handle reads rlmdb's environment variables (unless
+/// `rlmdb_env_read_environment` turned that off, or `RLMDB_IGNORE_ENV` is
+/// set), as is `RLMDB_FEATURES`.
+///
+/// The features ([`crate::feature`]) are resolved first, before any file
+/// is touched: an unknown name in `RLMDB_FEATURES` fails the open with
+/// `RLMDB_UNKNOWN_FEATURE`, `-` on a fixed feature there with
+/// `RLMDB_FEATURE_IS_FIXED`.
 ///
 /// `ENOTSUP` after `mdb_modsetup` asked for encryption or checksums,
 /// which rlmdb does not implement ([`crate::v10::mdb_modsetup`]): the
@@ -114,19 +148,7 @@ pub unsafe extern "C" fn mdb_env_open(
     if config.crypto_requested {
         return libc::ENOTSUP;
     }
-    let mut builder = Environment::builder();
-    builder
-        .map_size(config.map_size)
-        .max_readers(config.max_readers)
-        .max_dbs(config.max_dbs)
-        .flags(EnvironmentFlags::from_bits_retain(flags | config.flags))
-        .fallback_format(config.fallback_format);
-    if let Some(format) = config.format {
-        builder.format(format);
-    }
-    if let Some(page_size) = config.page_size {
-        builder.page_size(page_size);
-    }
+    let builder = builder_of(&config, flags);
     match builder.open_with_permissions(crate::platform::path_from_c(path), mode) {
         Ok(opened) => {
             e.set_opened(opened, path.to_owned());
@@ -377,7 +399,7 @@ pub unsafe extern "C" fn mdb_env_set_maxdbs(env: *mut MDB_env, dbs: MDB_dbi) -> 
 /// 511 if it would be LMDB 0.9; if it would be 1.0 (requested with
 /// `rlmdb_env_set_format`, else the process default, the
 /// `RLMDB_DEFAULT_FORMAT` variable or the library's format,
-/// [`rlmdb::default_format_or`]), the 1.0 limit for the page size it would
+/// [`rlmdb::EnvironmentBuilder::new_env_format`]), the 1.0 limit for the page size it would
 /// get (`mdb_env_set_pagesize`, else the OS page size). An existing file
 /// of the other format or with another page size changes that at the
 /// open. (C 1.0 returns 0 before the open: it only computes the limit in
@@ -390,9 +412,7 @@ pub unsafe extern "C" fn mdb_env_get_maxkeysize(env: *mut MDB_env) -> c_int {
             Some(open) => open.max_key_size(),
             None => {
                 let config = *e.config();
-                let format = config
-                    .format
-                    .unwrap_or_else(|| rlmdb::default_format_or(config.fallback_format));
+                let format = builder_of(&config, 0).new_env_format();
                 match format {
                     rlmdb::Format::V10 => format
                         .layout()

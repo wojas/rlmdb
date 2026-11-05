@@ -47,6 +47,12 @@ static const any_func functions[] = {
 	(any_func)rlmdb_sniff_format,
 	(any_func)rlmdb_set_default_format,
 	(any_func)rlmdb_env_set_pagesize,
+	(any_func)rlmdb_features,
+	(any_func)rlmdb_feature_default,
+	(any_func)rlmdb_env_enable_feature,
+	(any_func)rlmdb_env_disable_feature,
+	(any_func)rlmdb_env_feature_enabled,
+	(any_func)rlmdb_env_read_environment,
 #if MDB_VERSION_MAJOR >= 1
 	(any_func)mdb_env_set_pagesize,
 	(any_func)mdb_txn_flags,
@@ -154,6 +160,11 @@ int main(void)
 		format == RLMDB_FORMAT_UNKNOWN);
 	CHECK(rlmdb_env_set_pagesize(NULL, 4096) == EINVAL);
 	CHECK(rlmdb_env_set_format(NULL, RLMDB_FORMAT_10) == EINVAL);
+	CHECK(rlmdb_features() != NULL);
+	CHECK(rlmdb_env_enable_feature(NULL, "test-feature") == EINVAL);
+	CHECK(rlmdb_env_read_environment(NULL, 0) == EINVAL);
+	CHECK(RLMDB_UNKNOWN_FEATURE == -30600 && RLMDB_FEATURE_IS_FIXED == -30601);
+	CHECK(RLMDB_FEATURE_OFF == 0 && RLMDB_FEATURE_ON == 1 && RLMDB_FEATURE_FIXED == 2);
 
 	/* librlmdb reports rlmdb's version from mdb_version, whichever header
 	 * the program was built with, and the same line as
