@@ -468,11 +468,15 @@ fn c10_restores_the_source_from_rlmdbs_dump_of_a_freed_run() {
             );
             // Before the stale "run" C wrote what rlmdb writes. A `write`
             // copies the run's bytes up to the end of the map first;
-            // Windows's `WriteFile` fails without writing any.
+            // Windows's `WriteFile` fails without writing any, and so does
+            // `write` under QEMU user emulation, which checks the whole
+            // buffer first (`$INTEROP_NO_PARTIAL_WRITE`).
+            let all_or_nothing =
+                cfg!(windows) || std::env::var_os("INTEROP_NO_PARTIAL_WRITE").is_some();
             let stale = 0x6565_6565_6565_6565u64.to_ne_bytes();
             let k = match c.stdout.chunks(4096).position(|p| p[..8] == stale) {
                 Some(i) => i * 4096,
-                None if cfg!(windows) => c.stdout.len(),
+                None if all_or_nothing => c.stdout.len(),
                 None => panic!("C's dump holds no stale run"),
             };
             assert!(k > 0 && r.len() > k && r[..k] == c.stdout[..k]);

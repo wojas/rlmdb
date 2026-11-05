@@ -150,6 +150,7 @@ placeholders); or a peer completes a command but prints a
 | `INTEROP_RPEER` | path of the Rust peer (else found via `CARGO_BIN_EXE_rpeer` or next to the test binary) |
 | `INTEROP_KEEP` | keep the temporary directories (`interop-*`) of the environments, to look at the files after a failure |
 | `INTEROP_NO_ROBUST_MUTEX` | the writer mutex does not recover from a killed owner (QEMU user emulation, which `scripts/linux-test.sh` sets for `LINUX_TEST_TARGET` runs): `killed_writer` expects the next writer to wait, as on macOS |
+| `INTEROP_NO_PARTIAL_WRITE` | a `write` whose buffer runs past the end of a mapping fails with `EFAULT` without writing any of it, as on Windows (QEMU user emulation, which `scripts/linux-test.sh` sets it for): `incr10`'s freed-run test then expects no stale page in C's dump |
 | `INTEROP_PEER` | path of the external peer (`Peer::External`); unset or empty: the tests with it are skipped |
 | `INTEROP_PEER_ARGS` | arguments appended to every command of the external peer, split at whitespace (no quoting), e.g. `--impl port` |
 | `INTEROP_PEER_NAME` | the external peer's name in test output (ASCII letters, digits, `-`, `_`; default `External`) |
