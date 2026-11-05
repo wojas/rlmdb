@@ -16,8 +16,8 @@
 //! (rlmdb's own option) gives the format of a new environment; an existing
 //! one keeps its format, and `-F` naming the other one makes the open fail
 //! with `MDB_VERSION_MISMATCH`. Without `-F` a new environment gets the
-//! default format (`rlmdb::default_format`: LMDB 0.9 unless the
-//! experimental `RLMDB_DEFAULT_FORMAT` variable says `1.0`). The tool then
+//! default format (`rlmdb::EnvironmentBuilder::new_env_format`: LMDB 0.9
+//! unless the experimental `RLMDB_DEFAULT_FORMAT` variable says `1.0`). The tool then
 //! behaves like the C `mdb_load` of that format: for 1.0, `db_pagesize=` in
 //! the header sets the page size of a new environment
 //! (`mdb_env_set_pagesize`, an invalid size is ignored) and a record with an
@@ -439,7 +439,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         };
         match rlmdb::sniff_format(path_of(envname), flags) {
             Ok(Some(f)) => f,
-            _ => rlmdb::default_format(),
+            _ => crate::common::env_builder().new_env_format(),
         }
     });
     let mut input = Input {
@@ -468,7 +468,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     if hdr.map_address != 0 {
         flags |= EnvironmentFlags::FIXED_MAP;
     }
-    let mut builder = Environment::builder();
+    let mut builder = crate::common::env_builder();
     builder.max_dbs(2).flags(flags);
     if let Some(f) = o.format {
         builder.format(f);
@@ -529,7 +529,7 @@ fn load_incremental(o: Options, envname: &[u8]) -> i32 {
     if o.no_sub_dir {
         flags |= EnvironmentFlags::NO_SUB_DIR;
     }
-    let mut builder = Environment::builder();
+    let mut builder = crate::common::env_builder();
     builder.flags(flags);
     // -F is 1.0 here. Without it a new environment is 1.0 too, whatever
     // the process default or the variable says; an existing one keeps its

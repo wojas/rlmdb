@@ -203,6 +203,18 @@ open_env(const struct opts *o, unsigned int extra_flags)
 
 	CHECK(mdb_env_create(&env));
 #ifdef LMDB_RUST
+	{
+		/* Plain compatibility mode: the matrix compares what the peers
+		 * write with C byte for byte, so every feature that is on by
+		 * default is off here (none is so far). */
+		const char *const *name;
+		int state;
+		for (name = rlmdb_features(); *name; name++) {
+			CHECK(rlmdb_feature_default(*name, &state));
+			if (state == RLMDB_FEATURE_ON)
+				CHECK(rlmdb_env_disable_feature(env, *name));
+		}
+	}
 	if (o->format)
 		CHECK(rlmdb_env_set_format(env, o->format == 10 ? RLMDB_FORMAT_10 : RLMDB_FORMAT_09));
 	if (o->pagesize)

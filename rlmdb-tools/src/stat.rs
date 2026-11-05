@@ -93,7 +93,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     }
     let envname = &operands[0];
 
-    let mut builder = Environment::builder();
+    let mut builder = crate::common::env_builder();
     if o.all_dbs > 0 || o.subname.is_some() {
         builder.max_dbs(4);
     }

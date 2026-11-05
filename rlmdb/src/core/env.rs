@@ -13,9 +13,10 @@
 //! 3. Decide the data-file format ([`sniff_format`] of that descriptor: the
 //!    magic and version of the first meta page; not in C, which handles one
 //!    format only). An existing file keeps its format, a new one gets the
-//!    requested format or the [`default_format_or`] the builder's fallback
-//!    (the process default of [`set_default_format`], the experimental
-//!    `RLMDB_DEFAULT_FORMAT` variable, the fallback: LMDB 0.9 unless
+//!    requested format or [`EnvironmentBuilder::new_env_format`] (the
+//!    process default of [`set_default_format`], the experimental
+//!    `RLMDB_DEFAULT_FORMAT` variable if the builder reads the environment,
+//!    the fallback: LMDB 0.9 unless
 //!    [`EnvironmentBuilder::fallback_format`] says otherwise). This
 //!    happens before the lock file is touched, so
 //!    opening a file of the other format never re-initialises a peer's lock
@@ -86,6 +87,7 @@ use crate::core::txn::{RoTxn, Transaction};
 use crate::core::txn_rw::{RwTxn, SpareTxn};
 use crate::core::{Info, Stat};
 use crate::error::{Error, MdbError, Result};
+use crate::feature::{self, Feature, FeatureRequests, FeatureSet, FEATURES_ENV};
 use crate::flags::{DatabaseFlags, EnvironmentFlags};
 use crate::format::get_u64;
 use crate::format::layout::{Format, Layout, META_LAST_PGNO, META_SIZE, V10};
@@ -122,6 +124,8 @@ pub struct EnvironmentBuilder {
     format: Option<Format>,
     fallback_format: Format,
     page_size: Option<usize>,
+    read_environment: bool,
+    features: FeatureRequests,
 }
 
 impl Default for EnvironmentBuilder {
@@ -134,6 +138,8 @@ impl Default for EnvironmentBuilder {
             format: None,
             fallback_format: Format::V09,
             page_size: None,
+            read_environment: false,
+            features: FeatureRequests::new(),
         }
     }
 }
@@ -190,9 +196,11 @@ impl EnvironmentBuilder {
     /// this asks for the other one ([`sniff_format`] tells which it is).
     /// Without a request an existing file is opened in its format and a new
     /// one is created in the process default ([`set_default_format`]),
-    /// else the format the experimental `RLMDB_DEFAULT_FORMAT` variable
-    /// ([`DEFAULT_FORMAT_ENV`]) names, else the
-    /// [`fallback_format`](Self::fallback_format), LMDB 0.9 unless set.
+    /// else, if the builder [reads the environment
+    /// variables](Self::read_environment), the format the experimental
+    /// `RLMDB_DEFAULT_FORMAT` variable ([`DEFAULT_FORMAT_ENV`]) names, else
+    /// the [`fallback_format`](Self::fallback_format), LMDB 0.9 unless set
+    /// ([`new_env_format`](Self::new_env_format)).
     pub fn format(&mut self, format: Format) -> &mut Self {
         self.format = Some(format);
         self
@@ -200,7 +208,8 @@ impl EnvironmentBuilder {
 
     /// The format of a new environment when nothing asks for one: neither
     /// [`format`](Self::format), nor the process default, nor the
-    /// experimental variable ([`default_format_or`]). LMDB 0.9 unless set.
+    /// experimental variable ([`new_env_format`](Self::new_env_format)).
+    /// LMDB 0.9 unless set.
     /// Unlike [`format`](Self::format) it never applies to an existing
     /// file. The C API's LMDB 1.0 stub library sets it to [`Format::V10`]
     /// (its `mdb_env_create`), so that a program built for C LMDB 1.0
@@ -219,6 +228,91 @@ impl EnvironmentBuilder {
     pub fn page_size(&mut self, size: usize) -> &mut Self {
         self.page_size = Some(size);
         self
+    }
+
+    /// Whether the open reads rlmdb's environment variables: the
+    /// experimental `RLMDB_DEFAULT_FORMAT` ([`DEFAULT_FORMAT_ENV`]) and
+    /// `RLMDB_FEATURES` ([`FEATURES_ENV`]). Off unless set: a Rust program
+    /// configures rlmdb in code, and a library that reads the environment
+    /// on its own surprises. The C API turns it on (`mdb_env_create`; a C
+    /// program turns it off with `rlmdb_env_read_environment`), as do the
+    /// tools.
+    ///
+    /// What the program sets explicitly always wins; a variable only fills
+    /// in what the program did not set. Whatever this says, no variable is
+    /// read if `RLMDB_IGNORE_ENV` ([`IGNORE_ENV`]) is set to anything but
+    /// the empty string, nor in a setuid or setgid process (`secure_getenv`
+    /// semantics). The variables are read at the open.
+    pub fn read_environment(&mut self, on: bool) -> &mut Self {
+        self.read_environment = on;
+        self
+    }
+
+    /// Enables the feature named `name` ([`crate::feature`]), replacing an
+    /// earlier request to disable it. This wins over `RLMDB_FEATURES`. A
+    /// fixed feature is on anyway. [`Error::UnknownFeature`] for a name
+    /// this build does not know (and nothing changes): a program written
+    /// for a later rlmdb gets that from an earlier one. For names from
+    /// configuration; a program that names a feature in code can use
+    /// [`enable`](Self::enable).
+    pub fn enable_feature(&mut self, name: &str) -> Result<&mut Self> {
+        Ok(self.enable(Feature::lookup(name)?))
+    }
+
+    /// Disables the feature named `name` ([`crate::feature`]), replacing an
+    /// earlier request to enable it. This wins over `RLMDB_FEATURES`.
+    /// [`Error::UnknownFeature`] for a name this build does not know,
+    /// [`Error::FeatureIsFixed`] for a feature that cannot be disabled
+    /// (nothing changes for either).
+    pub fn disable_feature(&mut self, name: &str) -> Result<&mut Self> {
+        self.disable(Feature::lookup(name)?)
+    }
+
+    /// [`enable_feature`](Self::enable_feature) of `feature`.
+    pub fn enable(&mut self, feature: Feature) -> &mut Self {
+        self.features.enable(feature);
+        self
+    }
+
+    /// [`disable_feature`](Self::disable_feature) of `feature`.
+    pub fn disable(&mut self, feature: Feature) -> Result<&mut Self> {
+        self.features.disable(feature)?;
+        Ok(self)
+    }
+
+    /// What the program asked for, feature by feature (the calls above).
+    pub fn feature_requests(&self) -> FeatureRequests {
+        self.features
+    }
+
+    /// Replaces all feature requests with `requests` (for a layer that
+    /// collects them elsewhere first, such as the C API's `MDB_env`).
+    pub fn set_feature_requests(&mut self, requests: FeatureRequests) -> &mut Self {
+        self.features = requests;
+        self
+    }
+
+    /// The format a new environment opened with this builder gets, as
+    /// things stand now: the requested [`format`](Self::format), else the
+    /// process default ([`set_default_format`]), else, if the builder
+    /// [reads the environment variables](Self::read_environment), the
+    /// format the experimental `RLMDB_DEFAULT_FORMAT` variable names, else
+    /// the [`fallback_format`](Self::fallback_format). An existing file
+    /// keeps its format.
+    pub fn new_env_format(&self) -> Format {
+        self.format
+            .unwrap_or_else(|| self.defaults(&Variables::new(self.read_environment)))
+    }
+
+    /// The format of a new environment that asks for none, with the
+    /// variables `vars`.
+    fn defaults(&self, vars: &Variables) -> Format {
+        process_default_format()
+            .or_else(|| {
+                vars.get(DEFAULT_FORMAT_ENV)
+                    .and_then(|v| Format::from_name(v.as_encoded_bytes()))
+            })
+            .unwrap_or(self.fallback_format)
     }
 
     /// Opens the environment with file mode `0o644`.
@@ -285,6 +379,8 @@ pub struct Environment {
     node_max: usize,
     /// `me_maxkey` / `ENV_MAXKEY`: checked on every put.
     max_key: usize,
+    /// The features on in this handle ([`crate::feature`]).
+    features: FeatureSet,
     path: PathBuf,
     registration: Registration,
 }
@@ -370,6 +466,17 @@ impl Environment {
         {
             return Err(Error::einval());
         }
+        // Not C: rlmdb's variables, then the features, before any file is
+        // touched (a feature error fails the open as a bad flag would).
+        let vars = Variables::new(opts.read_environment);
+        let feature_var = vars.get(FEATURES_ENV);
+        let features = feature::resolve(
+            opts.features,
+            feature_var
+                .as_deref()
+                .map(|v| v.to_string_lossy())
+                .as_deref(),
+        )?;
         let read_only = flags & MDB_RDONLY != 0;
         let prev = flags & MDB_PREVSNAPSHOT != 0;
         if read_only {
@@ -413,7 +520,7 @@ impl Environment {
             Some(file) => sniff_file(file)?,
             None => None,
         };
-        let layout = choose_format(found, opts.format, opts.fallback_format)?.layout();
+        let layout = choose_format(found, opts.format, || opts.defaults(&vars))?.layout();
         let new_page_size = match opts.page_size {
             None => None,
             Some(ps) if layout.format == Format::V10 && valid_set_pagesize(ps, layout) => Some(ps),
@@ -591,6 +698,7 @@ impl Environment {
             prev_shared,
             node_max: layout.node_max(page_size),
             max_key: layout.max_key_size(page_size),
+            features,
             path: path.to_path_buf(),
             registration,
         };
@@ -1076,6 +1184,19 @@ impl Environment {
         self.max_key
     }
 
+    /// Whether `feature` is on in this environment ([`crate::feature`]):
+    /// its default, `RLMDB_FEATURES` if the builder read it, and the
+    /// builder's requests, as the open resolved them.
+    pub fn has_feature(&self, feature: Feature) -> bool {
+        self.features.contains(feature)
+    }
+
+    /// [`has_feature`](Self::has_feature) of the feature named `name`;
+    /// [`Error::UnknownFeature`] for a name this build does not know.
+    pub fn feature_enabled(&self, name: &str) -> Result<bool> {
+        Ok(self.has_feature(Feature::lookup(name)?))
+    }
+
     /// The data-file format of the environment.
     pub fn format(&self) -> Format {
         self.layout.format
@@ -1261,18 +1382,51 @@ fn open_existing(data_path: &Path, mode: u32) -> Result<Option<File>> {
 
 /// The format to open with: the existing file's (`found`), which must be
 /// the one `requested` if any (`MDB_VERSION_MISMATCH` otherwise: there is
-/// no conversion in place), else the requested one, else
-/// [`default_format_or`] `fallback`. The defaults never apply to an
-/// existing file.
+/// no conversion in place), else the requested one, else what `defaults`
+/// says. The defaults never apply to an existing file.
 fn choose_format(
     found: Option<Format>,
     requested: Option<Format>,
-    fallback: Format,
+    defaults: impl FnOnce() -> Format,
 ) -> Result<Format> {
     match (found, requested) {
         (Some(f), Some(r)) if f != r => Err(MdbError::VersionMismatch.into()),
         (Some(f), _) | (None, Some(f)) => Ok(f),
-        (None, None) => Ok(default_format_or(fallback)),
+        (None, None) => Ok(defaults()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// rlmdb's environment variables
+// ---------------------------------------------------------------------------
+
+/// The kill switch of rlmdb's environment variables: if
+/// `RLMDB_IGNORE_ENV` is set to anything but the empty string, no other
+/// `RLMDB_*` variable is read, whatever the program asked for
+/// ([`EnvironmentBuilder::read_environment`], the C API's default). It is
+/// the only one read before that decision.
+pub const IGNORE_ENV: &str = "RLMDB_IGNORE_ENV";
+
+/// rlmdb's environment variables as one open sees them: none unless the
+/// builder reads them and [`IGNORE_ENV`] is unset or empty, each read with
+/// `secure_getenv` semantics ([`os::secure_var`]).
+struct Variables {
+    read: bool,
+}
+
+impl Variables {
+    /// The variables of an open whose builder has `read_environment`
+    /// `read`.
+    fn new(read: bool) -> Variables {
+        let ignored = || os::secure_var(IGNORE_ENV).is_some_and(|v| !v.is_empty());
+        Variables {
+            read: read && !ignored(),
+        }
+    }
+
+    /// The variable `name`, if it is read and set.
+    fn get(&self, name: &str) -> Option<std::ffi::OsString> {
+        self.read.then(|| os::secure_var(name)).flatten()
     }
 }
 
@@ -1288,8 +1442,11 @@ fn choose_format(
 /// stray variable in a service's environment silently creates LMDB 1.0
 /// files that C LMDB 0.9 cannot open, so programs and deployments should
 /// prefer [`EnvironmentBuilder::format`] and [`set_default_format`]. It is
-/// read at every open of a new environment, also through the C API and by
-/// the tools. A value other than `0.9` or `1.0` is ignored, never an error.
+/// read at every open of a new environment whose builder reads the
+/// environment variables ([`EnvironmentBuilder::read_environment`]: off by
+/// default in Rust, on in the C API and the tools; [`IGNORE_ENV`] turns it
+/// off everywhere). A value other than `0.9` or `1.0` is ignored, never an
+/// error.
 pub const DEFAULT_FORMAT_ENV: &str = "RLMDB_DEFAULT_FORMAT";
 
 /// The process default of [`set_default_format`]: 0 = none, else
@@ -1307,7 +1464,8 @@ const fn format_code(format: Format) -> u8 {
 /// `rlmdb_set_default_format`: the format of new environments of this
 /// process that do not ask for one with [`EnvironmentBuilder::format`];
 /// `None` removes the process default again. It takes precedence over the
-/// experimental [`DEFAULT_FORMAT_ENV`] variable.
+/// experimental [`DEFAULT_FORMAT_ENV`] variable
+/// ([`EnvironmentBuilder::new_env_format`]).
 ///
 /// An existing data file always keeps its format; the default only decides
 /// what a new environment is created as. The setting applies to every
@@ -1323,30 +1481,6 @@ pub fn process_default_format() -> Option<Format> {
         10 => Some(Format::V10),
         _ => None,
     }
-}
-
-/// The format a new environment gets when it does not ask for one: the
-/// process default ([`set_default_format`]), else the experimental
-/// [`DEFAULT_FORMAT_ENV`] variable if it names a format, else
-/// [`Format::V09`], so that new files stay readable by every C LMDB 0.9.
-pub fn default_format() -> Format {
-    default_format_or(Format::V09)
-}
-
-/// [`default_format`] with `fallback` in place of LMDB 0.9 as the last
-/// resort: the format a new environment opened with
-/// [`EnvironmentBuilder::fallback_format`] `fallback` and no
-/// [`EnvironmentBuilder::format`] gets, as things stand now.
-pub fn default_format_or(fallback: Format) -> Format {
-    process_default_format()
-        .or_else(env_default_format)
-        .unwrap_or(fallback)
-}
-
-/// The format [`DEFAULT_FORMAT_ENV`] names, read now; `None` if it is unset
-/// or names none.
-fn env_default_format() -> Option<Format> {
-    std::env::var_os(DEFAULT_FORMAT_ENV).and_then(|v| Format::from_name(v.as_encoded_bytes()))
 }
 
 /// The checks of 1.0's `mdb_env_set_pagesize`: a power of two from 256 to

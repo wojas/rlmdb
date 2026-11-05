@@ -66,6 +66,19 @@ Linux (glibc) options may follow the path (`mdb_stat db -e`) unless
 and the error messages differ accordingly (`invalid option -- 'x'` vs.
 `illegal option -- x`).
 
+The tools read rlmdb's environment variables, as C programs do:
+
+* `RLMDB_FEATURES` turns opt-in features on or off. A name the tools do
+  not know stops them with `mdb_env_open failed, error -30600
+  RLMDB_UNKNOWN_FEATURE: Unknown feature`.
+* `RLMDB_DEFAULT_FORMAT` sets the format of a new environment
+  (experimental, see below).
+* `RLMDB_IGNORE_ENV=1` makes the tools ignore both.
+
+The C API README explains them:
+[`../rlmdb-capi/README.md`](../rlmdb-capi/README.md), "Environment
+variables".
+
 ## LMDB 1.0 environments
 
 Each C release's tools are the oracle for their own format: for an LMDB
@@ -274,7 +287,9 @@ sub-pages and sub-databases, a `MDB_NOSUBDIR` environment.
   DBs) leaves exactly the environment the C `mdb_drop` leaves.
 * `readers.rs`: `mdb_stat -r`/`-rr` with a C reader, a Rust reader (in the
   test process) and the stale slot of a killed reader.
-* `format.rs`: `mdb_load -F 0.9|1.0` and `RLMDB_DEFAULT_FORMAT` (set for
+* `format.rs`: the tools read `RLMDB_FEATURES` (a typo stops them) and
+  ignore it when `RLMDB_IGNORE_ENV` is set;
+  `mdb_load -F 0.9|1.0` and `RLMDB_DEFAULT_FORMAT` (set for
   the tool's process only) in every combination: the format of the new
   file, the same messages and environment as C 0.9's `mdb_load` for 0.9,
   the same records for 1.0; `-F` against an existing file of the other

@@ -41,10 +41,12 @@ must respect. The details live in:
   the peer and differential tests always run in this plain compatibility
   mode. A change that writes something else (which free page is reused,
   where a split lands, when to spill, another free-list layout) is an
-  opt-in feature a caller enables by name (issue #2): off by default, the
-  files still readable and writable by C, with its own tests (the C peers
-  reading and writing what a Rust process with the feature wrote). Never
-  diverge as a side effect of another change.
+  opt-in feature a caller enables by name (`rlmdb::feature`, issue #2):
+  off by default, the files still readable and writable by C, with its own
+  tests (the C peers reading and writing what a Rust process with the
+  feature wrote). The peers and the differential tests disable every
+  feature that is on by default. Never diverge as a side effect of another
+  change.
 * Never recompute what C reads from the file. Example: macOS semaphore
   names are stored in the lock file with uninitialised padding, so they are
   read, not derived; in lock-file version 2 they are derived from the hash
@@ -293,8 +295,9 @@ denser where precision needs it.
   (stage 4), the interop matrix covers both (stage 5); new environments
   are 0.9 unless 1.0 is asked for, and the
   environment variable `RLMDB_DEFAULT_FORMAT` that can ask for it is
-  experimental (keep it out of test environments: the suites assume it is
-  unset, and `scripts/check-all.sh` unsets it).
+  experimental (keep it, `RLMDB_FEATURES` and `RLMDB_IGNORE_ENV` out of
+  test environments: the suites assume they are unset, and
+  `scripts/check-all.sh` unsets them).
 * Not unless needed and feasible: 32-bit targets (`compile_error!` today;
   the format depends on `sizeof(size_t)`) and `MDB_VL32`.
 * `MDB_FIXEDMAP`, `MDB_MAPASYNC` and `MDB_NOMEMINIT` are accepted and

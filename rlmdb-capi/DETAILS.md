@@ -245,7 +245,9 @@ never returns `ENOTSUP`).
 ## `rlmdb.h`
 
 `include/rlmdb.h` declares rlmdb's own functions and nothing else: the
-version (module `version`) and the data-file formats (module `format`).
+version (module `version`), the data-file formats (module `format`), and
+the opt-in features and environment variables (module `feature`), with
+rlmdb's own return codes.
 C LMDB does not have them, so a program that calls them needs an rlmdb
 library. The header's comments are their reference documentation.
 
@@ -281,10 +283,12 @@ const char *rlmdb_version_string(void);		/* static, one line */
   fields the library has.
 * `rlmdb_version_string()` returns everything in one line, for logs and
   bug reports: `rlmdb 0.0.0 (mdb_version 0.0.0; format 0.9 = LMDB 0.9.37;
-  format 1.0 = LMDB 1.0.3)` in `librlmdb` (`mdb_version 0.9.85` and
-  `mdb_version 1.0.85` in the stubs). Programs read the version numbers
-  from `rlmdb_version()` instead of parsing it; opt-in features, once
-  there are any, will be listed by name (issue #2).
+  format 1.0 = LMDB 1.0.3; features: test-feature)` in `librlmdb`
+  (`mdb_version 0.9.85` and `mdb_version 1.0.85` in the stubs). The opt-in
+  features of the library come last, each name followed by `*` if it is
+  on by default and `!` if it is fixed; the part is left out without
+  features. Programs read the version numbers from `rlmdb_version()` and
+  the features from `rlmdb_features()` instead of parsing it.
 
 The Rust side is `rlmdb::version_info()`, from which the C structure and
 strings are filled once, at first use.
@@ -336,8 +340,10 @@ int rlmdb_env_set_pagesize(MDB_env *env, unsigned size);    /* LMDB 1.0's mdb_en
   1.0 stub (so that a program built for C 1.0 gets 1.0 files without
   asking). An explicit choice of the program wins over the variable and
   the library. **The variable is experimental**: it may be removed or
-  restricted in a later release. It is read at every open; programs should
-  use the functions.
+  restricted in a later release. It is read at every open of a handle
+  that reads rlmdb's variables (all, unless `rlmdb_env_read_environment`
+  turned it off or `RLMDB_IGNORE_ENV` is set; see "Features and
+  environment variables"); programs should use the functions.
 * `rlmdb_env_set_pagesize` and LMDB 1.0's `mdb_env_set_pagesize` (a power
   of two from 256 to 65536, as in C 1.0) apply to a new 1.0 environment;
   `mdb_env_open` fails with `EINVAL` if the environment turns out to be
@@ -400,6 +406,66 @@ snapshot's txnid, so the newest commit, the one `mdb_env_rollback` takes,
 is that plus one. With two-phase commit, `mdb_txn_commit` of a
 prepared transaction is the commit that ends the flag, as in C 1.0
 (`mdb_txn_prepare` alone does not).
+
+### Features and environment variables
+
+```c
+#define RLMDB_UNKNOWN_FEATURE  (-30600)  /* "RLMDB_UNKNOWN_FEATURE: Unknown feature" */
+#define RLMDB_FEATURE_IS_FIXED (-30601)  /* "RLMDB_FEATURE_IS_FIXED: Feature cannot be disabled" */
+
+#define RLMDB_FEATURE_OFF    0
+#define RLMDB_FEATURE_ON     1
+#define RLMDB_FEATURE_FIXED  2
+
+const char *const *rlmdb_features(void);                        /* NULL-terminated, static */
+int rlmdb_feature_default(const char *name, int *state);
+int rlmdb_env_enable_feature(MDB_env *env, const char *name);   /* before mdb_env_open */
+int rlmdb_env_disable_feature(MDB_env *env, const char *name);  /* before mdb_env_open */
+int rlmdb_env_feature_enabled(MDB_env *env, const char *name, int *enabled);  /* any time */
+int rlmdb_env_read_environment(MDB_env *env, int on);           /* before mdb_env_open */
+```
+
+* rlmdb's own return codes count down from -30600; -30600 .. -30699 are
+  reserved for them, clear of LMDB's (-30799 .. -30769). `mdb_strerror`
+  knows their texts, in the form of LMDB's.
+* Features are named by strings that are never renamed or retired: one
+  that graduates to always on stays listed as `RLMDB_FEATURE_FIXED`. A
+  name the library does not know (also one that is not UTF-8) is
+  `RLMDB_UNKNOWN_FEATURE`, never `EINVAL`. The only feature today is the
+  placeholder `test-feature` (off by default, changes nothing), which
+  will be removed when the first real feature is added.
+* At `mdb_env_open` each feature starts at its default, then
+  `RLMDB_FEATURES` applies if the handle reads the variables, then the
+  program's `rlmdb_env_enable_feature` / `rlmdb_env_disable_feature`,
+  which win (the later of the two calls for a feature counts). This
+  happens before any file is touched: an unknown name in the variable
+  fails the open with `RLMDB_UNKNOWN_FEATURE`, a `-` on a fixed feature
+  with `RLMDB_FEATURE_IS_FIXED`, and the directory is left as it was.
+  Enabling a fixed feature does nothing; disabling one is
+  `RLMDB_FEATURE_IS_FIXED`.
+* `RLMDB_FEATURES` holds names separated by commas or whitespace (any
+  mix); a leading `-` disables; for a name given more than once the last
+  entry wins; an empty value or empty entries are nothing.
+* `rlmdb_env_feature_enabled` after the open reports what the open
+  resolved; before it, the defaults and the program's requests
+  (`RLMDB_FEATURES` is read at the open).
+* Argument checks: a NULL handle, a NULL name or a NULL output is
+  `EINVAL`; so are `rlmdb_env_enable_feature`,
+  `rlmdb_env_disable_feature` and `rlmdb_env_read_environment` after the
+  open. The handle is checked first, then whether it is open (the
+  setters) or the output pointer (`rlmdb_env_feature_enabled`), then the
+  name.
+* A handle reads rlmdb's environment variables at the open (`RLMDB_FEATURES`
+  and the experimental `RLMDB_DEFAULT_FORMAT`) unless
+  `rlmdb_env_read_environment(env, 0)` turned that off, or
+  `RLMDB_IGNORE_ENV` is set to anything but the empty string (then none
+  is read, whatever the program asked; it is the only one read before
+  that decision). A setuid or setgid process reads none of them
+  (`secure_getenv` semantics: `AT_SECURE` on Linux, `issetugid` on macOS
+  and the BSDs). `mdb_env_get_maxkeysize` before the open follows the
+  same rules. The Rust API reads none unless the program asks for it
+  (`rlmdb::EnvironmentBuilder::read_environment`); the tools read them as
+  the C API does.
 
 ## Write side
 
@@ -790,6 +856,16 @@ environments.
   (rlmdb's version, the line of `rlmdb_version_string()`). The same
   program is compiled as C++ and linked, which checks the header's
   `extern "C"` guards.
+* `tests/capi_features.rs`: `tests/c/capi_features.c` checks the feature
+  functions of `rlmdb.h` and the environment variables against
+  `librlmdb` (no C oracle): the list, the defaults, enabling and
+  disabling before the open and `EINVAL` after it, the state before and
+  after the open, NULL arguments, `RLMDB_FEATURES` (separators, `-`, the
+  last entry winning, a typo failing the open before any file is made),
+  the program winning over it, `rlmdb_env_read_environment(env, 0)` and
+  `RLMDB_IGNORE_ENV` keeping it and `RLMDB_DEFAULT_FORMAT` unread (also
+  for `mdb_env_get_maxkeysize`), the error codes' texts and the features
+  in `rlmdb_version_string`.
 * `tests/capi_format.rs`: `tests/c/capi_format.c` checks the format
   functions of `rlmdb.h` and the constants of 1.0's `lmdb.h` against
   `librlmdb` (no C oracle): `rlmdb_env_set_format`/`get_format` before and after the open,

@@ -317,6 +317,16 @@ impl Opts {
 
         let mut builder = Environment::builder();
         builder.max_dbs(self.maxdbs).flags(flags);
+        // Plain compatibility mode: the matrix compares what the peers
+        // write with C byte for byte, so every feature that is on by
+        // default is off here (none is so far).
+        for f in rlmdb::features() {
+            if f.default == rlmdb::FeatureDefault::On {
+                builder
+                    .disable(f.feature)
+                    .check("disable a default feature")?;
+            }
+        }
         if self.mapsize != 0 {
             let size = usize::try_from(self.mapsize)
                 .map_err(|_| Fail::usage(format!("--mapsize {} too large", self.mapsize)))?;

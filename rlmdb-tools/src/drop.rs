@@ -12,7 +12,7 @@
 //! the main DB this also just empties it). Everything happens in one write
 //! transaction.
 
-use rlmdb::{DatabaseFlags, Environment, EnvironmentFlags};
+use rlmdb::{DatabaseFlags, EnvironmentFlags};
 
 use crate::common::{create_db, path_of, report_failed, Tool, EXIT_FAILURE};
 use crate::getopt::{GetOpt, Opt};
@@ -47,7 +47,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         return tool.usage(SYNOPSIS);
     }
 
-    let mut builder = Environment::builder();
+    let mut builder = crate::common::env_builder();
     builder.max_dbs(2);
     if no_sub_dir {
         builder.flags(EnvironmentFlags::NO_SUB_DIR);

@@ -129,10 +129,9 @@ For programs you cannot change, the environment variable
 RLMDB_DEFAULT_FORMAT=1.0 ./prog
 ```
 
-It takes `0.9` or `1.0`; other values are ignored. This is the only
-environment variable the library reads. It is experimental and may go
-away. Since existing files keep their format, you only need it when the
-environment is created.
+It takes `0.9` or `1.0`; other values are ignored. It is experimental
+and may go away. Since existing files keep their format, you only need it
+when the environment is created.
 
 The program's own choice always wins over the variable. To make sure the
 variable never changes what your program creates, call this at start-up:
@@ -140,6 +139,82 @@ variable never changes what your program creates, call this at start-up:
 ```c
 rlmdb_set_default_format(RLMDB_FORMAT_09);
 ```
+
+## Opt-in features
+
+A feature is extra behaviour of rlmdb that C LMDB does not have. It is
+off unless you turn it on. Turning a feature on never breaks
+compatibility: C programs can still open, read and write the
+environment.
+
+This release has one feature, `test-feature`. It does nothing. It is
+there so that you can try the functions below. It will be removed when
+the first real feature is added.
+
+Turn a feature on before you open the environment:
+
+```c
+mdb_env_create(&env);
+rlmdb_env_enable_feature(env, "test-feature");
+mdb_env_open(env, "./db", 0, 0644);
+```
+
+If you cannot change the program, use the `RLMDB_FEATURES` variable:
+
+```sh
+RLMDB_FEATURES=test-feature ./prog
+```
+
+To turn a feature off, put a `-` before its name. Separate names with
+commas or spaces:
+
+```sh
+RLMDB_FEATURES="a, -b" ./prog    # a on, b off
+```
+
+If a name appears twice, the last one counts. If you call
+`rlmdb_env_enable_feature()` or `rlmdb_env_disable_feature()` in the
+program, that call wins over the variable.
+
+A name the library does not know is an error: the function, or
+`mdb_env_open()` for a name in the variable, returns
+`RLMDB_UNKNOWN_FEATURE`. A typo in the variable stops the program from
+opening the environment, so you notice it.
+
+Each feature has a default:
+
+| Default | Meaning |
+|---|---|
+| `RLMDB_FEATURE_OFF` | Off unless you turn it on. |
+| `RLMDB_FEATURE_ON` | On unless you turn it off. |
+| `RLMDB_FEATURE_FIXED` | Always on. Turning it off returns `RLMDB_FEATURE_IS_FIXED`. |
+
+`rlmdb_features()` lists the features the library knows.
+`rlmdb_version_string()` lists them too, for logs: a `*` after a name
+means on by default, a `!` means always on.
+
+## Environment variables
+
+The library reads these variables when it opens an environment:
+
+| Variable | What it does |
+|---|---|
+| `RLMDB_IGNORE_ENV` | If set, and not empty, the library ignores the other two. |
+| `RLMDB_FEATURES` | Turns features on or off (see "Opt-in features"). |
+| `RLMDB_DEFAULT_FORMAT` | Sets the format of new environments (experimental, see above). |
+
+A setting the program makes with a function always wins over a variable.
+
+A program that should not read the variables at all can turn them off
+before it opens the environment:
+
+```c
+rlmdb_env_read_environment(env, 0);
+```
+
+Programs that run setuid or setgid never read the variables. The rlmdb
+tools read them like any C program. Rust programs read them only if they
+ask for it.
 
 ## The rlmdb functions
 
@@ -155,6 +230,12 @@ document each function.
 | `rlmdb_set_default_format(format)` | Sets the format of all new environments of the process. |
 | `rlmdb_sniff_format(path, flags, &format)` | Tells the format of an environment on disk, without opening it. |
 | `rlmdb_env_set_pagesize(env, size)` | `mdb_env_set_pagesize()` for programs using 0.9's `lmdb.h`. |
+| `rlmdb_env_enable_feature(env, name)` | Turns a feature on, before `mdb_env_open()`. |
+| `rlmdb_env_disable_feature(env, name)` | Turns a feature off, before `mdb_env_open()`. |
+| `rlmdb_env_feature_enabled(env, name, &on)` | Tells whether a feature is on. |
+| `rlmdb_features()` | Lists the features the library knows. |
+| `rlmdb_feature_default(name, &state)` | Tells a feature's default: off, on or always on. |
+| `rlmdb_env_read_environment(env, on)` | Turns reading the environment variables on or off, before `mdb_env_open()`. |
 | `rlmdb_version()` | Version numbers, as a struct. |
 | `rlmdb_version_string()` | The same as one line, for logs. |
 

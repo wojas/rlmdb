@@ -6,7 +6,9 @@ use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 
-use rlmdb::{Dbi, Environment, Error, Format, RoCursor, RwTxn, Stat, Transaction};
+use rlmdb::{
+    Dbi, Environment, EnvironmentBuilder, Error, Format, RoCursor, RwTxn, Stat, Transaction,
+};
 
 use crate::cfmt::{err_code, io_errno, strerror};
 use crate::output::{eprint_bytes, Output};
@@ -121,6 +123,17 @@ pub fn path_of(bytes: &[u8]) -> &Path {
 #[cfg(windows)]
 pub fn path_of(bytes: &[u8]) -> &Path {
     Path::new(std::str::from_utf8(bytes).unwrap_or("\u{fffd}"))
+}
+
+/// The builder every tool opens its environment with: one that reads
+/// rlmdb's environment variables (`RLMDB_FEATURES`, the experimental
+/// `RLMDB_DEFAULT_FORMAT`, unless `RLMDB_IGNORE_ENV`), as the C API does:
+/// the tools stand in for the C tools, whose only knobs for rlmdb's own
+/// behaviour the variables are.
+pub fn env_builder() -> EnvironmentBuilder {
+    let mut builder = Environment::builder();
+    builder.read_environment(true);
+    builder
 }
 
 /// A database name as `mdb_dbi_open` sees it: C names are NUL-terminated,

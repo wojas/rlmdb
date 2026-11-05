@@ -12,8 +12,8 @@
 # the other page sizes, the mutation and model tests are SKIPPED there.
 # nightly.yml runs the whole suite on every platform.
 #
-# RLMDB_DEFAULT_FORMAT is deliberately not set: the tests assume it is unset
-# (see scripts/check-all.sh).
+# RLMDB_DEFAULT_FORMAT, RLMDB_FEATURES and RLMDB_IGNORE_ENV are deliberately
+# not set: the tests assume they are unset (see scripts/check-all.sh).
 name: CI
 
 on:

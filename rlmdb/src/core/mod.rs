@@ -103,8 +103,8 @@ pub use crate::flags::{DatabaseFlags, EnvironmentFlags, WriteFlags};
 pub use commit::PreparedTxn;
 pub use dbi::Dbi;
 pub use env::{
-    default_format, default_format_or, process_default_format, set_default_format, sniff_format,
-    Environment, EnvironmentBuilder, DEFAULT_FORMAT_ENV,
+    process_default_format, set_default_format, sniff_format, Environment, EnvironmentBuilder,
+    DEFAULT_FORMAT_ENV, IGNORE_ENV,
 };
 pub use reader::{format_reader_list, ReaderInfo};
 pub use ro_cursor::{CursorOp, Entry, RoCursor};

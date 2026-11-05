@@ -1,7 +1,9 @@
 //! The data-file format through the tools, against the C 0.9 tools where
 //! there is an LMDB 0.9 file: `mdb_load -F 0.9|1.0`, the experimental
 //! `RLMDB_DEFAULT_FORMAT` variable (set only for the tool's process), and
-//! that neither changes what the tools do with an existing 0.9 file.
+//! that neither changes what the tools do with an existing 0.9 file; that
+//! the tools read rlmdb's variables (`RLMDB_FEATURES` too) unless
+//! `RLMDB_IGNORE_ENV` is set.
 //!
 //! That the 1.0 files are the ones C 1.0's tools write and read is checked
 //! in `interop/tests/tools10.rs`, where the C 1.0 tools are built.
@@ -133,6 +135,52 @@ fn load_format_option_and_default_variable() {
             assert_eq!(records(&env), records(&c_env), "{name}");
         }
     }
+}
+
+/// The tools read rlmdb's environment variables as the C API does:
+/// `RLMDB_DEFAULT_FORMAT` (above) and `RLMDB_FEATURES`, whose typo fails
+/// the open, unless `RLMDB_IGNORE_ENV` hides them.
+#[test]
+fn the_tools_read_the_variables_unless_ignored() {
+    let dir = tempdir();
+    let input = named_dump();
+    let load = |name: &str, vars: &[(&str, &str)]| {
+        let env = dir.path().join(name);
+        fs::create_dir_all(&env).unwrap();
+        let argv = vec![p(&env)];
+        let r = run_env(Impl::Rust, "mdb_load", &argv, &input, dir.path(), vars);
+        (r, format_of(&env))
+    };
+    let (r, format) = load("feature", &[("RLMDB_FEATURES", "test-feature")]);
+    assert_eq!(
+        (r.code, format),
+        (0, Some(Format::V09)),
+        "{}",
+        r.stderr_str()
+    );
+    let (r, format) = load("typo", &[("RLMDB_FEATURES", "test-feature,tset-feature")]);
+    assert_eq!(r.code, 1);
+    // After the header's warnings (db_pagesize= in a 0.9 load).
+    assert!(
+        r.stderr_text().ends_with(
+            "\nmdb_env_open failed, error -30600 RLMDB_UNKNOWN_FEATURE: Unknown feature\n"
+        ),
+        "{}",
+        r.stderr_str()
+    );
+    assert_eq!(format, None);
+    let ignored = [
+        ("RLMDB_FEATURES", "tset-feature"),
+        ("RLMDB_DEFAULT_FORMAT", "1.0"),
+        ("RLMDB_IGNORE_ENV", "1"),
+    ];
+    let (r, format) = load("ignored", &ignored);
+    assert_eq!(
+        (r.code, format),
+        (0, Some(Format::V09)),
+        "{}",
+        r.stderr_str()
+    );
 }
 
 #[test]

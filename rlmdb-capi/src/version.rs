@@ -14,7 +14,9 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint};
 use std::sync::OnceLock;
 
-use rlmdb::consts::{MDB_KEYEXIST, MDB_LAST_ERRCODE_V10};
+use rlmdb::consts::{
+    MDB_KEYEXIST, MDB_LAST_ERRCODE_V10, RLMDB_FEATURE_IS_FIXED, RLMDB_UNKNOWN_FEATURE,
+};
 
 use crate::Profile;
 
@@ -174,7 +176,8 @@ fn lmdb_messages() -> &'static [CString] {
 /// `mdb_strerror`: return a string describing a given error code.
 ///
 /// LMDB's codes map to static strings, LMDB 1.0's codes (its `lmdb.h`)
-/// included, where C 0.9 says "Invalid error code" (on Windows, where C
+/// and rlmdb's own (`RLMDB_UNKNOWN_FEATURE`, `RLMDB_FEATURE_IS_FIXED`,
+/// `rlmdb.h`) included, where C 0.9 says "Invalid error code" (on Windows, where C
 /// asks the system for any other code, the empty string); other positive values
 /// are passed to the C library's `strerror`, as C LMDB does on Unix (on
 /// Windows, as C does there: the C runtime's text for the `errno` values
@@ -185,6 +188,10 @@ pub unsafe extern "C" fn mdb_strerror(err: c_int) -> *mut c_char {
         c"Successful return: 0"
     } else if (MDB_KEYEXIST..=MDB_LAST_ERRCODE_V10).contains(&err) {
         &lmdb_messages()[(err - MDB_KEYEXIST) as usize]
+    } else if err == RLMDB_UNKNOWN_FEATURE {
+        c"RLMDB_UNKNOWN_FEATURE: Unknown feature"
+    } else if err == RLMDB_FEATURE_IS_FIXED {
+        c"RLMDB_FEATURE_IS_FIXED: Feature cannot be disabled"
     } else if err < 0 && !cfg!(windows) {
         c"Invalid error code"
     } else {
@@ -344,6 +351,12 @@ mod tests {
             "Invalid error code"
         };
         assert_eq!(s(MDB_LAST_ERRCODE_V10 + 1), invalid);
+        // rlmdb's own codes, with the texts of rlmdb::strerror.
+        for code in [RLMDB_UNKNOWN_FEATURE, RLMDB_FEATURE_IS_FIXED] {
+            assert_eq!(s(code), rlmdb::strerror(code));
+        }
+        assert_eq!(s(RLMDB_UNKNOWN_FEATURE + 1), invalid);
+        assert_eq!(s(RLMDB_FEATURE_IS_FIXED - 1), invalid);
         assert_eq!(s(MDB_KEYEXIST - 1), invalid);
         assert_eq!(s(-1), invalid);
         assert_eq!(s(libc::ENOENT), "No such file or directory");

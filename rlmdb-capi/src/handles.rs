@@ -47,7 +47,7 @@ use std::sync::atomic::AtomicPtr;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use rlmdb::consts::DEFAULT_READERS;
-use rlmdb::{CursorId, Dbi, Environment, Format, PreparedTxn, RwTxn, Transaction};
+use rlmdb::{CursorId, Dbi, Environment, FeatureRequests, Format, PreparedTxn, RwTxn, Transaction};
 
 use crate::erased::{
     ErasedInactiveTxn, ErasedPreparedTxn, ErasedRoCursor, ErasedRoTxn, ErasedRwTxn,
@@ -81,6 +81,11 @@ pub(crate) struct EnvConfig {
     /// `mdb_modsetup` asked for encryption or checksums, which are not
     /// implemented: `mdb_env_open` fails with `ENOTSUP`.
     pub(crate) crypto_requested: bool,
+    /// `rlmdb_env_read_environment`: whether the open reads rlmdb's
+    /// environment variables (on unless the program turns it off).
+    pub(crate) read_environment: bool,
+    /// `rlmdb_env_enable_feature` and `rlmdb_env_disable_feature`.
+    pub(crate) features: FeatureRequests,
 }
 
 /// `MDB_env`: an LMDB environment handle (opaque to C).
@@ -110,6 +115,8 @@ impl MDB_env {
                 fallback_format,
                 page_size: None,
                 crypto_requested: false,
+                read_environment: true,
+                features: FeatureRequests::new(),
             }),
             env: OnceLock::new(),
             path: OnceLock::new(),

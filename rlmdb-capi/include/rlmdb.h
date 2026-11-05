@@ -35,7 +35,8 @@
  *	<li>the format requested with #rlmdb_env_set_format(), else
  *	<li>the process default of #rlmdb_set_default_format(), else
  *	<li>the format the environment variable RLMDB_DEFAULT_FORMAT names
- *		("0.9" or "1.0"; any other value is ignored), else
+ *		("0.9" or "1.0"; any other value is ignored), if the environment
+ *		reads the variables (@ref rlmdb_environ_sec), else
  *	<li>the library's: LMDB 0.9 in librlmdb and the LMDB 0.9 stub, as
  *		almost all programs are written for LMDB 0.9 today (and every C
  *		LMDB release reads its files; this may change in a later release);
@@ -62,6 +63,52 @@
  *	crypto modules return ENOTSUP (rlmdb-capi/DETAILS.md lists them). With
  *	0.9's lmdb.h, LMDB 1.0's error codes are numbers without names;
  *	#mdb_strerror() knows their texts.
+ *
+ *	@section rlmdb_feature_sec Opt-in features
+ *	A feature is behaviour of rlmdb's own that a program, or the
+ *	RLMDB_FEATURES variable, enables by name for an environment: kebab-case
+ *	names that are never renamed, so that a program written for a later
+ *	rlmdb runs against an earlier one (it gets #RLMDB_UNKNOWN_FEATURE for a
+ *	name the library does not know). Every feature keeps the environment
+ *	compatible with C LMDB, which still opens, reads and writes it, also
+ *	while the feature is on in another process; what a feature writes may
+ *	differ from what C writes byte for byte. In a given library a feature
+ *	is off by default (#RLMDB_FEATURE_OFF), on by default
+ *	(#RLMDB_FEATURE_ON) or always on (#RLMDB_FEATURE_FIXED). A feature that
+ *	graduates to always on stays listed as fixed, so a program that asks
+ *	for it by name keeps getting a true answer. #rlmdb_features() lists
+ *	the names a library knows.
+ *
+ *	At #mdb_env_open() each feature starts at its default; then
+ *	RLMDB_FEATURES applies, if the environment reads the variables; then
+ *	what the program asked for with #rlmdb_env_enable_feature() and
+ *	#rlmdb_env_disable_feature(), which wins over the variable.
+ *	RLMDB_FEATURES holds names separated by commas or whitespace (any mix),
+ *	a leading '-' disables a feature, and for a name given more than once
+ *	the last entry wins: "RLMDB_FEATURES=a,b -c". An unknown name there
+ *	makes #mdb_env_open() fail with #RLMDB_UNKNOWN_FEATURE, a '-' on a
+ *	fixed feature with #RLMDB_FEATURE_IS_FIXED, so that a typo is noticed.
+ *	The only feature of this release is "test-feature", off by default,
+ *	which changes nothing but its own state: a placeholder for trying the
+ *	functions, removed when the first real feature is added.
+ *
+ *	@section rlmdb_environ_sec Environment variables
+ *	An environment handle reads rlmdb's environment variables when it is
+ *	opened, unless the program turned that off with
+ *	#rlmdb_env_read_environment() (an unmodified C program has no other
+ *	way to control rlmdb's own behaviour; the Rust API reads none unless
+ *	asked to). What the program sets with a function always wins over a
+ *	variable. They are, in the order they are read:
+ *	<ol>
+ *	<li>RLMDB_IGNORE_ENV: if set to anything but the empty string, none
+ *		of the others is read, whatever the program asked for;
+ *	<li>RLMDB_FEATURES: features to enable or disable
+ *		(@ref rlmdb_feature_sec);
+ *	<li>RLMDB_DEFAULT_FORMAT (experimental): the format of a new
+ *		environment that asks for none (@ref rlmdb_format_sec).
+ *	</ol>
+ *	A setuid or setgid program reads none of them (secure_getenv()
+ *	semantics).
  *
  *	@copyright See COPYRIGHT in the top-level directory of rlmdb.
  *	Redistribution and use in source and binary forms, with or without
@@ -116,8 +163,10 @@ const rlmdb_version_info *rlmdb_version(void);
 	 * the same string ("mdb_version 0.9.85" and "mdb_version 1.0.85" in the
 	 * stubs, which return LMDB's "LMDB 0.9.85: (rlmdb 0.0.0)" form there).
 	 * Meant for logs and bug reports: programs read the version numbers
-	 * from #rlmdb_version() instead of parsing it, and opt-in features, once
-	 * there are any, will be listed by name (rlmdb issue #2).
+	 * from #rlmdb_version() instead of parsing it. The opt-in features of
+	 * the library come last, "; features: a b* c!", each name followed by
+	 * '*' if it is on by default and '!' if it is fixed (left out in a
+	 * library without features); programs use #rlmdb_features() instead.
 	 * @return A static string, valid for the life of the process; it must not
 	 * be modified or freed.
 	 */
@@ -227,6 +276,124 @@ int rlmdb_set_default_format(unsigned format);
 	 * </ul>
 	 */
 int rlmdb_env_set_pagesize(MDB_env *env, unsigned size);
+/**	@} */
+
+/** @defgroup rlmdb_errors Return codes
+ *	rlmdb's own return codes, from -30600 downwards (-30600 to -30699 are
+ *	reserved for them; LMDB's are -30799 to -30769). #mdb_strerror() knows
+ *	their texts.
+ *	@{
+ */
+	/** A feature name this library does not know */
+#define RLMDB_UNKNOWN_FEATURE	(-30600)
+	/** A fixed feature cannot be disabled */
+#define RLMDB_FEATURE_IS_FIXED	(-30601)
+/**	@} */
+
+/** @defgroup rlmdb_features Opt-in features
+ *	See @ref rlmdb_feature_sec.
+ *	@{
+ */
+	/** Known, off unless enabled */
+#define RLMDB_FEATURE_OFF	0
+	/** Known, on unless disabled */
+#define RLMDB_FEATURE_ON	1
+	/** Known and always on: it cannot be disabled */
+#define RLMDB_FEATURE_FIXED	2
+
+	/** @brief Return the names of the features this library knows.
+	 *
+	 * @return A static array of static strings, ending with NULL, valid
+	 * for the life of the process; it must not be modified or freed.
+	 */
+const char *const *rlmdb_features(void);
+
+	/** @brief Get the default state of a feature in this library.
+	 *
+	 * @param[in] name The name of the feature
+	 * @param[out] state #RLMDB_FEATURE_OFF, #RLMDB_FEATURE_ON or
+	 * #RLMDB_FEATURE_FIXED. Not changed on failure.
+	 * @return A non-zero error value on failure and 0 on success. Some
+	 * possible errors are:
+	 * <ul>
+	 *	<li>#RLMDB_UNKNOWN_FEATURE - the library does not know the name.
+	 *	<li>EINVAL - an invalid parameter was specified.
+	 * </ul>
+	 */
+int rlmdb_feature_default(const char *name, int *state);
+
+	/** @brief Enable a feature of an environment.
+	 *
+	 * The feature is on in the environment whatever RLMDB_FEATURES says;
+	 * this replaces an earlier #rlmdb_env_disable_feature() of it. Enabling
+	 * a fixed feature does nothing. This function may only be called after
+	 * #mdb_env_create() and before #mdb_env_open().
+	 * @param[in] env An environment handle returned by #mdb_env_create()
+	 * @param[in] name The name of the feature
+	 * @return A non-zero error value on failure and 0 on success. Some
+	 * possible errors are:
+	 * <ul>
+	 *	<li>#RLMDB_UNKNOWN_FEATURE - the library does not know the name.
+	 *	<li>EINVAL - an invalid parameter was specified, or the environment
+	 *	is already open.
+	 * </ul>
+	 */
+int rlmdb_env_enable_feature(MDB_env *env, const char *name);
+
+	/** @brief Disable a feature of an environment.
+	 *
+	 * The feature is off in the environment whatever RLMDB_FEATURES says;
+	 * this replaces an earlier #rlmdb_env_enable_feature() of it. This
+	 * function may only be called after #mdb_env_create() and before
+	 * #mdb_env_open().
+	 * @param[in] env An environment handle returned by #mdb_env_create()
+	 * @param[in] name The name of the feature
+	 * @return A non-zero error value on failure and 0 on success. Some
+	 * possible errors are:
+	 * <ul>
+	 *	<li>#RLMDB_UNKNOWN_FEATURE - the library does not know the name.
+	 *	<li>#RLMDB_FEATURE_IS_FIXED - the feature cannot be disabled.
+	 *	<li>EINVAL - an invalid parameter was specified, or the environment
+	 *	is already open.
+	 * </ul>
+	 */
+int rlmdb_env_disable_feature(MDB_env *env, const char *name);
+
+	/** @brief Tell whether a feature of an environment is on.
+	 *
+	 * May be called at any time. After #mdb_env_open() it reports the
+	 * state the open settled on; before it, what the defaults and the
+	 * program's requests give (RLMDB_FEATURES is read at the open).
+	 * @param[in] env An environment handle returned by #mdb_env_create()
+	 * @param[in] name The name of the feature
+	 * @param[out] enabled 1 if the feature is on, else 0. Not changed on
+	 * failure.
+	 * @return A non-zero error value on failure and 0 on success. Some
+	 * possible errors are:
+	 * <ul>
+	 *	<li>#RLMDB_UNKNOWN_FEATURE - the library does not know the name.
+	 *	<li>EINVAL - an invalid parameter was specified.
+	 * </ul>
+	 */
+int rlmdb_env_feature_enabled(MDB_env *env, const char *name, int *enabled);
+
+	/** @brief Set whether an environment reads rlmdb's environment variables.
+	 *
+	 * A new handle reads them when it is opened (@ref rlmdb_environ_sec);
+	 * a program that configures rlmdb itself can turn that off.
+	 * RLMDB_IGNORE_ENV turns them off whatever this says. This function
+	 * may only be called after #mdb_env_create() and before
+	 * #mdb_env_open().
+	 * @param[in] env An environment handle returned by #mdb_env_create()
+	 * @param[in] on 0 to read none of them, anything else to read them
+	 * @return A non-zero error value on failure and 0 on success. Some
+	 * possible errors are:
+	 * <ul>
+	 *	<li>EINVAL - an invalid parameter was specified, or the environment
+	 *	is already open.
+	 * </ul>
+	 */
+int rlmdb_env_read_environment(MDB_env *env, int on);
 /**	@} */
 /**	@} */
 
