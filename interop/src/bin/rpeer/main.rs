@@ -13,7 +13,7 @@
 //! | `args` | `cpeer.c` | option parsing, exit codes, env open |
 //! | `dataset` | `dataset.c` | the deterministic data set |
 //! | `data` | `cpeer_data.c` | `fill`, `verify`, `delete`, `drop`, `dump` |
-//! | `loops` | `cpeer_loops.c` | `hold-reader`, `hold-env`, `hold-writer`, `writer-loop`, `reader-loop`, `formats-loop` (rpeer only) |
+//! | `loops` | `cpeer_loops.c` | `hold-reader`, `hold-env`, `hold-writer`, `prepare`, `rollback`, `writer-loop`, `reader-loop`, `formats-loop` (rpeer only) |
 //! | `misc` | `cpeer_misc.c` | `create`, `stat`, `readers`, `reader-check`, `copy`, `nested-test`, `gen` |
 //! | `pagewalk` | `cpeer_pagewalk.c` | `check-freelist` |
 //!
@@ -151,6 +151,23 @@ const COMMANDS: &[Command] = &[
         implemented: true,
     },
     Command {
+        name: "prepare",
+        run: loops::cmd_prepare,
+        min_pos: 5,
+        max_pos: 5,
+        usage: "prepare <env> <seconds> <db|-> <count> <seed> [data options] [--until-stdin] \
+                [--abort]",
+        implemented: true,
+    },
+    Command {
+        name: "rollback",
+        run: loops::cmd_rollback,
+        min_pos: 2,
+        max_pos: 2,
+        usage: "rollback <env> <txnid|last>",
+        implemented: true,
+    },
+    Command {
         name: "writer-loop",
         run: loops::cmd_writer_loop,
         min_pos: 4,
@@ -235,7 +252,7 @@ fn usage() -> Fail {
     }
     s.push_str(
         "env options: --nosubdir --notls --nosync --nometasync --mapsize N --maxdbs N \
-         --maxreaders N --format 0.9|1.0 --pagesize N\n\
+         --maxreaders N --format 0.9|1.0 --pagesize N --prevsnapshot\n\
          data options: --dupsort --dupfixed --intkey --intdup --revkey --revdup --valsize N --big N \
          --dups N --deleted-every N --per-txn N --append --reserve\n\
          command options: --every N --keys N --max-commits N --compact --all --until-stdin \

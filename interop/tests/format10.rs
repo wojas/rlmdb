@@ -26,10 +26,30 @@ use interop::bins;
 use interop::tools::parse_dump;
 use rlmdb::{DatabaseFlags, Environment, EnvironmentFlags, Format, RwTxn, Transaction, WriteFlags};
 
+/// A new temporary directory: under `$RLMDB_TEST_SCRATCH` if set (CI
+/// points it at a file system in memory), else in the system's temporary
+/// directory. Copies go to [`disk_tmp`].
 fn tmp() -> tempfile::TempDir {
+    let mut b = tempfile::Builder::new();
+    b.prefix("interop-v10-");
+    match std::env::var_os(interop::SCRATCH_VAR) {
+        Some(dir) if !dir.is_empty() => {
+            std::fs::create_dir_all(&dir).unwrap();
+            b.tempdir_in(dir).unwrap()
+        }
+        _ => b.tempdir().unwrap(),
+    }
+}
+
+/// A new temporary directory under `target/tmp`, on the disk, whatever
+/// `$RLMDB_TEST_SCRATCH` says, for the targets of copies: C and rlmdb
+/// write them with `O_DIRECT` on Linux, which a disk file system honours
+/// (writes aligned to its logical block size) and tmpfs ignores
+/// (`interop::TestEnv::derived_on_disk`).
+fn disk_tmp() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("interop-v10-")
-        .tempdir()
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
         .unwrap()
 }
 
@@ -462,7 +482,7 @@ fn copies_match_mdb_copy10() {
         writeops10(src.path(), 0, ps, &script(7, ps / 3));
         writeops10(src.path(), 0, ps, &script(9, ps + 100));
         for compact in [false, true] {
-            let (c, r) = (tmp(), tmp());
+            let (c, r) = (disk_tmp(), disk_tmp());
             let mut args = Vec::new();
             if compact {
                 args.push("-c");

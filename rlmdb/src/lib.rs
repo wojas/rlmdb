@@ -5,9 +5,9 @@
 //! writing, with the same reader table and the same writer lock.
 //!
 //! It is a rewrite, not a binding: no C code is linked. The C API
-//! (`liblmdb.a`/`.so`/`.dylib`, a drop-in replacement for C programs) is
-//! the separate `rlmdb-capi` crate, the command line tools are `rlmdb-tools`;
-//! both are built on this crate. See `README.md` for an overview and
+//! (`librlmdb.a`/`.so`/`.dylib`, and stubs named `liblmdb` that stand in
+//! for C LMDB 0.9 and 1.0) is the separate `rlmdb-capi` crate, the command
+//! line tools are `rlmdb-tools`; both are built on this crate. See `README.md` for an overview and
 //! `COMPATIBILITY.md` for the exact compatibility contract.
 //!
 //! # Layers
@@ -149,10 +149,13 @@
 //! named semaphores, and SysV semaphores for LMDB 1.0 lock files, on all
 //! but FreeBSD); they compile but are untested (`COMPATIBILITY.md`).
 //! Windows and 32-bit targets are out of scope, as
-//! are the LMDB 1.0 features (`MDB_VL32`, encryption, checksums,
-//! `MDB_PREVSNAPSHOT`).
-//! `MDB_WRITEMAP`, `MDB_FIXEDMAP`, `MDB_MAPASYNC` and `MDB_NOMEMINIT` are
-//! accepted and ignored (see [`EnvironmentFlags`]).
+//! are the LMDB 1.0 features (`MDB_VL32`, encryption, checksums);
+//! `MDB_PREVSNAPSHOT` works for environments of both formats
+//! ([`EnvironmentFlags::PREV_SNAPSHOT`]).
+//! `MDB_FIXEDMAP`, `MDB_MAPASYNC` and `MDB_NOMEMINIT` are accepted and
+//! ignored; `MDB_WRITEMAP` is accepted without a writable map, with C's
+//! limits (no nested transactions), and refused for writing on OpenBSD
+//! (see [`EnvironmentFlags`]).
 
 // No unsafe code outside `os` (which opts back in with
 // `#![allow(unsafe_code)]`); every other module additionally forbids it.
@@ -184,11 +187,12 @@ pub use crate::format::Format;
 pub use crate::os::{flush_file_maps, invalidate_file};
 pub use crate::version::{version_info, VersionInfo};
 
-/// What `mdb_version` reports, `(major, minor, patch)`: `(0, 9, 85)`, the
-/// 0.9 series this crate is a drop-in for with a patch level above every
-/// real 0.9 release, so that a program can tell rlmdb from C LMDB. The C
-/// releases the formats match and the rlmdb version are in
-/// [`version_info`].
+/// What `mdb_version` reports where rlmdb stands in for C LMDB 0.9 (the
+/// tools' `-V`, the C API's LMDB 0.9 stub), `(major, minor, patch)`:
+/// `(0, 9, 85)`, the 0.9 series with a patch level above every real 0.9
+/// release, so that a program can tell rlmdb from C LMDB. (The C API's
+/// `librlmdb` reports the rlmdb version instead.) The C releases the
+/// formats match and the rlmdb version are in [`version_info`].
 pub fn lmdb_version() -> (i32, i32, i32) {
     (
         consts::MDB_VERSION_MAJOR,

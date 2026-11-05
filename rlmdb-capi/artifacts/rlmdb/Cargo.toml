@@ -1,0 +1,25 @@
+[package]
+name = "librlmdb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "librlmdb, the C library of rlmdb (librlmdb.a, librlmdb.so, librlmdb.dylib; rlmdb.dll)"
+publish = false
+
+[lib]
+# Only the C libraries, no rlib: nobody uses this as a Rust crate (the
+# tests depend on it only to have cargo build the libraries before them),
+# and librlmdb's lib name is the core crate's, whose rlib in target/ an
+# rlib of this package would collide with. Nothing to test or document
+# here: the implementation and its tests are rlmdb-capi's.
+name = "rlmdb"
+crate-type = ["cdylib", "staticlib"]
+test = false
+doctest = false
+bench = false
+doc = false
+
+[dependencies]
+rlmdb-capi = { path = "../.." }

@@ -155,6 +155,9 @@ pub struct Opts {
     pub nosync: bool,
     /// `--nometasync`: `MDB_NOMETASYNC`.
     pub nometasync: bool,
+    /// `--prevsnapshot`: `MDB_PREVSNAPSHOT` (LMDB 1.0's flag; rlmdb takes
+    /// it for 0.9 environments too).
+    pub prevsnapshot: bool,
     /// `--mapsize N`; 0 keeps the environment's size.
     pub mapsize: u64,
     /// `--maxdbs N` (default 64).
@@ -191,6 +194,8 @@ pub struct Opts {
     pub check: bool,
     /// `--delete` (drop).
     pub delete: bool,
+    /// `--abort` (prepare).
+    pub abort: bool,
     /// `--keys N` (writer-loop; default 500).
     pub keys: u32,
     /// `--max-commits N` (writer-loop; 0 = no limit).
@@ -227,6 +232,7 @@ impl Opts {
                 "--notls" => o.notls = true,
                 "--nosync" => o.nosync = true,
                 "--nometasync" => o.nometasync = true,
+                "--prevsnapshot" => o.prevsnapshot = true,
                 "--mapsize" => o.mapsize = parse_u64(value(a)?, a)?,
                 "--maxdbs" => o.maxdbs = parse_u32(value(a)?, a)?,
                 "--maxreaders" => o.maxreaders = parse_u32(value(a)?, a)?,
@@ -259,6 +265,7 @@ impl Opts {
                 "--compact" => o.compact = true,
                 "--all" => o.all = true,
                 "--until-stdin" => o.until_stdin = true,
+                "--abort" => o.abort = true,
                 "--check" => o.check = true,
                 "--delete" => o.delete = true,
                 _ => return Err(Fail::usage(format!("unknown option {a}"))),
@@ -306,6 +313,7 @@ impl Opts {
         flags.set(EnvironmentFlags::NO_TLS, self.notls);
         flags.set(EnvironmentFlags::NO_SYNC, self.nosync);
         flags.set(EnvironmentFlags::NO_META_SYNC, self.nometasync);
+        flags.set(EnvironmentFlags::PREV_SNAPSHOT, self.prevsnapshot);
 
         let mut builder = Environment::builder();
         builder.max_dbs(self.maxdbs).flags(flags);

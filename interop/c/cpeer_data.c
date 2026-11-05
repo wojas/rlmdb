@@ -123,6 +123,27 @@ cmd_fill(struct opts *o)
 	return 0;
 }
 
+void
+fill_in_txn(MDB_txn *txn, MDB_dbi dbi, const struct opts *o)
+{
+	const struct dataset *ds = &o->ds;
+	unsigned char *vbuf = malloc(max_value_size(ds));
+	uint32_t i, d;
+
+	if (!vbuf)
+		die(EXIT_LMDB, "out of memory");
+	for (i = 0; i < ds->count; i++) {
+		unsigned char kbuf[DS_MAX_KEY];
+		MDB_val key;
+		key.mv_data = kbuf;
+		key.mv_size = ds_key(ds, i, kbuf);
+		for (d = 0; d < ds_ndups(ds, i); d++)
+			if (ds_present(ds, i, d))
+				put_item(txn, dbi, o, i, d, &key, vbuf);
+	}
+	free(vbuf);
+}
+
 /* ---- verify ------------------------------------------------------------- */
 
 static int

@@ -1,17 +1,21 @@
 //! The plain C types of `lmdb.h`: value, statistics and info structs, and
-//! the callback function types, with the exact C layout.
+//! the callback function types, with the exact C layout; also the types
+//! LMDB 1.0's `lmdb.h` adds for its crypto functions (`MDB_enc_func`,
+//! `MDB_sum_func`, `MDB_str2key_func`, `MDB_crypto_funcs`; declared in
+//! `include/lmdb.h`, LMDB 1.0's).
 //!
 //! Callback parameters that C allows to be NULL are `Option<fn>` in the
 //! exported signatures (Rust guarantees the same representation as a
 //! nullable C function pointer).
 //!
 //! The callback types use the `"C-unwind"` ABI: the calling convention is
-//! C's, but an exception that a C++ callback throws may unwind through the
-//! library's Rust frames. Every exported function is `extern "C"`, so such
-//! an exception aborts the process at the library boundary instead of
-//! unwinding into the caller's C frames (with a plain `"C"` callback type it
-//! would be undefined behaviour). A callback that `longjmp`s out of the
-//! library skips Rust frames and is undefined behaviour. A callback that
+//! C's, but a callback may unwind (a C++ exception, a Rust panic) into the
+//! library (with a plain `"C"` callback type that would be undefined
+//! behaviour). The library calls every callback through `callback::call`,
+//! which aborts the process where the callback returned by unwinding,
+//! before any frame of the library or the program is unwound. A callback
+//! that `longjmp`s out of the library skips Rust frames and is undefined
+//! behaviour. A callback that
 //! frees the transaction or a cursor it was called for aborts the process
 //! (see "Re-entrancy" in `crate::handles`).
 
@@ -137,6 +141,46 @@ pub type MDB_assert_func = unsafe extern "C-unwind" fn(env: *mut MDB_env, msg: *
 /// `MDB_msg_func`: a callback function used to print a message from the
 /// library (`mdb_reader_list`).
 pub type MDB_msg_func = unsafe extern "C-unwind" fn(msg: *const c_char, ctx: *mut c_void) -> c_int;
+
+/// `MDB_enc_func` (LMDB 1.0): a callback function used to encrypt or
+/// decrypt pages. Never called: encryption is not implemented
+/// (`mdb_env_set_encrypt` returns `ENOTSUP`).
+pub type MDB_enc_func = unsafe extern "C-unwind" fn(
+    src: *const MDB_val,
+    dst: *mut MDB_val,
+    key: *const MDB_val,
+    encdec: c_int,
+) -> c_int;
+
+/// `MDB_sum_func` (LMDB 1.0): a callback function used to checksum pages.
+/// Never called: checksums are not implemented (`mdb_env_set_checksum`
+/// returns `ENOTSUP`).
+pub type MDB_sum_func =
+    unsafe extern "C-unwind" fn(src: *const MDB_val, dst: *mut MDB_val, key: *const MDB_val);
+
+/// `MDB_str2key_func` (LMDB 1.0): a function that turns a password into
+/// an encryption key. Never called.
+pub type MDB_str2key_func =
+    unsafe extern "C-unwind" fn(passwd: *const c_char, key: *mut MDB_val) -> c_int;
+
+/// `MDB_crypto_funcs` (LMDB 1.0): what a crypto module returns, read by
+/// `mdb_modsetup`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MDB_crypto_funcs {
+    /// `mcf_str2key`: turns a password into a key.
+    pub mcf_str2key: Option<MDB_str2key_func>,
+    /// `mcf_encfunc`: the encryption function.
+    pub mcf_encfunc: Option<MDB_enc_func>,
+    /// `mcf_sumfunc`: the checksum function.
+    pub mcf_sumfunc: Option<MDB_sum_func>,
+    /// `mcf_keysize`: the size of an encryption key, in bytes.
+    pub mcf_keysize: c_int,
+    /// `mcf_esumsize`: the size of the MAC, for authenticated encryption.
+    pub mcf_esumsize: c_int,
+    /// `mcf_sumsize`: the size of the checksum, for plain checksums.
+    pub mcf_sumsize: c_int,
+}
 
 /// The bytes an input `MDB_val` describes, or `None` for a NULL pointer.
 ///

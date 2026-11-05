@@ -29,6 +29,71 @@ pub mod dataset;
 /// A key/data pair as owned bytes.
 pub type Pair = (Vec<u8>, Vec<u8>);
 
+// ---------------------------------------------------------------------------
+// Scratch directories
+// ---------------------------------------------------------------------------
+
+/// The variable that names a directory for the tests' environments where
+/// no disk is needed: CI points it at a file system in memory (tmpfs, a RAM
+/// disk), where the synced commits of the tests and of C do not wait for a
+/// disk. Unset, they go to the system's temporary directory.
+pub const SCRATCH_VAR: &str = "RLMDB_TEST_SCRATCH";
+
+/// Where [`tempdir`] makes directories: `$RLMDB_TEST_SCRATCH` (created if
+/// missing), else the system's temporary directory.
+pub fn scratch_root() -> PathBuf {
+    match std::env::var_os(SCRATCH_VAR) {
+        Some(dir) if !dir.is_empty() => {
+            let dir = PathBuf::from(dir);
+            fs::create_dir_all(&dir)
+                .unwrap_or_else(|e| panic!("${SCRATCH_VAR} {}: {e}", dir.display()));
+            dir
+        }
+        _ => std::env::temp_dir(),
+    }
+}
+
+/// A new directory for a test's environments (removed when dropped), in
+/// [`scratch_root`]: for everything that does not need a disk, which is
+/// everything but the targets of copies ([`disk_tempdir`]). What the
+/// tests check (file contents, sizes, sparse files, locks, `mmap`, errors
+/// injected into writes and syncs, killed processes) is the same on a
+/// file system in memory; durability across a power loss, where a disk
+/// would differ, no test can see.
+pub fn tempdir() -> tempfile::TempDir {
+    tempfile::tempdir_in(scratch_root()).expect("scratch directory")
+}
+
+/// For a test of the full scope only (`interop::scope`, which this crate
+/// cannot use): `true`, after a SKIPPED note naming `what` on the real
+/// stderr, when `$RLMDB_TEST_SCOPE` is `platform` (the platform suite of
+/// the CI of macOS, Windows and Linux arm64; the test then returns);
+/// `false` otherwise.
+pub fn full_scope_only(what: &str) -> bool {
+    if std::env::var_os("RLMDB_TEST_SCOPE").is_some_and(|v| v == "platform") {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "SKIPPED {what}: full scope only ($RLMDB_TEST_SCOPE=platform)"
+        );
+        return true;
+    }
+    false
+}
+
+/// A new directory under `target/tmp` (`CARGO_TARGET_TMPDIR`, on the disk
+/// of the build) whatever `$RLMDB_TEST_SCRATCH` says, for the target of a
+/// copy (`copy_to_path`, `mdb_copy`): rlmdb and C open it with `O_DIRECT`
+/// on Linux (`os::set_nocache`, `MDB_O_COPY`), which a disk file system
+/// honours (writes must be aligned to its logical block size, which C 1.0
+/// misses below 4 KiB pages, `KNOWN_C_BUGS.md` row 34) and tmpfs ignores
+/// (it takes any write, aligned or not). Only the target: the source is
+/// read through the map.
+pub fn disk_tempdir() -> tempfile::TempDir {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    fs::create_dir_all(&base).expect("CARGO_TARGET_TMPDIR");
+    tempfile::tempdir_in(base).expect("disk scratch directory")
+}
+
 /// The built C library and programs.
 pub struct CTools {
     pub dir: PathBuf,
@@ -1299,6 +1364,44 @@ fn stale_sub_eof(ops: &[String], c: (&str, &str), r: (&str, &str)) -> bool {
     (c_stopped && r_found) || (had_prev_multiple && key(r.0).is_some() && key(r.0) == key(r.1))
 }
 
+/// `KNOWN_C_BUGS.md` row 59: `op` moves into the duplicates of a node whose
+/// sub-cursor a failed exact search reset (`prev`, the line of the op
+/// before, has `MDB_GET_CURRENT`'s `EINVAL` for its position), where C
+/// starts from the record its sub-cursor last had (another key's, or
+/// garbage), and Rust's line `rl` is on that key's own first duplicate
+/// (`next`, `next_dup`; `next_multiple`: a run of them from the first) or
+/// its last (`prev`, `prev_dup`). `pairs`: the database's items in order.
+pub fn stale_dup_record(op: &str, prev: &str, rl: &str, pairs: &[Pair]) -> bool {
+    if !prev.ends_with("| cur rc=22 k=- d=-") {
+        return false;
+    }
+    let Some((r_op, r_cur)) = rl.split_once(" | ") else {
+        return false;
+    };
+    let Some(key) = r_cur
+        .strip_prefix("cur rc=0 k=")
+        .and_then(|k| k.split(' ').next())
+    else {
+        return false;
+    };
+    let dups: Vec<String> = pairs
+        .iter()
+        .filter(|(k, _)| hex(k) == key)
+        .map(|(_, d)| hex(d))
+        .collect();
+    let (Some(first), Some(last)) = (dups.first(), dups.last()) else {
+        return false;
+    };
+    match op {
+        "next" | "next_dup" => r_op == format!("{op} rc=0 d={first}"),
+        "prev" | "prev_dup" => r_op == format!("{op} rc=0 d={last}"),
+        "next_multiple" => r_op
+            .strip_prefix("next_multiple rc=0 d=")
+            .is_some_and(|d| d.starts_with(first.as_str()) && dups.concat().starts_with(d)),
+        _ => false,
+    }
+}
+
 /// Runs the same random cursor operations through C and Rust and asserts
 /// identical results and positions.
 pub fn differential(
@@ -1381,6 +1484,18 @@ pub fn differential(
                 && stale_sub_eof(&ops[..=i], (&c_lines[i - 1], cl), (&r_lines[i - 1], rl))
             {
                 eprintln!("NOTE: known C bug, row 28 (stale C_EOF) at op {i}: C {cl}, Rust {rl}");
+                c_bugs += 1;
+                break;
+            }
+            // KNOWN_C_BUGS.md row 59: a move into the duplicates of the node
+            // a failed exact search left the cursor on: C walks the record
+            // its sub-cursor last had, Rust the key's own. Stop comparing.
+            if cl != rl
+                && i > 0
+                && c_lines[i - 1] == r_lines[i - 1]
+                && stale_dup_record(&ops[i], &r_lines[i - 1], rl, pairs)
+            {
+                eprintln!("NOTE: known C bug, row 59 (stale duplicates record) at op {i}: C {cl}, Rust {rl}");
                 c_bugs += 1;
                 break;
             }

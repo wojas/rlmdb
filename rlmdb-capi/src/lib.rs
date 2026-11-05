@@ -1,9 +1,21 @@
-//! The C API of LMDB 0.9 (`lmdb.h`), implemented over the Rust [`rlmdb`]
-//! crate: `liblmdb.a` / `liblmdb.so` / `liblmdb.dylib` built from this crate
-//! are drop-in replacements for the C library, so existing C programs link
-//! against them unchanged. `include/lmdb.h` is the unmodified 0.9.37 header;
-//! `include/rlmdb.h` declares the few functions of rlmdb's own and the LMDB
-//! 1.0 constants a program needs with a 1.0 environment.
+//! The C API of LMDB (`lmdb.h`), implemented over the Rust [`rlmdb`]
+//! crate. This crate is the implementation; three small packages next to
+//! it (`artifacts/`) link it into the libraries C programs use
+//! ([`profile`]):
+//!
+//! * `librlmdb` (`librlmdb.a` / `librlmdb.so` / `librlmdb.dylib`, linked
+//!   with `-lrlmdb`): the library of rlmdb's own name;
+//! * two stubs named `liblmdb` that stand in for one C release each, for
+//!   programs built against C LMDB (`LD_PRELOAD`, `LD_LIBRARY_PATH`): the
+//!   0.9 stub (SONAME `liblmdb.so.0`) and the 1.0 stub (`liblmdb.so`),
+//!   whose new environments are LMDB 1.0.
+//!
+//! All three export the same functions: those of LMDB 0.9.37's `lmdb.h`,
+//! those LMDB 1.0's `lmdb.h` adds ([`v10`]; implemented where rlmdb can,
+//! `ENOTSUP` otherwise), and rlmdb's own `rlmdb_*` functions. The headers
+//! in `include` are LMDB 1.0.3's `lmdb.h`, unmodified (the API of all
+//! three, a superset of 0.9's with the same ABI), and `rlmdb.h`, which
+//! declares rlmdb's functions and also works after LMDB 0.9's `lmdb.h`.
 //!
 //! Environments of both data-file formats the core handles, LMDB 0.9 and
 //! LMDB 1.0, are opened through the same `mdb_*` functions: an existing
@@ -18,12 +30,18 @@
 //! # Modules (grouped like the sections of `lmdb.h`)
 //!
 //! * `mdb_version`, `mdb_strerror`, and `rlmdb.h`'s `rlmdb_version` and
-//!   `rlmdb_version_string` in [`version`].
+//!   `rlmdb_version_string` in [`version`] (those but `mdb_strerror` are
+//!   exported by the artifacts, see [`profile`]).
+//! * The library profiles and [`artifact_symbols!`] in [`profile`].
 //! * `rlmdb.h`'s data-file format functions (`rlmdb_env_set_format`,
 //!   `rlmdb_env_get_format`, `rlmdb_sniff_format`,
 //!   `rlmdb_set_default_format`, `rlmdb_env_set_pagesize`) in
 //!   [`format`](mod@format).
-//! * `mdb_env_*`, `mdb_reader_list`, `mdb_reader_check` in [`env`](mod@env).
+//! * `mdb_env_*`, `mdb_reader_list`, `mdb_reader_check` in [`env`](mod@env)
+//!   (`mdb_env_create` through [`env::env_create`]).
+//! * The functions of LMDB 1.0's `lmdb.h` that 0.9's lacks
+//!   (`mdb_env_set_pagesize`, `mdb_txn_flags`, `mdb_cursor_is_db`, the
+//!   unimplemented ones) in [`v10`].
 //! * `mdb_txn_*` in [`txn`].
 //! * `mdb_dbi_*`, `mdb_stat`, `mdb_set_compare` & co., `mdb_cmp`,
 //!   `mdb_dcmp` in [`dbi`].
@@ -36,7 +54,9 @@
 //!   [`handles`].
 //! * Private: `erased`, the one place where Rust lifetimes are erased so
 //!   that transactions and cursors can live in heap handles owned by C;
-//!   `cmp`, adapting C comparison functions to Rust comparators.
+//!   `cmp`, adapting C comparison functions to Rust comparators;
+//!   `callback`, where every call of a callback of the program goes
+//!   through (a callback that unwinds aborts the process there).
 //!
 //! # Safety contract
 //!
@@ -58,6 +78,7 @@
 // lmdb.h; it is stated once in the crate documentation above.
 #![allow(clippy::missing_safety_doc)]
 
+mod callback;
 mod cmp;
 pub mod cursor;
 pub mod dbi;
@@ -66,12 +87,15 @@ mod erased;
 pub mod format;
 pub mod handles;
 mod platform;
+pub mod profile;
 pub mod txn;
 pub mod types;
+pub mod v10;
 pub mod version;
 pub mod write;
 
 pub use handles::{MDB_cursor, MDB_env, MDB_txn};
+pub use profile::Profile;
 pub use types::*;
 
 use std::os::raw::c_int;

@@ -109,10 +109,15 @@ fn canonical09(page: &[u8], sub: bool) -> Vec<u8> {
         out.extend_from_slice(page.get(16..16 + nkeys * ksize).unwrap_or(page));
         return out;
     }
+    // Not a header where the pointers end past the page: the data of an
+    // overflow page after the first.
+    let Some(ptrs) = page.get(16..usize::from(lower)) else {
+        return page.to_vec();
+    };
     if !sub {
         out[8..10].fill(0);
     }
-    out.extend_from_slice(&page[16..usize::from(lower)]);
+    out.extend_from_slice(ptrs);
     for i in 0..nkeys {
         let Some(off) = u16_at(16 + 2 * i).map(usize::from) else {
             return page.to_vec();
@@ -410,6 +415,58 @@ fn diff_current_dup_outside_leaf() {
     }
 }
 
+/// `KNOWN_C_BUGS.md` row 58: `MDB_CURRENT` with a key that is not the
+/// cursor's ([`differential::current_other_key_script`]). Where C keeps the
+/// old key (data of the same size, overflow pages overwritten in place,
+/// duplicates) both sides put with the other key; where C would write it
+/// over the node, C puts with the cursor's key and Rust with the other
+/// one: rlmdb keeps the cursor's key and must leave the file C leaves for
+/// the right key. At the OS page size, page for page but for the bytes C
+/// 0.9 leaves uninitialised ([`C09::same_pages`]), in a plain, an
+/// `MDB_DUPSORT` and an `MDB_DUPFIXED` DB, also with a dirty limit of 16
+/// pages on the Rust side.
+#[test]
+fn diff_current_other_key() {
+    let c = require_c!();
+    let ps = common::os_page_size();
+    for dbflags in [0, MDB_DUPSORT, MDB_DUPSORT | MDB_DUPFIXED] {
+        let p = Profile::new(dbflags, 0);
+        let ops = differential::current_other_key_script(
+            dbflags,
+            ps,
+            nodemax09(ps),
+            MDB_MAXKEYSIZE,
+            false,
+        );
+        let current = format!(":{MDB_CURRENT}");
+        assert!(
+            ops.iter()
+                .filter(|op| op.starts_with("cp:") && op.ends_with(&current))
+                .count()
+                >= 10,
+            "flags {dbflags:#x}"
+        );
+        if dbflags & MDB_DUPFIXED == 0 {
+            assert!(
+                ops.iter().filter(|op| op.starts_with("cw:")).count() >= 10,
+                "flags {dbflags:#x}"
+            );
+        }
+        for dirty_limit in [None, Some(16)] {
+            let o = C09 {
+                dirty_limit,
+                ..C09::with_page_size(c, ps)
+            };
+            let tag = format!("current-other-key-{dbflags:#x}-dirty{dirty_limit:?}");
+            assert_eq!(
+                differential::run_round(&o, &p, 2, Ops::List(ops.clone()), &tag),
+                Round::Same,
+                "{tag}"
+            );
+        }
+    }
+}
+
 /// The 0.9 side of `KNOWN_C_BUGS.md` row 38
 /// ([`differential::single_item_on_overflow_pages`]): with 2 KiB pages C
 /// 0.9's `MDB_CURRENT` leaves a key's only item (511 bytes, the key 500)
@@ -683,4 +740,29 @@ fn diff_spill_full_size() {
         Round::Same
     );
     eprintln!("spill differential took {:?}", started.elapsed());
+}
+
+/// LMDB 1.0's two-phase commit on 0.9 files, against C 0.9's plain
+/// commits: transactions ended by `tp` (prepare, then commit) leave the
+/// pages C 0.9's `mdb_txn_commit` leaves (compared page by page at every
+/// `tp`), and the file between the two phases is the committed one with
+/// the meta pages from before (`differential::check_between`). Also when
+/// the Rust side spills.
+#[test]
+fn diff_two_phase_commit() {
+    let c = require_c!();
+    let ps = common::os_page_size();
+    for (dbflags, dirty_limit) in [(0, None), (MDB_DUPSORT, None), (0, Some(64))] {
+        let o = C09 {
+            dirty_limit,
+            ..C09::with_page_size(c, ps)
+        };
+        let p = Profile::new(dbflags, 300);
+        let tag = format!("2pc-{dbflags}-{dirty_limit:?}");
+        let ops = differential::two_phase_script(false);
+        assert_eq!(
+            differential::run_round(&o, &p, 2, Ops::List(ops), &tag),
+            Round::Same
+        );
+    }
 }

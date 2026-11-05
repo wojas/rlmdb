@@ -1,4 +1,4 @@
-//! Every interop scenario on LMDB 1.0 environments with the C peer linked against the Rust `liblmdb.a` (`rlmdb-capi`) on both
+//! Every interop scenario on LMDB 1.0 environments with the C peer linked against the Rust `librlmdb.a` (`rlmdb-capi`) on both
 //! sides (two processes of the same implementation sharing one environment).
 //!
 //! C 1.0 (`cpeer10`) verifies and audits as the reference, as C does in the

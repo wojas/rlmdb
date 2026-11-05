@@ -149,7 +149,7 @@ fn build() -> (Vec<u8>, Vec<Pair>, Vec<Pair>) {
 
 #[test]
 fn handbuilt_file_reads_identically_in_c_and_rust() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     std::fs::create_dir(&path).unwrap();
     let (file, main_expected, dups_expected) = build();
@@ -201,7 +201,7 @@ fn handbuilt_file_reads_identically_in_c_and_rust() {
 
 #[test]
 fn corrupt_pages_give_errors_not_panics() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     std::fs::create_dir(&path).unwrap();
     let (good, _, _) = build();
@@ -364,7 +364,7 @@ fn chain(first: u64, depth: usize, leaf: &[(&[u8], &[u8])]) -> Vec<Vec<u8>> {
 /// `MDB_CURSOR_FULL` as C does.
 #[test]
 fn deep_trees_and_short_get_stacks() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     std::fs::create_dir(&path).unwrap();
     let full = |r: rlmdb::Result<Option<&[u8]>>| match r {
@@ -523,7 +523,7 @@ fn root_split_beyond_the_cursor_stack_fails_the_txn() {
             ..Db::default()
         };
         let file = file_with(layout, ps, &pages, main);
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let data = dir.path().join("data.mdb");
         std::fs::write(&data, &file).unwrap();
         let env = open_rw(dir.path(), 2);
@@ -609,7 +609,9 @@ fn compacting_copy_of_shared_pages_stops_at_the_source_size() {
         .collect();
     let cycle = vec![branch(2, 3, true), leaf_page(3)];
     for (what, pages) in [("shared", shared), ("cycle", cycle)] {
-        let dir = tempfile::tempdir().unwrap();
+        // Holds copy targets: on the disk (`O_DIRECT`, see
+        // `common::disk_tempdir`).
+        let dir = common::disk_tempdir();
         let path = dir.path().join("env");
         std::fs::create_dir(&path).unwrap();
         let main = Db {
@@ -663,7 +665,7 @@ fn empty_file(layout: &Layout, ps: usize) -> Vec<u8> {
 fn small_09_pages_are_refused() {
     use rlmdb::{DatabaseFlags, Environment, EnvironmentFlags};
     for ps in [256, 512, 1024, 2048] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         std::fs::write(dir.path().join("data.mdb"), empty_file(&V09, ps)).unwrap();
         let open = |flags| {
             Environment::builder()
@@ -753,7 +755,7 @@ fn merge_with_a_lying_depth_commits() {
             root: 2,
             ..Db::default()
         };
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         std::fs::write(
             dir.path().join("data.mdb"),
             file_with(layout, PS, &pages, main),
@@ -815,7 +817,7 @@ fn snapshots_without_their_meta_pages_are_refused() {
             assert!(after[file.len()..].iter().all(|&b| b == 0), "{what}");
         };
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let data = dir.path().join("data.mdb");
         let mut file = empty_file(layout, PS);
         set_last(&mut file, 0, 0);
@@ -826,7 +828,7 @@ fn snapshots_without_their_meta_pages_are_refused() {
         drop(env);
         unchanged(&data, &file);
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let data = dir.path().join("data.mdb");
         let mut file = empty_file(layout, PS);
         std::fs::write(&data, &file).unwrap();
@@ -946,7 +948,9 @@ fn walks_of_a_free_db_with_shared_children_stop() {
         let free = shared_db(2, SHARED_LEVELS, 1);
         let file = file_with_dbs(layout, PS, &pages, free, main, 9);
         assert_eq!(file.len(), (SHARED_LEVELS as usize + 4) * PS);
-        let dir = tempfile::tempdir().unwrap();
+        // Holds a copy target: on the disk (`O_DIRECT`, see
+        // `common::disk_tempdir`).
+        let dir = common::disk_tempdir();
         let data = dir.path().join("data.mdb");
         std::fs::write(&data, &file).unwrap();
         let path = dir.path().to_path_buf();
@@ -992,7 +996,7 @@ fn cursor_walks_over_shared_children_stop() {
         let leaf: &[(&[u8], &[u8])] = &[(b"a", b"1"), (b"m", b"2"), (b"z", b"3")];
         let pages = shared_tree(layout, 2, SHARED_LEVELS, 4, leaf, |i| vec![b'a' + i as u8]);
         let file = file_with(layout, PS, &pages, shared_db(2, SHARED_LEVELS, 3));
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         std::fs::write(dir.path().join("data.mdb"), &file).unwrap();
         let path = dir.path().to_path_buf();
         let w = what.clone();
@@ -1044,7 +1048,7 @@ fn queue_walks_in_a_write_txn_are_not_bounded_by_the_file() {
     const ITEMS: usize = 2000;
     const LAG: usize = 1000;
     const STEPS: usize = 40_000;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = rlmdb::Environment::builder()
         .map_size(64 << 20)
         .open(dir.path())
@@ -1111,7 +1115,7 @@ fn drops_of_shared_children_stop() {
                 ..shared_db(2, levels, 3)
             };
             let file = file_with(layout, PS, &pages, main);
-            let dir = tempfile::tempdir().unwrap();
+            let dir = common::tempdir();
             let data = dir.path().join("data.mdb");
             std::fs::write(&data, &file).unwrap();
             let path = dir.path().to_path_buf();
@@ -1143,7 +1147,7 @@ fn drops_of_shared_children_stop() {
             ..Db::default()
         };
         let file = file_with(layout, PS, &pages, main);
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let data = dir.path().join("data.mdb");
         std::fs::write(&data, &file).unwrap();
         let env = open_rw(dir.path(), 2);

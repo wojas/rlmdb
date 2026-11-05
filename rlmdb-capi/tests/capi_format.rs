@@ -10,8 +10,9 @@
 //! `MDB_MULTIPLE`), `mdb_get`, `mdb_del` and `mdb_dbi_open`, also with
 //! inputs that point into the transaction's dirty pages; a 1.0 file opened
 //! without a request; `MDB_VERSION_MISMATCH` for the other format;
-//! `mdb_strerror` of the 1.0 codes; `MDB_PREVSNAPSHOT` and `MDB_ENCRYPT`
-//! refused. There is no C oracle (C LMDB has no `rlmdb.h`); that C 1.0
+//! `mdb_strerror` of the 1.0 codes; `MDB_ENCRYPT` refused, and
+//! `MDB_PREVSNAPSHOT` by `mdb_env_set_flags` (`tests/capi_prevsnapshot.rs`
+//! has the flag). There is no C oracle (C LMDB has no `rlmdb.h`); that C 1.0
 //! reads and writes these files is `interop/tests/capi10.rs`.
 
 mod common;
@@ -22,7 +23,7 @@ use common::*;
 
 #[test]
 fn rlmdb_h_format_functions() {
-    let exe = builder().test_program("capi_format", Lib::Rust);
+    let exe = builder().test_program("capi_format", Lib::RustApi);
     let scratch = builder().scratch("capi_format");
     let out = Command::new(&exe)
         .arg(&scratch)

@@ -1942,13 +1942,13 @@ char *
 mdb_strerror(int err)
 {
 #ifdef _WIN32
-	/** HACK: pad 4KB on stack over the buf. Return system msgs in buf.
-	 *	This works as long as no function between the call to mdb_strerror
-	 *	and the actual use of the message uses more than 4K of stack.
-	 */
+	/* rlmdb's patch 0002: system messages in a buffer of the thread */
 #define MSGSIZE	1024
-#define PADSIZE	4096
-	char buf[MSGSIZE+PADSIZE], *ptr = buf;
+#ifdef _MSC_VER
+	static __declspec(thread) char buf[MSGSIZE]; char *ptr = buf;
+#else
+	static __thread char buf[MSGSIZE]; char *ptr = buf;
+#endif
 #endif
 	int i;
 	if (!err)
@@ -12003,9 +12003,9 @@ mdb_env_incr_loadfd(MDB_env *env, HANDLE fd)
 
 	for (;;) {
 #ifdef _WIN32
-		rc = ReadFile(fd, buf, sizeof(buf), &rlen, NULL) ? (int)rlen : -1;
-		if (rc == -1 && ErrCode() == ERROR_HANDLE_EOF)
-			rc = 0;
+		if (!ReadFile(fd, buf, sizeof(buf), &rlen, NULL) && (rc = ErrCode()) != ERROR_HANDLE_EOF
+			&& rc != ERROR_BROKEN_PIPE) break;	/* rlmdb's patch 0003 */
+		rc = 0;
 #else
 		rlen = read(fd, buf, sizeof(buf));
 #endif

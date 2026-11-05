@@ -18,6 +18,12 @@
 //!   Rust-linked `mdb_dump`, Rust-linked `mdb_load` then C `mdb_dump`, and
 //!   Rust-linked `mdb_copy` (plain and `-c`) checked with the C tools
 //!   against the source.
+//! * LMDB 1.0's own `mtest.c` .. `mtest5.c` (`tests/lmdb-c/1.0`, with
+//!   1.0's `lmdb.h`), built against C LMDB 1.0 and against the LMDB 1.0
+//!   stub `liblmdb10.a` (a program built for C 1.0, whose new
+//!   environments the stub makes LMDB 1.0 files without being asked;
+//!   `mtest.c` sets 1 KiB pages with `mdb_env_set_pagesize`), compared the
+//!   same way with C 1.0's `mdb_stat` and `mdb_dump`.
 
 mod common;
 
@@ -82,9 +88,35 @@ fn without_map_address(text: &str) -> String {
 /// What the C tools see in `env`: the statistics and the full dump,
 /// without the map address.
 fn c_view(env: &Path) -> (String, String) {
-    let stat = tool_output("mdb_stat", Lib::C, &["-e", "-f", "-ff", "-a"], env);
-    let dump = tool_output("mdb_dump", Lib::C, &["-a"], env);
+    c_view_with(Lib::C, env)
+}
+
+/// [`c_view`] with the tools of library `lib`.
+fn c_view_with(lib: Lib, env: &Path) -> (String, String) {
+    let stat = tool_output("mdb_stat", lib, &["-e", "-f", "-ff", "-a"], env);
+    let dump = tool_output("mdb_dump", lib, dump_args(lib, env), env);
     (without_map_address(&stat), without_map_address(&dump))
+}
+
+/// `mdb_dump -a`, except where C 1.0's `mdb_dump` refuses `-a` because
+/// `env` has no named databases (0.9's dumps the main DB then).
+fn dump_args(lib: Lib, env: &Path) -> &'static [&'static str] {
+    if !lib.is_v10() {
+        return &["-a"];
+    }
+    let exe = builder().tool("mdb_dump", Lib::C10);
+    let out = command_as(&exe, "mdb_dump")
+        .args(["-a"])
+        .arg(env)
+        .output()
+        .unwrap();
+    let refused =
+        String::from_utf8_lossy(&out.stderr).contains("does not contain multiple databases");
+    if !out.status.success() && refused {
+        &[]
+    } else {
+        &["-a"]
+    }
 }
 
 /// The C peer's page audit of `env` must pass.
@@ -137,6 +169,63 @@ fn acceptance(prog: &str) {
     }
 }
 
+/// Runs LMDB 1.0's `prog` against C 1.0 and the 1.0 stub with every
+/// seed and compares, as [`acceptance`] does with C 1.0's tools (there is
+/// no 1.0 page audit in this crate: `interop`'s `cpeer10` is the 1.0
+/// peer; the free list is compared page by page through `mdb_stat -ff`).
+fn acceptance10(prog: &str) {
+    for seed in SEEDS {
+        let base = builder().scratch(&format!("{prog}-10-{seed}"));
+        let (c_dir, rust_dir) = (base.join("c10"), base.join("rust10"));
+        let c = run_mtest_seeded(prog, Lib::C10, &c_dir, seed);
+        let rust = run_mtest_seeded(prog, Lib::Rust10, &rust_dir, seed);
+        for (lib, out) in [("C 1.0", &c), ("Rust 1.0 stub", &rust)] {
+            assert!(
+                out.stderr.is_empty(),
+                "{prog} 1.0 (seed {seed}, {lib}) wrote to stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let c_out = without_pointers(&String::from_utf8_lossy(&c.stdout));
+        let rust_out = without_pointers(&String::from_utf8_lossy(&rust.stdout));
+        assert_eq!(c_out, rust_out, "{prog} 1.0 (seed {seed}): stdout differs");
+        let (c_env, rust_env) = (c_dir.join("testdb"), rust_dir.join("testdb"));
+        // The stub made an LMDB 1.0 file without being asked for one.
+        assert_eq!(
+            rlmdb::sniff_format(&rust_env, rlmdb::EnvironmentFlags::empty()).unwrap(),
+            Some(rlmdb::Format::V10),
+            "{prog} 1.0 (seed {seed})"
+        );
+        assert_eq!(
+            c_view_with(Lib::C10, &c_env),
+            c_view_with(Lib::C10, &rust_env),
+            "{prog} 1.0 (seed {seed}): the C 1.0 tools see different environments"
+        );
+        // The stub reads the file it wrote as C 1.0 does (but for the map
+        // address: C 1.0 reports its own where the file records none,
+        // KNOWN_C_BUGS.md, LMDB 1.0 section, `mdb_env_info`), also the
+        // previous snapshot (`-v`, `MDB_PREVSNAPSHOT`).
+        let dump = dump_args(Lib::C10, &rust_env);
+        let dump_v: Vec<&str> = ["-v"].iter().chain(dump).copied().collect();
+        for (tool, args) in [
+            ("mdb_stat", &["-e", "-f", "-ff", "-a"][..]),
+            ("mdb_stat", &["-v", "-e", "-f", "-ff", "-a"][..]),
+            ("mdb_dump", dump),
+            ("mdb_dump", &dump_v),
+        ] {
+            assert_eq!(
+                without_map_address(&tool_output(tool, Lib::C10, args, &rust_env)),
+                without_map_address(&tool_output(tool, Lib::Rust10, args, &rust_env)),
+                "{prog} 1.0 (seed {seed}): {tool} {args:?} linked against the 1.0 stub"
+            );
+        }
+        eprintln!(
+            "{prog} 1.0 seed {seed}: {} lines of identical output, identical environments",
+            c_out.lines().count()
+        );
+    }
+}
+
 #[test]
 fn mtest() {
     acceptance("mtest");
@@ -165,6 +254,31 @@ fn mtest5() {
 #[test]
 fn mtest6() {
     acceptance("mtest6");
+}
+
+#[test]
+fn mtest_1_0() {
+    acceptance10("mtest");
+}
+
+#[test]
+fn mtest2_1_0() {
+    acceptance10("mtest2");
+}
+
+#[test]
+fn mtest3_1_0() {
+    acceptance10("mtest3");
+}
+
+#[test]
+fn mtest4_1_0() {
+    acceptance10("mtest4");
+}
+
+#[test]
+fn mtest5_1_0() {
+    acceptance10("mtest5");
 }
 
 /// The seed reaches `srand()` (`tests/c/mtest_shim.h`), which the
@@ -356,7 +470,9 @@ fn copy(lib: Lib, compact: bool, src: &Path, dst: &Path) {
 
 #[test]
 fn mdb_copy_across_libraries() {
-    let dir = builder().scratch("copy");
+    // `mdb_copy` writes its copies into it: on the disk, see
+    // `Builder::disk_scratch`.
+    let dir = builder().disk_scratch("copy");
     // A source with free pages, so that compaction changes something.
     run_mtest_seeded("mtest3", Lib::C, &dir, MTEST_SEED);
     let src = dir.join("testdb");

@@ -9,6 +9,8 @@
 //! The same with C peers on each environment from other processes is
 //! `interop/tests/mixed_formats.rs` (`rpeer formats-loop`).
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +24,7 @@ use rlmdb::{
 fn tmp() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("rlmdb-mixed-")
-        .tempdir()
+        .tempdir_in(common::scratch_root())
         .unwrap()
 }
 
@@ -263,8 +265,9 @@ fn both_formats_in_one_process() {
         assert_eq!(&read_model(env), m, "{:?}", env.format());
     }
 
-    // Compacting copies keep the format.
-    let copies = [tmp(), tmp()];
+    // Compacting copies keep the format. (Copy targets: on the disk,
+    // `O_DIRECT`, see `common::disk_tempdir`.)
+    let copies = [common::disk_tempdir(), common::disk_tempdir()];
     for (env, dir) in envs.iter().zip(&copies) {
         env.copy_to_path(dir.path(), true).unwrap();
     }

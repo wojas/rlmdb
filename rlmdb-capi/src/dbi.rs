@@ -18,7 +18,7 @@ use rlmdb::consts::{FREE_DBI, MDB_CREATE, MDB_DUPSORT, MDB_INTEGERKEY, VALID_FLA
 use rlmdb::{Comparator, DatabaseFlags, Dbi, Transaction};
 
 use crate::cmp::{c_function_of, trampoline_for};
-use crate::handles::{bad_txn, MDB_env, MDB_txn};
+use crate::handles::{bad_txn, prepared_dbi_check, MDB_env, MDB_txn};
 use crate::types::*;
 use crate::write::KeyCopy;
 use crate::SUCCESS;
@@ -121,6 +121,17 @@ fn open_in_read_txn(
     }
 }
 
+/// `mdb_dbi_flags` of a write transaction `mdb_txn_prepare` is done with
+/// (`p`; `None` if it ended it, then C's handle check fails).
+fn prepared_db_flags(
+    p: Option<&rlmdb::PreparedTxn<'static>>,
+    dbi: MDB_dbi,
+) -> Result<DatabaseFlags, c_int> {
+    p.ok_or(EINVAL)?
+        .db_flags(Dbi::from_raw(dbi))
+        .map_err(|e| e.to_err_code())
+}
+
 /// `mdb_stat`: retrieve statistics for a database.
 #[no_mangle]
 pub unsafe extern "C" fn mdb_stat(txn: *mut MDB_txn, dbi: MDB_dbi, stat: *mut MDB_stat) -> c_int {
@@ -129,9 +140,11 @@ pub unsafe extern "C" fn mdb_stat(txn: *mut MDB_txn, dbi: MDB_dbi, stat: *mut MD
         Ok(t) if !stat.is_null() => t,
         _ => return EINVAL,
     };
-    let result = t.with_txn(EINVAL, |rt| {
-        rt.stat(Dbi::from_raw(dbi)).map_err(|e| e.to_err_code())
-    });
+    let result = t.with_txn(
+        EINVAL,
+        |rt| rt.stat(Dbi::from_raw(dbi)).map_err(|e| e.to_err_code()),
+        |p| prepared_dbi_check(p, dbi, false).and(Err(bad_txn())),
+    );
     match result {
         Ok(s) => {
             // SAFETY: stat is non-NULL and writable (lmdb.h).
@@ -155,9 +168,11 @@ pub unsafe extern "C" fn mdb_dbi_flags(
         Ok(t) if !flags.is_null() => t,
         _ => return EINVAL,
     };
-    let result = t.with_txn(EINVAL, |rt| {
-        rt.db_flags(Dbi::from_raw(dbi)).map_err(|e| e.to_err_code())
-    });
+    let result = t.with_txn(
+        EINVAL,
+        |rt| rt.db_flags(Dbi::from_raw(dbi)).map_err(|e| e.to_err_code()),
+        |p| prepared_db_flags(p, dbi),
+    );
     match result {
         Ok(f) => {
             // SAFETY: flags is non-NULL and writable (lmdb.h).
@@ -201,19 +216,29 @@ unsafe fn set_comparator(
         Ok(t) => t,
         Err(code) => return code,
     };
-    code(t.with_txn(EINVAL, |rt| {
-        let rust_cmp = match cmp {
-            Some(f) => Some(trampoline_for(f).ok_or(libc::ENOMEM)?),
-            None => None,
-        };
-        let db = Dbi::from_raw(dbi);
-        let set = if dup {
-            rt.set_dupsort(db, rust_cmp)
-        } else {
-            rt.set_compare(db, rust_cmp)
-        };
-        set.map_err(|e| e.to_err_code())
-    }))
+    let rust_cmp = || match cmp {
+        Some(f) => trampoline_for(f).map(Some).ok_or(libc::ENOMEM),
+        None => Ok(None),
+    };
+    let db = Dbi::from_raw(dbi);
+    code(t.with_txn(
+        EINVAL,
+        |rt| {
+            let rust_cmp = rust_cmp()?;
+            let set = if dup {
+                rt.set_dupsort(db, rust_cmp)
+            } else {
+                rt.set_compare(db, rust_cmp)
+            };
+            set.map_err(|e| e.to_err_code())
+        },
+        // As in C, a prepared transaction still sets the handle's function.
+        |p| {
+            let p = p.ok_or(EINVAL)?;
+            p.set_comparator(db, rust_cmp()?, dup)
+                .map_err(|e| e.to_err_code())
+        },
+    ))
 }
 
 /// `mdb_set_compare`: set a custom key comparison function for a database.
@@ -259,13 +284,16 @@ unsafe fn check_user_dbi(txn: *mut MDB_txn, dbi: MDB_dbi) -> c_int {
         Ok(t) => t,
         Err(code) => return code,
     };
-    code(t.with_txn(EINVAL, |rt| {
-        match rt.db_flags(Dbi::from_raw(dbi)) {
-            // C does not check for closed/reused handles here.
-            Ok(_) | Err(rlmdb::Error::Mdb(rlmdb::MdbError::BadDbi)) => Ok(()),
-            Err(_) => Err(EINVAL),
-        }
-    }))
+    // C does not check for closed/reused handles here.
+    let user_dbi = |flags: rlmdb::Result<DatabaseFlags>| match flags {
+        Ok(_) | Err(rlmdb::Error::Mdb(rlmdb::MdbError::BadDbi)) => Ok(()),
+        Err(_) => Err(EINVAL),
+    };
+    code(t.with_txn(
+        EINVAL,
+        |rt| user_dbi(rt.db_flags(Dbi::from_raw(dbi))),
+        |p| user_dbi(p.ok_or(EINVAL)?.db_flags(Dbi::from_raw(dbi))),
+    ))
 }
 
 /// `mdb_set_relfunc`: set a relocation function for a `MDB_FIXEDMAP`
@@ -311,9 +339,11 @@ fn default_comparator(t: &MDB_txn, dbi: MDB_dbi, dup: bool, a_len: usize) -> Opt
         return (!dup).then_some(Comparator::Long);
     }
     let flags = t
-        .with_txn(EINVAL, |rt| {
-            rt.db_flags(Dbi::from_raw(dbi)).map_err(|e| e.to_err_code())
-        })
+        .with_txn(
+            EINVAL,
+            |rt| rt.db_flags(Dbi::from_raw(dbi)).map_err(|e| e.to_err_code()),
+            |p| prepared_db_flags(p, dbi),
+        )
         .ok()?
         .bits();
     if !dup {
@@ -362,7 +392,7 @@ unsafe fn compare(
         return match c_function_of(cmp) {
             // SAFETY: f is the comparator the program installed; a and b
             // are valid values (checked above).
-            Some(f) => unsafe { f(a, b) },
+            Some(f) => crate::callback::call("a comparison function", || unsafe { f(a, b) }),
             // Not one of ours (installed through the Rust API).
             None => sign(cmp(sa, sb)),
         };

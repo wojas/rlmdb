@@ -22,7 +22,8 @@ pub const MDB_NOSYNC: u32 = 0x10000;
 pub const MDB_RDONLY: u32 = 0x20000;
 /// `MDB_NOMETASYNC`: do not fsync the meta page after commit.
 pub const MDB_NOMETASYNC: u32 = 0x40000;
-/// `MDB_WRITEMAP`: use a writable memory map (accepted, ignored).
+/// `MDB_WRITEMAP`: use a writable memory map (not used; its API limits
+/// are kept, see [`crate::EnvironmentFlags::WRITE_MAP`]).
 pub const MDB_WRITEMAP: u32 = 0x80000;
 /// `MDB_MAPASYNC`: asynchronous msync with `MDB_WRITEMAP` (accepted, ignored).
 pub const MDB_MAPASYNC: u32 = 0x100000;
@@ -34,19 +35,24 @@ pub const MDB_NOLOCK: u32 = 0x400000;
 pub const MDB_NORDAHEAD: u32 = 0x800000;
 /// `MDB_NOMEMINIT`: do not zero malloc'd pages (accepted, ignored).
 pub const MDB_NOMEMINIT: u32 = 0x1000000;
-/// `MDB_PREVSNAPSHOT` from LMDB 1.0 / mdb.master3. Not part of 0.9; rejected.
+/// `MDB_PREVSNAPSHOT` (LMDB 1.0): open the previous snapshot rather than the
+/// latest one, until the first write transaction commits. Not part of 0.9's
+/// `lmdb.h`; rlmdb takes it for environments of both formats.
 pub const MDB_PREVSNAPSHOT: u32 = 0x2000000;
 
 /// Env flags that may be changed on an open environment (`CHANGEABLE`).
 pub const CHANGEABLE: u32 = MDB_NOSYNC | MDB_NOMETASYNC | MDB_MAPASYNC | MDB_NOMEMINIT;
-/// Env flags that can only be given at open time (`CHANGELESS`).
+/// Env flags that can only be given at open time (`CHANGELESS`). LMDB
+/// 1.0's also holds `MDB_PREVSNAPSHOT`, which 0.9 does not know, and
+/// `MDB_REMAP_CHUNKS`, which rlmdb does not implement.
 pub const CHANGELESS: u32 = MDB_FIXEDMAP
     | MDB_NOSUBDIR
     | MDB_RDONLY
     | MDB_WRITEMAP
     | MDB_NOTLS
     | MDB_NOLOCK
-    | MDB_NORDAHEAD;
+    | MDB_NORDAHEAD
+    | MDB_PREVSNAPSHOT;
 
 // ---------------------------------------------------------------------------
 // Database flags (`mdb_dbi_open`), lmdb.h "mdb_dbi_open Database Flags".
@@ -272,6 +278,14 @@ pub const DEFAULT_READERS: u32 = 126;
 /// this is of no practical use; C takes any count and breaks above about
 /// 35 million (`KNOWN_C_BUGS.md` row 54). rlmdb has no such constant in C.
 pub const MAX_DBS_LIMIT: u32 = 1 << 20;
+/// The most reader slots a new lock file can be configured for
+/// (`mdb_env_set_maxreaders`, `EnvironmentBuilder::max_readers`):
+/// 1,048,576. A slot is 64 bytes in both lock-file versions, so the lock
+/// file is 64 MiB at the limit; C takes any count and makes a 256 GiB
+/// lock file at four billion (`KNOWN_C_BUGS.md` row 60). An existing lock
+/// file with a larger table is still attached to. rlmdb has no such
+/// constant in C.
+pub const MAX_READERS_LIMIT: u32 = 1 << 20;
 /// `CURSOR_STACK`: maximum depth of a B-tree (and of a cursor's page stack).
 pub const CURSOR_STACK: usize = 32;
 /// `CACHELINE`: alignment of lock-file structures.
@@ -297,16 +311,19 @@ pub const MDB_IDL_DB_MAX: usize = MDB_IDL_DB_SIZE - 1;
 /// `MDB_IDL_UM_MAX` (midl.h): maximum number of dirty pages in one txn.
 pub const MDB_IDL_UM_MAX: usize = MDB_IDL_UM_SIZE - 1;
 
-// The version `mdb_version` reports. The one exception to the rule above:
-// the patch level is not lmdb.h's (`DUAL_FORMAT.md` §4.4).
+// The version `mdb_version` reports where rlmdb stands in for C LMDB 0.9
+// (the tools' `-V`, the C API's 0.9 stub). The one exception to the rule
+// above: the patch level is not lmdb.h's (`DUAL_FORMAT.md` §4.4).
 
-/// `MDB_VERSION_MAJOR`, as `mdb_version` reports it: 0, as in `lmdb.h`.
+/// `MDB_VERSION_MAJOR`, as rlmdb's `mdb_version` for LMDB 0.9 reports it:
+/// 0, as in 0.9's `lmdb.h`.
 pub const MDB_VERSION_MAJOR: i32 = 0;
-/// `MDB_VERSION_MINOR`, as `mdb_version` reports it: 9, as in `lmdb.h`.
+/// `MDB_VERSION_MINOR`, as rlmdb's `mdb_version` for LMDB 0.9 reports it:
+/// 9, as in 0.9's `lmdb.h`.
 pub const MDB_VERSION_MINOR: i32 = 9;
-/// `MDB_VERSION_PATCH`, as `mdb_version` reports it: 85, where the 0.9.37
-/// `lmdb.h` has 36. A patch level above every real 0.9 release lets a
-/// program tell rlmdb from C LMDB while it stays in the 0.9 series rlmdb is
-/// a drop-in for. The C release the 0.9 format matches is
-/// [`VersionInfo::v09`](crate::VersionInfo::v09).
+/// `MDB_VERSION_PATCH`, as rlmdb's `mdb_version` for LMDB 0.9 reports it:
+/// 85, where the 0.9.37 `lmdb.h` has 37. A patch level above every real
+/// 0.9 release lets a program tell rlmdb from C LMDB while it stays in the
+/// 0.9 series rlmdb is a drop-in for. The C release the 0.9 format matches
+/// is [`VersionInfo::v09`](crate::VersionInfo::v09).
 pub const MDB_VERSION_PATCH: i32 = 85;

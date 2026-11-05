@@ -26,6 +26,26 @@ use rlmdb::{
     RwTxn, Transaction, WriteFlags,
 };
 
+/// A new directory for the environments of a round: under
+/// `$RLMDB_TEST_SCRATCH` if set, else in the system's temporary directory
+/// (`common::tempdir` of rlmdb's tests, which this file cannot use).
+fn tempdir() -> tempfile::TempDir {
+    match std::env::var_os("RLMDB_TEST_SCRATCH") {
+        Some(dir) if !dir.is_empty() => {
+            std::fs::create_dir_all(&dir).unwrap();
+            tempfile::tempdir_in(dir).unwrap()
+        }
+        _ => tempfile::tempdir().unwrap(),
+    }
+}
+
+/// A new directory under `target/tmp`, on the disk, for the target of a
+/// copy, which rlmdb and C write with `O_DIRECT` on Linux: a disk file
+/// system checks its alignment, tmpfs does not (`common::disk_tempdir`).
+fn disk_tempdir() -> tempfile::TempDir {
+    tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
+}
+
 /// The C side of a differential round: which `writeops` to run, the format
 /// and page size of the environments, and the checks of the results.
 pub trait Oracle {
@@ -144,6 +164,14 @@ fn rust_step(
             cur[f[1].parse::<usize>().unwrap()],
             &unhex(f[2]),
             &unhex(f[3]),
+            WriteFlags::CURRENT,
+        )),
+        // C puts with the cursor's key, Rust with another one, which rlmdb's
+        // MDB_CURRENT replaces by the cursor's (KNOWN_C_BUGS.md row 58).
+        "cw" => code(&txn.cursor_put(
+            cur[f[1].parse::<usize>().unwrap()],
+            &unhex(f[3]),
+            &unhex(f[4]),
             WriteFlags::CURRENT,
         )),
         "g" => {
@@ -446,9 +474,23 @@ impl Gen<'_> {
         // corrupts otherwise (KNOWN_C_BUGS.md row 13).
         let f: Vec<&str> = op.split(':').collect();
         if f[0] == "cp" && f[4] == MDB_CURRENT.to_string() {
-            let on_item = prev.is_some_and(|(_, l)| l.contains(&format!("| c{} rc=0 ", f[1])));
-            if !on_item {
+            let current = prev
+                .filter(|(_, l)| l.contains(&format!("| c{} rc=0 ", f[1])))
+                .and_then(|(_, l)| item_of(l, f[1].parse().ok()?));
+            let Some((ck, _)) = current else {
                 return format!("{}:0", f[..4].join(":"));
+            };
+            // The generated key, of the length of the cursor's: where it is
+            // another key, C puts the cursor's (C would write the other over
+            // the node where it rewrites it), Rust the other one, which
+            // rlmdb's MDB_CURRENT replaces by the cursor's (KNOWN_C_BUGS.md
+            // row 58). Of that length, the spill estimates (C counts the
+            // caller's key) are the same.
+            let mut w = unhex(f[2]);
+            w.resize(ck.len() / 2, b'w');
+            let w = hex(&w);
+            if w != ck {
+                return format!("cw:{}:{ck}:{w}:{}", f[1], f[3]);
             }
         }
         op
@@ -727,7 +769,7 @@ pub fn current_single_item_script(
 fn sub_db_leaf_firsts(o: &dyn Oracle, dbflags: u32, key: &[u8], items: &[Vec<u8>]) -> Vec<usize> {
     use rlmdb::format::meta::pick_newest;
     use rlmdb::format::{Db, Meta, NodeRef, PageRef};
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     if let Some(file) = o.data_file() {
         std::fs::write(dir.path().join("data.mdb"), &file).unwrap();
     }
@@ -967,6 +1009,188 @@ pub fn current_dup_outside_leaf_script(
     ops
 }
 
+/// A script (for [`Ops::List`], two cursors, a DB with `dbflags`,
+/// `KNOWN_C_BUGS.md` row 58) of `MDB_CURRENT` puts with a key that is not
+/// the cursor's, for an oracle of `ps`-byte pages with `me_nodemax`
+/// `nodemax` and maximum key (and duplicate) size `maxkey`, keys padded
+/// to an even length in nodes if `even_keys` (1.0).
+///
+/// Where C keeps the old key, both sides put with the other key (`cp`):
+/// data of the same size in the node; data on overflow pages that fits the
+/// pages it replaces (overwritten in place, as they are this
+/// transaction's); a duplicate of the same size on a sub-page or in a
+/// sub-DB of one leaf (C does not touch the key there). Where C would write
+/// the other key over the node (data of another size, to or from overflow
+/// pages, onto more overflow pages; another size for a key's only
+/// `MDB_DUPSORT` item), C puts with the cursor's key and Rust with the
+/// other one (`cw`): rlmdb must write what C writes for a caller that
+/// passes the right key. The other keys sort before and after every key,
+/// right after the cursor's, are a neighbour's, or as long as keys may be;
+/// the other cursor is on the same item or the next key, and looks the
+/// other key up afterwards. Two keys are replaced in nested transactions,
+/// one committed, one aborted; then keys between the old ones are put and
+/// the database is walked.
+pub fn current_other_key_script(
+    dbflags: u32,
+    ps: usize,
+    nodemax: usize,
+    maxkey: usize,
+    even_keys: bool,
+) -> Vec<String> {
+    const N: usize = 120;
+    const KLEN: usize = 12;
+    let dupsort = dbflags & MDB_DUPSORT != 0;
+    let fixed = dbflags & MDB_DUPFIXED != 0;
+    let knode = if even_keys { (KLEN + 1) & !1 } else { KLEN };
+    let key = |i: usize| {
+        let mut k = format!("k{i:04}").into_bytes();
+        k.resize(KLEN, b'q');
+        k
+    };
+    let val = |len: usize, seed: usize| -> Vec<u8> {
+        (0..len).map(|b| (b * 7 + seed * 13 + 1) as u8).collect()
+    };
+    // Items of a 40th of the page: a few dozen in a leaf.
+    let vs = (ps / 40).clamp(4, maxkey - 2);
+    // A larger item for a key's only MDB_DUPSORT item: within the maximum
+    // item size and a node with the key (KNOWN_C_BUGS.md row 38 otherwise).
+    let larger_dup = (2 * vs).min(maxkey).min(nodemax - 8 - knode);
+    // Duplicates: `tag` and `j` (2 bytes) first, so that other filler bytes
+    // keep their place.
+    let dup = |tag: u8, j: usize, seed: usize| -> Vec<u8> {
+        [&[tag, (j >> 8) as u8, j as u8][..], &val(vs - 3, seed)].concat()
+    };
+    let subpage_key = |i: usize| dupsort && i % 5 == 2;
+    // A sub-DB of one leaf: past the sub-page's limit (about half a page),
+    // three quarters of a leaf.
+    let hdr = if even_keys { 24 } else { 16 };
+    let item_space = if fixed { vs } else { ((8 + vs + 1) & !1) + 2 };
+    let n_sub = 3 * (ps - hdr) / 4 / item_space;
+    let sub_key = |i: usize| dupsort && i == N / 2 + 1;
+    let k = |i: usize| hex(&key(i));
+    let mut ops = Vec::new();
+    for i in 0..N {
+        if sub_key(i) {
+            for j in 0..n_sub {
+                ops.push(format!("p:{}:{}:0", k(i), hex(&dup(b'e', j, j))));
+            }
+        } else if subpage_key(i) {
+            for j in [10, 20, 30] {
+                ops.push(format!("p:{}:{}:0", k(i), hex(&dup(b'd', j, i))));
+            }
+        } else {
+            ops.push(format!("p:{}:{}:0", k(i), hex(&val(vs, i))));
+        }
+    }
+    let mut wrong_n = 0;
+    let mut wrong = |i: usize| -> String {
+        wrong_n += 1;
+        let mut between = key(i);
+        between.push(b'x');
+        let neighbour = if i + 1 < N { key(i + 1) } else { key(i - 1) };
+        hex(&match wrong_n % 5 {
+            0 => b"a".to_vec(),
+            1 => b"zz".to_vec(),
+            2 => between,
+            3 => neighbour,
+            _ => vec![b'w'; maxkey],
+        })
+    };
+    // Replaces the item of key i the cursors are positioned on (`pos`: the
+    // `g` op's tail) by `d`, with the other key in both (`cp`) or on the
+    // Rust side only (`cw`); the other cursor on the same item or the next
+    // key.
+    let mut n = 0;
+    let mut replace = |ops: &mut Vec<String>, i: usize, pos: &str, d: &[u8], in_place: bool| {
+        n += 1;
+        ops.push(format!("g:0:{pos}"));
+        if n % 2 == 0 && i + 1 < N {
+            ops.push(format!("g:1:{MDB_SET}:{}", k(i + 1)));
+        } else {
+            ops.push(format!("g:1:{pos}"));
+        }
+        let w = wrong(i);
+        if in_place {
+            ops.push(format!("cp:0:{w}:{}:{MDB_CURRENT}", hex(d)));
+        } else {
+            ops.push(format!("cw:0:{}:{w}:{}", k(i), hex(d)));
+        }
+        ops.push(format!("g:0:{MDB_GET_CURRENT}"));
+        ops.push(format!("g:1:{MDB_SET}:{w}"));
+    };
+    // Keys across the DB (in a DUPSORT DB a third of them with a sub-page),
+    // the last one, the sub-DB's.
+    let picks: Vec<usize> = (0..12)
+        .map(|c| c * N / 12 + c % 3)
+        .chain([N - 1, N / 2 + 1])
+        .collect();
+    for (c, &i) in picks.iter().enumerate() {
+        let end = match picks.len() - c {
+            3 => Some("nc"),
+            4 => Some("na"),
+            _ => None,
+        };
+        if end.is_some() {
+            ops.push("nb".into());
+        }
+        let set = format!("{MDB_SET}:{}", k(i));
+        if sub_key(i) {
+            for j in [0, n_sub / 2, n_sub - 1] {
+                let pos = format!("{MDB_GET_BOTH}:{}:{}", k(i), hex(&dup(b'e', j, j)));
+                replace(&mut ops, i, &pos, &dup(b'e', j, 900 + j), true);
+            }
+        } else if subpage_key(i) {
+            for j in [20, 10, 30] {
+                let pos = format!("{MDB_GET_BOTH}:{}:{}", k(i), hex(&dup(b'd', j, i)));
+                replace(&mut ops, i, &pos, &dup(b'd', j, 500 + i), true);
+            }
+        } else if dupsort {
+            replace(&mut ops, i, &set, &val(vs, i + 1), true);
+            if !fixed {
+                if larger_dup > vs {
+                    replace(&mut ops, i, &set, &val(larger_dup, i + 2), false);
+                    replace(&mut ops, i, &set, &val(larger_dup, i + 3), true);
+                }
+                replace(&mut ops, i, &set, &val(vs / 2, i + 4), false);
+            }
+        } else {
+            let steps = [
+                (vs, true),
+                (2 * vs, false),
+                (2 * vs, true),
+                (vs / 2, false),
+                // To overflow pages, three of them.
+                (2 * ps + 50, false),
+                // In place on them: as many pages, fewer.
+                (2 * ps + 10, true),
+                (ps + 100, true),
+                // More pages: new ones.
+                (4 * ps, false),
+                // Back into the node.
+                (vs, false),
+            ];
+            for (s, (len, in_place)) in steps.into_iter().enumerate() {
+                replace(&mut ops, i, &set, &val(len, i + s), in_place);
+            }
+        }
+        if let Some(end) = end {
+            ops.push(end.into());
+            ops.push(format!("g:0:{MDB_GET_CURRENT}"));
+        }
+    }
+    let mut more = 0;
+    for i in (0..N).step_by(3) {
+        let mut b = key(i);
+        b.push(b'm');
+        ops.push(format!("p:{}:{}:0", hex(&b), hex(&val(vs, i))));
+        more += 1;
+    }
+    ops.push(format!("g:0:{MDB_FIRST}"));
+    let items = N + more + if dupsort { n_sub + 2 * (N / 5) } else { 0 };
+    ops.extend(std::iter::repeat_n(format!("g:0:{MDB_NEXT}"), items));
+    ops
+}
+
 /// What one case of [`single_item_on_overflow_pages`] does to the key
 /// `k` in a write transaction: an op on `db` (cursor `c` is on `k`'s item)
 /// and its result.
@@ -1023,7 +1247,7 @@ pub fn single_item_on_overflow_pages(o: &dyn Oracle, dbflags: u32, klen: usize, 
     let (ka, kz) = (vec![b'a'; klen], vec![b'z'; klen]);
     let dbs = DatabaseFlags::from_bits_retain(dbflags);
     let new_dir = || {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         if let Some(file) = o.data_file() {
             std::fs::write(dir.path().join("data.mdb"), file).unwrap();
         }
@@ -1193,7 +1417,7 @@ pub fn single_item_on_overflow_pages(o: &dyn Oracle, dbflags: u32, klen: usize, 
         ));
     }
     for (name, op, rc, k_items, left) in cases {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         std::fs::copy(state.path().join("data.mdb"), dir.path().join("data.mdb")).unwrap();
         {
             let env = open(dir.path());
@@ -1220,7 +1444,7 @@ pub fn single_item_on_overflow_pages(o: &dyn Oracle, dbflags: u32, klen: usize, 
         assert_eq!(o.dump(dir.path(), "t"), expected_dump(&k_items), "{name}");
     }
     {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         std::fs::copy(state.path().join("data.mdb"), dir.path().join("data.mdb")).unwrap();
         let env = open(dir.path());
         let mut txn = env.begin_rw_txn().unwrap();
@@ -1231,7 +1455,8 @@ pub fn single_item_on_overflow_pages(o: &dyn Oracle, dbflags: u32, klen: usize, 
         assert_eq!(overflow_pages(dir.path()), 0, "mdb_drop: md_overflow_pages");
         audit(dir.path(), "mdb_drop");
     }
-    let copy = tempfile::tempdir().unwrap();
+    // The copy target: on the disk (`O_DIRECT`, see `disk_tempdir`).
+    let copy = disk_tempdir();
     open(state.path()).copy_to_path(copy.path(), true).unwrap();
     audit(copy.path(), "compacting copy");
     assert_eq!(o.dump(copy.path(), "t"), c_dump, "compacting copy");
@@ -1261,6 +1486,9 @@ enum LevelEnd {
     Abort(String),
     /// C stopped (see [`Round::CStopped`]).
     Stopped,
+    /// An op that ends the top-level transaction (`tc`, `tp`, `ta`,
+    /// `rb:<delta>`) and C's output for it.
+    Top(String, String),
 }
 
 /// The state of a round: the C process, the op source and what the checks
@@ -1282,6 +1510,13 @@ struct Driver<'a> {
     i: usize,
     /// C's output for an `nb` op, compared once Rust's child exists.
     pending_c_line: Option<String>,
+    /// The environments of C and Rust.
+    c_dir: std::path::PathBuf,
+    r_dir: std::path::PathBuf,
+    /// The page size of both.
+    page_size: usize,
+    /// The meta pages of C's and Rust's data files before a `tp` op.
+    metas_before: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Driver<'_> {
@@ -1446,7 +1681,7 @@ impl Driver<'_> {
         let (name, cl, commit) = match end {
             LevelEnd::Commit(cl) => ("nc", cl, true),
             LevelEnd::Abort(cl) => ("na", cl, false),
-            LevelEnd::Done => unreachable!(),
+            LevelEnd::Done | LevelEnd::Top(..) => unreachable!(),
             LevelEnd::Stopped => return Ok(None),
         };
         for &id in &ccur[..self.ncur] {
@@ -1490,6 +1725,13 @@ impl Driver<'_> {
                     return LevelEnd::Stopped;
                 }
             }
+            let top = depth == 0 && is_top_op(&op);
+            if top && op == "tp" {
+                self.metas_before = Some((
+                    meta_pages(&self.c_dir, self.page_size),
+                    meta_pages(&self.r_dir, self.page_size),
+                ));
+            }
             let Some(cl) = self.crun.as_mut().and_then(|c| c.step(&op)) else {
                 let (_, err) = self.crun.take().expect("C running").finish();
                 assert!(
@@ -1509,6 +1751,9 @@ impl Driver<'_> {
             };
             if op == "nb" {
                 self.pending_c_line = Some(cl.clone());
+            }
+            if top {
+                return LevelEnd::Top(op, cl);
             }
             let rl_raw = match op.as_str() {
                 "nc" if depth > 0 => return LevelEnd::Commit(cl),
@@ -1595,6 +1840,145 @@ fn bulk_put(
     Ok(())
 }
 
+/// A script of several write transactions ended by the top-level ops,
+/// most of them committed in two phases (`tp`): puts, deletes, values on
+/// overflow pages (with pages up to 4 KiB), a nested transaction, cursor
+/// moves, a cleared database. With `v10` (C 1.0, which has two-phase
+/// commit), also a prepared transaction that is aborted (`ta`) and a
+/// commit rolled back (`rb:0`) and a rollback refused (`rb:1`). No
+/// transaction ended by `tp` is empty (C 1.0's commit then fails,
+/// `KNOWN_C_BUGS.md` row 61).
+pub fn two_phase_script(v10: bool) -> Vec<String> {
+    let key = |i: usize| hex(format!("k{i:05}").as_bytes());
+    let val = |i: usize, len: usize| hex(&vec![b'a' + (i % 26) as u8; len]);
+    let puts = |ops: &mut Vec<String>, range: std::ops::Range<usize>, len: usize| {
+        ops.extend(range.map(|i| format!("p:{}:{}:0", key(i), val(i, len))));
+    };
+    let mut ops = Vec::new();
+    // Ends the transaction with `op`, after a few small puts, which every
+    // database takes (the large values are too large for MDB_DUPSORT
+    // items): no transaction ends empty.
+    let end = |ops: &mut Vec<String>, op: &str| {
+        let n = ops.len();
+        puts(ops, 2000 + n..2003 + n, 8);
+        ops.push(op.into());
+    };
+    puts(&mut ops, 0..200, 50);
+    end(&mut ops, "tp");
+    ops.extend((0..200).step_by(3).map(|i| format!("d:{}", key(i))));
+    puts(&mut ops, 300..330, 5000);
+    ops.push(format!("g:0:{MDB_FIRST}"));
+    ops.push(format!("g:1:{MDB_LAST}"));
+    end(&mut ops, "tp");
+    ops.push("nb".into());
+    puts(&mut ops, 400..430, 100);
+    ops.push("nc".into());
+    ops.extend((300..320).map(|i| format!("d:{}", key(i))));
+    end(&mut ops, "tc");
+    if v10 {
+        puts(&mut ops, 500..540, 3000);
+        end(&mut ops, "ta");
+    }
+    puts(&mut ops, 600..640, 80);
+    ops.push(format!("g:0:{MDB_SET}:{}", key(610)));
+    end(&mut ops, "tp");
+    if v10 {
+        puts(&mut ops, 700..710, 6000);
+        end(&mut ops, "rb:0");
+        puts(&mut ops, 710..720, 20);
+        end(&mut ops, "rb:1");
+    }
+    puts(&mut ops, 800..830, 40);
+    end(&mut ops, "tp");
+    ops.push("dr:0".into());
+    puts(&mut ops, 900..905, 10);
+    end(&mut ops, "tp");
+    puts(&mut ops, 1000..1020, 10);
+    ops
+}
+
+/// The ops that end the top-level transaction and begin the next one.
+fn is_top_op(op: &str) -> bool {
+    matches!(op, "tc" | "tp" | "ta") || op.starts_with("rb:")
+}
+
+/// The two meta pages of the data file in `dir` (pages of `ps` bytes).
+fn meta_pages(dir: &Path, ps: usize) -> Vec<u8> {
+    let mut file = std::fs::read(dir.join("data.mdb")).unwrap();
+    file.truncate(2 * ps);
+    file
+}
+
+/// Checks the file `dir` held between the phases of a `tp` op
+/// (`prepared.mdb`) against what it held before (`metas_before`, its meta
+/// pages) and after the commit (`data.mdb`): the meta pages from before,
+/// the data pages from after (a commit is a prepare and a meta page
+/// write). Returns the file between the phases, `None` if there is none
+/// (C 0.9 has no two-phase commit). The copy is removed.
+fn check_between(dir: &Path, metas_before: &[u8], ps: usize, tag: &str) -> Option<Vec<u8>> {
+    let between = std::fs::read(dir.join("prepared.mdb")).ok()?;
+    let after = std::fs::read(dir.join("data.mdb")).unwrap();
+    assert_eq!(
+        &between[..2 * ps],
+        metas_before,
+        "{tag}: meta pages after the prepare"
+    );
+    assert_eq!(
+        between.len(),
+        after.len(),
+        "{tag}: file length after the prepare"
+    );
+    let differ: Vec<usize> = (2..between.len() / ps)
+        .filter(|&p| between[p * ps..(p + 1) * ps] != after[p * ps..(p + 1) * ps])
+        .collect();
+    assert!(
+        differ.is_empty(),
+        "{tag}: data pages {differ:?} changed after the prepare"
+    );
+    std::fs::remove_file(dir.join("prepared.mdb")).unwrap();
+    Some(between)
+}
+
+/// Ends the Rust side's top-level transaction `txn` (whose cursors `cur`
+/// are closed first) as the top-level op `op` asks, as `writeops.c`'s
+/// `end_top` does; returns the first failure's code (0 if none).
+fn rust_end_top(
+    env: &Environment,
+    mut txn: RwTxn<'_>,
+    cur: &mut Vec<CursorId>,
+    op: &str,
+    dir: &Path,
+) -> i32 {
+    for id in cur.drain(..) {
+        txn.close_cursor(id);
+    }
+    match op {
+        "tc" => code(&txn.commit()),
+        "tp" => match txn.prepare() {
+            Ok(prepared) => {
+                std::fs::copy(dir.join("data.mdb"), dir.join("prepared.mdb")).unwrap();
+                code(&prepared.commit())
+            }
+            Err(e) => e.to_err_code(),
+        },
+        "ta" => match txn.prepare() {
+            Ok(prepared) => {
+                prepared.abort();
+                0
+            }
+            Err(e) => e.to_err_code(),
+        },
+        _ => {
+            let delta: i64 = op["rb:".len()..].parse().unwrap();
+            let id = txn.id();
+            match txn.commit() {
+                Ok(()) => code(&env.rollback(id.wrapping_add_signed(delta))),
+                Err(e) => e.to_err_code(),
+            }
+        }
+    }
+}
+
 /// Runs one round in lock step: each op goes to C, then to Rust, and the
 /// two outputs must be equal.
 pub fn run_round(o: &dyn Oracle, p: &Profile, ncur: usize, ops: Ops<'_>, tag: &str) -> Round {
@@ -1612,8 +1996,8 @@ pub fn run_round_sized(
     tag: &str,
     map_size: usize,
 ) -> Round {
-    let cdir = tempfile::tempdir().unwrap();
-    let rdir = tempfile::tempdir().unwrap();
+    let cdir = tempdir();
+    let rdir = tempdir();
     if let Some(file) = o.data_file() {
         std::fs::write(cdir.path().join("data.mdb"), &file).unwrap();
         std::fs::write(rdir.path().join("data.mdb"), &file).unwrap();
@@ -1631,13 +2015,9 @@ pub fn run_round_sized(
     if let Some(n) = o.dirty_limit() {
         env.set_dirty_limit(n);
     }
+    let db_flags = DatabaseFlags::from_bits_retain(p.dbflags) | DatabaseFlags::CREATE;
     let mut txn = env.begin_rw_txn().unwrap();
-    let mut db = txn
-        .create_db(
-            Some("t"),
-            DatabaseFlags::from_bits_retain(p.dbflags) | DatabaseFlags::CREATE,
-        )
-        .unwrap();
+    let mut db = txn.create_db(Some("t"), db_flags).unwrap();
     let mut cur: Vec<CursorId> = (0..ncur).map(|_| txn.open_cursor(db).unwrap()).collect();
     let crun = CRun::start(o, cdir.path(), "t", p.dbflags, ncur, map_size);
     let mut drv = Driver {
@@ -1654,13 +2034,52 @@ pub fn run_round_sized(
         heal: Default::default(),
         i: 0,
         pending_c_line: None,
+        c_dir: cdir.path().to_path_buf(),
+        r_dir: rdir.path().to_path_buf(),
+        page_size: env.page_size(),
+        metas_before: None,
     };
-    match drv.level(&mut txn, &mut db, 0, &mut cur) {
-        LevelEnd::Done => {}
-        LevelEnd::Stopped => return Round::CStopped(drv.i),
-        LevelEnd::Commit(_) | LevelEnd::Abort(_) => unreachable!(),
+    let mut txn = Some(txn);
+    loop {
+        let level = drv.level(txn.as_mut().expect("a transaction"), &mut db, 0, &mut cur);
+        match level {
+            LevelEnd::Done => break,
+            LevelEnd::Stopped => return Round::CStopped(drv.i),
+            LevelEnd::Commit(_) | LevelEnd::Abort(_) => unreachable!(),
+            LevelEnd::Top(op, cl) => {
+                // End the transaction as the op says, begin the next.
+                let ended = txn.take().expect("a transaction");
+                let rc = rust_end_top(&env, ended, &mut cur, &op, rdir.path());
+                let next = txn.insert(env.begin_rw_txn().unwrap());
+                db = next.create_db(Some("t"), db_flags).unwrap();
+                cur.extend((0..ncur).map(|_| next.open_cursor(db).unwrap()));
+                let name = op.split(':').next().unwrap_or("").to_owned();
+                let rl = drv.line(next, &cur, &name, rc);
+                if !drv.compare(op.clone(), cl, rl) {
+                    return Round::CStopped(drv.i);
+                }
+                if op == "tp" {
+                    // Each side's file between the phases is its committed
+                    // file with the meta pages from before; those are the
+                    // same on both sides, and so are (as the oracle
+                    // compares files) the committed files: so the prepare
+                    // wrote the same pages on both. (Byte for byte the
+                    // files differ where neither side reads: the gap
+                    // between the nodes and their pointers holds what the
+                    // page held before, which `pagecmp` leaves out too.)
+                    let (cm, rm) = drv.metas_before.take().expect("metas before tp");
+                    let step = format!("{tag}: step {} tp", drv.i);
+                    check_between(rdir.path(), &rm, drv.page_size, &format!("{step}, Rust"))
+                        .expect("Rust's file between the phases");
+                    check_between(cdir.path(), &cm, drv.page_size, &format!("{step}, C"));
+                    assert!(cm == rm, "{step}: the meta pages before differ");
+                    o.after_round(cdir.path(), rdir.path(), &step);
+                }
+            }
+        }
     }
     let (c_commit, err) = drv.crun.take().expect("C running").finish();
+    let mut txn = txn.expect("a transaction");
     for id in cur {
         txn.close_cursor(id);
     }
@@ -1869,7 +2288,7 @@ pub fn run_profile(o: &dyn Oracle, p: Profile, seed: u64, rounds: usize, n: usiz
 fn cursor_of(op: &str) -> Option<usize> {
     let f: Vec<&str> = op.split(':').collect();
     match f[0] {
-        "g" | "cp" | "cd" | "cr" => f[1].parse().ok(),
+        "g" | "cp" | "cd" | "cr" | "cw" => f[1].parse().ok(),
         _ => None,
     }
 }

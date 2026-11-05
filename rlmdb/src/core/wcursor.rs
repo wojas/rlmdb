@@ -65,18 +65,21 @@
 //! borrow the transaction, so write code copies what it keeps.
 //!
 //! The positioning of every `mdb_put` and `mdb_del` (`MDB_SET`, and
-//! `mdb_cursor_last` for `MDB_APPEND`, on the fresh cursor of a tree
-//! without duplicates) runs on the write cursor's own stack instead
-//! ([`RwTxn::seek_key`], [`RwTxn::seek_last`]): the same steps as the read
-//! path, leaving the same state, without building and storing back a read
-//! cursor, and finding each level's page through its slot.
+//! `mdb_cursor_last` for `MDB_APPEND`, on the fresh cursor) runs on the
+//! write cursor's own stack instead ([`RwTxn::seek_key`],
+//! [`RwTxn::seek_last`]): the same steps as the read path, leaving the same
+//! state, without building and storing back a read cursor, and finding
+//! each level's page through its slot. Only on a node with duplicates is
+//! the sub-cursor set up as the read path does it, with a read operation
+//! on the sub-cursor alone.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cmp::Comparator;
 use crate::consts::*;
 use crate::core::cursor::{
-    corrupted, empty_page, node_read, search_page, Cursor, Walk, C_DEL, C_EOF, C_INITIALIZED, C_SUB,
+    corrupted, cursor_first, cursor_last, empty_page, node_read, search_page, Cursor, Walk, C_DEL,
+    C_EOF, C_INITIALIZED, C_SUB,
 };
 use crate::core::dbi::{DB_DIRTY, DB_DUPDATA, DB_USRVALID, DB_VALID};
 use crate::core::dirty::PageSlot;
@@ -659,6 +662,7 @@ pub(crate) fn write_back(arena: &mut Arena, c: CRef, mc: &Cursor<'_>, mx: Option
 /// `mdb_put` keeps them from put to put, and consecutive operations mostly
 /// pass the same root and branch pages), and the slot found is stored, so
 /// the `mdb_page_touch` that follows needs no search either.
+#[inline(always)]
 fn descend<'t>(
     core: &'t TxnCore<'_>,
     w: &mut WCursor,
@@ -716,29 +720,29 @@ fn descend<'t>(
     Ok(mp)
 }
 
-/// The key of item `ki` of leaf `mp` of a tree without duplicates
-/// (`ksize`: its `P_LEAF2` key size), read as `read_position` and the end
-/// of `cursor_set` read it for a main cursor without a sub-cursor: a node
-/// with duplicates is corrupt there, and the data is read too (following
-/// `F_BIGDATA`) for its checks.
+/// The key of item `ki` of leaf `mp` (`ksize`: its `P_LEAF2` key size),
+/// read as `read_position` and the end of `cursor_set` read it for a main
+/// cursor: the data is read too (following `F_BIGDATA`) for its checks.
+/// `None` for a node with duplicates, whose key the caller reads after
+/// setting up the sub-cursor ([`RwTxn::enter_dups`]), as those do.
 fn read_item<'t>(
     core: &'t TxnCore<'_>,
     mp: PageRef<'t>,
     ki: usize,
     ksize: usize,
-) -> Result<&'t [u8]> {
+) -> Result<Option<&'t [u8]>> {
     if !mp.is_leaf() {
         return Err(corrupted());
     }
     if mp.is_leaf2() {
-        return mp.leaf2_key(ki, ksize).ok_or_else(corrupted);
+        return mp.leaf2_key(ki, ksize).ok_or_else(corrupted).map(Some);
     }
     let leaf = mp.node(ki).ok_or_else(corrupted)?;
     if leaf.is_dupdata() {
-        return Err(corrupted());
+        return Ok(None);
     }
     node_read(core, leaf)?;
-    leaf.key().ok_or_else(corrupted)
+    leaf.key().ok_or_else(corrupted).map(Some)
 }
 
 /// The record and key order of cursor `c`.
@@ -1003,13 +1007,86 @@ impl<'env> RwTxn<'env> {
 
     /// Whether `mc` can be positioned on its own stack ([`RwTxn::seek_key`],
     /// [`RwTxn::seek_last`]) instead of through [`RwTxn::read_op`]: an
-    /// unpositioned main cursor of a tree without duplicates (no
-    /// sub-cursor). That is the cursor `mdb_put` and `mdb_del` open for
-    /// every call; everything else takes the read path.
+    /// unpositioned main cursor whose sub-cursor, if it has one, holds no
+    /// pages (as `mdb_cursor_init` leaves it). That is the cursor `mdb_put`
+    /// and `mdb_del` open for every call; everything else takes the read
+    /// path.
     #[inline]
     pub(crate) fn seeks_in_place(&self, mc: CRef) -> bool {
         let s = &self.w.cursors.slots[mc.slot];
-        !mc.sub && s.x.is_none() && !s.main.is_init() && matches!(s.main.db, DbRef::Txn(_))
+        !mc.sub
+            && !s.main.is_init()
+            && matches!(s.main.db, DbRef::Txn(_))
+            && s.x.as_ref().is_none_or(|x| x.c.snum == 0 && !x.c.subp)
+    }
+
+    /// The `reset_sub` that `cursor_set` and `cursor_last` begin with, for
+    /// a cursor that [`RwTxn::seeks_in_place`]: the sub-cursor is no longer
+    /// on an item. (The read path stores the rest of such a sub-cursor's
+    /// state back unchanged.)
+    fn reset_sub_in_place(&mut self, mc: CRef) {
+        if let Some(x) = self.w.cursors.slot_mut(mc.slot).and_then(|s| s.x.as_mut()) {
+            x.c.flags &= !(C_INITIALIZED | C_EOF);
+        }
+    }
+
+    /// The duplicates branch of `cursor_set` and `cursor_last` for a main
+    /// cursor `mc` positioned in place on a node with duplicates: point the
+    /// sub-cursor at them ([`RwTxn::xcursor_init1`]) and put it on the first
+    /// (`last`: the last) of them with the read path's `cursor_first` /
+    /// `cursor_last` on the sub-cursor alone. Returns the node's key. The
+    /// sub-cursor and its record end up as through [`RwTxn::read_op`] on
+    /// the main cursor; `mx_dbflag` is also set, as C's `mdb_xcursor_init1`
+    /// sets it.
+    ///
+    /// A sub-DB record without a root is `MDB_CORRUPTED`: C never writes
+    /// one (a key's node goes with its last duplicate). Through the read
+    /// path its `cursor_first` fails with `MDB_NOTFOUND`, which `mdb_put`
+    /// takes for a missing key and inserts the key a second time (C does
+    /// the same, `_mdb_cursor_put` after `mdb_cursor_set`); in place the
+    /// put fails and changes nothing.
+    fn enter_dups(&mut self, mc: CRef, last: bool) -> Result<&[u8]> {
+        if self.w.cursors.slots[mc.slot].x.is_none() {
+            // A node with duplicates in a tree without them.
+            return Err(corrupted());
+        }
+        self.xcursor_init1(mc)?;
+        let x = self.w.cursors.slots[mc.slot]
+            .x
+            .as_ref()
+            .ok_or_else(corrupted)?;
+        if !x.c.subp && x.db.root == P_INVALID {
+            return Err(corrupted());
+        }
+        if x.c.subp && !last {
+            // `cursor_first` on a sub-page: `xcursor_init1` left the
+            // sub-cursor initialised on its first item, so it does not move
+            // and only `read_position` reads the item, for its checks (a
+            // sub-cursor reads no data).
+            let ksize = x.db.pad as usize;
+            let sp = self.page_of(CRef::sub(mc.slot), 0)?;
+            let item = if !sp.is_leaf() {
+                None
+            } else if sp.is_leaf2() {
+                sp.leaf2_key(0, ksize)
+            } else {
+                sp.node(0).filter(|n| !n.is_dupdata()).and_then(|n| n.key())
+            };
+            item.ok_or_else(corrupted)?;
+        } else {
+            self.read_op(CRef::sub(mc.slot), |txn, x, _| {
+                let dup = if last {
+                    cursor_last(txn, x, None)
+                } else {
+                    cursor_first(txn, x, None)
+                };
+                dup.map(|_| ())
+            })?;
+        }
+        let leaf = self.top_page(mc)?;
+        leaf.node(self.cur(mc).ki_top())
+            .and_then(|n| n.key())
+            .ok_or_else(corrupted)
     }
 
     /// `mdb_cursor_set` with `MDB_SET` for a cursor that
@@ -1029,6 +1106,7 @@ impl<'env> RwTxn<'env> {
         if key.is_empty() {
             return Err(MdbError::BadValSize.into());
         }
+        self.reset_sub_in_place(mc);
         if db.root == P_INVALID {
             return Ok(false);
         }
@@ -1043,7 +1121,9 @@ impl<'env> RwTxn<'env> {
         }
         // set1: the descent left C_INITIALIZED set and C_EOF clear. Read
         // the item as `cursor_set` does, for its checks.
-        read_item(core, mp, w.ki_top(), ksize)?;
+        if read_item(core, mp, w.ki_top(), ksize)?.is_none() {
+            self.enter_dups(mc, false)?;
+        }
         Ok(true)
     }
 
@@ -1060,6 +1140,7 @@ impl<'env> RwTxn<'env> {
         cmp: Comparator,
         f: impl FnOnce(Option<&[u8]>) -> R,
     ) -> Result<R> {
+        self.reset_sub_in_place(mc);
         if db.root == P_INVALID {
             return Err(MdbError::NotFound.into());
         }
@@ -1077,7 +1158,10 @@ impl<'env> RwTxn<'env> {
         }
         w.ki[w.top] = (nkeys - 1) as u16;
         w.flags |= C_INITIALIZED | C_EOF;
-        Ok(f(Some(read_item(core, mp, w.ki_top(), db.pad as usize)?)))
+        match read_item(core, mp, w.ki_top(), db.pad as usize)? {
+            Some(last) => Ok(f(Some(last))),
+            None => Ok(f(Some(self.enter_dups(mc, true)?))),
+        }
     }
 
     /// `mdb_page_search` with `MDB_PS_MODIFY`: descend to the leaf for
@@ -1543,10 +1627,29 @@ mod tests {
         assert_eq!(a.pg[..a.snum], b.pg[..b.snum]);
     }
 
+    /// The main cursors of slots `a` and `b` and their sub-cursors (with
+    /// the duplicates' records and order) are in the same state.
+    fn same_slots(txn: &RwTxn<'_>, a: usize, b: usize) {
+        same_state(txn.cur(CRef::main(a)), txn.cur(CRef::main(b)));
+        let x = |i: usize| txn.w.cursors.slot(i).unwrap().x.as_ref();
+        match (x(a), x(b)) {
+            (None, None) => {}
+            (Some(xa), Some(xb)) => {
+                same_state(&xa.c, &xb.c);
+                assert_eq!(xa.db, xb.db);
+                assert_eq!(format!("{:?}", xa.cmp), format!("{:?}", xb.cmp));
+            }
+            _ => panic!("one slot has a sub-cursor, the other not"),
+        }
+    }
+
     /// Positions two fresh cursors of `dbi`, one on its own stack and one
     /// through the read path, for `MDB_SET` on `probe` and for
     /// `mdb_cursor_last`, and checks that results and cursor states agree.
     fn check(txn: &mut RwTxn<'_>, dbi: usize, probe: &[u8]) {
+        // Resolve the DBI's record as `mdb_put` does on first use in a
+        // transaction (`open_slot` reads the entry as it is).
+        txn.core.fresh_dbi(Dbi(dbi as u32), DB_USRVALID).unwrap();
         let (a, b) = (txn.open_slot(dbi, false), txn.open_slot(dbi, false));
         let (ca, cb) = (CRef::main(a), CRef::main(b));
         assert!(txn.seeks_in_place(ca));
@@ -1562,12 +1665,13 @@ mod tests {
             Err(e) => Err(e.to_err_code()),
         };
         assert_eq!(got, want, "MDB_SET {:?}", &probe[..probe.len().min(4)]);
-        same_state(txn.cur(ca), txn.cur(cb));
+        same_slots(txn, a, b);
         txn.close_slot(a);
         txn.close_slot(b);
 
         let (a, b) = (txn.open_slot(dbi, false), txn.open_slot(dbi, false));
         let (ca, cb) = (CRef::main(a), CRef::main(b));
+        assert!(txn.seeks_in_place(ca));
         let got = txn
             .seek_last(ca, &db, cmp, |k| k.map(<[u8]>::to_vec))
             .map_err(|e| e.to_err_code());
@@ -1577,7 +1681,7 @@ mod tests {
             })
             .map_err(|e| e.to_err_code());
         assert_eq!(got, want, "last");
-        same_state(txn.cur(ca), txn.cur(cb));
+        same_slots(txn, a, b);
         txn.close_slot(a);
         txn.close_slot(b);
     }
@@ -1587,6 +1691,9 @@ mod tests {
             .into_iter()
             .map(key)
             .collect();
+        // Keys with a sub-page and with a sub-DB in the MDB_DUPSORT tree.
+        p.push(key(2));
+        p.push(key(1204));
         p.push(Vec::new());
         p.push(b"a".to_vec());
         p.push(vec![0]);
@@ -1594,8 +1701,12 @@ mod tests {
     }
 
     fn check_all(txn: &mut RwTxn<'_>) {
+        check_db(txn, Dbi::MAIN);
+    }
+
+    fn check_db(txn: &mut RwTxn<'_>, db: Dbi) {
         for probe in probes() {
-            check(txn, Dbi::MAIN.0 as usize, &probe);
+            check(txn, db.0 as usize, &probe);
         }
     }
 
@@ -1657,5 +1768,223 @@ mod tests {
         }
         assert!(!txn.core.spilled.is_empty());
         check_all(&mut txn);
+    }
+    #[test]
+    fn positioning_in_place_matches_the_read_path_with_duplicates() {
+        dup_positioning_matches(Format::V09);
+        dup_positioning_matches(Format::V10);
+    }
+
+    /// Puts the items of key `i` of the `MDB_DUPSORT` test tree: one item
+    /// for every third key, a sub-DB for one key in 300 (and so for the
+    /// first key with duplicates, key(4)), else a sub-page of two or three
+    /// items.
+    fn put_dups(txn: &mut RwTxn<'_>, db: Dbi, i: u32, tag: &[u8]) {
+        let count = match i % 3 {
+            0 => 1,
+            _ if i % 300 == 2 => 200,
+            r => r + 1,
+        };
+        for d in 0..count {
+            let mut v = vec![tag[0]; 100];
+            v[..4].copy_from_slice(&d.to_be_bytes());
+            txn.put(db, &key(2 * i), &v, WriteFlags::empty()).unwrap();
+        }
+    }
+
+    fn dup_positioning_matches(format: Format) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = Environment::builder();
+        builder
+            .map_size(256 << 20)
+            .max_dbs(2)
+            .flags(EnvironmentFlags::NO_SYNC)
+            .format(format);
+        if format == Format::V10 {
+            builder.page_size(4096);
+        }
+        let env = builder.open(dir.path()).unwrap();
+        let mut txn = env.begin_rw_txn().unwrap();
+        let db = txn
+            .create_db(
+                Some("dups"),
+                DatabaseFlags::DUP_SORT | DatabaseFlags::CREATE,
+            )
+            .unwrap();
+        // An empty tree.
+        check_db(&mut txn, db);
+        for i in 0..3000u32 {
+            put_dups(&mut txn, db, i, b"v");
+            if i == 2 {
+                // The last key holds a sub-DB.
+                check_db(&mut txn, db);
+            }
+        }
+        assert!(txn.stat(db).unwrap().depth >= 3);
+        // Dirty pages; the last key holds a sub-page.
+        check_db(&mut txn, db);
+        txn.commit().unwrap();
+
+        // Clean pages, then some dirty again.
+        let mut txn = env.begin_rw_txn().unwrap();
+        check_db(&mut txn, db);
+        for i in (0..3000u32).step_by(7) {
+            put_dups(&mut txn, db, i, b"w");
+        }
+        check_db(&mut txn, db);
+        // Pages dirty in the parent, then in the child too.
+        {
+            let mut child = txn.begin_nested_txn().unwrap();
+            check_db(&mut child, db);
+            put_dups(&mut child, db, 1, b"c");
+            check_db(&mut child, db);
+        }
+        txn.abort();
+
+        // Spilled pages.
+        env.set_dirty_limit(64);
+        let mut txn = env.begin_rw_txn().unwrap();
+        for i in 0..3000u32 {
+            put_dups(&mut txn, db, i, b"s");
+        }
+        assert!(!txn.core.spilled.is_empty());
+        check_db(&mut txn, db);
+    }
+
+    /// A sub-page whose first item is damaged: positioning on its key in
+    /// place fails as through the read path, and leaves the same state.
+    #[test]
+    fn positioning_on_a_damaged_sub_page_matches_the_read_path() {
+        use crate::format::page::P_LEAF;
+        let dir = tempfile::tempdir().unwrap();
+        let env = Environment::builder()
+            .map_size(64 << 20)
+            .max_dbs(2)
+            .flags(EnvironmentFlags::NO_SYNC)
+            .format(Format::V09)
+            .open(dir.path())
+            .unwrap();
+        let mut txn = env.begin_rw_txn().unwrap();
+        let db = txn
+            .create_db(
+                Some("dups"),
+                DatabaseFlags::DUP_SORT | DatabaseFlags::CREATE,
+            )
+            .unwrap();
+        txn.commit().unwrap();
+        let l = env.layout();
+        // Each damages the sub-page of key(2) (its key's three items).
+        let damages: [fn(&Layout, &mut [u8]); 3] = [
+            // Not a leaf.
+            |l, sp| page_ops::set_flags(l, sp, page_ops::flags(l, sp) & !P_LEAF),
+            // The first item has duplicates of its own.
+            |l, sp| {
+                let off = page_ops::ptr(l, sp, 0).unwrap() + 4;
+                sp[off..off + 2].copy_from_slice(&F_DUPDATA.to_ne_bytes());
+            },
+            // The first item's key runs past the sub-page.
+            |l, sp| {
+                let off = page_ops::ptr(l, sp, 0).unwrap() + 6;
+                sp[off..off + 2].copy_from_slice(&u16::MAX.to_ne_bytes());
+            },
+        ];
+        for damage in damages {
+            let mut txn = env.begin_rw_txn().unwrap();
+            for i in 0..3 {
+                put_dups(&mut txn, db, i, b"v");
+            }
+            let dbi = db.0 as usize;
+            let a = txn.open_slot(dbi, false);
+            let ca = CRef::main(a);
+            let (rec, cmp) = (txn.db_of(ca), txn.cmp_of(ca));
+            assert!(txn.seek_key(ca, &rec, cmp, &key(2)).unwrap());
+            let ki = txn.cur(ca).ki_top();
+            let leaf = txn.top_page_mut(ca).unwrap();
+            let range = page_ops::node_data_range(l, leaf, ki).unwrap();
+            damage(l, &mut leaf[range]);
+            txn.close_slot(a);
+            check(&mut txn, dbi, &key(2));
+        }
+    }
+
+    /// A sub-DB record without a root: positioning on its key in place
+    /// fails with `MDB_CORRUPTED`, and `mdb_put` and `mdb_del` on the key
+    /// change nothing (through the read path the put would insert the key
+    /// a second time, as C does).
+    #[test]
+    fn a_sub_db_record_without_a_root_is_corrupt() {
+        use crate::format::layout::DB_ROOT;
+        for format in [Format::V09, Format::V10] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut builder = Environment::builder();
+            builder
+                .map_size(64 << 20)
+                .max_dbs(2)
+                .flags(EnvironmentFlags::NO_SYNC)
+                .format(format);
+            if format == Format::V10 {
+                builder.page_size(4096);
+            }
+            let env = builder.open(dir.path()).unwrap();
+            let l = env.layout();
+            let mut txn = env.begin_rw_txn().unwrap();
+            let db = txn
+                .create_db(
+                    Some("dups"),
+                    DatabaseFlags::DUP_SORT | DatabaseFlags::CREATE,
+                )
+                .unwrap();
+            // Keys 0 (one item), 2 (a sub-page) and 4 (a sub-DB).
+            for i in 0..3 {
+                put_dups(&mut txn, db, i, b"v");
+            }
+            let dbi = db.0 as usize;
+            let a = txn.open_slot(dbi, false);
+            let ca = CRef::main(a);
+            let (rec, cmp) = (txn.db_of(ca), txn.cmp_of(ca));
+            assert!(txn.seek_key(ca, &rec, cmp, &key(4)).unwrap());
+            let ki = txn.cur(ca).ki_top();
+            let leaf = txn.top_page_mut(ca).unwrap();
+            let num_keys = page_ops::num_keys(l, leaf);
+            let range = page_ops::node_data_range(l, leaf, ki).unwrap();
+            let root = range.start + DB_ROOT;
+            leaf[root..root + 8].copy_from_slice(&P_INVALID.to_ne_bytes());
+            txn.close_slot(a);
+            txn.commit().unwrap();
+
+            // A failed put leaves the transaction unusable, as in C: each
+            // operation gets its own.
+            let mut txn = env.begin_rw_txn().unwrap();
+            txn.core.fresh_dbi(db, DB_USRVALID).unwrap();
+            let a = txn.open_slot(dbi, false);
+            let ca = CRef::main(a);
+            let (rec, cmp) = (txn.db_of(ca), txn.cmp_of(ca));
+            let got = txn
+                .seek_key(ca, &rec, cmp, &key(4))
+                .map_err(|e| e.to_err_code());
+            assert_eq!(got, Err(MDB_CORRUPTED), "{format:?}");
+            txn.close_slot(a);
+            let got = txn
+                .put(db, &key(4), &[b'x'; 100], WriteFlags::empty())
+                .map_err(|e| e.to_err_code());
+            assert_eq!(got, Err(MDB_CORRUPTED), "put, {format:?}");
+            txn.abort();
+            let mut txn = env.begin_rw_txn().unwrap();
+            let got = txn.del(db, &key(4), None).map_err(|e| e.to_err_code());
+            assert_eq!(got, Err(MDB_CORRUPTED), "del, {format:?}");
+            txn.abort();
+            // Nothing changed: the leaf still holds the same keys, and the
+            // other keys are still reachable.
+            let mut txn = env.begin_rw_txn().unwrap();
+            txn.core.fresh_dbi(db, DB_USRVALID).unwrap();
+            let a = txn.open_slot(dbi, false);
+            let ca = CRef::main(a);
+            let (rec, cmp) = (txn.db_of(ca), txn.cmp_of(ca));
+            assert!(txn.seek_key(ca, &rec, cmp, &key(2)).unwrap());
+            let leaf = txn.top_page(ca).unwrap();
+            assert_eq!(leaf.num_keys(), num_keys);
+            assert!(leaf.node(ki).unwrap().is_subdata());
+            txn.close_slot(a);
+        }
     }
 }

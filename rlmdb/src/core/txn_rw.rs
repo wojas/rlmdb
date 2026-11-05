@@ -12,6 +12,9 @@
 //! * [`RwTxn::commit`] = `mdb_txn_commit` (line 3791, see `super::commit`):
 //!   write named DB records into the main DB, save the free list, write the
 //!   dirty pages, sync, write the meta page, publish the txnid.
+//!   [`RwTxn::prepare`] (LMDB 1.0's `mdb_txn_prepare`) does all but the
+//!   last two, which [`PreparedTxn::commit`](crate::core::PreparedTxn::commit)
+//!   does later.
 //! * [`RwTxn::abort`] or dropping the transaction = `mdb_txn_abort` /
 //!   `mdb_txn_end`: discard the dirty pages, close handles of databases
 //!   created by the transaction, unlock.
@@ -47,7 +50,6 @@ use crate::core::wcursor::{read_cursors, write_back, Arena, CRef};
 use crate::core::Stat;
 use crate::error::{Error, MdbError, Result};
 use crate::flags::{DatabaseFlags, WriteFlags};
-use crate::format::meta::Meta;
 use crate::format::Db;
 use crate::idl::Idl;
 
@@ -200,13 +202,34 @@ impl std::ops::DerefMut for FailOnPanic<'_, '_> {
 /// of its handle and, unless `MDB_NOLOCK`, the shared writer mutex; with
 /// `MDB_NOLOCK`, the writer lock of every handle of the data file in the
 /// process instead. Dropping it unlocks in the reverse order (`Drop`, then
-/// the fields in order).
-struct WriterLock<'env> {
+/// the fields in order). [`Environment::rollback`] holds it too.
+pub(crate) struct WriterLock<'env> {
     state: MutexGuard<'env, WriterState>,
     /// `NO_LOCK`: the file's in-process writer lock (`registry::LocalShared`),
     /// held only.
     _file: Option<MutexGuard<'env, ()>>,
     shared: Option<&'env LockRegion>,
+}
+
+impl<'env> WriterLock<'env> {
+    /// Takes the writer locks of `env`, waiting for other writers of this
+    /// process and (with a lock file) of other processes: first, without a
+    /// lock file, the writer lock of every handle of the file in this
+    /// process, then the handle's writer state, then the shared writer
+    /// mutex (`LOCK_MUTEX(env->me_wmutex)`).
+    pub(crate) fn acquire(env: &'env Environment) -> Result<WriterLock<'env>> {
+        let file = env.local_shared().map(|l| l.lock_writer());
+        let state = env.lock_writer_state();
+        let shared = env.lock_region();
+        if let Some(lock) = shared {
+            lock.lock_writer(|| env.published_meta().map(|m| m.txnid))?;
+        }
+        Ok(WriterLock {
+            state,
+            _file: file,
+            shared,
+        })
+    }
 }
 
 impl Drop for WriterLock<'_> {
@@ -290,31 +313,15 @@ impl<'env> RwTxn<'env> {
         if env.is_read_only() {
             return Err(Error::errno(libc::EACCES));
         }
-        // Without a lock file, first the writer lock of every handle of the
-        // file in this process.
-        let file = env.local_shared().map(|l| l.lock_writer());
-        let state = env.lock_writer_state();
-        let shared = env.lock_region();
-        if let Some(lock) = shared {
-            lock.lock_writer(|| env.pick_meta().map(|m| m.txnid))?;
-        }
         // From here on, dropping `lock` unlocks again.
-        let mut lock = WriterLock {
-            state,
-            _file: file,
-            shared,
-        };
-        let (last, meta) = match shared {
+        let mut lock = WriterLock::acquire(env)?;
+        let (last, meta) = match env.lock_region() {
             Some(l) => {
                 let t = l.txnid();
-                match lock.state.last_meta {
-                    // This process wrote the newest meta page (see
-                    // `WriterState::last_meta`).
-                    Some(m) if m.txnid == t => (t, m),
-                    _ => (t, env.read_meta((t & 1) as usize)?),
-                }
+                (t, env.read_meta((t & 1) as usize)?)
             }
             None => {
+                // With PREV_SNAPSHOT the older one, as in C.
                 let m = env.pick_meta()?;
                 (m.txnid, m)
             }
@@ -369,7 +376,7 @@ impl<'env> RwTxn<'env> {
     /// or close the handles of databases this transaction created
     /// (`mdb_dbis_update`), drop the dirty pages and cursors, unlock. A
     /// nested transaction hands its state back to its parent instead.
-    fn end(&mut self, keep: bool) {
+    pub(crate) fn end(&mut self, keep: bool) {
         if self.w.flags & TXN_FINISHED != 0 {
             return;
         }
@@ -403,7 +410,7 @@ impl<'env> RwTxn<'env> {
         self.core.spilled.clear();
         if !keep {
             if let Some(main) = self.w.base_main {
-                self.close_vanished_handles(main);
+                self.close_vanished_handles(main, None);
             }
         }
         self.w.free_pgs.clear();
@@ -419,15 +426,6 @@ impl<'env> RwTxn<'env> {
             if !leaked_child {
                 lock.state.spare = Some(self.spare());
             }
-        }
-    }
-
-    /// After `mdb_env_write_meta` wrote `meta` and published its txnid:
-    /// remember it for the next write transaction (see
-    /// `WriterState::last_meta`). Top-level transactions only.
-    pub(crate) fn wrote_meta(&mut self, meta: Meta) {
-        if let Some(lock) = &mut self.lock {
-            lock.state.last_meta = lock.shared.is_some().then_some(meta);
         }
     }
 
@@ -470,7 +468,21 @@ impl<'env> RwTxn<'env> {
     /// that it (or a committed child) had created after the first handle
     /// was closed (`drop_db`) would stay open in C and refer to nothing,
     /// and `create_db` would return it (KNOWN_C_BUGS.md row 19).
-    pub(crate) fn close_vanished_handles(&mut self, main: Db) {
+    ///
+    /// A nested transaction reverts to the state of its parent, whose DB
+    /// table is `parent` (`None` for a top-level transaction). A database
+    /// the parent has a live view of under the same registration
+    /// ([`TxnDb::is_live_view`]) is the parent's, so its handle is kept
+    /// without a lookup, as C keeps it. That is more than a saved search:
+    /// the main DB can be out of order (a comparator changed between
+    /// opens, a damaged file), and a search could then miss a database the
+    /// parent changed; closing its handle would make the parent's commit
+    /// fail with `MDB_BAD_DBI`, or, once a new database took the slot, lose
+    /// the parent's changes to it and leak its pages, where C writes them.
+    /// Every other handle is still looked up, also one registered before
+    /// the child began: its database may have been deleted by another
+    /// process (row 19 says what remains of the difference to C).
+    pub(crate) fn close_vanished_handles(&mut self, main: Db, parent: Option<&[TxnDb]>) {
         let registry = &self.core.env.dbis;
         let candidates: Vec<usize> = self
             .core
@@ -480,7 +492,12 @@ impl<'env> RwTxn<'env> {
             .enumerate()
             .skip(CORE_DBS as usize)
             .filter(|(i, e)| {
-                e.state & DB_VALID != 0 && e.state & DB_NEW == 0 && e.seq == registry.seq_of(*i)
+                e.state & DB_VALID != 0
+                    && e.state & DB_NEW == 0
+                    && e.seq == registry.seq_of(*i)
+                    && !parent
+                        .and_then(|p| p.get(*i))
+                        .is_some_and(|pe| pe.is_live_view(e.seq))
             })
             .map(|(i, _)| i)
             .collect();
@@ -583,12 +600,12 @@ impl<'env> RwTxn<'env> {
     }
 
     /// `TXN_DBI_EXIST(txn, dbi, DB_USRVALID)` for a write operation, then
-    /// the stale-record refresh of `mdb_cursor_init`. Returns the entry
-    /// (resolved once for the whole operation).
-    fn user_dbi(&self, db: Dbi) -> Result<TxnDb> {
-        let entry = self.core.dbi_entry(db, DB_USRVALID)?;
+    /// the stale-record refresh of `mdb_cursor_init`. Returns the record's
+    /// persistent flags (resolved once for the whole operation).
+    fn user_dbi(&self, db: Dbi) -> Result<u16> {
+        self.core.check_dbi(db, DB_USRVALID)?;
         self.check_usable()?;
-        self.core.refreshed(db, entry)
+        Ok(self.core.fresh_order(db)?.0)
     }
 
     // --- databases ---------------------------------------------------------------
@@ -664,31 +681,7 @@ impl<'env> RwTxn<'env> {
             }
             .into());
         }
-        let found = match self.core.find_named_db(name) {
-            Ok(NamedDb::Found(db)) => Some(db),
-            Ok(NamedDb::Missing) => None,
-            Err(e) if e.not_found() => None,
-            Err(e) => return Err(e),
-        };
-        let (db, state) = match found {
-            Some(db) => (db, DB_VALID | DB_USRVALID),
-            None => {
-                if flags & MDB_CREATE == 0 {
-                    return Err(MdbError::NotFound.into());
-                }
-                let db = Db::empty((flags & PERSISTENT_FLAGS) as u16);
-                let slot = self.open_slot(MAIN_DBI as usize, true);
-                let rc = self.put_at(
-                    CRef::main(slot),
-                    name,
-                    PutData::bytes(&db.to_bytes()),
-                    u32::from(crate::format::node::F_SUBDATA),
-                );
-                self.close_slot(slot);
-                rc?;
-                (db, DB_NEW | DB_VALID | DB_USRVALID | DB_DIRTY)
-            }
-        };
+        let (db, state) = self.find_or_create_named_db(name, flags)?;
         // Got info, register DBI in this txn and the environment.
         let entry = DbiSlot {
             name: Some(name.into()),
@@ -726,28 +719,7 @@ impl<'env> RwTxn<'env> {
     /// record again (if the name is not in the main DB) and take a new view
     /// of the slot.
     fn recreate_db(&mut self, i: usize, name: &[u8], flags: u32) -> Result<()> {
-        let found = match self.core.find_named_db(name) {
-            Ok(NamedDb::Found(db)) => Some(db),
-            Ok(NamedDb::Missing) => None,
-            Err(e) if e.not_found() => None,
-            Err(e) => return Err(e),
-        };
-        let (db, state) = match found {
-            Some(db) => (db, DB_VALID | DB_USRVALID),
-            None => {
-                let db = Db::empty((flags & PERSISTENT_FLAGS) as u16);
-                let slot = self.open_slot(MAIN_DBI as usize, true);
-                let rc = self.put_at(
-                    CRef::main(slot),
-                    name,
-                    PutData::bytes(&db.to_bytes()),
-                    u32::from(crate::format::node::F_SUBDATA),
-                );
-                self.close_slot(slot);
-                rc?;
-                (db, DB_NEW | DB_VALID | DB_USRVALID | DB_DIRTY)
-            }
-        };
+        let (db, state) = self.find_or_create_named_db(name, flags)?;
         let registry = &self.core.env.dbis;
         let slots = registry.read();
         let (key_cmp, dup_cmp) = DbiRegistry::comparators(&slots[i], i, db.flags);
@@ -761,6 +733,49 @@ impl<'env> RwTxn<'env> {
             name_id: name_id(name),
         };
         Ok(())
+    }
+
+    /// The search and the create branch of `mdb_dbi_open` (mdb.c 0.9 lines
+    /// 10020 and 10045, 1.0 lines 12356 and 12381): the record of database
+    /// `name` in the main DB with the view's state bits; if there is none,
+    /// `MDB_NOTFOUND` without [`DatabaseFlags::CREATE`] in `flags`, else an
+    /// empty record with the persistent bits of `flags`, stored in the main
+    /// DB (`DB_NEW | DB_DIRTY`).
+    ///
+    /// As in C, the record is put with the cursor the search left where it
+    /// ended, not after a search of its own: the put's `mdb_cursor_set`
+    /// then starts on that leaf (0.9 line 6187, 1.0 line 8073), comparing
+    /// `name` with its first and last keys; a name before the first goes
+    /// to index 0 of a root leaf. In a main DB in order that is where a new
+    /// search puts it too; in one out of order (a comparator changed
+    /// between opens, a damaged file) it can be another place, and the
+    /// page must be C's.
+    fn find_or_create_named_db(&mut self, name: &[u8], flags: u32) -> Result<(Db, u8)> {
+        let slot = self.open_slot(MAIN_DBI as usize, true);
+        let rc = self.find_or_create_at(CRef::main(slot), name, flags);
+        self.close_slot(slot);
+        rc
+    }
+
+    /// [`RwTxn::find_or_create_named_db`] with the main-DB cursor `mc`.
+    fn find_or_create_at(&mut self, mc: CRef, name: &[u8], flags: u32) -> Result<(Db, u8)> {
+        match self.read_op(mc, |txn, c, _| txn.find_named_db_at(c, name)) {
+            Ok(NamedDb::Found(db)) => return Ok((db, DB_VALID | DB_USRVALID)),
+            Ok(NamedDb::Missing) => {}
+            Err(e) if e.not_found() => {}
+            Err(e) => return Err(e),
+        }
+        if flags & MDB_CREATE == 0 {
+            return Err(MdbError::NotFound.into());
+        }
+        let db = Db::empty((flags & PERSISTENT_FLAGS) as u16);
+        self.put_at(
+            mc,
+            name,
+            PutData::bytes(&db.to_bytes()),
+            u32::from(crate::format::node::F_SUBDATA),
+        )?;
+        Ok((db, DB_NEW | DB_VALID | DB_USRVALID | DB_DIRTY))
     }
 
     /// `mdb_drop(txn, db, 1)`: delete database `db` from the environment
@@ -870,16 +885,16 @@ impl<'env> RwTxn<'env> {
         data: PutData<'_>,
         flags: u32,
     ) -> Result<Option<DataLoc>> {
-        let entry = self.core.dbi_entry(db, DB_USRVALID)?;
+        self.core.check_dbi(db, DB_USRVALID)?;
         if flags & !(MDB_NOOVERWRITE | MDB_NODUPDATA | MDB_RESERVE | MDB_APPEND | MDB_APPENDDUP)
             != 0
         {
             return Err(Error::einval());
         }
         self.check_usable()?;
-        let entry = self.core.refreshed(db, entry)?;
-        check_reserve(entry.db.flags, flags)?;
-        let slot = self.w.cursors.open(db.0 as usize, entry.dup_order(), true);
+        let (db_flags, dup_order) = self.core.fresh_order(db)?;
+        check_reserve(db_flags, flags)?;
+        let slot = self.w.cursors.open(db.0 as usize, dup_order, true);
         let c = CRef::main(slot);
         let rc = self.put_at(c, key, data, flags);
         let loc = match rc {
@@ -927,8 +942,8 @@ impl<'env> RwTxn<'env> {
     /// pair `key`/`data` if `data` is given, else all of the key's items.
     /// Returns `false` if there was nothing to delete (`MDB_NOTFOUND`).
     pub fn del(&mut self, db: Dbi, key: &[u8], data: Option<&[u8]>) -> Result<bool> {
-        let entry = self.user_dbi(db)?;
-        let dupsort = u32::from(entry.db.flags) & MDB_DUPSORT != 0;
+        let db_flags = self.user_dbi(db)?;
+        let dupsort = u32::from(db_flags) & MDB_DUPSORT != 0;
         // Must ignore any data unless DUP_SORT.
         let data = if dupsort { data } else { None };
         match self.del0(db.0 as usize, key, data, 0) {
@@ -1037,15 +1052,15 @@ impl<'env> RwTxn<'env> {
     }
 
     /// `mdb_cursor_is_db` (LMDB 1.0) on a handle: `true` if the cursor is
-    /// on the record of a named database (see [`RoCursor::current_is_db`]).
-    pub fn cursor_is_db(&mut self, id: CursorId) -> Result<bool> {
+    /// on the record of a named database (see [`RoCursor::is_db`]).
+    pub fn cursor_is_db(&self, id: CursorId) -> Result<bool> {
         let slot = self.cursor_slot(id)?;
         let c = CRef::main(slot);
         let dbi = self.cur(c).dbi;
         let dcmp = self.core.dbs.borrow()[dbi].dup_cmp;
         let core = &self.core;
         let (mc, mx) = read_cursors(core, &self.w.cursors, c)?;
-        Ok(RoCursor::from_parts(core, Dbi(dbi as u32), mc, mx, dcmp).current_is_db())
+        Ok(RoCursor::from_parts(core, Dbi(dbi as u32), mc, mx, dcmp).is_db())
     }
 
     /// `mdb_cursor_put` on a handle (see [`RwCursor::put`]).
@@ -1307,6 +1322,7 @@ trait CursorHost {
     ) -> Result<usize>;
     fn del(&mut self, id: CursorId, flags: WriteFlags) -> Result<()>;
     fn count(&mut self, id: CursorId) -> Result<u64>;
+    fn is_db(&self, id: CursorId) -> Result<bool>;
     fn close(&mut self, id: CursorId);
 }
 
@@ -1354,6 +1370,10 @@ impl CursorHost for RwTxn<'_> {
         self.cursor_count(id)
     }
 
+    fn is_db(&self, id: CursorId) -> Result<bool> {
+        self.cursor_is_db(id)
+    }
+
     fn close(&mut self, id: CursorId) {
         self.close_cursor(id)
     }
@@ -1378,8 +1398,9 @@ impl RwCursor<'_> {
     /// `mdb_cursor_put`: store `data` under `key` and leave the cursor on
     /// the new item. Flags as [`RwTxn::put`], plus
     /// [`WriteFlags::CURRENT`]: replace the item at the cursor position
-    /// (the key must match; for `DUP_SORT` the new data must sort like the
-    /// old).
+    /// (the key must match, and one that does not is ignored: the item
+    /// keeps the cursor's key, `KNOWN_C_BUGS.md` row 58; for `DUP_SORT` the
+    /// new data must sort like the old).
     pub fn put(&mut self, key: &[u8], data: &[u8], flags: WriteFlags) -> Result<()> {
         self.txn.put(self.id, key, data, flags)
     }
@@ -1411,6 +1432,14 @@ impl RwCursor<'_> {
     /// `mdb_cursor_count` (see [`RoCursor::count`]).
     pub fn count(&mut self) -> Result<u64> {
         self.txn.count(self.id)
+    }
+
+    /// `mdb_cursor_is_db` (LMDB 1.0): `true` if the cursor is on the record
+    /// of a named database, never an error (see [`RoCursor::is_db`]).
+    pub fn is_db(&self) -> bool {
+        // The cursor borrows its transaction, so its handle stays valid and
+        // no nested transaction blocks it: the lookup cannot fail.
+        self.txn.is_db(self.id).unwrap_or(false)
     }
 
     /// `MDB_FIRST`.

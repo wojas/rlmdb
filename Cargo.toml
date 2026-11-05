@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "rlmdb",
     "rlmdb-capi",
+    "rlmdb-capi/artifacts/rlmdb",
+    "rlmdb-capi/artifacts/lmdb09",
+    "rlmdb-capi/artifacts/lmdb10",
     "rlmdb-tools",
     "interop",
     "bench",
@@ -17,6 +20,18 @@ repository = "https://github.com/wojas/rlmdb"
 
 [workspace.dependencies]
 libc = "0.2"
+
+# The tests run the dev profile. Optimised a little (rlmdb, the C API, the
+# Rust peer and tools the tests start, the tests' own models), the test
+# suite takes two thirds of the time it takes unoptimised; the C oracle is
+# built with -O2 regardless.
+# Debug assertions and overflow checks stay on: the robustness tests find
+# an integer overflow on crafted input because it panics here (AGENTS.md
+# section 3).
+[profile.dev]
+opt-level = 1
+debug-assertions = true
+overflow-checks = true
 
 [profile.release]
 debug = 1

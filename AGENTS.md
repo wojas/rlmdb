@@ -11,7 +11,8 @@ must respect. The details live in:
 * `DESIGN.md`: goals, the on-disk and lock-file format, architecture.
 * `COMPATIBILITY.md`: the compatibility contract and which test checks it.
 * `KNOWN_C_BUGS.md`: C bugs not ported (and the few ported on purpose).
-* `rlmdb-capi/README.md`: the C API and its documented deviations.
+* `rlmdb-capi/README.md`: using the C API; `rlmdb-capi/DETAILS.md`: its
+  documented deviations.
 * `bench/README.md`, `bench/RESULTS.md`: benchmarks against C.
 
 ## 1. Binary compatibility with C LMDB 0.9 comes first
@@ -95,7 +96,7 @@ PR nn in commit messages, docs and comments (`ITS#nnnn` is safe).
   naming a live page, a lock file with a forged `mti_txnid` or a cleared
   live reader slot): a writer may then rewrite a page under a live
   reader's slice, as in C; see `os::DataMap` and the residual-risk list
-  in `rlmdb-capi/README.md`.
+  in `rlmdb-capi/DETAILS.md`.
 * Meta pages are written concurrently by other processes: read them with
   volatile reads into an owned value, validate, and re-check `mti_txnid`.
 * `RwTxn` is `!Send` (the Linux writer mutex is thread-owned). Read
@@ -116,22 +117,45 @@ deferred until the core has been validated through the C API.
 
 ## 5. The C API is a drop-in `liblmdb`
 
-* `rlmdb-capi` builds `liblmdb.a` / `liblmdb.so` / `liblmdb.dylib` with
-  the same `mdb_*` symbols, the unmodified upstream `include/lmdb.h`, the
-  same flag values and error codes. Unmodified `mtest*.c` and the C tools
-  must behave identically against it.
+* `rlmdb-capi` (the implementation, an rlib) is linked into three
+  libraries by the packages in `rlmdb-capi/artifacts`: `librlmdb`
+  (`librlmdb.a` / `.so` / `.dylib`, `rlmdb.dll`; `-lrlmdb`), and two stubs
+  named `liblmdb` that stand in for C LMDB 0.9 (SONAME `liblmdb.so.0`)
+  and 1.0 (SONAME `liblmdb.so`), built as `liblmdb09.*` / `liblmdb10.*`
+  and renamed by `scripts/install-libs.sh`. They differ only in their
+  names, in `mdb_version` (`librlmdb` rlmdb's own version, programs link
+  against it explicitly; the stubs 0.9.85 and 1.0.85) and in the format
+  of new environments that ask for none (0.9, 0.9, 1.0: almost all
+  programs are written for 0.9 today); everything else is common code,
+  and the profile is a build-time property (`rlmdb-capi/src/profile.rs`:
+  no cargo feature, no load-time code).
+* Every artifact exports the full symbol set: every function of LMDB
+  0.9.37's `lmdb.h`, of LMDB 1.0's `lmdb.h` (what rlmdb does not
+  implement makes C 1.0's argument checks, then returns `ENOTSUP`) and of
+  `rlmdb.h`, with the same flag values and error codes
+  (`rlmdb-capi/tests/capi_artifacts.rs` checks the set against the
+  headers). Unmodified `mtest*.c` and the C tools of each release must
+  behave identically against it.
 * Argument validation follows `mdb.c`: same checks, same order, same
   return codes. Misuse that crashes C (NULL handles, use after free)
-  returns `EINVAL` instead; keep that list in `rlmdb-capi/README.md`
+  returns `EINVAL` instead; keep that list in `rlmdb-capi/DETAILS.md`
   current.
 * The layer is thin: no database logic in `rlmdb-capi`. Lifetimes are
   erased in one place (`erased.rs`); handle ownership is explicit.
 * The tools in `rlmdb-tools` match the C tools' options, output, messages
   and exit codes; the C tools are their test oracle, each release for its
   own format (C 1.0's for 1.0 files, in `interop/tests/tools10.rs`).
-* `include/rlmdb.h` holds rlmdb's own functions (`rlmdb_*`) and the LMDB
-  1.0 constants (each under `#ifndef`, values copied from 1.0's `lmdb.h`
-  with a comment naming it); `lmdb.h` stays the pristine 0.9.37 header.
+* The public C API of `librlmdb` is LMDB 1.0's plus rlmdb's own
+  functions: `include/lmdb.h` is the pristine LMDB 1.0.3 header (byte for
+  byte `tests/lmdb-c/1.0/lmdb.h` after one comment block;
+  `scripts/update-c-sources.sh` writes it and a test compares the two),
+  and `include/rlmdb.h` holds only rlmdb's own functions (`rlmdb_*`). It
+  must compile after either `lmdb.h`, 1.0's or 0.9's (it needs only
+  `MDB_env` and plain C types, and includes the `lmdb.h` next to it only
+  when none came before). Programs written for 0.9 (the tests' 0.9
+  programs, `cpeer_capi`) compile against the vendored 0.9 header
+  (`tests/lmdb-c/0.9/lmdb.h`), with `rlmdb.h` after it where they use
+  rlmdb's functions, and link against the same symbols.
 
 ## 6. Performance
 
@@ -193,6 +217,15 @@ deferred until the core has been validated through the C API.
   A new scenario goes into `interop/src/scenarios` and runs in both
   formats: take the reference peer, the tools and the page size from the
   `Pair`, never `Peer::C` or the 0.9 tools directly.
+* The CI runs the whole suite on Linux x86-64 and the platform suite
+  (`RLMDB_TEST_SCOPE=platform`) on macOS, Windows and Linux arm64; the
+  nightly runs the whole suite everywhere (`interop/README.md`, "Scope").
+  A new test runs in both scopes unless it only repeats on another
+  platform what Linux checks (another page size, more of the generic
+  matrix, mutation or model runs): then it returns early with a SKIPPED
+  note in the platform suite (`interop::scope`,
+  `common::full_scope_only`), and a new scenario that depends on the
+  platform goes into `scenarios::PLATFORM_SCENARIOS`.
 * Run `scripts/check-all.sh` (fmt, clippy, doc, host tests, then the same
   tests in a Linux container via `scripts/linux-test.sh`) before declaring
   work done. `--no-linux` skips the container only for quick iteration.
@@ -217,17 +250,27 @@ deferred until the core has been validated through the C API.
   differential tests for anything that affects what is written, `interop/`
   scenarios for anything cross-process.
 * Test scratch directories must be per process (tests run in parallel and
-  in shared containers).
+  in shared containers). Make them with the helpers of the crate's tests
+  (`common::tempdir`, `Builder::scratch`, `TestEnv::new`, …), which honour
+  `$RLMDB_TEST_SCRATCH` (CI points it at a file system in memory). The
+  target of a copy (`copy_to_path`, `mdb_copy`, a peer's `copy`) goes to
+  the disk helper instead (`common::disk_tempdir`,
+  `Builder::disk_scratch`, `TestEnv::derived_on_disk`) unless any copy
+  error is accepted (the robustness tests): copies are written with
+  `O_DIRECT` on Linux, whose alignment only a disk file system checks.
+  Nothing else the tests check differs on tmpfs.
 
 ## 9. Not implemented yet, and what that means
 
 * Windows (64-bit, MSVC and MinGW) is implemented in
   `rlmdb/src/os/windows.rs`, whose module documentation lists every
   Windows decision. Keep every OS specific behind `rlmdb/src/os/`.
-* Possible later: `MDB_WRITEMAP` (dirty pages are owned buffers today;
-  keep the page backing replaceable), the typed Rust API, LMDB 1.0
-  features beyond its data file (`MDB_PREVSNAPSHOT`, two-phase commit,
-  checksums, encryption; `DUAL_FORMAT.md` §7) and the format-converting
+* Possible later: `MDB_WRITEMAP`'s writable map (the flag is accepted
+  with C's API limits, refused for writing on OpenBSD; dirty pages are
+  owned buffers today; keep the page backing replaceable), the typed Rust
+  API, LMDB 1.0
+  features beyond its data file (checksums, encryption;
+  `DUAL_FORMAT.md` §7) and the format-converting
   copy (`convert-copy`, §4.3). The C API and the tools handle both formats
   (stage 4), the interop matrix covers both (stage 5); new environments
   are 0.9 unless 1.0 is asked for, and the

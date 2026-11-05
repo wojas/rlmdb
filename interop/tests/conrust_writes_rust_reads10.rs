@@ -1,4 +1,4 @@
-//! Every interop scenario on LMDB 1.0 environments with the C peer linked against the Rust `liblmdb.a` (`rlmdb-capi`) writing
+//! Every interop scenario on LMDB 1.0 environments with the C peer linked against the Rust `librlmdb.a` (`rlmdb-capi`) writing
 //! and the Rust peer (`rpeer` on `rlmdb`) reading (and, in the bidirectional
 //! scenarios, writing too).
 //!

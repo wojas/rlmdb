@@ -1,6 +1,7 @@
 //! `tests/c/capi_limits.c` checks the limits the Rust library has where C
-//! LMDB has none (`mdb_env_set_maxdbs` beyond `MAX_DBS_LIMIT` is `EINVAL`,
-//! `KNOWN_C_BUGS.md` row 54), against the Rust library only.
+//! LMDB has none (`mdb_env_set_maxdbs` beyond `MAX_DBS_LIMIT` and
+//! `mdb_env_set_maxreaders` beyond `MAX_READERS_LIMIT` are `EINVAL`,
+//! `KNOWN_C_BUGS.md` rows 54 and 60), against the Rust library only.
 
 mod common;
 

@@ -22,7 +22,8 @@ not a binding. The goals, in priority order:
    "undefined behaviour if you call this twice".
 4. **A C API compatible with C LMDB** (`rlmdb-capi`): the same `mdb_*` symbols,
    same `lmdb.h`, same error codes and flag values, so existing C programs link
-   and run unchanged against the Rust build (`liblmdb.a` / `liblmdb.so`).
+   and run unchanged against the Rust build (`librlmdb`, or one of the two
+   stubs named `liblmdb` that stand in for C LMDB 0.9 and 1.0).
 5. **Performance comparable to C.** No allocations in the hot read path, binary
    search on pages, cursor stacks in fixed arrays, zero-copy values.
 6. **Minimal `unsafe`.** `unsafe` is confined to `rlmdb/src/os/` (mmap,
@@ -43,9 +44,13 @@ Out of scope for now (leave the door open, do not design it away):
 * `MDB_VL32`, encryption / checksums (1.0 features, not in 0.9 anyway).
   `MDB_FIXEDMAP`, `MDB_NOMEMINIT` and `MDB_MAPASYNC` are accepted and
   ignored (per-process choices; see `COMPATIBILITY.md`).
-* `MDB_WRITEMAP` is deferred (not needed for compatibility: it is a per-process
-  choice). Design `RwTxn` so dirty pages are owned buffers; WRITEMAP can be
-  added later as an alternative page backing.
+* `MDB_WRITEMAP`'s writable map is deferred (not needed for compatibility: it
+  is a per-process choice). The flag is accepted with C's API limits (no
+  nested transactions) and pages are written with `pwrite`; on OpenBSD,
+  which keeps maps apart from descriptor writes, an open for writing with
+  it is refused (`os/mod.rs`). Design `RwTxn` so dirty pages are owned
+  buffers; the writable map can be added later as an alternative page
+  backing.
 
 ## Reference material
 
@@ -53,7 +58,8 @@ Out of scope for now (leave the door open, do not design it away):
   references in this document refer to that file at upstream commit
   `ff3f48f` (the vendored version, `tests/lmdb-c/README.md`).
 * `tests/lmdb-c/0.9/lmdb.h` is the public C API and documents the
-  semantics of every flag and function. The C API crate ships a copy of it.
+  semantics of every flag and function. The C API crate ships LMDB 1.0's
+  (`tests/lmdb-c/1.0/lmdb.h`), a superset with the same ABI.
 * `tests/lmdb-c/0.9/midl.c` / `midl.h`: the ID lists (`MDB_IDL`,
   `MDB_ID2L`) used for free lists and dirty lists.
 * `tests/lmdb-c/0.9/mtest*.c`: small C test programs; they must run
@@ -399,7 +405,7 @@ side either way.
                       update-c-sources.sh (re-creates tests/lmdb-c)
   tests/lmdb-c/       the C reference sources (LMDB 0.9 and 1.0), vendored
   rlmdb/          the library (package `rlmdb`, lib `rlmdb`)
-  rlmdb-capi/          cdylib+staticlib `lmdb` exporting the C ABI, ships include/lmdb.h
+  rlmdb-capi/          the C ABI (artifacts/: librlmdb, the liblmdb stubs); include/lmdb.h (1.0's), rlmdb.h
   rlmdb-tools/         mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop in Rust
   interop/            cross-process compatibility tests (builds the C library)
 ```
@@ -604,8 +610,9 @@ DUP_FIXED, INTEGER_DUP, REVERSE_DUP, CREATE`), `WriteFlags` (`NO_OVERWRITE,
 NO_DUP_DATA, CURRENT, RESERVE, APPEND, APPEND_DUP, MULTIPLE`), all with the C
 bit values; the heed layer re-exports them under heed's names (`EnvFlags`,
 `DatabaseFlags`, `PutFlags`). Unsupported env flags (`FIXED_MAP`,
-`WRITE_MAP`, `MAP_ASYNC`, `NO_MEM_INIT`) are all accepted and ignored
-(`flags.rs` documents each); `PREV_SNAPSHOT` (1.0 only) is `EINVAL`.
+`MAP_ASYNC`, `NO_MEM_INIT`) are accepted and ignored, `WRITE_MAP` is
+accepted with C's limits and refused for writing on OpenBSD (`flags.rs`
+documents each); `PREV_SNAPSHOT` (LMDB 1.0's) works for both formats.
 
 Footgun rules: `put`/`del` take `&mut self` so no `&[u8]` borrowed from a
 write txn can be alive across a mutation; a `Dbi` is `Copy` and borrows
@@ -799,7 +806,7 @@ coordinator. What landed (commits of this repository):
   `mtest.c` .. `mtest6.c` and C tools run against it with C's results
   (`2c3a95f`).
 * B3. The Rust peer's write side, a third peer (the C peer linked against
-  the Rust `liblmdb.a`), all nine writer/reader pairs, concurrent and
+  the Rust library, today `librlmdb.a`), all nine writer/reader pairs, concurrent and
   alternating writers, stale readers (`04feda8`).
 * T. `rlmdb-tools`: `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`,
   `mdb_drop`, byte-identical to the C tools (`2a69af3`).

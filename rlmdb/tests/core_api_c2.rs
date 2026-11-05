@@ -3,6 +3,8 @@
 //! transaction, cursor state queries, `Info::map_address`,
 //! `Environment::has_lock_file`, read-only and `NO_LOCK` environments.
 
+mod common;
+
 use std::cmp::Ordering;
 
 use rlmdb::{
@@ -25,7 +27,7 @@ fn reverse(a: &[u8], b: &[u8]) -> Ordering {
 
 #[test]
 fn comparators_set_through_a_transaction_apply_at_once() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path(), EnvironmentFlags::NO_SYNC);
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn
@@ -87,7 +89,7 @@ fn fold(a: &[u8], b: &[u8]) -> Ordering {
 #[test]
 fn comparators_set_after_a_read_cursor_opened() {
     for format in [Format::V09, Format::V10] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let open_format = || {
             Environment::builder()
                 .map_size(16 << 20)
@@ -149,7 +151,7 @@ fn comparators_set_after_a_read_cursor_opened() {
 
 #[test]
 fn byte_names() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path(), EnvironmentFlags::NO_SYNC);
     let mut txn = env.begin_rw_txn().unwrap();
     let a = txn
@@ -169,7 +171,7 @@ fn byte_names() {
 
 #[test]
 fn cursor_state_queries() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path(), EnvironmentFlags::NO_SYNC);
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn
@@ -206,7 +208,7 @@ fn cursor_state_queries() {
 
 #[test]
 fn info_and_lock_files() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     {
         let env = open(dir.path(), EnvironmentFlags::NO_SYNC);
         assert!(env.has_lock_file());
@@ -223,7 +225,7 @@ fn info_and_lock_files() {
         assert_eq!(txn.get(Dbi::MAIN, b"a").unwrap(), Some(&b"b"[..]));
     }
     // NO_LOCK: no lock file is created or used; reads and writes work.
-    let dir2 = tempfile::tempdir().unwrap();
+    let dir2 = common::tempdir();
     {
         let env = open(
             dir2.path(),
@@ -243,17 +245,11 @@ fn info_and_lock_files() {
         assert!(env.reader_list().unwrap().is_empty());
     }
     assert!(!dir2.path().join("lock.mdb").exists());
-    // PREV_SNAPSHOT is an LMDB 1.0 flag; 0.9 refuses it like C.
-    let e = Environment::builder()
-        .flags(EnvironmentFlags::PREV_SNAPSHOT)
-        .open(dir.path())
-        .unwrap_err();
-    assert_eq!(e.to_err_code(), libc::EINVAL);
 }
 
 #[test]
 fn close_db_while_a_write_txn_changed_the_db() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path(), EnvironmentFlags::NO_SYNC);
     let db = env.create_db(Some("x"), DatabaseFlags::CREATE).unwrap();
     let mut txn = env.begin_rw_txn().unwrap();

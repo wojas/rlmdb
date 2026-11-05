@@ -259,14 +259,15 @@ fn append_mode() {
 }
 
 /// Header values that `mdb_dump` never writes are refused with C's
-/// "invalid <keyword>" message (`KNOWN_C_BUGS.md` rows 53 and 55;
+/// "invalid <keyword>" message (`KNOWN_C_BUGS.md` rows 53, 55 and 60;
 /// `rlmdb-tools/README.md`): numbers that are not a plain decimal of the
 /// field's width (C's `sscanf` takes a sign, blanks and trailing junk;
 /// `maxreaders=-1` makes it create a 256 GiB lock file, `mapsize=-1` an
-/// environment nothing opens again), and flag lines whose value is not
-/// `1` (C sets the flag for any value, `dupsort=0` included). C is not
-/// run here; `malformed_input` compares the accepted forms with it
-/// (`maxreaders=7`, `maxreaders=0`: the default, as in C).
+/// environment nothing opens again), reader counts beyond
+/// `MAX_READERS_LIMIT`, which the library refuses, and flag lines whose
+/// value is not `1` (C sets the flag for any value, `dupsort=0`
+/// included). C is not run here; `malformed_input` compares the accepted
+/// forms with it (`maxreaders=7`, `maxreaders=0`: the default, as in C).
 #[test]
 fn header_values_mdb_dump_never_writes_are_refused() {
     let numbers = [
@@ -291,10 +292,12 @@ fn header_values_mdb_dump_never_writes_are_refused() {
             format!("invalid mapsize {value}"),
         ));
     }
-    cases.push((
-        "maxreaders=4294967296".into(),
-        "invalid maxreaders 4294967296".into(),
-    ));
+    for value in ["1048577", "4294967295", "4294967296"] {
+        cases.push((
+            format!("maxreaders={value}"),
+            format!("invalid maxreaders {value}"),
+        ));
+    }
     for value in ["0", "", "yes", "2", "1 "] {
         cases.push((
             format!("dupsort={value}"),

@@ -4,6 +4,8 @@
 //! * `hold-reader` pins a snapshot (a read transaction) for a while: MVCC.
 //! * `hold-env` keeps the environment open without a read transaction.
 //! * `hold-writer` holds the writer lock: an open write transaction.
+//! * `prepare` holds a transaction between the two phases of LMDB 1.0's
+//!   two-phase commit, `rollback` takes a commit back.
 //! * `reader-loop` repeatedly opens read transactions and checks invariants
 //!   that every committed state of `writer-loop` satisfies.
 //! * `writer-loop` commits many small random write transactions, with
@@ -37,7 +39,7 @@ use crate::args::{
     found, now_seconds, parse_seconds, parse_u64, show, sleep_seconds, strtoull10, Check,
     CmdResult, Fail, Opts, EXIT_MISMATCH,
 };
-use crate::data::verify_in_txn;
+use crate::data::{fill_in_txn, verify_in_txn};
 use crate::dataset::{fmix32, splitmix64, splitmix_fill};
 
 // ---- hold-reader ---------------------------------------------------------------------
@@ -154,6 +156,56 @@ pub fn cmd_hold_writer(o: &mut Opts) -> CmdResult {
         now_seconds() - start
     );
     txn.abort();
+    Ok(())
+}
+
+// ---- prepare, rollback (two-phase commit) ----------------------------------------------
+
+/// `prepare <env> <seconds> <db|-> <count> <seed> [data options]
+/// [--until-stdin] [--abort]`: put the data set into `<db>` in one write
+/// transaction, prepare it ([`RwTxn::prepare`]: its pages are written, the
+/// meta page is not), print `READY txnid=.. pid=..`, wait like
+/// `hold-writer`, then commit it (`committed txnid=..`), or with `--abort`
+/// abort it (`aborted txnid=..`). Tests kill it between the phases.
+pub fn cmd_prepare(o: &mut Opts) -> CmdResult {
+    let secs = parse_seconds(o.pos.get(1).map(String::as_str))?;
+    let ds = o.dataset(2)?;
+    let env = o.open_env(false)?;
+    let mut txn = env.begin_rw_txn().check("mdb_txn_begin")?;
+    let flags = DatabaseFlags::from_bits_retain(ds.flags) | DatabaseFlags::CREATE;
+    let dbi = txn
+        .create_db(ds.db.as_deref(), flags)
+        .check("mdb_dbi_open")?;
+    fill_in_txn(&mut txn, dbi, o, &ds)?;
+    let prepared = txn.prepare().check("mdb_txn_prepare")?;
+    let id = prepared.id();
+    let start = now_seconds();
+    println!("READY txnid={id} pid={}", std::process::id());
+    if o.until_stdin {
+        wait_stdin(start + secs);
+    } else {
+        sleep_seconds(secs);
+    }
+    if o.abort {
+        prepared.abort();
+        println!("aborted txnid={id}");
+    } else {
+        prepared.commit().check("mdb_txn_commit")?;
+        println!("committed txnid={id}");
+    }
+    Ok(())
+}
+
+/// `rollback <env> <txnid|last>`: [`Environment::rollback`] of `<txnid>`,
+/// or of the last committed transaction; prints `rolled-back txnid=..`.
+pub fn cmd_rollback(o: &mut Opts) -> CmdResult {
+    let env = o.open_env(false)?;
+    let id = match o.pos.get(1).map(String::as_str) {
+        Some("last") => env.info().check("mdb_env_info")?.last_txnid as u64,
+        other => parse_u64(other.unwrap_or_default(), "txnid")?,
+    };
+    env.rollback(id).check("mdb_env_rollback")?;
+    println!("rolled-back txnid={id}");
     Ok(())
 }
 

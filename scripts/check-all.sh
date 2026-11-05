@@ -13,8 +13,9 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 cd "$here" || exit 1
 # The experimental default-format variable would make the tests create LMDB
 # 1.0 environments where they expect 0.9 ones (the tests that need it set
-# it for their own processes).
-unset RLMDB_DEFAULT_FORMAT
+# it for their own processes). The checks run everything: not the CI's
+# platform suite (RLMDB_TEST_SCOPE, interop/README.md).
+unset RLMDB_DEFAULT_FORMAT RLMDB_TEST_SCOPE
 
 linux=1
 for arg in "$@"; do

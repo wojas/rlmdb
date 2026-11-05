@@ -4,13 +4,13 @@
 
 mod common;
 
-use rlmdb::consts::{MAX_DBS_LIMIT, MDB_MAXKEYSIZE};
+use rlmdb::consts::{MAX_DBS_LIMIT, MAX_READERS_LIMIT, MDB_MAXKEYSIZE};
 use rlmdb::{
     CursorOp, Dbi, Environment, EnvironmentFlags, Error, Format, MdbError, Transaction, WriteFlags,
 };
 
 fn tmp() -> tempfile::TempDir {
-    tempfile::tempdir().unwrap()
+    common::tempdir()
 }
 
 #[test]
@@ -518,11 +518,15 @@ fn read_only_open_requires_existing_files() {
 #[test]
 fn invalid_flags_and_options() {
     let dir = tmp();
-    let err = Environment::builder()
-        .flags(EnvironmentFlags::PREV_SNAPSHOT)
-        .open(dir.path())
-        .unwrap_err();
-    assert_eq!(err.to_err_code(), libc::EINVAL);
+    // Bits that are no environment flag (LMDB 1.0's MDB_REMAP_CHUNKS
+    // among them, which rlmdb does not implement).
+    for bits in [0x4000000, 0x2000, 0x8000_0000] {
+        let err = Environment::builder()
+            .flags(EnvironmentFlags::from_bits_retain(bits))
+            .open(dir.path())
+            .unwrap_err();
+        assert_eq!(err.to_err_code(), libc::EINVAL);
+    }
     let err = Environment::builder()
         .max_readers(0)
         .open(dir.path())
@@ -832,4 +836,77 @@ fn max_dbs_beyond_the_limit_is_refused() {
         .unwrap();
     txn.put(db, b"k", b"v", WriteFlags::empty()).unwrap();
     txn.commit().unwrap();
+}
+
+/// `max_readers` beyond [`MAX_READERS_LIMIT`] does not open (`EINVAL`) and
+/// creates no files: C takes any count above zero and makes a lock file of
+/// 64 bytes per slot, 256 GiB at four billion (`KNOWN_C_BUGS.md` row 60).
+/// A large count within the limit opens.
+#[test]
+fn max_readers_beyond_the_limit_is_refused() {
+    for readers in [MAX_READERS_LIMIT + 1, u32::MAX - 1, u32::MAX] {
+        let dir = tmp();
+        let r = Environment::builder().max_readers(readers).open(dir.path());
+        assert!(
+            matches!(r, Err(Error::Io(ref e)) if e.raw_os_error() == Some(libc::EINVAL)),
+            "max_readers {readers}: {r:?}"
+        );
+        for file in ["data.mdb", "lock.mdb"] {
+            assert!(
+                !dir.path().join(file).exists(),
+                "max_readers {readers}: {file} created"
+            );
+        }
+    }
+    let dir = tmp();
+    let env = Environment::builder()
+        .max_readers(100_000)
+        .open(dir.path())
+        .unwrap();
+    assert_eq!(env.max_readers(), 100_000);
+    let txn = env.begin_ro_txn().unwrap();
+    assert_eq!(env.reader_list().unwrap().len(), 1);
+    drop(txn);
+}
+
+/// The limit applies to the table a new lock file is made with: an
+/// existing lock file with more slots (as C makes it for a larger count)
+/// is attached to with its own table, as in C (`mdb_env_setup_locks`
+/// takes the count from the file's size), in both lock-file versions.
+#[test]
+fn lock_file_beyond_the_reader_limit_is_attached_to() {
+    for format in [Format::V09, Format::V10] {
+        let dir = tmp();
+        let lock = dir.path().join("lock.mdb");
+        let size = {
+            let env = Environment::builder()
+                .format(format)
+                .open(dir.path())
+                .unwrap();
+            let len = std::fs::metadata(&lock).unwrap().len();
+            len - u64::from(env.max_readers()) * 64
+        };
+        // A sparse file of 2^20 + 10 slots (64 MiB and a bit).
+        let slots = MAX_READERS_LIMIT + 10;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_len(size + u64::from(slots) * 64)
+            .unwrap();
+        let env = Environment::builder()
+            .format(format)
+            .open(dir.path())
+            .unwrap();
+        assert_eq!(env.max_readers(), slots, "{format:?}");
+        let txn = env.begin_ro_txn().unwrap();
+        assert_eq!(env.reader_list().unwrap().len(), 1, "{format:?}");
+        drop(txn);
+        drop(env);
+        assert_eq!(
+            std::fs::metadata(&lock).unwrap().len(),
+            size + u64::from(slots) * 64,
+            "{format:?}: lock file resized"
+        );
+    }
 }

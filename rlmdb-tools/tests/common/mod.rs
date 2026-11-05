@@ -475,15 +475,40 @@ pub fn version_line(imp: Impl) -> Vec<u8> {
 
 /// The usage synopsis of `mdb_load` as C 0.9 prints it, and as the Rust
 /// tool does, which also has `-F 0.9|1.0` (the format of a new
-/// environment; C 0.9 knows one format only). With `\n` line ends
-/// ([`platform_lines`] gives what the tools write).
+/// environment; C 0.9 knows one format only) and LMDB 1.0's `-i` (load an
+/// incremental dump). With `\n` line ends ([`platform_lines`] gives what
+/// the tools write).
 pub const LOAD_USAGE_C: &[u8] = b"[-V] [-a] [-f input] [-n] [-s name] [-N] [-T] dbpath\n";
 pub const LOAD_USAGE_RUST: &[u8] =
-    b"[-V] [-a] [-f input] [-F 0.9|1.0] [-n] [-s name] [-N] [-T] dbpath\n";
+    b"[-V] [-a] [-f input] [-F 0.9|1.0] [-i] [-n] [-s name] [-N] [-T] dbpath\n";
+
+/// The usage synopses in which the Rust tools differ from C 0.9's: (tool,
+/// C 0.9's, the Rust tool's). `mdb_load` has `-F` and C 1.0's `-i`
+/// ([`LOAD_USAGE_RUST`]); `mdb_stat`, `mdb_dump` and `mdb_copy` have C
+/// 1.0's `-v` (`MDB_PREVSNAPSHOT`), and `mdb_dump` C 1.0's `-i`, named
+/// where C 1.0's usage lines name them.
+pub const USAGE_DIFFS: [(&str, &[u8], &[u8]); 4] = [
+    ("mdb_load", LOAD_USAGE_C, LOAD_USAGE_RUST),
+    (
+        "mdb_stat",
+        b"[-V] [-n] [-e] [-r[r]] [-f[f[f]]] [-a|-s subdb] dbpath\n",
+        b"[-V] [-n] [-e] [-r[r]] [-f[f[f]]] [-v] [-a|-s subdb] dbpath\n",
+    ),
+    (
+        "mdb_dump",
+        b"[-V] [-f output] [-l] [-n] [-p] [-a|-s subdb] dbpath\n",
+        b"[-V] [-f output] [-i txnid] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath\n",
+    ),
+    (
+        "mdb_copy",
+        b"[-V] [-c] [-n] srcpath [dstpath]\n",
+        b"[-V] [-c] [-n] [-v] srcpath [dstpath]\n",
+    ),
+];
 
 /// `c` as the Rust `tool` should print it: each standard output line that
-/// is the C version line becomes the Rust one ([`version_line`]), and
-/// `mdb_load`'s usage line names `-F` ([`LOAD_USAGE_RUST`]).
+/// is the C version line becomes the Rust one ([`version_line`]), and a
+/// usage line of [`USAGE_DIFFS`] the Rust tool's.
 fn expected_of_rust(tool: &str, c: &Run) -> Run {
     let (c_line, rust_line) = (version_line(Impl::C), version_line(Impl::Rust));
     let mut stdout = Vec::with_capacity(c.stdout.len());
@@ -491,12 +516,16 @@ fn expected_of_rust(tool: &str, c: &Run) -> Run {
         stdout.extend_from_slice(if line == c_line { &rust_line } else { line });
     }
     let mut stderr = c.stderr.clone();
-    if tool == "mdb_load" {
+    if let Some((_, c_usage, rust_usage)) = USAGE_DIFFS.iter().find(|d| d.0 == tool) {
         if let Some(rest) = stderr
-            .strip_suffix(platform_lines(LOAD_USAGE_C).as_slice())
-            .filter(|head| head.ends_with(b"usage: mdb_load "))
+            .strip_suffix(platform_lines(c_usage).as_slice())
+            .filter(|head| {
+                // The last line: "usage: <argv[0]> <synopsis>".
+                let line = head.rsplit(|&b| b == b'\n').next().unwrap_or(head);
+                line.starts_with(b"usage: ") && line.ends_with(b" ")
+            })
         {
-            stderr = [rest, &platform_lines(LOAD_USAGE_RUST)].concat();
+            stderr = [rest, &platform_lines(rust_usage)].concat();
         }
     }
     Run {
@@ -508,8 +537,7 @@ fn expected_of_rust(tool: &str, c: &Run) -> Run {
 
 /// Asserts that two runs are identical, with a readable diff. The version
 /// line is the exception: where C prints its version line, Rust must print
-/// its own ([`version_line`]); so is `mdb_load`'s usage line, which also
-/// names `-F`.
+/// its own ([`version_line`]); so are the usage lines of [`USAGE_DIFFS`].
 pub fn assert_runs_equal(tool: &str, argv: &[Vec<u8>], c: &Run, r: &Run) {
     if expected_of_rust(tool, c) != *r {
         let cmd: Vec<String> = argv
@@ -545,8 +573,27 @@ pub fn c_ok(tool: &str, argv: &[Vec<u8>], cwd: &Path) -> Vec<u8> {
     r.stdout
 }
 
-/// A fresh temporary directory for one test.
+/// A fresh temporary directory for one test: under `$RLMDB_TEST_SCRATCH`
+/// if set (CI points it at a file system in memory), else under
+/// `target/tmp`. Not for the targets of copies: see [`disk_tempdir`].
 pub fn tempdir() -> tempfile::TempDir {
+    let root = match std::env::var_os("RLMDB_TEST_SCRATCH") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
+    };
+    fs::create_dir_all(&root).unwrap();
+    tempfile::Builder::new()
+        .prefix("rlmdb-tools-")
+        .tempdir_in(root)
+        .unwrap()
+}
+
+/// A fresh temporary directory under `target/tmp`, on the disk, whatever
+/// `$RLMDB_TEST_SCRATCH` says: for tests that write copies (`mdb_copy`)
+/// into it. rlmdb and C open a copy's target with `O_DIRECT` on Linux,
+/// which a disk file system honours (writes must be aligned to its logical
+/// block size, `KNOWN_C_BUGS.md` row 34) and tmpfs ignores.
+pub fn disk_tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("rlmdb-tools-")
         .tempdir_in(env!("CARGO_TARGET_TMPDIR"))

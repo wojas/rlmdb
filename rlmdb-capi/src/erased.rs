@@ -26,6 +26,9 @@
 //!    ([`ErasedRwTxn`]) is boxed too, but its cursors are handles
 //!    ([`rlmdb::CursorId`]) into the transaction, not borrows: nothing
 //!    refers to it except through its owning `MDB_txn`.
+//!    After `mdb_txn_prepare` the transaction is an [`ErasedPreparedTxn`],
+//!    which holds the environment's writer lock as the write transaction
+//!    did, and nothing else.
 //! 5. **A parent is untouched while its child lives.** A nested write
 //!    transaction borrows its parent mutably. [`ErasedRwTxn::begin_nested`]
 //!    is `unsafe`: the parent's `MDB_txn` refuses every access to the
@@ -35,7 +38,7 @@
 //! Nothing here hands out `'static` references: values read through an
 //! erased transaction or cursor borrow the erased handle itself.
 
-use rlmdb::{Dbi, Environment, InactiveTxn, RoCursor, RoTxn, RwTxn, Transaction};
+use rlmdb::{Dbi, Environment, InactiveTxn, PreparedTxn, RoCursor, RoTxn, RwTxn, Transaction};
 use std::ptr::NonNull;
 
 /// An active read transaction, boxed at a stable address.
@@ -154,6 +157,12 @@ impl ErasedRoCursor {
     pub(crate) fn current_has_dups(&self) -> bool {
         self.cursor.current_has_dups()
     }
+
+    /// `mdb_cursor_is_db` (LMDB 1.0): the cursor is on the record of a
+    /// named database.
+    pub(crate) fn current_is_db(&self) -> bool {
+        self.cursor.is_db()
+    }
 }
 
 /// An active write transaction (`mdb_txn_begin` without `MDB_RDONLY`),
@@ -205,6 +214,35 @@ impl ErasedRwTxn {
     }
 
     /// `mdb_txn_commit`. On failure the transaction is aborted.
+    pub(crate) fn commit(self) -> rlmdb::Result<()> {
+        self.txn.commit()
+    }
+
+    /// `mdb_txn_prepare` of a top-level transaction without a child. On
+    /// failure the transaction is aborted.
+    pub(crate) fn prepare(self) -> rlmdb::Result<ErasedPreparedTxn> {
+        // The transaction moves out of its box: nothing refers to it (rule
+        // 4; it has no child).
+        let txn = Box::new((*self.txn).prepare()?);
+        Ok(ErasedPreparedTxn { txn })
+    }
+}
+
+/// A write transaction after `mdb_txn_prepare` ([`RwTxn::prepare`]): it
+/// holds the writer lock until it is committed or aborted (dropped).
+pub(crate) struct ErasedPreparedTxn {
+    txn: Box<PreparedTxn<'static>>,
+}
+
+impl ErasedPreparedTxn {
+    /// The prepared transaction (its DBI checks and table, for the calls
+    /// C still serves).
+    pub(crate) fn txn(&self) -> &PreparedTxn<'static> {
+        &self.txn
+    }
+
+    /// `mdb_txn_commit` of a prepared transaction. On failure it is
+    /// aborted.
     pub(crate) fn commit(self) -> rlmdb::Result<()> {
         self.txn.commit()
     }

@@ -1,16 +1,20 @@
 //! Scenarios about the reader table and the lock file: reader slots seen
 //! across processes and implementations, stale slots of killed readers and
 //! who clears them, the lock file created by the reader peer, reader loops
-//! next to nested transactions, and `MDB_NOTLS` readers.
+//! next to nested transactions, `MDB_NOTLS` readers, and
+//! `MDB_PREVSNAPSHOT`, whose writer holds the lock file exclusively until
+//! its first commit.
 
 use std::fmt;
+use std::time::Duration;
 
 use super::{
     audit, finish_reader_loop, hold_secs, log, loop_secs, new_env, reader_check, readers, stat,
     DataSet, Pair, MIB,
 };
 use crate::report::{HoldReady, WriterLoopReport};
-use crate::{ensure, tools, Error, Peer, Result, TestEnv};
+use crate::{ensure, tools, Error, Format, Peer, Result, TestEnv};
+use rlmdb::format::lockfile::{LockObjects, LOCK_V09, LOCK_V10};
 
 /// Reader slots are visible across processes and implementations; the
 /// lock table works whoever opened it first.
@@ -165,7 +169,7 @@ fn rewrite(pair: &Pair, env: &TestEnv, old: &DataSet, new: &DataSet) -> Result<u
 fn stale_reader(pair: &Pair, holder: Peer, clearer: Clearer) -> Result<()> {
     let env = new_env(pair, 512 * MIB)?;
     let sets: Vec<DataSet> = (0..3)
-        .map(|k| DataSet::new("data", 3000, 41 + k).with(&["--valsize", "400"]))
+        .map(|k| DataSet::new("data", pair.scaled(3000), 41 + k).with(&["--valsize", "400"]))
         .collect();
     sets[0].fill(pair.writer, &env, &[])?;
 
@@ -276,7 +280,7 @@ pub fn stale_reader_cleared_by_mdb_stat(pair: Pair) -> Result<()> {
 /// loop and a held snapshot interoperate.
 pub fn reader_creates_lock_file(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 1024 * MIB)?;
-    let ds = DataSet::new("data", 1500, 51).with(&["--dupsort", "--dups", "4"]);
+    let ds = DataSet::new("data", pair.scaled(1500), 51).with(&["--dupsort", "--dups", "4"]);
     ds.fill(pair.writer, &env, &[])?;
     pair.writer
         .on("writer-loop", &env)
@@ -404,7 +408,7 @@ pub fn reader_loop_during_nested(pair: Pair) -> Result<()> {
 /// writer loops.
 pub fn notls_readers(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 1024 * MIB)?;
-    let ds = DataSet::new("data", 1000, 61).with(&["--intkey"]);
+    let ds = DataSet::new("data", pair.scaled(1000), 61).with(&["--intkey"]);
     ds.fill(pair.writer, &env, &[])?;
     pair.writer
         .on("writer-loop", &env)
@@ -457,6 +461,141 @@ pub fn notls_readers(pair: Pair) -> Result<()> {
             .args(ds.args())
             .arg("--notls")
             .run()?;
+    }
+    audit(&pair, &env)?;
+    Ok(())
+}
+
+/// `MDB_PREVSNAPSHOT` (LMDB 1.0's open flag; rlmdb takes it for 0.9
+/// environments too) across processes, run by the peers of the pair that
+/// have it ([`Peer::opens_prev_snapshot`]: not `cpeer`, LMDB 0.9):
+///
+/// 1. The writer fills a data set to 300 keys, then to 600 in one more
+///    transaction: the previous snapshot is the 300-key one.
+/// 2. A peer alone opens it read-only with the flag and verifies 300 keys.
+/// 3. While the other peer keeps the environment open (`hold-env`), a
+///    writer with the flag gets `MDB_ENV_BUSY`. A read-only peer with the
+///    flag still verifies 300 keys, and every verifier then finds the 600:
+///    the lock file still names the latest commit. (C 1.0's read-only
+///    handle publishes the previous snapshot there, which takes the latest
+///    commit out of the other processes' view and lets their next writer
+///    overwrite it, `KNOWN_C_BUGS.md` row 68: not run with `cpeer10` as that
+///    peer.)
+/// 4. With the environment to itself, a writer with the flag fills the
+///    data set to 450 keys in one transaction, on top of the 300: the
+///    600-key commit is gone. Every verifier finds 450 keys.
+/// 5. A read-only peer holds the environment with the flag, alone (so it
+///    keeps the exclusive lock until it closes), while the other peer's
+///    writer waits to open it; that writer then commits on top of the
+///    latest snapshot, which the holder published when it closed: it
+///    deletes every second of the 450 keys. (C 1.0 leaves the previous
+///    snapshot in the lock file, and the waiting writer overwrites the
+///    latest one, `KNOWN_C_BUGS.md` row 70: not run with `cpeer10` as the
+///    holder.) Where the shared locks die with their last user (not
+///    Linux or FreeBSD), the holder's peer waits instead of a C peer,
+///    whose open fails when the holder closes (row 47). The auditors audit
+///    the file.
+pub fn prev_snapshot(pair: Pair) -> Result<()> {
+    let first = |peers: [Peer; 2]| peers.into_iter().find(Peer::opens_prev_snapshot);
+    let (Some(reader), Some(writer)) = (
+        first([pair.reader, pair.writer]),
+        first([pair.writer, pair.reader]),
+    ) else {
+        crate::peer::skipped(format_args!(
+            "prev_snapshot: neither {} nor {} opens environments with MDB_PREVSNAPSHOT",
+            pair.writer, pair.reader
+        ));
+        return Ok(());
+    };
+    let env = new_env(&pair, 64 * MIB)?;
+    let ds = |n| DataSet::new("-", n, 77);
+    ds(300).fill(pair.writer, &env, &[])?;
+    ds(600).fill(pair.writer, &env, &[])?;
+    let verify_prev = |peer: Peer, n| {
+        peer.on("verify", &env)
+            .args(ds(n).args())
+            .arg("--prevsnapshot")
+            .run()
+    };
+    verify_prev(reader, 300)?;
+
+    let keeper_peer = pair.other(reader);
+    let mut keeper = keeper_peer
+        .on("hold-env", &env)
+        .args([hold_secs().as_str(), "--until-stdin"])
+        .spawn()?;
+    keeper.wait_ready()?;
+    let busy = writer
+        .on("fill", &env)
+        .args(ds(450).args())
+        .arg("--prevsnapshot")
+        .output()?;
+    ensure!(
+        !busy.success() && busy.stderr.contains("MDB_ENV_BUSY"),
+        "a writer with MDB_PREVSNAPSHOT next to {keeper_peer}'s hold-env: {busy}"
+    );
+    if reader == Peer::C10 {
+        log(
+            "prev_snapshot: cpeer10 does not open read-only with MDB_PREVSNAPSHOT next to \
+             another process (it would publish the previous snapshot, KNOWN_C_BUGS.md row 68)",
+        );
+    } else {
+        verify_prev(reader, 300)?;
+        for peer in pair.verifiers() {
+            ds(600).verify(peer, &env)?;
+        }
+    }
+    keeper.release()?;
+    keeper.finish()?.ok()?;
+
+    ds(450).fill(writer, &env, &["--prevsnapshot"])?;
+    for peer in pair.verifiers() {
+        ds(450).verify(peer, &env)?;
+    }
+
+    if reader == Peer::C10 {
+        log(
+            "prev_snapshot: cpeer10 does not hold the environment with MDB_PREVSNAPSHOT \
+             while another process waits (it would leave the previous snapshot in the lock \
+             file, KNOWN_C_BUGS.md row 70)",
+        );
+    } else {
+        let mut holder = reader
+            .on("hold-env", &env)
+            .args([hold_secs().as_str(), "--until-stdin", "--prevsnapshot"])
+            .spawn()?;
+        holder.wait_ready()?;
+        // The holder is the last user. Where the shared locks do not
+        // outlive their last user, a C peer that waited fails its open once
+        // the holder is gone (KNOWN_C_BUGS.md row 47; rlmdb probes again),
+        // so an rlmdb peer waits there: semaphores, which the last user
+        // removes (macOS, OpenBSD, NetBSD, DragonFly), and Windows' named
+        // mutexes, which the kernel destroys with the last handle (C 1.0
+        // holder and waiter fail alike there). Only mutexes in the lock file
+        // (Linux, FreeBSD) outlive it.
+        let lock = match pair.format {
+            Format::V09 => &LOCK_V09,
+            Format::V10 => &LOCK_V10,
+        };
+        let mut waiter_peer = pair.other(reader);
+        if lock.objects != LockObjects::PthreadMutexes && !waiter_peer.is_rust() {
+            waiter_peer = reader;
+        }
+        // Deleting keys of the 450 fails outright on the 300-key snapshot.
+        let waiter = waiter_peer
+            .on("delete", &env)
+            .args(ds(450).args())
+            .args(["--every", "2"])
+            .spawn()?;
+        // Long enough for the waiter to wait for the holder's lock (if it
+        // is late, it opens alone afterwards: the check passes vacuously).
+        std::thread::sleep(Duration::from_millis(300));
+        holder.release()?;
+        holder.finish()?.ok()?;
+        waiter.finish()?.ok()?;
+        for peer in pair.verifiers() {
+            ds(450).after_delete(2).verify(peer, &env)?;
+        }
     }
     audit(&pair, &env)?;
     Ok(())

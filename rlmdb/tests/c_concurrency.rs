@@ -36,7 +36,7 @@ fn me() -> i32 {
 #[test]
 fn rust_creates_environment_c_uses_it() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("testdb");
     std::fs::create_dir(&path).unwrap();
 
@@ -67,17 +67,25 @@ fn rust_creates_environment_c_uses_it() {
     assert!(text.contains("  0 stale readers cleared."), "{text}");
 
     // A C writer commits into the Rust-created files while we hold an old
-    // snapshot.
-    c.run("mtest", &[], Some(dir.path()));
+    // snapshot. A bounded one: while a reader pins snapshot 0 no page can
+    // be reused, and mtest's loop of one delete per transaction can then
+    // outgrow its 10 MiB map on 16 KiB pages.
+    c_put(c, &path, None, b"k1", b"v1");
     assert_eq!(txn.id(), 0);
     assert_eq!(walk_forward(&txn, Dbi::MAIN), vec![]);
     let txn2 = env.begin_ro_txn().unwrap();
-    assert!(txn2.id() > 0);
+    assert_eq!(txn2.id(), 1);
+    assert_eq!(walk_forward(&txn2, Dbi::MAIN), vec![pair(b"k1", b"v1")]);
+    drop((txn, txn2));
+    // With the snapshot released, mtest's full run.
+    c.run("mtest", &[], Some(dir.path()));
+    let txn3 = env.begin_ro_txn().unwrap();
+    assert!(txn3.id() > 1);
     // (mtest seeds rand() with the time; with few values its deletes can
     // leave the DB empty, which is a valid outcome to compare too.)
     let expected = c.dump(&path, None);
-    assert_eq!(walk_forward(&txn2, Dbi::MAIN), expected);
-    drop((txn, txn2));
+    assert_eq!(walk_forward(&txn3, Dbi::MAIN), expected);
+    drop(txn3);
     verify_db(&env, Dbi::MAIN, &expected);
     // Our slots are gone from C's view after the txns end.
     assert_eq!(parse_readers(&c.stat_text(&path, &["-r"])), vec![]);
@@ -86,7 +94,7 @@ fn rust_creates_environment_c_uses_it() {
 #[test]
 fn rust_creates_no_sub_dir_environment() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("flat.db");
     let env = Environment::builder()
         .flags(EnvironmentFlags::NO_SUB_DIR)
@@ -102,7 +110,7 @@ fn rust_creates_no_sub_dir_environment() {
 #[test]
 fn c_creates_environment_rust_attaches() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("testdb");
     std::fs::create_dir(&path).unwrap();
     // C first: creates the files and the shared locks, holds a read txn.
@@ -132,24 +140,66 @@ fn c_creates_environment_rust_attaches() {
     assert_eq!(c_readers, want);
 
     // A C writer commits (it needs the writer lock C created) while both
-    // readers pin snapshot 0.
-    c.run("mtest2", &[], Some(dir.path()));
+    // readers pin snapshot 0: a bounded one, see
+    // `rust_creates_environment_c_uses_it`.
+    c_put(c, &path, Some("id1"), b"k1", b"v1");
     let mut holder = holder;
     let renewed = holder.renew();
-    assert!(renewed > 0);
+    assert_eq!(renewed, 1);
     let txn2 = env.begin_ro_txn().unwrap();
     assert_eq!(txn2.id(), renewed);
     let db = txn2.open_db(Some("id1")).unwrap();
-    assert_eq!(walk_forward(&txn2, db), c.dump(&path, Some("id1")));
+    assert_eq!(walk_forward(&txn2, db), vec![pair(b"k1", b"v1")]);
     drop((txn, txn2));
     holder.quit();
     assert!(env.reader_list().unwrap().is_empty());
+    // With the snapshots released, mtest2's full run on the same files.
+    c.run("mtest2", &[], Some(dir.path()));
+    let txn3 = env.begin_ro_txn().unwrap();
+    assert!(txn3.id() > 1);
+    let db = txn3.open_db(Some("id1")).unwrap();
+    assert_eq!(walk_forward(&txn3, db), c.dump(&path, Some("id1")));
+}
+
+/// One C write transaction: `mdb_put` of `key`/`data` into `db` (`None`:
+/// the main DB) of `path`, committed (`tests/c/writeops.c`, one op).
+fn c_put(c: &CTools, path: &Path, db: Option<&str>, key: &[u8], data: &[u8]) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let mut child = Command::new(c.bin("writeops"))
+        .arg(path)
+        .arg(db.unwrap_or("-"))
+        .args(["0", "0", "10485760"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        child.stdin.take().unwrap(),
+        "p:{}:{}:0",
+        hex(key),
+        hex(data)
+    )
+    .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && text.contains("p rc=0") && text.contains("commit rc=0"),
+        "writeops: {text}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn pair(k: &[u8], v: &[u8]) -> Pair {
+    (k.to_vec(), v.to_vec())
 }
 
 #[test]
 fn rust_reader_check_clears_dead_c_reader() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("testdb");
     std::fs::create_dir(&path).unwrap();
     let env = Environment::builder().open(&path).unwrap();
@@ -169,7 +219,7 @@ fn rust_reader_check_clears_dead_c_reader() {
 #[test]
 fn snapshot_stable_while_c_writes() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     std::fs::create_dir(&path).unwrap();
     let env = Environment::builder()
@@ -252,7 +302,7 @@ fn snapshot_stable_while_c_writes() {
 #[test]
 fn map_resized_when_c_grows_the_file() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     std::fs::create_dir(&path).unwrap();
     // Rust maps only the default 1 MiB.
@@ -281,7 +331,7 @@ fn map_resized_when_c_grows_the_file() {
 #[test]
 fn exclusive_opener_resizes_small_lock_file() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     // mtest creates its lock file with room for a single reader.
     let path = c.mtest("mtest", dir.path());
     let small = std::fs::metadata(path.join("lock.mdb")).unwrap().len();
@@ -312,7 +362,7 @@ fn check_env_info_with(env: &Environment, c: &CTools, path: &Path) {
 #[test]
 fn rust_readers_while_c_mtest_writes() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("testdb");
     std::fs::create_dir(&path).unwrap();
     let env = Environment::builder()
@@ -378,7 +428,9 @@ fn rust_readers_while_c_mtest_writes() {
 #[test]
 fn no_lock_handle_sees_commits_of_another_process() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
+    // The copy targets: on the disk (`O_DIRECT`, see `common::disk_tempdir`).
+    let copies = common::disk_tempdir();
     let path = dir.path().join("testdb");
     std::fs::create_dir(&path).unwrap();
     let env = Environment::builder()
@@ -419,7 +471,7 @@ fn no_lock_handle_sees_commits_of_another_process() {
         };
         // A plain copy has every page of that snapshot.
         let copy = || {
-            let copy = dir.path().join(format!("copy-{key}"));
+            let copy = copies.path().join(format!("copy-{key}"));
             std::fs::create_dir(&copy).unwrap();
             env.copy_to_path(&copy, false).unwrap();
             assert_eq!(last_txnid(&copy), newest, "copy after {key}");

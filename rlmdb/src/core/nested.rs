@@ -37,7 +37,9 @@
 //! appended, the DB table, next page number, allocation count, dirty
 //! room, flags and free-page state replace the parent's (keeping the
 //! parent's `DB_NEW` marks). An abort restores the parent's cursors and
-//! closes the handles of databases the child created (`mdb_dbis_update`).
+//! closes the handles of databases the child created (`mdb_dbis_update`),
+//! and of those that do not exist in the parent's state
+//! (`RwTxn::close_vanished_handles`, KNOWN_C_BUGS.md row 19).
 //!
 //! A child leaked with `mem::forget` never gives the state back. Its
 //! parent keeps `TXN_HAS_CHILD`, so it refuses every operation and cannot
@@ -53,7 +55,7 @@ use crate::core::dirty::{DirtyPages, Layer, SpillSet};
 use crate::core::txn::TxnCore;
 use crate::core::txn_rw::{RwTxn, WriteState, TXN_ERROR, TXN_FINISHED, TXN_HAS_CHILD};
 use crate::core::wcursor::Slot;
-use crate::error::Result;
+use crate::error::{MdbError, Result};
 use crate::idl::Idl;
 
 /// The parent link of a nested transaction.
@@ -130,7 +132,13 @@ impl<'env> RwTxn<'env> {
     /// (their handles become invalid, `EINVAL`).
     ///
     /// Children can be nested further. `MdbError::BadTxn` if this
-    /// transaction has failed.
+    /// transaction has failed, and in an environment opened with
+    /// [`WRITE_MAP`](crate::EnvironmentFlags::WRITE_MAP): C refuses nested
+    /// transactions there (`lmdb.h`: "Incompatible with nested
+    /// transactions"; 0.9's `mdb_txn_begin` returns `MDB_BAD_TXN`, 1.0's
+    /// `EINVAL`), so a program that uses the flag behaves as it would with
+    /// C, although this implementation does not use a writable map. The
+    /// refusal changes nothing: this transaction stays usable.
     ///
     /// The child takes this transaction's state (and that of its
     /// ancestors) until it ends. If it is leaked with `mem::forget`
@@ -138,6 +146,12 @@ impl<'env> RwTxn<'env> {
     /// then fail every operation and their commit with `MdbError::BadTxn`
     /// and can only be aborted, so none of their changes are written.
     pub fn begin_nested_txn(&mut self) -> Result<RwTxn<'_>> {
+        // C ORs the environment's MDB_WRITEMAP into every transaction's
+        // flags and refuses a child for it as for a blocked parent; the
+        // flag cannot change while the environment is open.
+        if self.core.env.raw_flags() & MDB_WRITEMAP != 0 {
+            return Err(MdbError::BadTxn.into());
+        }
         self.check_usable()?;
         let depth = self.w.cursors.depth() + 1;
 
@@ -234,7 +248,7 @@ impl<'env> RwTxn<'env> {
             self.core.dirty.clear();
             self.core.spilled.clear();
             let main = p.dbs[MAIN_DBI as usize].db;
-            self.close_vanished_handles(main);
+            self.close_vanished_handles(main, Some(p.dbs.as_slice()));
         }
 
         // The parent's pages come back.

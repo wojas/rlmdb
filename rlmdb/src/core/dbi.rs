@@ -284,6 +284,15 @@ impl TxnDb {
         (u32::from(self.db.flags) & MDB_DUPSORT != 0)
             .then(|| self.dup_cmp.unwrap_or(Comparator::Memn))
     }
+
+    /// Whether this is a live view of the slot's registration with
+    /// sequence number `seq`: valid, taken under that registration, and
+    /// its record read from the transaction's state or written in it (not
+    /// `DB_STALE`). The transaction then holds the database: its changes
+    /// are in this record, which the commit writes back.
+    pub(crate) fn is_live_view(&self, seq: u32) -> bool {
+        self.state & (DB_VALID | DB_STALE) == DB_VALID && self.seq == seq
+    }
 }
 
 /// A fingerprint of a database name (FNV-1a, never 0).
@@ -397,6 +406,51 @@ impl TxnCore<'_> {
         Ok(entry)
     }
 
+    /// [`Self::dbi_entry`] without copying the entry out: the same checks,
+    /// in the same order, with the same errors. For the write operations,
+    /// which read what they need of the entry afterwards
+    /// ([`Self::fresh_order`]); a copy of the whole entry, returned through
+    /// memory, was a measurable part of every put.
+    #[inline]
+    pub(crate) fn check_dbi(&self, dbi: Dbi, validity: u8) -> Result<()> {
+        let i = dbi.0 as usize;
+        let (mut state, mut seq) = self
+            .dbs
+            .borrow()
+            .get(i)
+            .map(|e| (e.state, e.seq))
+            .ok_or_else(Error::einval)?;
+        if state == 0 {
+            let entry = self.first_use(i)?;
+            (state, seq) = (entry.state, entry.seq);
+        }
+        if state & validity == 0 {
+            return Err(Error::einval());
+        }
+        if seq != self.env.dbis.seq(i) {
+            return Err(MdbError::BadDbi.into());
+        }
+        Ok(())
+    }
+
+    /// For a `dbi` that [`Self::check_dbi`] accepted: the refresh of
+    /// [`Self::refreshed`], then the persistent flags of the record and
+    /// its duplicate order ([`TxnDb::dup_order`]).
+    #[inline]
+    pub(crate) fn fresh_order(&self, dbi: Dbi) -> Result<(u16, Option<Comparator>)> {
+        let i = dbi.0 as usize;
+        let entry = {
+            let dbs = self.dbs.borrow();
+            let entry = dbs.get(i).ok_or_else(Error::einval)?;
+            if entry.state & DB_STALE == 0 {
+                return Ok((entry.db.flags, entry.dup_order()));
+            }
+            *entry
+        };
+        let entry = self.refresh_stale(i, entry)?;
+        Ok((entry.db.flags, entry.dup_order()))
+    }
+
     /// The first use of DBI slot `i` in this transaction: take a stale
     /// view of the environment's slot (see [`Self::dbi_entry`]).
     #[cold]
@@ -468,12 +522,25 @@ impl TxnCore<'_> {
     /// there is no exact match; `MDB_INCOMPATIBLE` if the key holds plain
     /// data instead of a DB record.
     pub(crate) fn find_named_db(&self, name: &[u8]) -> Result<NamedDb> {
+        let main = self.dbs.borrow()[MAIN_DBI as usize];
+        let mut mc = Cursor::new(main.db, main.key_cmp, 0, self.layout);
+        self.find_named_db_at(&mut mc, name)
+    }
+
+    /// [`Self::find_named_db`] with `mc`, an unpositioned cursor on the
+    /// main DB, which is left where the search ends, as `mdb_cursor_set`
+    /// with `MDB_SET` leaves the cursor of `mdb_dbi_open` (mdb.c 0.9 line
+    /// 10020, 1.0 line 12356): on the record, or where `name` would be
+    /// inserted in the leaf the descent reached.
+    pub(crate) fn find_named_db_at<'t>(
+        &'t self,
+        mc: &mut Cursor<'t>,
+        name: &[u8],
+    ) -> Result<NamedDb> {
         // mdb_cursor_set: a zero-length key (DB name) is invalid.
         if name.is_empty() {
             return Err(MdbError::BadValSize.into());
         }
-        let main = self.dbs.borrow()[MAIN_DBI as usize];
-        let mut mc = Cursor::new(main.db, main.key_cmp, 0, self.layout);
         mc.page_search(self, Some(name), 0)?;
         let (found, exact) = mc.node_search(name)?;
         if !found || !exact {

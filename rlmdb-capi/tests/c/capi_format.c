@@ -1,6 +1,7 @@
-/* Checks the data-file format support of the C API against the Rust
- * library: rlmdb.h's format functions and LMDB 1.0 constants, and LMDB 1.0
- * environments through the lmdb.h functions (C LMDB has no rlmdb.h, and
+/* Checks the data-file format support of the C API against librlmdb,
+ * built with its own headers (rlmdb.h, which includes the lmdb.h next to
+ * it, LMDB 1.0's): rlmdb.h's format functions, LMDB 1.0's constants, and
+ * LMDB 1.0 environments through the lmdb.h functions (C LMDB has no rlmdb.h, and
  * C 0.9 cannot open 1.0 files, so there is no C build; interop's
  * tests/capi10.rs has C 1.0 read and write what this library writes).
  *
@@ -122,7 +123,7 @@ static void test_constants(void)
 	/* The values of LMDB 1.0's lmdb.h. */
 	CHECK(MDB_ENCRYPT == 0x2000 && MDB_PREVSNAPSHOT == 0x2000000);
 	CHECK(MDB_PROBLEM == -30779 && MDB_ADDR_BUSY == -30769);
-	CHECK(MDB_PROBLEM == MDB_LAST_ERRCODE + 1);
+	CHECK(MDB_PROBLEM == MDB_BAD_DBI + 1 && MDB_LAST_ERRCODE == MDB_ADDR_BUSY);
 	for (i = 0; i < sizeof(errs) / sizeof(errs[0]); i++) {
 		CHECK(errs[i].code == MDB_PROBLEM + (int)i);
 		CHECK(!strcmp(mdb_strerror(errs[i].code), errs[i].text));
@@ -387,9 +388,9 @@ static void test_refused_flags(void)
 	MDB_env *env;
 	const char *dir;
 
-	/* MDB_PREVSNAPSHOT: unknown to 0.9, not implemented for 1.0. */
-	RC(open_env(new_dir(), 0, 0, MDB_PREVSNAPSHOT, &env), EINVAL);
-	RC(open_env(new_dir(), RLMDB_FORMAT_10, 0, MDB_PREVSNAPSHOT, &env), EINVAL);
+	/* MDB_ENCRYPT is not implemented. MDB_PREVSNAPSHOT is, for both
+	 * formats (tests/c/capi_prevsnapshot.c); it cannot be set on an open
+	 * environment, as in C. */
 	dir = new_dir();
 	OK(open_env(dir, RLMDB_FORMAT_10, 0, 0, &env));
 	if (env) {
@@ -398,9 +399,8 @@ static void test_refused_flags(void)
 		RC(mdb_env_set_flags(env, MDB_PREVSNAPSHOT, 1), EINVAL);
 		mdb_env_close(env);
 	}
-	RC(open_env(dir, 0, 0, MDB_PREVSNAPSHOT, &env), EINVAL);
-	RC(open_env(dir, 0, 0, MDB_PREVSNAPSHOT | MDB_RDONLY, &env), EINVAL);
 	RC(open_env(dir, 0, 0, MDB_ENCRYPT, &env), EINVAL);
+	RC(open_env(dir, 0, 0, MDB_ENCRYPT | MDB_PREVSNAPSHOT, &env), EINVAL);
 	OK(mdb_env_create(&env));
 	RC(mdb_env_set_flags(env, MDB_ENCRYPT, 1), EINVAL);
 	mdb_env_close(env);

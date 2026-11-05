@@ -60,12 +60,18 @@
 //!   (`mdb_cursor_put`, `mdb_node_add`), `split` (`mdb_page_split`),
 //!   `cursor_del` (`mdb_cursor_del`, `mdb_rebalance`, `mdb_page_merge`,
 //!   `mdb_node_move`, `mdb_drop`), `commit` (`mdb_page_flush`,
-//!   `mdb_env_write_meta`), `nested` (nested transactions:
+//!   `mdb_env_write_meta`, LMDB 1.0's `mdb_txn_prepare`: [`PreparedTxn`]),
+//!   `rollback` (LMDB 1.0's `mdb_env_rollback`:
+//!   [`Environment::rollback`]), `nested` (nested transactions:
 //!   `mdb_txn_begin` with a parent, `mdb_cursor_shadow`, the nested commit
 //!   and abort) and `spill` (`mdb_page_spill`, `mdb_page_unspill`);
 //! * `copy`: [`Environment::copy_to_path`] and
 //!   [`Environment::copy_to_fd`] (`mdb_env_copyfd0`, `mdb_env_copyfd1`,
-//!   `mdb_env_cwalk`), byte-identical to `mdb_copy` and `mdb_copy -c`.
+//!   `mdb_env_cwalk`), byte-identical to `mdb_copy` and `mdb_copy -c`;
+//! * `incr`: incremental backups of LMDB 1.0 environments,
+//!   [`Environment::incr_dump`], [`Environment::incr_dump_to_path`] and
+//!   [`Environment::incr_load`] (`mdb_env_incr_dumpfd`,
+//!   `mdb_env_incr_dump`, `mdb_env_incr_loadfd`).
 
 #[cfg(test)]
 pub(crate) mod audit;
@@ -78,11 +84,13 @@ pub mod dbi;
 pub(crate) mod dirty;
 pub mod env;
 mod freelist;
+mod incr;
 mod nested;
 pub(crate) mod page_ops;
 pub mod reader;
 mod registry;
 pub mod ro_cursor;
+mod rollback;
 mod spill;
 mod split;
 pub mod txn;
@@ -92,10 +100,11 @@ pub(crate) mod wcursor;
 pub use crate::cmp::{CmpFn, Comparator};
 pub use crate::error::{Error, MdbError, Result};
 pub use crate::flags::{DatabaseFlags, EnvironmentFlags, WriteFlags};
+pub use commit::PreparedTxn;
 pub use dbi::Dbi;
 pub use env::{
-    default_format, process_default_format, set_default_format, sniff_format, Environment,
-    EnvironmentBuilder, DEFAULT_FORMAT_ENV,
+    default_format, default_format_or, process_default_format, set_default_format, sniff_format,
+    Environment, EnvironmentBuilder, DEFAULT_FORMAT_ENV,
 };
 pub use reader::{format_reader_list, ReaderInfo};
 pub use ro_cursor::{CursorOp, Entry, RoCursor};

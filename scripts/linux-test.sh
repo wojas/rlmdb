@@ -83,13 +83,23 @@ tmpfs=${LINUX_TEST_TMPFS-1536m}
 case $tmpfs in ""|0) tmpfs_mount= ;; *) tmpfs_mount="--tmpfs /tmp:exec,size=$tmpfs" ;; esac
 memory=${LINUX_TEST_MEMORY-2g}
 case $memory in ""|0) memory_limit= ;; *) memory_limit="--memory=$memory --memory-swap=$memory" ;; esac
-# Docker Desktop's credential helper is not installed on this machine, so use
-# a scratch config and talk to the Lima docker socket directly.
+# The docker commands run with a scratch config: a credential helper named
+# in the user's config (Docker Desktop's) may not be installed. That config
+# also names the current context (Colima's, Lima's), so the daemon's
+# address is taken from it first, unless DOCKER_HOST already says.
+if [ -z "${DOCKER_HOST:-}" ]; then
+  host=$(docker context inspect --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null || true)
+  case $host in
+    unix://*|tcp://*|ssh://*|npipe://*) export DOCKER_HOST=$host ;;
+  esac
+fi
 export DOCKER_CONFIG=${DOCKER_CONFIG:-/tmp/lmdb-rs-dockercfg}
 mkdir -p "$DOCKER_CONFIG"
 [ -f "$DOCKER_CONFIG/config.json" ] || echo '{}' > "$DOCKER_CONFIG/config.json"
-if [ -z "${DOCKER_HOST:-}" ] && [ -S "$HOME/.lima/docker/sock/docker.sock" ]; then
-  export DOCKER_HOST="unix://$HOME/.lima/docker/sock/docker.sock"
+if [ -z "${DOCKER_HOST:-}" ]; then
+  for sock in "$HOME/.lima/docker/sock/docker.sock" "$HOME/.colima/default/docker.sock"; do
+    if [ -S "$sock" ]; then export DOCKER_HOST="unix://$sock"; break; fi
+  done
 fi
 if [ $# -eq 0 ]; then set -- test --workspace; fi
 target_vol="lmdb-rs-target-linux-$(printf '%s' "$here" | cksum | cut -d' ' -f1)"
@@ -147,10 +157,17 @@ if [ "$cmd" = cargo ]; then
   set -- sh -c 'case $1 in clippy) rustup component add clippy >/dev/null 2>&1 ;; esac; exec cargo "$@"' sh "$@"
   cmd=
 fi
-# Report the container's peak memory and OOM kills after the command (its
-# exit status is kept). The cgroup is the container's own (cgroup v2 with a
+# A checkout the Docker VM does not share (a directory outside its mounts)
+# arrives as an empty /work: say so instead of failing in cargo. Then report
+# the container's peak memory and OOM kills after the command (its exit
+# status is kept). The cgroup is the container's own (cgroup v2 with a
 # cgroup namespace), created with it, so the peak covers the whole run.
-set -- sh -c '"$@"; status=$?
+set -- sh -c 'if ! [ -e /work/Cargo.toml ]; then
+    echo "linux-test.sh: the checkout is not visible in the container (/work is empty):" \
+      "the Docker VM does not share its directory; run from a directory the VM mounts" >&2
+    exit 2
+  fi
+  "$@"; status=$?
   cg=/sys/fs/cgroup
   if [ -r $cg/memory.peak ]; then
     limit=$(cat $cg/memory.max)
@@ -161,6 +178,7 @@ set -- sh -c '"$@"; status=$?
   exit $status' sh "$@"
 # shellcheck disable=SC2086  # $tmpfs_mount, $memory_limit, $cross_env and $cmd are words or empty
 exec docker run --rm -i \
+  --ulimit core=0 \
   $memory_limit \
   $tmpfs_mount \
   $cross_env \

@@ -1,8 +1,10 @@
+mod common;
+
 use rlmdb::{DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
 
 #[test]
 fn put_commit_read() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = Environment::builder()
         .map_size(64 << 20)
         .max_dbs(4)

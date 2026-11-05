@@ -3,14 +3,40 @@
 //! [`crate::dumpfmt`]).
 //!
 //! ```text
-//! mdb_dump [-V] [-f output] [-l] [-n] [-p] [-a|-s subdb] dbpath
+//! mdb_dump [-V] [-f output] [-i txnid] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath
 //! ```
+//!
+//! `-v` (C 1.0's option, here for both formats) dumps the previous
+//! snapshot (`MDB_PREVSNAPSHOT`), without C 1.0's effect on other
+//! processes (`KNOWN_C_BUGS.md` row 68).
 //!
 //! Output and messages are those of the C tool of the environment's format.
 //! The dump format is the same for LMDB 0.9 and 1.0 environments; for a 1.0
 //! one the messages are 1.0's (`mdb_dbi_open`), and `-a`/`-l` list the
 //! records of named databases (`mdb_cursor_is_db`; 1.0 stores a name with
 //! its NUL, which 0.9's tool would skip).
+//!
+//! `-i txnid` is LMDB 1.0's: instead of the text dump it writes an
+//! incremental dump since transaction `txnid`
+//! ([`rlmdb::Environment::incr_dump`]: C 1.0's bytes but where C's walk
+//! takes stale free pages for pages, `KNOWN_C_BUGS.md` row 72) to
+//! standard output or, with
+//! `-f`, into a new file (`mdb_env_incr_dump`, which refuses an existing
+//! one), as `tests/lmdb-c/1.0/mdb_dump.c` does: the txnid is read as
+//! `sscanf("%zu")` reads it (`5x` is 5, `-1` is `SIZE_MAX`), and one that
+//! is not a number or is 0 is "invalid txnid" with the C library's
+//! `strerror(errno)` of the rejected txnid's parse, 0
+//! ([`crate::cfmt::crt_strerror_0`]; C's tool keeps an earlier `-i`'s
+//! `ERANGE` there with the BSD C library and on Windows,
+//! `KNOWN_C_BUGS.md` row 76); the other options but `-n` are ignored. With `-i` the options follow
+//! 1.0's tool, which opens `-f`'s file only after the environment; without
+//! it, 0.9's, which reopens standard output on it when it reads the
+//! option. With `-v` the incremental dump is one of the previous
+//! snapshot (C 1.0's holds the latest commit's meta page and pages,
+//! `KNOWN_C_BUGS.md` row 72). An LMDB 0.9 environment cannot be dumped
+//! this way:
+//! "mdb_env_incr_dump failed, error 45 Operation not supported" (the
+//! number is the platform's `ENOTSUP`).
 //!
 //! C installs handlers for `SIGPIPE`, `SIGHUP`, `SIGINT` and `SIGTERM` that
 //! make the dump stop after the current record with "Interrupted system
@@ -25,7 +51,7 @@ use std::fs::OpenOptions;
 
 use rlmdb::{DatabaseFlags, Dbi, Environment, EnvironmentFlags, RoTxn, Transaction};
 
-use crate::cfmt::{crt_errno, err_code, io_errno, pointer, strerror};
+use crate::cfmt::{crt_errno, crt_strerror_0, err_code, io_errno, pointer, scan_size, strerror};
 use crate::common::{
     db_name_of, dbi_open_name, open_db, path_of, report_failed, Tool, EXIT_FAILURE,
 };
@@ -33,7 +59,10 @@ use crate::dumpfmt::encode_line;
 use crate::getopt::{GetOpt, Opt};
 use crate::output::{eprint_bytes, Output};
 
-const SYNOPSIS: &str = "[-V] [-f output] [-l] [-n] [-p] [-a|-s subdb] dbpath";
+const SYNOPSIS: &str = "[-V] [-f output] [-i txnid] [-l] [-n] [-p] [-v] [-a|-s subdb] dbpath";
+
+/// The options `getopt` takes.
+const OPTSTRING: &str = "af:i:lnps:vV";
 
 const NOTFOUND: i32 = rlmdb::consts::MDB_NOTFOUND;
 const EINTR: i32 = 4;
@@ -57,7 +86,13 @@ struct Options {
     list: bool,
     no_sub_dir: bool,
     print: bool,
+    /// `-v`: `MDB_PREVSNAPSHOT`.
+    prev_snapshot: bool,
     subname: Option<Vec<u8>>,
+    /// `-i`: the incremental dump since this txnid (never 0).
+    txnid: Option<u64>,
+    /// `-f` with `-i`: the file for the incremental dump.
+    outname: Option<Vec<u8>>,
 }
 
 /// The `main` of `mdb_dump`; returns the exit code.
@@ -66,7 +101,18 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         return tool.usage(SYNOPSIS);
     }
     let mut o = Options::default();
-    let mut getopt = GetOpt::new(args, "af:lnps:V");
+    // With -i anywhere, -f names the file of the incremental dump (C 1.0
+    // opens it after the environment); without, C 0.9's tool reopens
+    // standard output on it at once.
+    let incremental = {
+        let mut scan = GetOpt::new(args, OPTSTRING);
+        let mut found = false;
+        while let Some(opt) = scan.next() {
+            found |= matches!(opt, Opt::Arg(b'i', _));
+        }
+        found
+    };
+    let mut getopt = GetOpt::new(args, OPTSTRING);
     while let Some(opt) = getopt.next() {
         match opt {
             Opt::Flag(b'V') => return tool.version(),
@@ -79,6 +125,17 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
                 }
                 o.all_dbs += 1;
             }
+            Opt::Arg(b'f', path) if incremental => o.outname = Some(path),
+            Opt::Arg(b'i', arg) => match scan_size(&arg) {
+                Some(txnid) if txnid != 0 => o.txnid = Some(txnid),
+                _ => {
+                    // The parse of this txnid set no errno (one that
+                    // overflows is SIZE_MAX, a valid txnid).
+                    let text = crt_strerror_0();
+                    tool.eprint_prog(&[&arg, b": invalid txnid: ", text.as_bytes(), b"\n"]);
+                    return EXIT_FAILURE;
+                }
+            },
             Opt::Arg(b'f', path) => {
                 // freopen(optarg, "w", stdout)
                 let mut opts = OpenOptions::new();
@@ -96,6 +153,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
             }
             Opt::Flag(b'n') => o.no_sub_dir = true,
             Opt::Flag(b'p') => o.print = true,
+            Opt::Flag(b'v') => o.prev_snapshot = true,
             Opt::Arg(b's', name) => {
                 if o.all_dbs > 0 {
                     return tool.usage(SYNOPSIS);
@@ -123,6 +181,9 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     if o.no_sub_dir {
         flags |= EnvironmentFlags::NO_SUB_DIR;
     }
+    if o.prev_snapshot {
+        flags |= EnvironmentFlags::PREV_SNAPSHOT;
+    }
     builder.flags(flags);
     let env = match builder.open_with_permissions(path_of(envname), 0o664) {
         Ok(env) => env,
@@ -131,6 +192,19 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
             return EXIT_FAILURE;
         }
     };
+    if let Some(txnid) = o.txnid {
+        let rc = match &o.outname {
+            Some(name) => env.incr_dump_to_path(path_of(name), txnid),
+            None => incr_dump_to_stdout(&env, txnid),
+        };
+        return match rc {
+            Ok(()) => 0,
+            Err(e) => {
+                report_failed("mdb_env_incr_dump", &e);
+                EXIT_FAILURE
+            }
+        };
+    }
     let txn = match env.begin_ro_txn() {
         Ok(t) => t,
         Err(e) => {
@@ -167,6 +241,17 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     } else {
         0
     }
+}
+
+/// `mdb_env_incr_dumpfd(env, MDB_STDOUT, txnid)`: the incremental dump
+/// goes to standard output's descriptor (on Windows its handle), not
+/// through the text output.
+fn incr_dump_to_stdout(env: &Environment, txnid: u64) -> Result<(), rlmdb::Error> {
+    #[cfg(unix)]
+    let fd = std::os::fd::AsFd::as_fd(&std::io::stdout()).try_clone_to_owned()?;
+    #[cfg(windows)]
+    let fd = std::os::windows::io::AsHandle::as_handle(&std::io::stdout()).try_clone_to_owned()?;
+    env.incr_dump(std::fs::File::from(fd), txnid)
 }
 
 /// `-a` / `-l`: dump (or list) every named database of the main DB.

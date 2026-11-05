@@ -235,7 +235,7 @@ fn audit(dir: &Path, format: Format) {
 #[test]
 fn robust_failed_page_flush_aborts_the_commit() {
     for format in FORMATS {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let env = open(dir.path(), EnvironmentFlags::empty(), format);
         fill(&env, 0, 500);
         let before = meta_bytes(dir.path(), env.page_size());
@@ -275,7 +275,7 @@ fn robust_failed_page_flush_aborts_the_commit() {
 #[test]
 fn robust_failed_meta_write_is_fatal() {
     for format in FORMATS {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let env = open(dir.path(), EnvironmentFlags::empty(), format);
         fill(&env, 0, 300);
         let txnid = env.info().unwrap().last_txnid;
@@ -397,7 +397,7 @@ fn robust_failed_meta_sync_is_fatal() {
 #[cfg(unix)]
 fn failed_meta_sync(format: Format, flags: EnvironmentFlags) {
     let what = format!("{format:?} {flags:?}");
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path(), flags, format);
     let ps = env.page_size();
     fill(&env, 0, 300);
@@ -446,8 +446,9 @@ fn failed_meta_sync(format: Format, flags: EnvironmentFlags) {
 
     // A plain copy taken now, by another handle (without a lock file) or
     // another process: its newest meta page is the published snapshot,
-    // whose pages it holds.
-    let copy = tempfile::tempdir().unwrap();
+    // whose pages it holds. (A copy target: on the disk, `O_DIRECT`, see
+    // `common::disk_tempdir`.)
+    let copy = common::disk_tempdir();
     match &other {
         Some(other) => {
             assert_eq!(other.begin_ro_txn().unwrap().id(), txnid, "{what}");
@@ -584,7 +585,7 @@ fn c_dump_shows(c: &common::CTools, src: &Path, value: &[u8]) -> bool {
 fn robust_read_only_reader_skips_unpublished_first_commit() {
     for format in FORMATS {
         let what = format!("{format:?}");
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let src = dir.path().to_path_buf();
         let env = open(&src, EnvironmentFlags::empty(), format);
         let ps = env.page_size();
@@ -660,7 +661,7 @@ fn robust_failed_full_fsync_is_fatal() {
         return;
     }
     for format in FORMATS {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let env = open(dir.path(), EnvironmentFlags::empty(), format);
         fill(&env, 0, 300);
         let txnid = env.info().unwrap().last_txnid;
@@ -688,7 +689,7 @@ fn robust_failed_full_fsync_is_fatal() {
 #[test]
 fn robust_failed_spill_fails_the_transaction() {
     for format in FORMATS {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let env = open(dir.path(), EnvironmentFlags::NO_SYNC, format);
         fill(&env, 0, 200);
         env.set_dirty_limit(16);
@@ -727,7 +728,7 @@ fn robust_failed_spill_fails_the_transaction() {
 #[test]
 fn robust_failed_copy_changes_nothing() {
     for format in FORMATS {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let env = open(dir.path(), EnvironmentFlags::NO_SYNC, format);
         fill(&env, 0, 400);
         for compact in [false, true] {
@@ -767,7 +768,8 @@ fn robust_failed_copy_changes_nothing() {
         assert!(env.reader_list().unwrap().iter().all(|r| r.txnid.is_none()));
         fill(&env, 400, 10);
         assert_eq!(count(&env), 410);
-        let target = tempfile::tempdir().unwrap();
+        // A copy target: on the disk (`O_DIRECT`, see `common::disk_tempdir`).
+        let target = common::disk_tempdir();
         env.copy_to_path(target.path(), true).unwrap();
         assert_eq!(
             count(&open(target.path(), EnvironmentFlags::NO_SYNC, format)),

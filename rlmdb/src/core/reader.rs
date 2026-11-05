@@ -52,7 +52,7 @@
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::consts::MDB_MAGIC;
@@ -111,6 +111,16 @@ impl ReaderTable {
         match self {
             ReaderTable::Shared(lock) => lock.find_oldest(txnid),
             ReaderTable::Local(local) => local.readers.find_oldest(txnid),
+        }
+    }
+
+    /// Whether a read transaction uses snapshot `txnid` (for
+    /// [`Environment::rollback`](crate::core::Environment::rollback)).
+    /// Without a lock file, the readers of this process.
+    pub(crate) fn pins(&self, txnid: u64) -> bool {
+        match self {
+            ReaderTable::Shared(lock) => lock.pins(txnid),
+            ReaderTable::Local(local) => local.readers.pins(txnid),
         }
     }
 }
@@ -539,6 +549,31 @@ impl LockRegion {
         oldest
     }
 
+    /// Whether an occupied slot pins snapshot `txnid` (the slots
+    /// [`LockRegion::find_oldest`] looks at).
+    pub(crate) fn pins(&self, txnid: u64) -> bool {
+        (0..self.num_readers()).any(|i| self.slot_pid(i) != 0 && self.slot_txnid(i) == txnid)
+    }
+
+    /// How many occupied slots pin a snapshot (`mr_txnid != (txnid_t)-1`):
+    /// `(of this process, of other processes)`. Not in C: the exclusivity
+    /// check of an incremental load (`core::incr`).
+    pub(crate) fn pinning_readers(&self) -> (usize, usize) {
+        let (mut own, mut others) = (0, 0);
+        for i in 0..self.num_readers() {
+            let pid = self.slot_pid(i);
+            if pid == 0 || self.slot_txnid(i) == !0 {
+                continue;
+            }
+            if pid == self.pid {
+                own += 1;
+            } else {
+                others += 1;
+            }
+        }
+        (own, others)
+    }
+
     /// The occupied slots, as `mdb_reader_list` walks them.
     pub(crate) fn reader_list(&self) -> Vec<ReaderInfo> {
         (0..self.num_readers())
@@ -689,6 +724,10 @@ struct LocalEntry {
 #[derive(Debug)]
 pub(crate) struct LocalSlot(Arc<LocalEntry>);
 
+/// [`LocalReaders`] locked with no entry owned
+/// ([`LocalReaders::lock_if_unowned`]); unlocks on drop.
+pub(crate) struct LocalReadersGuard<'a>(#[allow(dead_code)] MutexGuard<'a, Vec<Arc<LocalEntry>>>);
+
 impl LocalReaders {
     /// Claims an entry for a read transaction, reusing a released one
     /// first (the slot search of `mdb_txn_renew0`). Its txnid is [`IDLE`].
@@ -725,6 +764,28 @@ impl LocalReaders {
             .iter()
             .map(|e| e.txnid.load(Ordering::SeqCst))
             .fold(txnid.wrapping_sub(1), u64::min)
+    }
+
+    /// Whether an entry pins snapshot `txnid`.
+    pub(crate) fn pins(&self, txnid: u64) -> bool {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        // As in `find_oldest`.
+        fence(Ordering::SeqCst);
+        entries
+            .iter()
+            .any(|e| e.txnid.load(Ordering::SeqCst) == txnid)
+    }
+
+    /// Locks the table if no read transaction owns an entry (also a reset
+    /// one, which may renew without the lock), `None` otherwise. While the
+    /// guard lives, no read transaction of any handle of the file can begin
+    /// ([`LocalReaders::acquire`] waits for it). Not in C: the exclusivity
+    /// check of an incremental load (`core::incr`).
+    pub(crate) fn lock_if_unowned(&self) -> Option<LocalReadersGuard<'_>> {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        // Pairs with the release in `LocalSlot::drop`.
+        let owned = entries.iter().any(|e| e.owned.load(Ordering::Acquire));
+        (!owned).then_some(LocalReadersGuard(entries))
     }
 
     /// The number of entries that pin a snapshot.

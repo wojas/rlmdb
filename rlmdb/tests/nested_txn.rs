@@ -222,7 +222,7 @@ fn check_with_c(c: &CTools, path: &std::path::Path) {
 
 #[test]
 fn rust_nested_scenarios_pass_c_check() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     {
         let env = open(dir.path());
         nested_write(&env);
@@ -238,7 +238,7 @@ fn rust_nested_scenarios_pass_c_check() {
 #[test]
 fn c_nested_scenarios_pass_rust_check() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let p = dir.path().to_str().unwrap();
     c.peer_ok(&["create", p, &(64u64 << 20).to_string(), "8"]);
     let out = c.peer_ok(&["nested-test", p]);
@@ -261,8 +261,8 @@ fn c_nested_scenarios_pass_rust_check() {
 #[test]
 fn nested_scenarios_match_c_page_counts() {
     let c = require_c!();
-    let cdir = tempfile::tempdir().unwrap();
-    let rdir = tempfile::tempdir().unwrap();
+    let cdir = common::tempdir();
+    let rdir = common::tempdir();
     let cp = cdir.path().to_str().unwrap();
     c.peer_ok(&["create", cp, &(64u64 << 20).to_string(), "8"]);
     c.peer_ok(&["nested-test", cp]);
@@ -284,7 +284,7 @@ fn cursor_at(t: &mut RwTxn<'_>, id: rlmdb::CursorId) -> Option<(Vec<u8>, Vec<u8>
 
 #[test]
 fn parent_cursors_follow_child_commit_and_restore_on_abort() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path());
     let mut t = env.begin_rw_txn().unwrap();
     let db = t.create_db(Some("c"), DatabaseFlags::CREATE).unwrap();
@@ -375,7 +375,7 @@ fn parent_cursors_follow_child_commit_and_restore_on_abort() {
 
 #[test]
 fn child_handles_and_failures() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path());
     let mut t = env.begin_rw_txn().unwrap();
     let a = t.create_db(Some("a"), DatabaseFlags::CREATE).unwrap();
@@ -417,7 +417,7 @@ fn child_handles_and_failures() {
 
 #[test]
 fn nested_txn_on_failed_parent_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = Environment::builder()
         .map_size(1 << 20)
         .flags(EnvironmentFlags::NO_SYNC)
@@ -439,7 +439,7 @@ fn nested_txn_on_failed_parent_is_refused() {
 
 #[test]
 fn failed_child_commit_fails_the_parent() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = Environment::builder()
         .map_size(1 << 20)
         .flags(EnvironmentFlags::NO_SYNC)
@@ -472,7 +472,7 @@ fn comparator_set_in_child_survives_abort() {
     fn rev(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
         b.cmp(a)
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path());
     let mut t = env.begin_rw_txn().unwrap();
     let db = t.create_db(Some("r"), DatabaseFlags::CREATE).unwrap();
@@ -498,7 +498,7 @@ fn comparator_set_in_child_survives_abort() {
 /// half-written reaches the file.
 #[test]
 fn leaked_child_blocks_the_parent() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open(dir.path());
     let mut t = env.begin_rw_txn().unwrap();
     t.put(Dbi::MAIN, b"a", b"1", WriteFlags::empty()).unwrap();
@@ -587,7 +587,7 @@ fn leaked_descendant_blocks_every_ancestor() {
     ];
     for format in [Format::V09, Format::V10] {
         for ends in cases {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = common::tempdir();
             let env = open_format(dir.path(), format);
             let mut t = env.begin_rw_txn().unwrap();
             t.put(Dbi::MAIN, b"key", b"original", WriteFlags::empty())
@@ -643,5 +643,293 @@ fn leaked_descendant_blocks_every_ancestor() {
                 }
             }
         }
+    }
+}
+
+// --- a main DB out of order --------------------------------------------------
+
+/// `P_INVALID`: the root of an empty database.
+const P_INVALID: u64 = u64::MAX;
+
+/// The default key order with the top bit of every byte flipped: bytes from
+/// 0x80 sort before the others.
+fn hibit_first(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    a.iter().map(|x| x ^ 0x80).cmp(b.iter().map(|x| x ^ 0x80))
+}
+
+/// The key of database `name` in the main DB (with its NUL in LMDB 1.0).
+fn name_key(format: Format, name: &str) -> Vec<u8> {
+    let mut k = name.as_bytes().to_vec();
+    if format == Format::V10 {
+        k.push(0);
+    }
+    k
+}
+
+/// Begins a write transaction whose main DB is out of order, as
+/// `rlmdb-capi/tests/c/capi_unsorted_main.c` leaves it: "dups" (one item),
+/// "fixed", "ints" and "plain", then the key 89 8a 8b 8c put in an order
+/// that sorts it first. A comparator changed within the transaction is
+/// misuse C does not detect, as it cannot detect one changed between opens
+/// or a damaged file. In the default order a search for "dups" turns left
+/// at "fixed", then at 89 8a 8b 8c, and misses it. Returns the transaction
+/// and the handle of "dups".
+fn unsorted_main(env: &Environment) -> (RwTxn<'_>, Dbi) {
+    let mut t = env.begin_rw_txn().unwrap();
+    let dups = t.create_db(Some("dups"), DatabaseFlags::CREATE).unwrap();
+    put(&mut t, dups, "k", b"v");
+    for name in ["fixed", "ints", "plain"] {
+        t.create_db(Some(name), DatabaseFlags::CREATE).unwrap();
+    }
+    t.set_compare(Dbi::MAIN, Some(hibit_first)).unwrap();
+    t.put(
+        Dbi::MAIN,
+        &[0x89, 0x8a, 0x8b, 0x8c],
+        &[b'v'; 10],
+        WriteFlags::NO_OVERWRITE,
+    )
+    .unwrap();
+    t.set_compare(Dbi::MAIN, None).unwrap();
+    let key = name_key(env.format(), "dups");
+    assert_eq!(
+        t.get(Dbi::MAIN, &key).unwrap(),
+        None,
+        "a search finds dups: the main DB is in order"
+    );
+    (t, dups)
+}
+
+/// A main DB record: the key and, for a named database's record (48
+/// bytes), its entries and root.
+type MainRecord = (Vec<u8>, Option<(u64, u64)>);
+
+/// The committed main DB's records in page order.
+fn main_records(env: &Environment) -> Vec<MainRecord> {
+    let txn = env.begin_ro_txn().unwrap();
+    let mut c = txn.cursor(Dbi::MAIN).unwrap();
+    let mut out = Vec::new();
+    while let Some((k, v)) = c.next().unwrap() {
+        let u64_at = |off: usize| u64::from_ne_bytes(v[off..off + 8].try_into().unwrap());
+        let db = (v.len() == 48).then(|| (u64_at(32), u64_at(40)));
+        out.push((k.to_vec(), db));
+    }
+    out
+}
+
+/// The page count of an environment written by [`unsorted_main`]: the
+/// pages of the main DB, of every database whose record is in it (read
+/// from the record, as the C page audit does, so a record a search cannot
+/// find counts too), of the free DB and the page numbers it lists must add
+/// up to all pages but the two meta pages. A leaked page breaks it. (The C
+/// page audit, which checks more, runs on the 0.9 environments here, and
+/// on both formats in `rlmdb-capi/tests/capi_unsorted_main.rs`.)
+fn assert_pages_accounted(env: &Environment, at: &str) {
+    let txn = env.begin_ro_txn().unwrap();
+    let pages = |s: rlmdb::Stat| s.branch_pages + s.leaf_pages + s.overflow_pages;
+    let mut used = pages(txn.stat(Dbi::MAIN).unwrap()) + pages(txn.stat(Dbi::FREE).unwrap());
+    let mut c = txn.cursor(Dbi::MAIN).unwrap();
+    while let Some((_, v)) = c.next().unwrap() {
+        if v.len() == 48 {
+            let u64_at = |off: usize| u64::from_ne_bytes(v[off..off + 8].try_into().unwrap());
+            used += (u64_at(8) + u64_at(16) + u64_at(24)) as usize;
+        }
+    }
+    let mut f = txn.cursor(Dbi::FREE).unwrap();
+    while let Some((_, v)) = f.next().unwrap() {
+        used += u64::from_ne_bytes(v[..8].try_into().unwrap()) as usize;
+    }
+    let last = env.info().unwrap().last_pgno;
+    assert_eq!(
+        used,
+        last - 1,
+        "{at}: pages 2 to {last} are not all accounted for"
+    );
+}
+
+/// One of the three runs of `capi_unsorted_main.c`: with `child`, a nested
+/// transaction begins and aborts; with `reuse`, "xa" is created then; the
+/// transaction commits. The main DB's records must be C's, in C's order
+/// (the C program's trace against C 0.9 and C 1.0; its driver compares the
+/// files byte for byte).
+fn unsorted_main_run(format: Format, child: bool, reuse: bool) {
+    let at = format!("{format:?}, child {child}, reuse {reuse}");
+    let dir = common::tempdir();
+    let env = open_format(dir.path(), format);
+    let (mut t, dups) = unsorted_main(&env);
+    if child {
+        t.begin_nested_txn().unwrap().abort();
+    }
+    if reuse {
+        let xa = t.create_db(Some("xa"), DatabaseFlags::CREATE).unwrap();
+        // A new database takes a free slot, not the slot of an open one.
+        assert_ne!(xa, dups, "{at}");
+    }
+    // The handle is the parent's still, with its changes.
+    expect(&t, dups, "k", Some(b"v"), &at);
+    t.commit().unwrap();
+
+    let key = |name: &str| name_key(format, name);
+    let empty = Some((0, P_INVALID));
+    let names =
+        |list: &[&str]| -> Vec<MainRecord> { list.iter().map(|n| (key(n), empty)).collect() };
+    let unsorted = (vec![0x89, 0x8a, 0x8b, 0x8c], None);
+    // At commit C puts the record of every database the transaction
+    // changed, all with one cursor, so each search starts on the leaf the
+    // last put left it on: a name the search misses gets a second record
+    // where the search ended.
+    let want: Vec<_> = if reuse {
+        // "xa" was put at the front (C's search for it ended on the only
+        // leaf, and "xa" sorts before its first key); at commit "dups" is
+        // found, "fixed" goes to the front and "xa" to the end.
+        let mut w = names(&["fixed", "xa"]);
+        w.push(unsorted);
+        w.push((key("dups"), Some((1, 3))));
+        w.extend(names(&["fixed", "ints", "plain", "xa"]));
+        w
+    } else {
+        // At commit "dups" is missed and goes to the front.
+        let mut w = vec![(key("dups"), Some((1, 3))), unsorted];
+        w.extend(names(&["dups", "fixed", "ints", "plain"]));
+        w
+    };
+    assert_eq!(main_records(&env), want, "{at}");
+    assert_eq!(env.info().unwrap().last_pgno, 3, "{at}");
+    assert_pages_accounted(&env, &at);
+    drop(env);
+    if format == Format::V09 {
+        if let Some(c) = common::c_tools() {
+            c.peer_ok(&["check-freelist", dir.path().to_str().unwrap()]);
+        }
+    }
+}
+
+/// A nested transaction that aborts keeps the handles of the databases its
+/// parent has a live view of, as C does (it closes only the handles of
+/// databases the child created, `mdb_dbis_update`): the parent commits,
+/// with its changes to them. Before, the abort looked each up in the
+/// parent's main DB to close the handles of databases that do not exist
+/// there (`KNOWN_C_BUGS.md` row 19), missed "dups" in the main DB out of
+/// order and closed its handle: the commit failed with `MDB_BAD_DBI`, or,
+/// once "xa" had taken the slot, lost the put and leaked its page.
+#[test]
+fn child_abort_keeps_parent_handles_in_unsorted_main() {
+    for format in [Format::V09, Format::V10] {
+        unsorted_main_run(format, true, false);
+        unsorted_main_run(format, true, true);
+    }
+}
+
+/// In an LMDB 0.9 file, emptying the main DB removes the records of the
+/// named databases but keeps their handles (`KNOWN_C_BUGS.md` row 21), and
+/// the commit writes back the records of those the transaction changed. A
+/// nested transaction's abort keeps such a handle, as C does: the parent
+/// has a live view of the database. (The abort used to look it up in the
+/// parent's empty main DB and close it; the commit then failed with
+/// `MDB_BAD_DBI`.)
+#[test]
+fn child_abort_keeps_handles_after_the_parent_emptied_the_main_db() {
+    let dir = common::tempdir();
+    let env = open_format(dir.path(), Format::V09);
+    let mut t = env.begin_rw_txn().unwrap();
+    let x = t.create_db(Some("x"), DatabaseFlags::CREATE).unwrap();
+    put(&mut t, x, "a", b"1");
+    t.commit().unwrap();
+    let mut t = env.begin_rw_txn().unwrap();
+    put(&mut t, x, "b", b"2");
+    t.clear_db(Dbi::MAIN).unwrap();
+    t.begin_nested_txn().unwrap().abort();
+    expect(&t, x, "b", Some(b"2"), "after the child");
+    t.commit().unwrap();
+    let r = env.begin_ro_txn().unwrap();
+    expect(&r, x, "a", Some(b"1"), "committed");
+    expect(&r, x, "b", Some(b"2"), "committed");
+}
+
+/// A new database's record goes where C's `mdb_dbi_open` puts it: with the
+/// cursor its search left on the leaf, whose `mdb_cursor_set` puts a name
+/// before the first key at index 0 (a new search of a main DB out of order
+/// put "xa" last).
+#[test]
+fn new_database_record_goes_where_c_puts_it_in_unsorted_main() {
+    for format in [Format::V09, Format::V10] {
+        unsorted_main_run(format, false, true);
+    }
+}
+
+/// What row 19's abort still does in a nested transaction: a handle the
+/// child opened for a database that exists only because the child created
+/// it, registered again (without `DB_NEW`) after its first handle was
+/// closed and that slot reused, is closed when the child aborts. Otherwise
+/// it would name nothing, and `create_db` in the parent would return it.
+#[test]
+fn child_abort_closes_the_handle_of_a_database_only_the_child_had() {
+    for format in [Format::V09, Format::V10] {
+        let dir = common::tempdir();
+        let env = open_format(dir.path(), format);
+        let mut t = env.begin_rw_txn().unwrap();
+        t.create_db(Some("y"), DatabaseFlags::CREATE).unwrap();
+        t.commit().unwrap();
+        env.close_db(env.begin_ro_txn().unwrap().open_db(Some("y")).unwrap());
+
+        let mut t = env.begin_rw_txn().unwrap();
+        let mut c = t.begin_nested_txn().unwrap();
+        let x1 = c.create_db(Some("x"), DatabaseFlags::CREATE).unwrap();
+        env.close_db(x1);
+        // "y" takes the slot, so "x" is found in the main DB and registered
+        // in another, as a database that existed before.
+        assert_eq!(c.open_db(Some("y")).unwrap(), x1);
+        let x2 = c.open_db(Some("x")).unwrap();
+        assert_ne!(x2, x1);
+        c.abort();
+        let e = t.open_db(Some("x")).unwrap_err();
+        assert!(e.not_found(), "{format:?}: {e:?}");
+        let x = t.create_db(Some("x"), DatabaseFlags::CREATE).unwrap();
+        put(&mut t, x, "k", b"x");
+        t.commit().unwrap();
+        let r = env.begin_ro_txn().unwrap();
+        let x = r.open_db(Some("x")).unwrap();
+        expect(&r, x, "k", Some(b"x"), &format!("{format:?}"));
+    }
+}
+
+/// What row 19's abort still does in a nested transaction for a database
+/// another transaction deleted after its handle was opened (here a read
+/// transaction on an older snapshot opened it, as another process could
+/// have deleted it): once the child looked at the handle, its abort closes
+/// it, and `create_db` in the parent creates the database afresh instead
+/// of returning a handle that names nothing (as C's `mdb_dbi_open` would,
+/// finding the name open). The parent has no live view of such a
+/// database, so this does not depend on which transaction registered the
+/// handle: looking only at the handles registered in the child would keep
+/// this one open.
+#[test]
+fn child_abort_closes_the_handle_of_a_database_deleted_elsewhere() {
+    for format in [Format::V09, Format::V10] {
+        let at = format!("{format:?}");
+        let dir = common::tempdir();
+        let env = open_format(dir.path(), format);
+        let mut t = env.begin_rw_txn().unwrap();
+        let gone = t.create_db(Some("gone"), DatabaseFlags::CREATE).unwrap();
+        put(&mut t, gone, "k", b"old");
+        t.commit().unwrap();
+        let old = env.begin_ro_txn().unwrap();
+        let mut t = env.begin_rw_txn().unwrap();
+        t.drop_db(gone).unwrap();
+        t.commit().unwrap();
+        let gone = old.open_db(Some("gone")).unwrap();
+        expect(&old, gone, "k", Some(b"old"), &at);
+        drop(old);
+
+        let mut t = env.begin_rw_txn().unwrap();
+        let c = t.begin_nested_txn().unwrap();
+        // (The record is not found: the handle names nothing.)
+        assert!(c.get(gone, b"k").is_err(), "{at}");
+        c.abort();
+        let db = t.create_db(Some("gone"), DatabaseFlags::CREATE).unwrap();
+        put(&mut t, db, "k", b"new");
+        t.commit().unwrap();
+        let r = env.begin_ro_txn().unwrap();
+        let db = r.open_db(Some("gone")).unwrap();
+        expect(&r, db, "k", Some(b"new"), &at);
     }
 }

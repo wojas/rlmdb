@@ -192,10 +192,22 @@ impl<'txn> RoCursor<'txn> {
     }
 
     /// `mdb_cursor_is_db` (LMDB 1.0): `true` if the cursor is on the record
-    /// of a named database (an `F_SUBDATA` node without `F_DUPDATA`), which
-    /// only the main DB has. `mdb_dump -a` and `mdb_stat -a` of 1.0 list
-    /// the named databases with it.
-    pub fn current_is_db(&self) -> bool {
+    /// of a named database. "Db" means a database opened by name
+    /// ([`Environment::open_db`](crate::Environment::open_db) with
+    /// `Some(name)`): the main DB stores each one's record under its name,
+    /// in a node with the sub-database flag (`F_SUBDATA`) and without the
+    /// duplicates flag (`F_DUPDATA`, which a `DUP_SORT` key's sub-DB also
+    /// has). Only a cursor on the main DB can see one; `mdb_dump -a` and
+    /// `mdb_stat -a` of 1.0 list the named databases with it, where 0.9's
+    /// tools try to open every key of the main DB (or look for 48-byte
+    /// values, the size of a record, which plain values may have too).
+    ///
+    /// Never an error: `false` for any other item and for a cursor that
+    /// is not on a page (never positioned, or `None` from an empty
+    /// database). As in C, a cursor that a failed move left on a page
+    /// (past either end, a [`set`](RoCursor::set) of a missing key) reports
+    /// the node it is still on. The same in both formats.
+    pub fn is_db(&self) -> bool {
         let mc = &self.mc;
         if !mc.is_initialized() || mc.depth() == 0 {
             return false;

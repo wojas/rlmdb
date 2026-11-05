@@ -20,7 +20,7 @@ use std::ptr::{self, NonNull};
 use rlmdb::consts::{FREE_DBI, MDB_DUPSORT};
 use rlmdb::{CursorOp, Dbi, Transaction};
 
-use crate::handles::{CursorAccess, CursorInner, MDB_cursor, MDB_txn};
+use crate::handles::{bad_txn, prepared_dbi_check, CursorAccess, CursorInner, MDB_cursor, MDB_txn};
 use crate::types::*;
 use crate::SUCCESS;
 
@@ -50,18 +50,22 @@ pub unsafe extern "C" fn mdb_get(
         Ok(None) => return EINVAL,
         Err(code) => return code,
     };
-    let result = t.with_txn(EINVAL, |rt| {
-        match rt.get(Dbi::from_raw(dbi), key) {
-            Ok(Some(value)) => {
-                // SAFETY: data is non-NULL and writable (lmdb.h); the
-                // value lives in the map until the transaction ends.
-                unsafe { output(data, value) };
-                Ok(())
+    let result = t.with_txn(
+        EINVAL,
+        |rt| {
+            match rt.get(Dbi::from_raw(dbi), key) {
+                Ok(Some(value)) => {
+                    // SAFETY: data is non-NULL and writable (lmdb.h); the
+                    // value lives in the map until the transaction ends.
+                    unsafe { output(data, value) };
+                    Ok(())
+                }
+                Ok(None) => Err(not_found()),
+                Err(e) => Err(e.to_err_code()),
             }
-            Ok(None) => Err(not_found()),
-            Err(e) => Err(e.to_err_code()),
-        }
-    });
+        },
+        |p| prepared_dbi_check(p, dbi, true).and(Err(bad_txn())),
+    );
     result.err().unwrap_or(SUCCESS)
 }
 
@@ -94,6 +98,10 @@ pub unsafe extern "C" fn mdb_cursor_open(
         Some(t) if !cursor.is_null() => t,
         _ => return EINVAL,
     };
+    // A prepared transaction: C's handle check, then MDB_TXN_BLOCKED.
+    if let Some(checked) = t.prepared_dbi(dbi, false) {
+        return checked.err().unwrap_or_else(bad_txn);
+    }
     let opened = if t.is_read_only() {
         t.with_read(EINVAL, |rt| {
             // SAFETY: the cursor is registered with `t` below, which drops
@@ -152,8 +160,10 @@ pub unsafe extern "C" fn mdb_cursor_renew(txn: *mut MDB_txn, cursor: *mut MDB_cu
     // SAFETY: cursor is a live handle (lmdb.h).
     let c = unsafe { handle.as_ref() };
     let dbi = c.dbi();
-    if c.write_id().is_some() || !t.is_read_only() {
-        // C: C_UNTRACK cursor or a transaction with mt_cursors.
+    let of_write_txn = c.txn().is_some_and(|o| !o.is_read_only());
+    if c.write_id().is_some() || of_write_txn || !t.is_read_only() {
+        // C: C_UNTRACK cursor (also one mdb_txn_prepare closed) or a
+        // transaction with mt_cursors.
         return EINVAL;
     }
     let result = t.with_read(EINVAL, |rt| {

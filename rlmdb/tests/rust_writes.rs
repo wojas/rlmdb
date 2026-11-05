@@ -195,7 +195,7 @@ fn gen_vectors_match_cpeer() {
 #[test]
 fn plain_random_order_main_db() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let ds = Dataset::new(None, 5000, 11).finish();
     let env = open_env(dir.path());
     fill(&env, &ds, 0);
@@ -208,7 +208,7 @@ fn plain_random_order_main_db() {
 /// Writes `ds` with Rust (`how`), then checks it with C and Rust.
 fn run_variant(ds: Dataset, how: Fill) {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = open_env(dir.path());
     match how {
         Fill::Put(per_txn) => {

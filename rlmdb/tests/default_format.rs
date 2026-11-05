@@ -1,20 +1,23 @@
 //! The format of new environments that do not ask for one
 //! (`DUAL_FORMAT.md` §4.2): the process default of
 //! `rlmdb::set_default_format`, then the experimental `RLMDB_DEFAULT_FORMAT`
-//! variable, then LMDB 0.9; and that none of them changes what an existing
-//! file is opened as.
+//! variable, then the builder's fallback (`fallback_format`, LMDB 0.9
+//! unless set); and that none of them changes what an existing file is
+//! opened as.
 //!
 //! The process default and the variable are process-wide, so every test of
 //! this file holds [`SERIAL`] and resets both before it returns. They are
 //! in a test binary of their own: no other test opens an environment while
 //! one of them has the variable set.
 
+mod common;
+
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use rlmdb::{
-    default_format, process_default_format, set_default_format, Environment, EnvironmentFlags,
-    Error, Format, MdbError, DEFAULT_FORMAT_ENV,
+    default_format, default_format_or, process_default_format, set_default_format, Environment,
+    EnvironmentFlags, Error, Format, MdbError, DEFAULT_FORMAT_ENV,
 };
 
 /// Serialises the tests of this file (see the module documentation).
@@ -47,7 +50,7 @@ impl Drop for Defaults {
 fn tmp() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("rlmdb-defmt-")
-        .tempdir()
+        .tempdir_in(common::scratch_root())
         .unwrap()
 }
 
@@ -180,6 +183,48 @@ fn defaults_never_apply_to_existing_files() {
         matches!(err, Error::Mdb(MdbError::VersionMismatch)),
         "{err:?}"
     );
+}
+
+/// Creates an environment at `dir` without a format request, with
+/// fallback `fallback`, and returns its format.
+fn create_with_fallback(dir: &Path, fallback: Format) -> Format {
+    Environment::builder()
+        .fallback_format(fallback)
+        .open(dir)
+        .unwrap()
+        .format()
+}
+
+#[test]
+fn fallback_format_comes_last() {
+    let d = Defaults::take();
+    assert_eq!(default_format_or(Format::V10), Format::V10);
+    assert_eq!(default_format_or(Format::V09), Format::V09);
+    assert_eq!(create_with_fallback(tmp().path(), Format::V10), Format::V10);
+    assert_eq!(create_with_fallback(tmp().path(), Format::V09), Format::V09);
+    // The variable and the process default come first.
+    d.set_var("0.9");
+    assert_eq!(default_format_or(Format::V10), Format::V09);
+    assert_eq!(create_with_fallback(tmp().path(), Format::V10), Format::V09);
+    set_default_format(Some(Format::V10));
+    assert_eq!(default_format_or(Format::V09), Format::V10);
+    assert_eq!(create_with_fallback(tmp().path(), Format::V09), Format::V10);
+    set_default_format(None);
+    std::env::remove_var(DEFAULT_FORMAT_ENV);
+    // A request of the builder wins.
+    let dir = tmp();
+    let env = Environment::builder()
+        .fallback_format(Format::V10)
+        .format(Format::V09)
+        .open(dir.path())
+        .unwrap();
+    assert_eq!(env.format(), Format::V09);
+    drop(env);
+    // An existing file keeps its format: no MDB_VERSION_MISMATCH.
+    assert_eq!(create_with_fallback(dir.path(), Format::V10), Format::V09);
+    let old10 = tmp();
+    assert_eq!(create_with_fallback(old10.path(), Format::V10), Format::V10);
+    assert_eq!(create_with_fallback(old10.path(), Format::V09), Format::V10);
 }
 
 #[test]

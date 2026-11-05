@@ -31,6 +31,11 @@ repository cites an upstream commit (`ff3f48f`, `a69ce88`, `d4dc8e2`, `4865523`,
   (`LMDB10_LIB_FILES` and `UPSTREAM10_PROGRAMS`).
 * `LICENSE` and `COPYRIGHT` of upstream, in both directories.
 
+`rlmdb-capi/include/lmdb.h`, the public header of rlmdb's C libraries, is
+`1.0/lmdb.h` with one comment in front; `scripts/update-c-sources.sh`
+writes it with the two directories, and `rlmdb-capi`'s tests check that
+the two agree.
+
 Upstream's man pages, `Makefile`, documentation, `CHANGES`, `mplay.c` and
 sample programs are not copied: the build scripts and test helpers compile
 the sources themselves, with the flags of the upstream `Makefile`. For the
@@ -57,8 +62,19 @@ ChaCha implementation, as in upstream.
 ## Patches
 
 The files are always upstream's at the pinned commit with the patches of
-`patches/0.9/` and `patches/1.0/` applied in name order; there are none at
-the moment. `patches/README.md` describes the convention.
+`patches/0.9/` and `patches/1.0/` applied in name order.
+`patches/README.md` describes the convention. `patches/0.9/` is empty;
+`patches/1.0/` fixes C bugs that kept the tests from a working C side,
+each with its `KNOWN_C_BUGS.md` row:
+
+| Patch | Fixes |
+|-------|-------|
+| `0001-mdb_dump-i-stale-errno.patch` | `mdb_dump -i`: "invalid txnid" with the `errno` an earlier `-i` left (row 76) |
+| `0002-mdb_strerror-windows-buffer.patch` | `mdb_strerror` on Windows returned its stack buffer, NULL with MinGW-w64's gcc (row 75) |
+| `0003-incr-load-windows-end-of-pipe.patch` | `mdb_env_incr_loadfd` on Windows: the end of a pipe is the end of the input, a failed read returns its error (row 66) |
+
+Each keeps the line count of its file, so the line numbers this
+repository cites are upstream's.
 
 ## Updating
 
@@ -67,13 +83,14 @@ the moment. `patches/README.md` describes the convention.
    another file.
 2. Run `scripts/update-c-sources.sh`. It fetches the pinned commits from
    upstream (`git fetch --depth 1`) into a temporary repository, extracts
-   the files, applies the patches and re-creates `0.9/` and `1.0/`,
-   reporting what differed. A patch that no longer applies stops it; fix
-   or drop the patch and run it again.
+   the files, applies the patches and re-creates `0.9/` and `1.0/` and
+   `rlmdb-capi/include/lmdb.h`, reporting what differed. A patch that no
+   longer applies stops it; fix or drop the patch and run it again.
 3. Update this file and the commit cited in the documentation
    (`DESIGN.md`, `COMPATIBILITY.md`, `DUAL_FORMAT.md`, `interop/README.md`),
    then run `scripts/check-all.sh`: a new C version is a new oracle, and
    tests that compare layouts or messages may need attention.
 
 `scripts/update-c-sources.sh --check` only compares: it exits with status 1
-when the tree is not upstream plus patches.
+when the tree (or `rlmdb-capi/include/lmdb.h`) is not upstream plus
+patches.

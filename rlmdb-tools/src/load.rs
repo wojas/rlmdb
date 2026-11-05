@@ -4,7 +4,7 @@
 //! [`crate::dumpfmt`]).
 //!
 //! ```text
-//! mdb_load [-V] [-a] [-f input] [-F 0.9|1.0] [-n] [-s name] [-N] [-T] dbpath
+//! mdb_load [-V] [-a] [-f input] [-F 0.9|1.0] [-i] [-n] [-s name] [-N] [-T] dbpath
 //! ```
 //!
 //! The input is read exactly as C reads it: same header keywords and
@@ -23,6 +23,26 @@
 //! (`mdb_env_set_pagesize`, an invalid size is ignored) and a record with an
 //! empty key is skipped with a warning; 0.9's tool warns about
 //! `db_pagesize=` as an unknown keyword and fails on an empty key.
+//!
+//! `-i` is LMDB 1.0's: the input is an incremental dump (`mdb_dump -i`),
+//! which [`rlmdb::Environment::incr_load`] applies to the environment, as
+//! `tests/lmdb-c/1.0/mdb_load.c` does (no header, no text; `-a`, `-s`,
+//! `-N` and `-T` are ignored). The environment is opened (and created if
+//! need be) with `MDB_NOSYNC` and the defaults, as in C; the load itself
+//! writes each dump's meta pages after its data pages and syncs before and
+//! after them, where C writes the meta pages first and does not sync
+//! (`KNOWN_C_BUGS.md` row 65). An interrupted load keeps the base's meta
+//! pages, and the base snapshot whole only if the dump spans at most two
+//! commits; a dump cut at a record boundary looks whole. So load onto a
+//! copy that can be thrown away, or keep the base until the load has
+//! succeeded; loading the same dump again completes an interrupted one.
+//! Incremental dumps exist only for LMDB 1.0, so `-i` always means
+//! 1.0: a new environment is a 1.0 one with the default page size (C 1.0's
+//! tool creates 1.0 files), whatever the experimental
+//! `RLMDB_DEFAULT_FORMAT` says; `-F 0.9` with `-i` is a usage error, before
+//! anything is opened; an existing environment keeps its format (a 0.9
+//! one fails in the load, `ENOTSUP`). Messages: "mdb_env_open failed, …",
+//! "mdb_env_incr_load failed, error N …".
 //!
 //! Deliberate differences from C 0.9.37:
 //!
@@ -54,7 +74,7 @@ use crate::dumpfmt::decode_line_into;
 use crate::getopt::{GetOpt, Opt};
 use crate::output::eprint_bytes;
 
-const SYNOPSIS: &str = "[-V] [-a] [-f input] [-F 0.9|1.0] [-n] [-s name] [-N] [-T] dbpath";
+const SYNOPSIS: &str = "[-V] [-a] [-f input] [-F 0.9|1.0] [-i] [-n] [-s name] [-N] [-T] dbpath";
 
 /// The page sizes `mdb_env_set_pagesize` (LMDB 1.0) accepts.
 const SET_PAGESIZE: std::ops::RangeInclusive<u32> = 256..=65536;
@@ -246,11 +266,16 @@ impl Input {
             })
     }
 
-    /// `maxreaders=`: [`plain_decimal`](Self::plain_decimal), 32 bits.
+    /// `maxreaders=`: [`plain_decimal`](Self::plain_decimal), at most
+    /// `MAX_READERS_LIMIT`, which the library refuses beyond (C takes any
+    /// count, `KNOWN_C_BUGS.md` row 60); a larger count is "invalid
+    /// maxreaders" too, before any environment is created.
     fn max_readers(&self, rest: &[u8]) -> Result<u32, ()> {
         self.plain_decimal(rest, "maxreaders")?
             .try_into()
-            .map_err(|_| {
+            .ok()
+            .filter(|&n| n <= rlmdb::consts::MAX_READERS_LIMIT)
+            .ok_or_else(|| {
                 self.message(&[b"invalid maxreaders ", cstr(strip_newline(rest)), b"\n"].concat());
             })
     }
@@ -341,6 +366,8 @@ struct Options {
     plain: bool,
     /// `-F 0.9|1.0`: the format of a new environment.
     format: Option<Format>,
+    /// `-i`: load an incremental dump.
+    incr: bool,
 }
 
 /// The `main` of `mdb_load`; returns the exit code.
@@ -349,7 +376,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         return tool.usage(SYNOPSIS);
     }
     let mut o = Options::default();
-    let mut getopt = GetOpt::new(args, "af:F:ns:NQTV");
+    let mut getopt = GetOpt::new(args, "af:F:ins:NQTV");
     while let Some(opt) = getopt.next() {
         match opt {
             Opt::Flag(b'V') => return tool.version(),
@@ -370,6 +397,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
                     return EXIT_FAILURE;
                 }
             },
+            Opt::Flag(b'i') => o.incr = true,
             Opt::Flag(b'n') => o.no_sub_dir = true,
             Opt::Arg(b's', name) => o.subname = Some(name),
             Opt::Flag(b'N') => o.no_overwrite = true,
@@ -388,6 +416,13 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         return tool.usage(SYNOPSIS);
     }
     let envname = &operands[0];
+    if o.incr {
+        if o.format == Some(Format::V09) {
+            tool.eprint_prog(&[b"-i loads LMDB 1.0 environments only, not with -F 0.9\n"]);
+            return tool.usage(SYNOPSIS);
+        }
+        return load_incremental(o, envname);
+    }
 
     // As C reads it: in text mode on Windows (`output::text_input`).
     let reader: Box<dyn BufRead> = match o.input.take() {
@@ -485,6 +520,53 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         }
     }
     0
+}
+
+/// `-i`: open the environment and apply the incremental dump on the input
+/// (`-f`'s file, else standard input, read as bytes).
+fn load_incremental(o: Options, envname: &[u8]) -> i32 {
+    let mut flags = EnvironmentFlags::NO_SYNC;
+    if o.no_sub_dir {
+        flags |= EnvironmentFlags::NO_SUB_DIR;
+    }
+    let mut builder = Environment::builder();
+    builder.flags(flags);
+    // -F is 1.0 here. Without it a new environment is 1.0 too, whatever
+    // the process default or the variable says; an existing one keeps its
+    // format (a file that cannot be sniffed fails at the open).
+    let new = matches!(rlmdb::sniff_format(path_of(envname), flags), Ok(None));
+    if o.format.is_some() || new {
+        builder.format(Format::V10);
+    }
+    let mut env = match builder.open_with_permissions(path_of(envname), 0o664) {
+        Ok(env) => env,
+        Err(e) => {
+            report_failed("mdb_env_open", &e);
+            return EXIT_FAILURE;
+        }
+    };
+    let rc = match o.input {
+        Some(file) => env.incr_load(file),
+        None => stdin_file().and_then(|file| env.incr_load(file)),
+    };
+    match rc {
+        Ok(()) => 0,
+        Err(e) => {
+            report_failed("mdb_env_incr_load", &e);
+            EXIT_FAILURE
+        }
+    }
+}
+
+/// Standard input's descriptor (on Windows its handle) as a file, read
+/// without the text-mode translation (C 1.0's `mdb_load -i` reads
+/// `MDB_STDIN` with `read`/`ReadFile`).
+fn stdin_file() -> Result<File, rlmdb::Error> {
+    #[cfg(unix)]
+    let fd = std::os::fd::AsFd::as_fd(&io::stdin()).try_clone_to_owned()?;
+    #[cfg(windows)]
+    let fd = std::os::windows::io::AsHandle::as_handle(&io::stdin()).try_clone_to_owned()?;
+    Ok(File::from(fd))
 }
 
 /// The state of a load: the environment, the input and the put options.

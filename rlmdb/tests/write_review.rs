@@ -22,7 +22,7 @@ fn env(dir: &std::path::Path) -> Environment {
 /// duplicates (KNOWN_C_BUGS.md row 27). Nothing to fetch is the answer.
 #[test]
 fn get_multiple_on_a_single_item_after_a_key_with_duplicates() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env(dir.path());
     let flags = DatabaseFlags::CREATE | DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED;
     let mut txn = env.begin_rw_txn().unwrap();
@@ -98,10 +98,12 @@ fn get_multiple_on_a_single_item_after_a_key_with_duplicates() {
 /// `mdb_cursor_get` does not. C finds the sub-cursor uninitialised
 /// (`mdb_cursor_set` clears it) and returns `MDB_NOTFOUND`. The same probe
 /// runs the other operations whose dispatch does not start from the current
-/// key; every result and position must be C's.
+/// key; every result and position must be C's, but for `MDB_NEXT_MULTIPLE`
+/// into the duplicates of a key the search left the cursor on, which C
+/// fetches from a stale record (`KNOWN_C_BUGS.md` row 59).
 #[test]
 fn cursor_ops_after_a_failed_set_on_dupfixed() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env(dir.path());
     let flags = DatabaseFlags::CREATE | DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED;
     let key = |i: u32| format!("k{i:05}").into_bytes();
@@ -109,6 +111,7 @@ fn cursor_ops_after_a_failed_set_on_dupfixed() {
     let db = txn.create_db(Some("f"), flags).unwrap();
     // Even keys exist: some with a single item, most with a few
     // duplicates, a few with several pages of them (a sub-DB).
+    let mut pairs = Vec::new();
     for i in (0..800).step_by(2) {
         let n = match i {
             _ if i % 97 == 0 => 5000,
@@ -116,8 +119,9 @@ fn cursor_ops_after_a_failed_set_on_dupfixed() {
             _ => i % 5 + 2,
         };
         for d in 0..n {
-            txn.put(db, &key(i), &(d * 2 + 1).to_be_bytes(), WriteFlags::empty())
-                .unwrap();
+            let item = (d * 2 + 1u32).to_be_bytes();
+            txn.put(db, &key(i), &item, WriteFlags::empty()).unwrap();
+            pairs.push((key(i), item.to_vec()));
         }
     }
     txn.commit().unwrap();
@@ -225,6 +229,15 @@ fn cursor_ops_after_a_failed_set_on_dupfixed() {
             assert_eq!(rl, "next_multiple rc=-30798 d=- | cur rc=-30798 k=- d=-");
             continue;
         }
+        // KNOWN_C_BUGS.md row 59: a failed exact search left the cursor on
+        // a key with duplicates and the sub-cursor reset; C's
+        // MDB_NEXT_MULTIPLE fetches from the record its sub-cursor last had
+        // (MDB_FIRST's, the first key's sub-DB), Rust the key's own first
+        // page.
+        if cl != *rl && common::stale_dup_record(&ops[i], &rust[i - 1], rl, &pairs) {
+            assert_eq!(c_lines[i - 1], rust[i - 1]);
+            continue;
+        }
         assert_eq!(&cl, rl, "op {i}: {}, after {:?}", ops[i], &ops[i - 2..i]);
     }
 }
@@ -239,7 +252,7 @@ fn cursor_ops_after_a_failed_set_on_dupfixed() {
 /// everywhere. C must run every op, as Rust does.
 #[test]
 fn cursorops_runs_a_script_larger_than_arg_max() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env(dir.path());
     // Small records first, for the many short ops (every line prints the
     // current record); then the large ones, for the long ops.
@@ -415,7 +428,7 @@ fn c_scenario(n: u32) -> Option<String> {
     let bin = BIN
         .get_or_init(|| c_program("scenarios", C_SCENARIOS))
         .as_ref()?;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let out = Command::new(bin)
         .arg(dir.path())
         .arg(n.to_string())
@@ -445,7 +458,7 @@ fn item(k: &str, d: &str) -> Option<(Vec<u8>, Vec<u8>)> {
 /// deleted node `C_DEL` (KNOWN_C_BUGS.md row 29).
 #[test]
 fn next_after_a_delete_before_the_cursor() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env(dir.path());
     let mut txn = env.begin_rw_txn().unwrap();
     let db = dupsort_txn_db(&mut txn);
@@ -476,7 +489,7 @@ fn next_after_a_delete_before_the_cursor() {
 /// next `MDB_NEXT` returned its item again (KNOWN_C_BUGS.md row 29).
 #[test]
 fn next_after_another_cursor_adds_a_duplicate() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env(dir.path());
     let mut txn = env.begin_rw_txn().unwrap();
     let db = dupsort_txn_db(&mut txn);
@@ -501,7 +514,7 @@ fn next_after_another_cursor_adds_a_duplicate() {
 /// that `MDB_APPEND` put alone on a new page.
 #[test]
 fn next_after_last_sees_items_added_after_it() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env(dir.path());
     let mut txn = env.begin_rw_txn().unwrap();
     let db = dupsort_txn_db(&mut txn);
@@ -555,7 +568,7 @@ fn next_after_last_sees_items_added_after_it() {
         format!("p:{}:{}:{}", h(b"k3"), h(&v), rlmdb::consts::MDB_APPEND),
         format!("g:0:{}", rlmdb::consts::MDB_NEXT),
     ];
-    let cdir = tempfile::tempdir().unwrap();
+    let cdir = common::tempdir();
     let mut child = Command::new(tools.bin("writeops"))
         .arg(cdir.path())
         .args(["t", "0", "1"])
@@ -584,7 +597,7 @@ fn next_after_last_sees_items_added_after_it() {
 /// (KNOWN_C_BUGS.md row 28; found by the model test, seed 28).
 #[test]
 fn delete_by_a_cursor_with_a_stale_eof() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env(dir.path());
     let mut txn = env.begin_rw_txn().unwrap();
     let db = dupsort_txn_db(&mut txn);
@@ -611,7 +624,7 @@ fn delete_by_a_cursor_with_a_stale_eof() {
 /// half-changed tree (C's `MDB_TXN_ERROR`).
 #[test]
 fn a_write_that_hits_a_corrupt_page_cannot_be_committed() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let ps;
     {
         let env = env(dir.path());
@@ -667,7 +680,7 @@ fn panicky_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 fn a_panicking_comparator_fails_the_transaction() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::Ordering::SeqCst;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env(dir.path());
     let mut txn = env.begin_rw_txn().unwrap();
     let db = dupsort_txn_db(&mut txn);
@@ -727,7 +740,7 @@ fn a_panicking_comparator_fails_the_transaction() {
 /// written and the count tells the caller none were (KNOWN_C_BUGS.md row 30).
 #[test]
 fn put_multiple_does_not_stop_at_an_existing_single_item() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env(dir.path());
     let mut txn = env.begin_rw_txn().unwrap();
     let f = txn
@@ -803,7 +816,7 @@ fn assert_refused(txn: &mut rlmdb::RwTxn<'_>, id: rlmdb::CursorId, what: &str) {
 /// arena now, which no other transaction shares.
 #[test]
 fn cursor_ids_of_another_environment_are_refused() {
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (dir_a, dir_b) = (common::tempdir(), common::tempdir());
     let (env_a, env_b) = (env(dir_a.path()), env(dir_b.path()));
     let mut ta = env_a.begin_rw_txn().unwrap();
     let mut tb = env_b.begin_rw_txn().unwrap();
@@ -840,7 +853,7 @@ fn cursor_ids_of_another_environment_are_refused() {
 /// transaction that ended, in its parent.
 #[test]
 fn cursor_ids_of_an_ended_transaction_are_refused() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env(dir.path());
     for (n, end) in [(17, "commit"), (1, "commit"), (17, "abort"), (1, "abort")] {
         let what = format!("{n} cursors, {end}");

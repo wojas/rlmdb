@@ -21,6 +21,13 @@
 //! * A handle with a lock file and a `NO_LOCK` handle never share a file
 //!   (their readers would be invisible to each other's writers): whichever
 //!   comes second gets `EBUSY`.
+//! * A `NO_LOCK` handle opened with `PREV_SNAPSHOT` claims the file as a
+//!   handle with a lock file does, until its first commit
+//!   ([`Registration::share`]): it reads and writes on top of the previous
+//!   snapshot, which the other handles' readers and writers know nothing
+//!   of. This is the in-process counterpart of the exclusive lock that C
+//!   keeps on the lock file until then (C coordinates nothing without
+//!   one).
 //!
 //! There are three keys, each claimed before the step it guards. The
 //! canonical path is claimed first, before any file is opened. The identity
@@ -74,7 +81,9 @@ pub(crate) struct LocalShared {
     /// transactions publish and pin as they would the lock file's (see
     /// `RoTxn::take_snapshot`). [`TXNID_UNKNOWN`] until the first handle
     /// has read the file's header ([`LocalShared::init_txnid`]); from then
-    /// on changed only under `writer`, and never back.
+    /// on changed only under `writer`, and never back but by a rollback
+    /// (`Environment::rollback`, which a reader of the snapshot it takes
+    /// back stops, or one of another process, [`LocalShared::adopt_txnid`]).
     txnid: AtomicU64,
     /// The read transactions of every handle of the file.
     pub(crate) readers: LocalReaders,
@@ -138,12 +147,14 @@ impl LocalShared {
     }
 
     /// Adopts `newest`, the txnid of the newest meta page, read while
-    /// holding the writer lock (`_writer`), if it is newer than what this
+    /// holding the writer lock (`_writer`), if it differs from what this
     /// process knows: a commit of another process (`NO_LOCK` leaves keeping
     /// processes apart to the caller, as in C, so such a commit happened
-    /// while no transaction of ours ran). Returns whether it was newer.
+    /// while no transaction of ours ran), or a rollback of another process
+    /// (`Environment::rollback`), after which the newest meta page is older
+    /// than what we know. Returns whether it differed.
     pub(crate) fn adopt_txnid(&self, _writer: &MutexGuard<'_, ()>, newest: u64) -> bool {
-        self.txnid.fetch_max(newest, Ordering::SeqCst) < newest
+        self.txnid.swap(newest, Ordering::SeqCst) != newest
     }
 
     /// Sets the last committed transaction from the newest meta page of the
@@ -172,7 +183,8 @@ struct FileId {
 #[derive(Debug)]
 enum Use<S> {
     /// By one handle with a lock file (or none, but without `NO_LOCK`: a
-    /// read-only environment on a read-only file system).
+    /// read-only environment on a read-only file system), or by a `NO_LOCK`
+    /// handle opened with `PREV_SNAPSHOT` until its first commit.
     Exclusive,
     /// By `handles` `NO_LOCK` handles, sharing `state`.
     Shared { handles: usize, state: S },
@@ -364,6 +376,34 @@ impl Registration {
         Ok(lock_file)
     }
 
+    /// Turns the exclusive claims of a `NO_LOCK` handle opened with
+    /// `PREV_SNAPSHOT` into the shared claims of a `NO_LOCK` handle, with
+    /// `state` (the handle's own) as the state the data file's handles
+    /// share: at the handle's first commit, where C shares the locks of a
+    /// lock file (`mdb_env_share_locks` in `mdb_txn_commit`). From then on
+    /// other `NO_LOCK` handles may open the file.
+    pub(crate) fn share(&self, state: &Arc<LocalShared>) {
+        let mut reg = registry();
+        if let Some(u) = reg.paths.get_mut(&self.path) {
+            if matches!(u, Use::Exclusive) {
+                *u = Use::Shared {
+                    handles: 1,
+                    state: (),
+                };
+            }
+        }
+        for id in &self.data {
+            if let Some(u) = reg.files.get_mut(id) {
+                if matches!(u, Use::Exclusive) {
+                    *u = Use::Shared {
+                        handles: 1,
+                        state: Arc::clone(state),
+                    };
+                }
+            }
+        }
+    }
+
     /// Gives the lock file's claim back, for an open that closed the lock
     /// file to start again ([`LockRegion::open`] after the shared locks
     /// were removed under it). Descriptors that refused opens parked for
@@ -502,9 +542,15 @@ mod tests {
         std::fs::create_dir(&env_dir).unwrap();
         let link = dir.path().join("link");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&env_dir, &link).unwrap();
+        let linked = std::os::unix::fs::symlink(&env_dir, &link);
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&env_dir, &link).unwrap();
+        let linked = std::os::windows::fs::symlink_dir(&env_dir, &link);
+        if let Err(e) = linked {
+            // A volume without symbolic links (exFAT), or a Windows account
+            // without the privilege: nothing to test here.
+            eprintln!("NOTE: no symbolic links in the scratch directory ({e}); skipped");
+            return;
+        }
         let no_lock = EnvironmentFlags::NO_LOCK;
         let no_sub_dir = EnvironmentFlags::NO_SUB_DIR;
         let a = Environment::builder()
@@ -514,7 +560,10 @@ mod tests {
         // Through a symlink (the same canonical path), as the data file
         // itself and through a hard link of it (other paths, the same file).
         let hard = dir.path().join("hard.mdb");
-        std::fs::hard_link(env_dir.join("data.mdb"), &hard).unwrap();
+        if let Err(e) = std::fs::hard_link(env_dir.join("data.mdb"), &hard) {
+            eprintln!("NOTE: no hard links in the scratch directory ({e}); skipped");
+            return;
+        }
         let b = Environment::builder().flags(no_lock).open(&link).unwrap();
         let c = Environment::builder()
             .flags(no_lock | no_sub_dir)

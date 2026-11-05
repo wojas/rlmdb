@@ -222,6 +222,77 @@ cmd_hold_writer(struct opts *o)
 	return 0;
 }
 
+/* ---- prepare, rollback (two-phase commit) -------------------------------- */
+
+/* Put the data set into its DB in one write transaction, mdb_txn_prepare it
+ * (its pages are written, the meta page is not), print READY and wait like
+ * hold-writer; then commit it, or with --abort abort it. A test kills this
+ * process between the phases. */
+int
+cmd_prepare(struct opts *o)
+{
+#if HAVE_TWO_PHASE_COMMIT
+	double secs = parse_seconds(o->pos[1]), start;
+	MDB_env *env;
+	MDB_txn *txn;
+	MDB_dbi dbi;
+	size_t id;
+
+	parse_dataset_args(o, 2);
+	env = open_env(o, 0);
+	txn = begin_write(env);
+	CHECK(mdb_dbi_open(txn, o->ds.db, o->ds.dbflags | MDB_CREATE, &dbi));
+	fill_in_txn(txn, dbi, o);
+	id = mdb_txn_id(txn);
+	CHECK(mdb_txn_prepare(txn));
+	start = now_seconds();
+	printf("READY txnid=%zu pid=%d\n", id, (int)getpid());
+	fflush(stdout);
+	if (o->until_stdin)
+		wait_stdin(start + secs);
+	else
+		sleep_seconds(secs);
+	if (o->abort_txn) {
+		abort_write(txn);
+		printf("aborted txnid=%zu\n", id);
+	} else {
+		commit_write(txn);
+		printf("committed txnid=%zu\n", id);
+	}
+	mdb_env_close(env);
+	return 0;
+#else
+	(void)o;
+	die(EXIT_NOT_IMPLEMENTED, "prepare: LMDB 0.9 has no two-phase commit");
+#endif
+}
+
+/* mdb_env_rollback of <txnid>, or of the last committed transaction
+ * ("last", from mdb_env_info). */
+int
+cmd_rollback(struct opts *o)
+{
+#if HAVE_TWO_PHASE_COMMIT
+	MDB_env *env = open_env(o, 0);
+	size_t id;
+
+	if (!strcmp(o->pos[1], "last")) {
+		MDB_envinfo info;
+		CHECK(mdb_env_info(env, &info));
+		id = info.me_last_txnid;
+	} else {
+		id = (size_t)parse_u64(o->pos[1], "txnid");
+	}
+	CHECK(mdb_env_rollback(env, id));
+	printf("rolled-back txnid=%zu\n", id);
+	mdb_env_close(env);
+	return 0;
+#else
+	(void)o;
+	die(EXIT_NOT_IMPLEMENTED, "rollback: LMDB 0.9 has no two-phase commit");
+#endif
+}
+
 /* ---- shared writer-loop data -------------------------------------------- */
 
 #define DUP_KEYS	64		/* key space of the dups DB */

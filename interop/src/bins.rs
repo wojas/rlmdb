@@ -12,7 +12,7 @@
 //! (`mdb_stat10`, `mtest10`, `mtest2_10`).
 //!
 //! One more C program is linked at test time: [`cpeer_capi`], the C peer
-//! linked against the *Rust* `liblmdb.a` of `rlmdb-capi`.
+//! linked against the *Rust* `librlmdb.a` of `rlmdb-capi`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -178,8 +178,8 @@ pub fn lmdb10_src() -> &'static Path {
     Path::new(env!("INTEROP_LMDB10_SRC"))
 }
 
-/// System libraries a C program needs next to the Rust `liblmdb.a` (as
-/// `rlmdb-capi/README.md` lists them; on macOS the compiler driver adds
+/// System libraries a C program needs next to the Rust `librlmdb.a` (as
+/// `rlmdb-capi/DETAILS.md` lists them; on macOS the compiler driver adds
 /// them).
 fn rust_native_libs() -> &'static [&'static str] {
     if cfg!(all(windows, target_env = "msvc")) {
@@ -260,17 +260,18 @@ fn rust_native_libs() -> &'static [&'static str] {
     }
 }
 
-/// The file name of `rlmdb-capi`'s static library: `lmdb.lib` with MSVC,
-/// `liblmdb.a` everywhere else (MinGW included).
+/// The file name of `librlmdb`'s static library: `rlmdb.lib` with MSVC,
+/// `librlmdb.a` everywhere else (MinGW included).
 const STATICLIB: &str = if cfg!(target_env = "msvc") {
-    "lmdb.lib"
+    "rlmdb.lib"
 } else {
-    "liblmdb.a"
+    "librlmdb.a"
 };
 
-/// The Rust `liblmdb.a` built by cargo for `rlmdb-capi` (a dev-dependency of
-/// this crate, so it is built before the tests): in `target/<profile>/deps`
-/// next to the running test executable, or one level up.
+/// The Rust `librlmdb.a` built by cargo for the `librlmdb` package of
+/// `rlmdb-capi` (a dev-dependency of this crate, so it is built before the
+/// tests): in `target/<profile>/deps` next to the running test executable,
+/// or one level up.
 pub fn rust_staticlib() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let mut dirs = Vec::new();
@@ -286,15 +287,15 @@ pub fn rust_staticlib() -> Result<PathBuf> {
         .find(|p| p.is_file())
         .ok_or_else(|| {
             Error::new(format!(
-                "the Rust liblmdb.a (rlmdb-capi) is not next to {}: build it with \
-                 `cargo test -p rlmdb-interop` (rlmdb-capi is a dev-dependency)",
+                "the Rust librlmdb.a (rlmdb-capi) is not next to {}: build it with \
+                 `cargo test -p rlmdb-interop` (librlmdb is a dev-dependency)",
                 exe.display()
             ))
         })
 }
 
 /// Links `cpeer_capi` from the recipe `build.rs` wrote and the Rust
-/// `liblmdb.a`; returns its path. Written under a temporary name and
+/// `librlmdb.a`; returns its path. Written under a temporary name and
 /// renamed, so concurrent test processes never run a half-written file.
 fn link_cpeer_capi() -> Result<PathBuf> {
     let recipe_path = env!("INTEROP_CPEER_CAPI_LINK");
@@ -344,12 +345,13 @@ fn link_cpeer_capi() -> Result<PathBuf> {
     Ok(out)
 }
 
-/// The C peer linked against the Rust `liblmdb.a` of `rlmdb-capi`
+/// The C peer linked against the Rust `librlmdb.a` of `rlmdb-capi`
 /// ([`crate::Peer::COnRust`]): the same C program as [`cpeer`], compiled
-/// against `rlmdb-capi/include/lmdb.h`, with the library swapped.
+/// against the same LMDB 0.9 `lmdb.h` and rlmdb's `rlmdb.h`, with the
+/// library swapped.
 ///
 /// Linked once per test process (the first call), so it always uses the
-/// `liblmdb.a` the tests were built with.
+/// `librlmdb.a` the tests were built with.
 pub fn cpeer_capi() -> Result<&'static Path> {
     static PATH: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
     match PATH.get_or_init(|| link_cpeer_capi().map_err(|e| e.message().to_owned())) {

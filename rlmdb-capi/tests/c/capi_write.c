@@ -39,7 +39,7 @@ static int checks, failures;
 
 #define OK(expr) RC(expr, 0)
 
-/* A documented difference (README.md): C returns c_rc, Rust rust_rc. */
+/* A documented difference (DETAILS.md): C returns c_rc, Rust rust_rc. */
 #ifdef LMDB_RUST
 #define DIFFERS(expr, c_rc, rust_rc) RC(expr, rust_rc)
 #else
@@ -49,7 +49,7 @@ static int checks, failures;
 #ifdef LMDB_RUST
 #define GAP(name, cond) do { if (cond) { failures++; \
 	fprintf(stderr, "%s:%d: known gap \"%s\" now behaves like C: " \
-		"update the test and rlmdb-capi/README.md\n", __FILE__, __LINE__, name); \
+		"update the test and rlmdb-capi/DETAILS.md\n", __FILE__, __LINE__, name); \
 	} else printf("known gap: %s\n", name); } while (0)
 #define DEVIATION(stmt) do { stmt; } while (0)
 #else
@@ -893,6 +893,435 @@ static void test_dupfixed_small(void)
 
 /* ---------------------------------------------------------------------- */
 
+/* mdb_cursor_count of a cursor on a key after another cursor (or mdb_put)
+ * put duplicates of that key: converting a single item, into a sub-page,
+ * growing it, promoting it to a sub-DB, into a sub-DB, splitting its leaf;
+ * before and after the cursor's item. C's count is the one before the put
+ * (its cursor keeps a stale copy of the duplicates' record,
+ * KNOWN_C_BUGS.md row 14): one short where the node was rewritten, short by
+ * every added item in a sub-DB. rlmdb's is right. The positions are C's
+ * (traced). */
+
+static MDB_val be32(unsigned char *b, unsigned v)
+{
+	b[0] = (unsigned char)(v >> 24);
+	b[1] = (unsigned char)(v >> 16);
+	b[2] = (unsigned char)(v >> 8);
+	b[3] = (unsigned char)v;
+	return bv(b, 4);
+}
+
+static unsigned be32_of(MDB_val d)
+{
+	const unsigned char *b = d.mv_data;
+	return d.mv_size == 4 ? (unsigned)b[0] << 24 | (unsigned)b[1] << 16 |
+		(unsigned)b[2] << 8 | b[3] : 0;
+}
+
+static size_t leaf_pages(MDB_txn *txn, MDB_dbi dbi)
+{
+	MDB_stat st;
+	st.ms_leaf_pages = 0;
+	OK(mdb_stat(txn, dbi, &st));
+	return st.ms_leaf_pages;
+}
+
+/* A new database of `flags` named `name` with keys "a" and "z" around "k".
+ * Puts items 10, 20, ... under "k" until n are there, or (n == 0) until a
+ * put adds a leaf page for the (from-1)-th time (the first time: "k" moves
+ * to a sub-DB; then its leaf splits); returns that put's number. */
+static unsigned fill_k(MDB_txn *txn, const char *name, unsigned flags, unsigned n,
+	int from, MDB_dbi *dbp)
+{
+	unsigned char b[4];
+	MDB_val k = sv("k"), d;
+	unsigned i;
+	int added = 0;
+
+	OK(mdb_dbi_open(txn, name, MDB_CREATE | flags, dbp));
+	d = be32(b, 1);
+	k = sv("a");
+	OK(mdb_put(txn, *dbp, &k, &d, 0));
+	k = sv("z");
+	OK(mdb_put(txn, *dbp, &k, &d, 0));
+	k = sv("k");
+	for (i = 1; n ? i <= n : i < 1000000; i++) {
+		size_t lp = leaf_pages(txn, *dbp);
+		d = be32(b, 10 * i);
+		OK(mdb_put(txn, *dbp, &k, &d, 0));
+		if (!n && leaf_pages(txn, *dbp) != lp && ++added == from)
+			return i;
+	}
+	return n;
+}
+
+/* Cursor A on item `on` of "k" (items 10 ... 10n), then `how`: 0 another
+ * cursor puts `v`, 1 mdb_put puts it, 2 MDB_MULTIPLE puts v, v+1, v+2. */
+static void count_case(MDB_txn *txn, const char *what, unsigned flags, int how,
+	unsigned n, unsigned on, unsigned v)
+{
+	static int seq;
+	unsigned char b[4], items[12];
+	char name[32];
+	MDB_dbi db;
+	MDB_cursor *a, *c;
+	MDB_val k, d, m[2];
+	size_t cnt, truth;
+	unsigned added = how == 2 ? 3 : 1, cur, next, prev;
+	int rc, rc_next, rc_prev;
+
+	snprintf(name, sizeof(name), "count%d", seq++);
+	fill_k(txn, name, flags, n, 0, &db);
+	OK(mdb_cursor_open(txn, db, &a));
+	OK(mdb_cursor_open(txn, db, &c));
+	k = sv("k");
+	d = be32(b, on);
+	OK(mdb_cursor_get(a, &k, &d, MDB_GET_BOTH));
+	d = be32(b, v);
+	if (how == 0) {
+		OK(mdb_cursor_put(c, &k, &d, 0));
+	} else if (how == 1) {
+		OK(mdb_put(txn, db, &k, &d, 0));
+	} else {
+		be32(items, v);
+		be32(items + 4, v + 1);
+		be32(items + 8, v + 2);
+		m[0] = bv(items, 4);
+		m[1].mv_size = 3;
+		m[1].mv_data = NULL;
+		OK(mdb_cursor_put(c, &k, m, MDB_MULTIPLE));
+	}
+	OK(mdb_cursor_get(c, &k, &d, MDB_SET));
+	OK(mdb_cursor_count(c, &truth));
+	CHECK(truth == n + added);
+	OK(mdb_cursor_count(a, &cnt));
+#ifdef LMDB_RUST
+	CHECK(cnt == truth);
+#else
+	CHECK(cnt < truth);	/* stale, KNOWN_C_BUGS.md row 14 */
+#endif
+	rc = mdb_cursor_get(a, &k, &d, MDB_GET_CURRENT);
+	cur = rc ? 0 : be32_of(d);
+	rc_next = mdb_cursor_get(a, &k, &d, MDB_NEXT_DUP);
+	next = rc_next ? 0 : be32_of(d);
+	rc_prev = mdb_cursor_get(a, &k, &d, MDB_PREV_DUP);
+	prev = rc_prev ? 0 : be32_of(d);
+	T("count after a put, %s (flags %#x, %s): %zu items, A on %u (%d), next dup %u (%d), "
+		"then previous %u (%d)", what, flags, how == 0 ? "cursor" : how == 1 ? "mdb_put" :
+		"MDB_MULTIPLE", truth, cur, rc, next, rc_next, prev, rc_prev);
+	mdb_cursor_close(a);
+	mdb_cursor_close(c);
+}
+
+static void test_count_after_other_put(void)
+{
+	MDB_env *env = new_env("count", 1UL << 24, 200, 0);
+	unsigned flags[2] = { MDB_DUPSORT | MDB_DUPFIXED, MDB_DUPSORT };
+	MDB_txn *txn;
+	MDB_dbi probe;
+	unsigned s, t;
+	char name[32];
+	int f, how;
+
+	OK(mdb_txn_begin(env, NULL, 0, &txn));
+	for (f = 0; f < 2; f++) {
+		snprintf(name, sizeof(name), "probe%d", f);
+		/* "k" moves to a sub-DB with item s, its leaf splits with item t */
+		s = fill_k(txn, name, flags[f], 0, 1, &probe);
+		snprintf(name, sizeof(name), "probe-split%d", f);
+		t = fill_k(txn, name, flags[f], 0, 2, &probe);
+		CHECK(s > 4 && t > s);
+		for (how = 0; how < (f == 0 ? 3 : 2); how++) {
+			count_case(txn, "single item, after", flags[f], how, 1, 10, 15);
+			count_case(txn, "single item, before", flags[f], how, 1, 10, 5);
+			count_case(txn, "sub-page, after", flags[f], how, 3, 20, 25);
+			count_case(txn, "sub-page, before", flags[f], how, 3, 20, 15);
+			count_case(txn, "sub-page grows", flags[f], how, 4, 20, 45);
+			count_case(txn, "to a sub-DB, after", flags[f], how, s - 1, 20, 10 * s + 5);
+			count_case(txn, "to a sub-DB, before", flags[f], how, s - 1, 20, 5);
+			count_case(txn, "sub-DB, after", flags[f], how, s + 5, 20, 25);
+			count_case(txn, "sub-DB, before", flags[f], how, s + 5, 20, 15);
+			count_case(txn, "sub-DB leaf splits, after", flags[f], how, t - 1, 10, 10 * t + 5);
+			count_case(txn, "sub-DB leaf splits, before", flags[f], how, t - 1,
+				10 * (t - 1), 5);
+		}
+	}
+	OK(mdb_txn_commit(txn));
+	mdb_env_close(env);
+}
+
+/* ---------------------------------------------------------------------- */
+
+/* Moves after a failed exact search (KNOWN_C_BUGS.md row 59). Cursor A's
+ * MDB_SET of "b" leaves it on the node of "k" (between "a" and "z") with
+ * its sub-cursor reset; MDB_NEXT or MDB_PREV then enters the duplicates of
+ * "k". C enters them with what the sub-cursor last held: a record from
+ * before another cursor added items to "k" (the count is short; after the
+ * sub-DB's root split the walk sees only the old root; where the put moved
+ * a sub-page C reads the main leaf as its root and crashes), another key's
+ * record ("m", whose items C walks under the key "k"), none (a new cursor,
+ * row 6: C asserts), or a C_DEL mark left by a delete ("b" deleted under
+ * the cursor, row 29: C's MDB_NEXT returns the first item twice). rlmdb
+ * sets the sub-cursor up from the node. The cases C survives run against
+ * both libraries (C's results written in the checks), the others against
+ * rlmdb only. */
+
+enum { ON_K, ON_M, FRESH, DELETED };
+
+/* What miss_case() saw. */
+struct miss {
+	unsigned total, min, max;	/* items of "k" in the end, the smallest,
+					 * the largest */
+	int rc_count, rc_cur;	/* count and MDB_GET_CURRENT after the search
+				 * (not for DELETED: 0) */
+	int rc;			/* the move */
+	size_t count;		/* count after it */
+	unsigned first;		/* the item it returned */
+	unsigned seen, sorted;	/* items of "k" the walk saw, how many in order */
+	unsigned fourbyte;	/* how many had 4 bytes */
+	char end;		/* the key the walk ended on, '-' for none */
+};
+
+#define TRY(expr) do { int rc_ = (expr); if (rc_) return rc_; } while (0)
+
+/* A new database with "a" and "z" (item 1) and "k" (items 10 ... 10n),
+ * "m" with nm items of 8 bytes (ON_M) or "b" (DELETED); A positioned as
+ * `before` says, then the failed MDB_SET; another cursor adds the items 5,
+ * 15, ... (`add` of them, with MDB_MULTIPLE if `multiple`); then `op` and
+ * the same move while on "k". No checks of its own (the cases C crashes
+ * on run in DEVIATION()): 0, or the error of a step before the move. */
+static int miss_case(MDB_txn *txn, unsigned flags, unsigned n, int before, unsigned nm,
+	unsigned add, int multiple, MDB_cursor_op op, struct miss *r)
+{
+	static int seq;
+	unsigned char b[4], b8[8], *items;
+	char name[32];
+	MDB_dbi db;
+	MDB_cursor *a, *c;
+	MDB_val k, d, m[2];
+	unsigned i, v, prev = 0;
+	int rc;
+
+	memset(r, 0, sizeof(*r));
+	r->total = n + add;
+	r->min = add ? 5 : 10;
+	r->max = add && 10 * (add - 1) + 5 > 10 * n ? 10 * (add - 1) + 5 : 10 * n;
+	snprintf(name, sizeof(name), "miss%d", seq++);
+	TRY(mdb_dbi_open(txn, name, MDB_CREATE | flags, &db));
+	d = be32(b, 1);
+	k = sv("a");
+	TRY(mdb_put(txn, db, &k, &d, 0));
+	k = sv("z");
+	TRY(mdb_put(txn, db, &k, &d, 0));
+	if (before == DELETED) {
+		k = sv("b");
+		TRY(mdb_put(txn, db, &k, &d, 0));
+	}
+	k = sv("k");
+	for (i = 1; i <= n; i++) {
+		d = be32(b, 10 * i);
+		TRY(mdb_put(txn, db, &k, &d, 0));
+	}
+	k = sv("m");
+	for (i = 0; before == ON_M && i < nm; i++) {
+		memset(b8, 0, 4);
+		be32(b8 + 4, i);
+		d = bv(b8, 8);
+		TRY(mdb_put(txn, db, &k, &d, 0));
+	}
+	TRY(mdb_cursor_open(txn, db, &a));
+	TRY(mdb_cursor_open(txn, db, &c));
+	if (before != FRESH) {
+		k = sv(before == ON_K ? "k" : before == ON_M ? "m" : "b");
+		TRY(mdb_cursor_get(a, &k, &d, MDB_SET));
+	}
+	if (before == DELETED) {
+		k = sv("b");
+		TRY(mdb_del(txn, db, &k, NULL));
+	}
+	k = sv("b");
+	rc = mdb_cursor_get(a, &k, &d, MDB_SET);
+	if (rc != MDB_NOTFOUND)
+		return rc ? rc : -1;
+	r->rc_count = mdb_cursor_count(a, &r->count);
+	/* C's MDB_GET_CURRENT through the sub-cursor clears its C_DEL, also
+	 * when it fails. */
+	if (before != DELETED)
+		r->rc_cur = mdb_cursor_get(a, &k, &d, MDB_GET_CURRENT);
+	k = sv("k");
+	if (multiple) {
+		items = malloc(4 * add);
+		for (i = 0; i < add; i++)
+			be32(items + 4 * i, 10 * i + 5);
+		m[0] = bv(items, 4);
+		m[1].mv_size = add;
+		m[1].mv_data = NULL;
+		rc = mdb_cursor_put(c, &k, m, MDB_MULTIPLE);
+		free(items);
+		TRY(rc);
+	}
+	for (i = 0; !multiple && i < add; i++) {
+		d = be32(b, 10 * i + 5);
+		TRY(mdb_cursor_put(c, &k, &d, 0));
+	}
+	r->count = 0;
+	rc = r->rc = mdb_cursor_get(a, &k, &d, op);
+	if (!rc) {
+		r->first = be32_of(d);
+		if (mdb_cursor_count(a, &r->count))
+			r->count = 0;
+	}
+	while (!rc && veq(k, "k")) {
+		v = be32_of(d);
+		r->fourbyte += d.mv_size == 4;
+		r->sorted += !r->seen || (op == MDB_NEXT ? v > prev : v < prev);
+		r->seen++;
+		prev = v;
+		rc = mdb_cursor_get(a, &k, &d, op);
+	}
+	r->end = rc ? '-' : *(char *)k.mv_data;
+	mdb_cursor_close(a);
+	mdb_cursor_close(c);
+	return 0;
+}
+
+/* rlmdb's result: every item of "k" once, in order, from the first (the
+ * last for MDB_PREV), and the right count. */
+static int miss_right(const struct miss *r, MDB_cursor_op op)
+{
+	return r->first == (op == MDB_NEXT ? r->min : r->max) && r->count == r->total &&
+		r->seen == r->total && r->sorted == r->total && r->fourbyte == r->total;
+}
+
+/* How C's walk differs from rlmdb's, in the cases it survives. */
+enum { C_RIGHT, C_COUNT, C_OLD_ROOT, C_OTHER_KEY, C_TWICE };
+
+/* A case run against both libraries. */
+static void miss_both(MDB_txn *txn, const char *what, unsigned flags, unsigned n, int before,
+	unsigned nm, unsigned add, int multiple, MDB_cursor_op op, int c_result)
+{
+	struct miss r;
+
+	RC(miss_case(txn, flags, n, before, nm, add, multiple, op, &r), 0);
+	/* C's argument checks: the sub-cursor is not on an item. */
+	RC(r.rc_count, EINVAL);
+	RC(r.rc_cur, before == DELETED ? 0 : EINVAL);
+	RC(r.rc, 0);
+	CHECK(r.end == (op == MDB_PREV ? 'a' : before == ON_M ? 'm' : 'z'));
+#ifdef LMDB_RUST
+	CHECK(miss_right(&r, op));
+#else
+	switch (c_result) {
+	case C_RIGHT:
+		CHECK(miss_right(&r, op));
+		break;
+	case C_COUNT:	/* the count before the put, as row 14 */
+		CHECK(r.count == n && r.seen == r.total && r.sorted == r.total);
+		break;
+	case C_OLD_ROOT:	/* the old root's items only */
+		CHECK(r.count == n && r.seen < r.total && r.sorted == r.seen);
+		break;
+	case C_OTHER_KEY:	/* the items of "m" */
+		CHECK(r.count == nm && r.seen == nm && r.fourbyte == 0);
+		break;
+	default:	/* C_TWICE: the first item twice */
+		CHECK(r.first == 10 && r.count == n && r.seen == n + 1 && r.sorted == n);
+		break;
+	}
+#endif
+	T("move after a failed search, %s (flags %#x, %s): count %d, current %d, move %d, "
+		"ends on %c", what, flags, op == MDB_NEXT ? "MDB_NEXT" : "MDB_PREV", r.rc_count,
+		r.rc_cur, r.rc, r.end);
+}
+
+#ifdef LMDB_RUST
+/* A case C crashes on, asserts in or answers with garbage, against rlmdb:
+ * 0, or the step that is wrong. No checks of its own, as DEVIATION()
+ * counts one. */
+static int miss_rust(MDB_txn *txn, unsigned flags, unsigned n, int before, unsigned add,
+	int multiple, MDB_cursor_op op)
+{
+	struct miss r;
+	int rc = miss_case(txn, flags, n, before, 0, add, multiple, op, &r);
+
+	if (rc)
+		return rc;
+	if (r.rc_count != EINVAL || r.rc_cur != EINVAL)
+		return 1;
+	if (r.rc)
+		return 2;
+	if (r.end != (op == MDB_PREV ? 'a' : 'z'))
+		return 3;
+	return miss_right(&r, op) ? 0 : 4;
+}
+#endif
+
+static void test_moves_after_failed_search(void)
+{
+	MDB_env *env = new_env("miss", 1UL << 24, 200, 0);
+	unsigned flags[2] = { MDB_DUPSORT | MDB_DUPFIXED, MDB_DUPSORT };
+	MDB_cursor_op ops[2] = { MDB_NEXT, MDB_PREV };
+	MDB_txn *txn;
+	MDB_dbi probe;
+	unsigned s, t, f, o;
+	char name[32];
+
+	OK(mdb_txn_begin(env, NULL, 0, &txn));
+	for (f = 0; f < 2; f++) {
+		snprintf(name, sizeof(name), "probe%u", f);
+		/* "k" moves to a sub-DB with item s, its leaf splits with item t */
+		s = fill_k(txn, name, flags[f], 0, 1, &probe);
+		snprintf(name, sizeof(name), "probe-split%u", f);
+		t = fill_k(txn, name, flags[f], 0, 2, &probe);
+		CHECK(s > 4 && t > s + 1);
+		for (o = 0; o < 2; o++) {
+			MDB_cursor_op op = ops[o];
+			int fixed = f == 0;
+
+			miss_both(txn, "sub-DB, another cursor adds one", flags[f], s + 1, ON_K, 0,
+				1, 0, op, C_COUNT);
+			miss_both(txn, "sub-DB's root splits", flags[f], s + 1, ON_K, 0, t - s + 1,
+				0, op, C_OLD_ROOT);
+			miss_both(txn, "another key's sub-page", flags[f], 3, ON_M, 2, 0, 0, op,
+				C_OTHER_KEY);
+			miss_both(txn, "another key's sub-DB", flags[f], 3, ON_M, s + 1, 0, 0, op,
+				C_OTHER_KEY);
+			miss_both(txn, "a sub-DB, another key's sub-page", flags[f], s + 1, ON_M, 2,
+				0, 0, op, C_OTHER_KEY);
+			miss_both(txn, "sub-page, a delete marked it", flags[f], 3, DELETED, 0, 0, 0,
+				op, op == MDB_NEXT ? C_TWICE : C_RIGHT);
+			miss_both(txn, "sub-DB, a delete marked it", flags[f], s + 1, DELETED, 0, 0,
+				0, op, op == MDB_NEXT ? C_TWICE : C_RIGHT);
+			miss_both(txn, "sub-page, the record is right", flags[f], 3, ON_K, 0, 0, 0,
+				op, C_RIGHT);
+			miss_both(txn, "sub-DB, the record is right", flags[f], s + 1, ON_K, 0, 0, 0,
+				op, C_RIGHT);
+			if (fixed) {
+				/* The sub-page has room for the item: it does not move. */
+				miss_both(txn, "sub-page, another cursor adds one", flags[f], 3, ON_K,
+					0, 1, 0, op, C_COUNT);
+				miss_both(txn, "sub-page, MDB_MULTIPLE of one", flags[f], 3, ON_K, 0,
+					1, 1, op, C_COUNT);
+				miss_both(txn, "sub-DB's root splits, MDB_MULTIPLE", flags[f], s + 1,
+					ON_K, 0, t - s + 1, 1, op, C_OLD_ROOT);
+				/* The sub-page moves: C crashes. */
+				DEVIATION(RC(miss_rust(txn, flags[f], 3, ON_K, 2, 1, op), 0));
+			} else {
+				DEVIATION(RC(miss_rust(txn, flags[f], 3, ON_K, 1, 0, op), 0));
+			}
+			/* The sub-page becomes a sub-DB: C reads garbage. */
+			DEVIATION(RC(miss_rust(txn, flags[f], s - 1, ON_K, 2, 0, op), 0));
+			/* Never on duplicates (row 6): C asserts. */
+			DEVIATION(RC(miss_rust(txn, flags[f], 3, FRESH, 0, 0, op), 0));
+			DEVIATION(RC(miss_rust(txn, flags[f], s + 1, FRESH, 0, 0, op), 0));
+		}
+	}
+	OK(mdb_txn_commit(txn));
+	mdb_env_close(env);
+}
+
+/* ---------------------------------------------------------------------- */
+
 static void test_comparators(void)
 {
 	MDB_env *env = new_env("cmp", 1UL << 22, 4, 0);
@@ -1712,6 +2141,8 @@ int main(int argc, char **argv)
 	test_copy("put");
 	test_dupfixed_small();
 	test_copy("small");
+	test_count_after_other_put();
+	test_moves_after_failed_search();
 
 	printf("capi_write: %d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

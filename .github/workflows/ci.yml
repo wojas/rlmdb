@@ -1,15 +1,29 @@
-# Formatting, lints, rustdoc and the whole test suite on every push and pull
-# request, on the three platforms rlmdb is tested on. The tests build the C
+# Formatting, lints, rustdoc and the tests on every push and pull request,
+# on the three platforms rlmdb is tested on. The tests build the C
 # reference library from tests/lmdb-c with the runner's C compiler; no git
 # history or network access is needed after the checkout.
+#
+# Linux x86-64 runs the whole test suite. Linux arm64 and macOS run the
+# platform suite (RLMDB_TEST_SCOPE=platform, see interop/README.md): what
+# depends on the platform (unit and format tests, the lock file, readers
+# and concurrency, the C API, tools and install tests, the differential
+# tests at the OS page size, the reader and lock-file scenarios of the
+# interop matrix and a smoke set of the others); the rest of the matrix,
+# the other page sizes, the mutation and model tests are SKIPPED there.
+# nightly.yml runs the whole suite on every platform.
 #
 # RLMDB_DEFAULT_FORMAT is deliberately not set: the tests assume it is unset
 # (see scripts/check-all.sh).
 name: CI
 
 on:
+  # Pushes to main and pull requests, not both for a branch with a pull
+  # request (that ran every check twice). A branch without a pull request
+  # runs nothing; start it by hand with workflow_dispatch.
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,10 +42,13 @@ jobs:
         include:
           - name: Linux x86-64
             os: ubuntu-latest
+            scope: full
           - name: Linux arm64
             os: ubuntu-24.04-arm
+            scope: platform
           - name: macOS arm64
             os: macos-latest
+            scope: platform
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -46,8 +63,32 @@ jobs:
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-      - name: test
+      # The tests' environments go to a file system in memory (a tmpfs, an
+      # APFS RAM disk), RLMDB_TEST_SCRATCH: the tests and the C peers commit
+      # synced, and on the runner's disk every commit waits for a flush (on
+      # macOS a full one, F_FULLFSYNC). The targets of copies stay on the
+      # disk, in target/tmp: they are written with O_DIRECT on Linux, which
+      # only a disk file system checks (the test helpers say why, e.g.
+      # rlmdb/tests/common/mod.rs, disk_tempdir). The size only caps the
+      # contents: the whole suite on 4 cores had 1.4 GiB there at most, the
+      # platform suite 0.9 GiB, the whole suite with macOS's 16 KiB pages
+      # on 3 cores 1.3 GiB.
+      - name: scratch in memory (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/scratch"
+          sudo mount -t tmpfs -o size=3g,uid="$(id -u)",gid="$(id -g)",mode=0755 tmpfs "$RUNNER_TEMP/scratch"
+          echo "RLMDB_TEST_SCRATCH=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
+      - name: scratch in memory (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          dev=$(hdiutil attach -nomount ram://$((2048 * 2048)) | awk '{print $1}')
+          diskutil erasevolume APFS rlmdb-scratch "$dev"
+          echo "RLMDB_TEST_SCRATCH=/Volumes/rlmdb-scratch" >> "$GITHUB_ENV"
+      - name: test (${{ matrix.scope }} suite)
         run: cargo test --workspace --no-fail-fast
+        env:
+          RLMDB_TEST_SCOPE: ${{ matrix.scope }}
 
   bsd-check:
     # FreeBSD and NetBSD are supported but untested (COMPATIBILITY.md):

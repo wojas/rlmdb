@@ -7,7 +7,8 @@
 //! here each stage is a function and the jumps are return values:
 //!
 //! 1. position the cursor (`MDB_SET`, `MDB_APPEND` → last key, or the
-//!    current position for `MDB_CURRENT`); an empty tree gets a root leaf;
+//!    current position for `MDB_CURRENT`, whose key is the one put,
+//!    [`RwTxn::current_key_if_other`]); an empty tree gets a root leaf;
 //! 2. touch the pages on the cursor's path ([`RwTxn::cursor_touch`]);
 //! 3. for an existing key: overwrite in place where possible
 //!    ([`RwTxn::put_current`]), or for `MDB_DUPSORT` prepare the node that
@@ -164,6 +165,36 @@ impl<'env> RwTxn<'env> {
         oldk == size
             || page_ops::size_left(l, fp) + even(l.leaf_size(oldk, 0)) + 2
                 >= even(l.leaf_size(size, 0) + 2)
+    }
+
+    /// For `MDB_CURRENT` through a main cursor: the key of the item under
+    /// it, if `key` is not that key, else `None` (`key` is put, as in C).
+    ///
+    /// `lmdb.h` requires the caller's key to match the cursor's; C does not
+    /// check. Where it rewrites the node (`new_ksize`: data of another size,
+    /// or not fitting the overflow pages in place; a `MDB_DUPSORT` node it
+    /// rebuilds) it writes the caller's key at the cursor's index, which
+    /// leaves the leaf unsorted; where it overwrites the data in place it
+    /// keeps the old key. The put keeps the cursor's key in every case
+    /// instead (`KNOWN_C_BUGS.md` row 58). The keys are compared as
+    /// searches compare them: a key the comparator calls equal is the same
+    /// key, and is written where C writes it.
+    fn current_key_if_other(&self, mc: CRef, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let page = self.top_page(mc)?;
+        if page.is_leaf2() {
+            return Ok(None); // not a main DB's page (KNOWN_C_BUGS.md row 17)
+        }
+        let node = page.node(self.cur(mc).ki_top()).ok_or_else(corrupted)?;
+        let current = node.key().ok_or_else(corrupted)?;
+        if current == key
+            || self
+                .cmp_of(mc)
+                .compare_in_page(key, current, node.key_tail())
+                == Ordering::Equal
+        {
+            return Ok(None);
+        }
+        Ok(Some(current.to_vec()))
     }
 
     /// For `MDB_CURRENT` on a `MDB_DUPSORT` key: is the cursor on the
@@ -395,6 +426,16 @@ impl<'env> RwTxn<'env> {
         if self.cur(mc).flags & C_DEL != 0 {
             self.cur_mut(mc).flags ^= C_DEL;
         }
+        // MDB_CURRENT keeps the key under the cursor, also where the caller
+        // passed another (KNOWN_C_BUGS.md row 58). The spill estimate stays
+        // C's, from the caller's key.
+        let caller_key = key;
+        let cursor_key = if flags & MDB_CURRENT != 0 && !self.cur(mc).is_sub() {
+            self.current_key_if_other(mc, key)?
+        } else {
+            None
+        };
+        let key = cursor_key.as_deref().unwrap_or(key);
         if dupsort && u32::from(db.flags) & MDB_DUPFIXED != 0 && pos == Pos::Found {
             self.check_dupfixed_size(mc, data.size)?;
         }
@@ -436,7 +477,7 @@ impl<'env> RwTxn<'env> {
             } else {
                 data.size
             };
-            self.spill_check(mc, db.depth, Some((key.len(), rsize)))?;
+            self.spill_check(mc, db.depth, Some((caller_key.len(), rsize)))?;
         }
 
         if pos == Pos::NoRoot {

@@ -361,8 +361,12 @@ fn audit_passes_on_c10_files() {
 fn audit_passes_on_copies_of_c10_files() {
     let (env, _) = filled_env10(Some(1024));
     let txnid = File10::read(&env).txnid();
+    // The copies' targets are on the disk (`TestEnv::derived_on_disk`).
+    interop::register_target_tmpdir(option_env!("CARGO_TARGET_TMPDIR"));
     for (compact, tool) in [(false, true), (true, true), (true, false)] {
-        let copy = env.derived(&format!("copy-{compact}-{tool}"));
+        let copy = env
+            .derived_on_disk(&format!("copy-{compact}-{tool}"))
+            .expect("copy target");
         let mut args = if tool { vec![] } else { vec!["copy"] };
         if compact {
             args.push(if tool { "-c" } else { "--compact" });

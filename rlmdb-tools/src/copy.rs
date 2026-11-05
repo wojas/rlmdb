@@ -2,13 +2,18 @@
 //! (`tests/lmdb-c/0.9/mdb_copy.c`).
 //!
 //! ```text
-//! mdb_copy [-V] [-c] [-n] srcpath [dstpath]
+//! mdb_copy [-V] [-c] [-n] [-v] srcpath [dstpath]
 //! ```
 //!
 //! Without `dstpath` the copy (the data file only) is written to standard
 //! output. Options are parsed by hand, as in C: only leading arguments that
-//! are exactly `-V`, `-c` or `-n` are options; any other argument starting
-//! with `-` makes the command line invalid.
+//! are exactly `-V`, `-c`, `-n` or `-v` are options; any other argument
+//! starting with `-` makes the command line invalid.
+//!
+//! `-v` (C 1.0's option, here for both formats) copies the previous
+//! snapshot (`MDB_PREVSNAPSHOT`). Without `-c` C 1.0's copy keeps the
+//! latest commit's meta page and lacks its pages (`KNOWN_C_BUGS.md` row
+//! 69); this one is a copy of the previous snapshot, as with `-c`.
 //!
 //! C installs no-op handlers for `SIGPIPE`, `SIGHUP`, `SIGINT` and
 //! `SIGTERM`, so those signals do not interrupt it (a closed pipe is a
@@ -35,6 +40,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
         match args[first].as_slice() {
             b"-n" => flags |= EnvironmentFlags::NO_SUB_DIR,
             b"-c" => compact = true,
+            b"-v" => flags |= EnvironmentFlags::PREV_SNAPSHOT,
             b"-V" => return tool.version(),
             _ => {
                 valid = false;
@@ -45,7 +51,7 @@ pub fn run(tool: &mut Tool, args: &[Vec<u8>]) -> i32 {
     }
     let rest = &args[first.min(args.len())..];
     if !valid || rest.is_empty() || rest.len() > 2 {
-        return tool.usage("[-V] [-c] [-n] srcpath [dstpath]");
+        return tool.usage("[-V] [-c] [-n] [-v] srcpath [dstpath]");
     }
 
     let mut act = "opening environment";

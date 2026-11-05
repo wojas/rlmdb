@@ -14,6 +14,15 @@
 
 #include "cpeer.h"
 
+/* --prevsnapshot: LMDB 1.0's flag, which 0.9's lmdb.h (cpeer, and
+ * cpeer_capi, built with it) does not define; rlmdb takes it in both
+ * formats. */
+#ifdef MDB_PREVSNAPSHOT
+#define CPEER_PREVSNAPSHOT	MDB_PREVSNAPSHOT
+#else
+#define CPEER_PREVSNAPSHOT	0x2000000
+#endif
+
 /* The open top-level write transaction, if any. die() aborts it so that a
  * failing peer releases the writer lock instead of leaving other processes
  * blocked on it (named semaphores, used on macOS, are not robust). */
@@ -189,6 +198,8 @@ open_env(const struct opts *o, unsigned int extra_flags)
 		flags |= MDB_NOSYNC;
 	if (o->nometasync)
 		flags |= MDB_NOMETASYNC;
+	if (o->prevsnapshot)
+		flags |= CPEER_PREVSNAPSHOT;
 
 	CHECK(mdb_env_create(&env));
 #ifdef LMDB_RUST
@@ -303,6 +314,9 @@ static const struct command commands[] = {
 		"hold-reader <env> <seconds> [--until-stdin] [<db|-> <count> <seed> [data options]]" },
 	{ "hold-env", cmd_hold_env, 2, 2, "hold-env <env> <seconds> [--until-stdin]" },
 	{ "hold-writer", cmd_hold_writer, 2, 2, "hold-writer <env> <seconds> [--until-stdin]" },
+	{ "prepare", cmd_prepare, 5, 5,
+		"prepare <env> <seconds> <db|-> <count> <seed> [data options] [--until-stdin] [--abort]" },
+	{ "rollback", cmd_rollback, 2, 2, "rollback <env> <txnid|last>" },
 	{ "writer-loop", cmd_writer_loop, 4, 4, "writer-loop <env> <db|-> <seconds> <seed> [--keys N] [--max-commits N]" },
 	{ "reader-loop", cmd_reader_loop, 3, 3, "reader-loop <env> <db|-> <seconds>" },
 	{ "formats-loop", cmd_formats_loop, 5, 5, "formats-loop <env 0.9> <env 1.0> <db|-> <seconds>"
@@ -322,8 +336,11 @@ cmd_commands(struct opts *o)
 {
 	const struct command *c;
 
-	for (c = commands; c->name; c++)
-		printf("command=%s implemented=%d\n", c->name, c->run != cmd_formats_loop);
+	for (c = commands; c->name; c++) {
+		int two_phase = c->run == cmd_prepare || c->run == cmd_rollback;
+		printf("command=%s implemented=%d\n", c->name,
+			c->run != cmd_formats_loop && (HAVE_TWO_PHASE_COMMIT || !two_phase));
+	}
 	return 0;
 }
 
@@ -337,7 +354,7 @@ usage(void)
 		fprintf(stderr, "  %s\n", c->usage);
 	fprintf(stderr,
 		"env options: --nosubdir --notls --nosync --nometasync --mapsize N"
-		" --maxdbs N --maxreaders N --format 0.9|1.0 --pagesize N\n"
+		" --maxdbs N --maxreaders N --format 0.9|1.0 --pagesize N --prevsnapshot\n"
 		"data options: --dupsort --dupfixed --intkey --intdup --revkey --revdup"
 		" --valsize N --big N --dups N --deleted-every N --per-txn N --append --reserve\n");
 	exit(EXIT_USAGE);
@@ -387,6 +404,12 @@ parse_args(int argc, char **argv, struct opts *o)
 			die(EXIT_USAGE, "--pagesize: LMDB 0.9 has no mdb_env_set_pagesize");
 #endif
 		}
+		else if (!strcmp(a, "--prevsnapshot")) {
+			o->prevsnapshot = 1;
+#if !defined(LMDB_RUST) && MDB_VERSION_MAJOR < 1
+			die(EXIT_USAGE, "--prevsnapshot: LMDB 0.9 has no MDB_PREVSNAPSHOT");
+#endif
+		}
 		/* data set options */
 		else if (!strcmp(a, "--dupsort")) o->ds.dbflags |= MDB_DUPSORT;
 		else if (!strcmp(a, "--dupfixed")) o->ds.dbflags |= MDB_DUPSORT | MDB_DUPFIXED;
@@ -413,6 +436,7 @@ parse_args(int argc, char **argv, struct opts *o)
 		else if (!strcmp(a, "--until-stdin")) o->until_stdin = 1;
 		else if (!strcmp(a, "--check")) o->check = 1;
 		else if (!strcmp(a, "--delete")) o->del = 1;
+		else if (!strcmp(a, "--abort")) o->abort_txn = 1;
 		else die(EXIT_USAGE, "unknown option %s", a);
 	}
 }

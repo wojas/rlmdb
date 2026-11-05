@@ -232,6 +232,7 @@ static void run_threads(const char *name, struct result *first)
 int main(int argc, char **argv)
 {
 	struct result first, again;
+	char version[256];
 	int i;
 	if (argc != 3) {
 		fprintf(stderr, "usage: capi_dlopen <shared-library> <environment-dir>\n");
@@ -249,13 +250,18 @@ int main(int argc, char **argv)
 	for (i = 0; i < RELOADS; i++) {
 		struct lmdb l;
 		struct result r;
-		int major, minor, patch;
+		const char *s;
+		int major = -1, minor = -1, patch = -1;
 		load(&l, RTLD_NOW | RTLD_LOCAL);
 		read_env(&l, &r, 0);
 		CHECK(r.entries == first.entries && r.sum == first.sum);
 		/* Strings the library builds on first use stay valid. */
-		CHECK(l.version(&major, &minor, &patch) != NULL);
-		CHECK(major == 0 && minor == 9);
+		s = l.version(&major, &minor, &patch);
+		CHECK(s != NULL && major >= 0 && minor >= 0 && patch >= 0);
+		if (i == 0)
+			snprintf(version, sizeof(version), "%s", s ? s : "");
+		else
+			CHECK(s != NULL && !strcmp(s, version));
 		T("reload %d: entries %zu sum %llx; %s", i, r.entries, r.sum,
 			l.strerror(MDB_NOTFOUND));
 		CHECK(dlclose(l.lib) == 0);

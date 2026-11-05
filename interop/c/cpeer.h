@@ -103,6 +103,7 @@ struct opts {
 
 	/* environment options, valid for every command */
 	int		nosubdir, notls, nosync, nometasync;
+	int		prevsnapshot;	/* --prevsnapshot: MDB_PREVSNAPSHOT (LMDB 1.0's) */
 	size_t		mapsize;	/* 0: keep the environment's size */
 	unsigned int	maxdbs, maxreaders;
 	int		format;		/* --format: 0 (not given), 9 (0.9) or 10 (1.0) */
@@ -114,6 +115,7 @@ struct opts {
 	uint32_t	every;		/* delete --every */
 	int		append, reserve, compact, all, until_stdin, check;
 	int		del;		/* drop --delete */
+	int		abort_txn;	/* prepare --abort */
 	uint32_t	keys;		/* writer-loop key space */
 	uint64_t	max_commits;	/* writer-loop: stop after this many, 0 = no limit */
 };
@@ -169,12 +171,32 @@ int cmd_reader_check(struct opts *o);
 int cmd_hold_reader(struct opts *o);
 int cmd_hold_env(struct opts *o);
 int cmd_hold_writer(struct opts *o);
+int cmd_prepare(struct opts *o);
+int cmd_rollback(struct opts *o);
+/* Whether the library has LMDB 1.0's two-phase commit (mdb_txn_prepare,
+ * mdb_env_rollback): cpeer10 and cpeer_capi, not cpeer (LMDB 0.9). */
+#if MDB_VERSION_MAJOR >= 1 || defined(LMDB_RUST)
+#define HAVE_TWO_PHASE_COMMIT 1
+#else
+#define HAVE_TWO_PHASE_COMMIT 0
+#endif
+#if defined(LMDB_RUST) && MDB_VERSION_MAJOR < 1
+/* cpeer_capi is compiled against LMDB 0.9's lmdb.h, which does not
+ * declare them; librlmdb exports LMDB 1.0's functions (rlmdb.h declares
+ * only rlmdb's own). mdb_size_t is size_t on every supported platform. */
+int mdb_txn_prepare(MDB_txn *txn);
+int mdb_env_rollback(MDB_env *env, size_t txnid);
+#endif
 int cmd_writer_loop(struct opts *o);
 int cmd_reader_loop(struct opts *o);
 int cmd_check_freelist(struct opts *o);
 int cmd_nested_test(struct opts *o);
 int cmd_copy(struct opts *o);
 int cmd_gen(struct opts *o);
+
+/* Put the data set o->ds into DB dbi in the write transaction txn, in index
+ * order (fill without its options). */
+void fill_in_txn(MDB_txn *txn, MDB_dbi dbi, const struct opts *o);
 
 /* Verify the data set `ds` inside an existing transaction (shared by verify
  * and hold-reader --verify). Returns 0, or EXIT_MISMATCH after printing the

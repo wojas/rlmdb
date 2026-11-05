@@ -1,6 +1,15 @@
-# The long tests that are #[ignore]d in the normal runs (a randomised
-# differential run, a full-size spill comparison with C, soak tests), in
-# release mode, once a day and on demand.
+# Once a day and on demand: the whole test suite on every platform (the
+# pull request CI runs it on Linux x86-64 only and the platform suite
+# elsewhere, RLMDB_TEST_SCOPE=platform), the long tests that are
+# #[ignore]d in the normal runs (a randomised differential run, a
+# full-size spill comparison with C, soak tests) in release mode, and the
+# suites on a big-endian host.
+#
+# The whole suite runs with the tests' environments on the runner's disk
+# (no RLMDB_TEST_SCRATCH): the pull request CI has them in memory. On
+# Windows TMP and TEMP point at the runner's local disk and the interop
+# scenarios get a longer timeout, as in windows.yml (whose header says
+# why).
 name: Nightly
 
 on:
@@ -15,6 +24,45 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  full:
+    name: Whole suite (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86-64
+            os: ubuntu-latest
+          - name: Linux arm64
+            os: ubuntu-24.04-arm
+          - name: macOS arm64
+            os: macos-latest
+          - name: Windows x86-64, MSVC
+            os: windows-latest
+    steps:
+      - name: line endings as committed
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      # As in windows.yml.
+      - name: no Defender scans of the build and the tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}", "${{ runner.temp }}", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: test
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --no-fail-fast
+      - name: test
+        if: runner.os == 'Windows'
+        run: cargo test --workspace --no-fail-fast
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+          INTEROP_TIMEOUT_SECS: "900"
+
   ignored:
     name: Ignored tests (Linux x86-64, release)
     runs-on: ubuntu-latest

@@ -926,8 +926,8 @@ impl<'env> RwTxn<'env> {
             CursorOp::Set
         };
         if data.is_none() && self.seeks_in_place(mc) {
-            // The cursor of `mdb_del` in a tree without duplicates: on its
-            // own stack.
+            // The cursor of `mdb_del` deleting a key with all its items:
+            // on its own stack.
             let db = self.db_of(mc);
             let cmp = self.cmp_of(mc);
             if !self.seek_key(mc, &db, cmp, key)? {

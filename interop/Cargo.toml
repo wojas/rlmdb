@@ -31,11 +31,10 @@ tempfile = "3"
 # tests/layout.rs compares C's sizeof(pthread_mutex_t) etc. with the types
 # the Rust library is compiled against.
 libc.workspace = true
-# Not used as a Rust crate: depending on it makes cargo build its
-# `liblmdb.a` (the lib has an rlib crate type, so all crate types are built
-# before the tests), which the third peer, `Peer::COnRust` (cpeer linked
-# against the Rust library), is linked with at test time.
-rlmdb-capi = { path = "../rlmdb-capi" }
+# Not used as a Rust crate: depending on it makes cargo build
+# `librlmdb.a` before the tests, which the third peer, `Peer::COnRust`
+# (cpeer linked against the Rust library), is linked with at test time.
+librlmdb = { path = "../rlmdb-capi/artifacts/rlmdb" }
 
 [build-dependencies]
 cc = "1"

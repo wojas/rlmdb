@@ -98,7 +98,7 @@ fn soak() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0x5eed);
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().to_str().unwrap().to_owned();
     let env = Environment::builder()
         .map_size(if std::env::var("SOAK_SPILL").is_ok_and(|v| v == "1") {

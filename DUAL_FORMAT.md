@@ -10,7 +10,7 @@ peers on 1.0 environments, also at 256 B, 1 KiB and 64 KiB pages, and one
 process has environments of both formats open next to C peers of both
 releases. §4.2–§4.5 describe what was built, §7 what each stage needed.
 Open: the format-converting copy (§4.3) and the 1.0 features beyond its
-data file (stage 7).
+data file (stage 7) but two-phase commit, which is done.
 
 Question: can rlmdb read and write both the LMDB 0.9 (`MDB_DATA_VERSION 1`)
 and the LMDB 1.0 (`MDB_DATA_VERSION 3`) formats from one code base, picking
@@ -97,11 +97,12 @@ These are invariants C 1.0 peers rely on, so they are not optional:
    be added later behind the same `Format` descriptor.)
 
 Features of 1.0 that are API, not format, and can come later without
-touching the layout work: `mdb_txn_prepare` / `mdb_env_rollback` (2PC),
-`MDB_PREVSNAPSHOT` (pick the older meta, mdb10.c 4783), read-only child
-transactions of a write transaction, `mdb_env_incr_dump*` (walks `mp_txnid`),
-`mdb_cursor_is_db`, `mdb_txn_flags`, `MDB_REMAP_CHUNKS` and the reader page
-cache (`MDB_RPAGE_CACHE`, in-memory only; the source of lmdb-go#45).
+touching the layout work: `mdb_txn_prepare` / `mdb_env_rollback` (2PC,
+done: stage 7), `MDB_PREVSNAPSHOT` (pick the older meta, mdb10.c 4783),
+read-only child transactions of a write transaction, `mdb_env_incr_dump*`
+(walks `mp_txnid`; done, §7), `mdb_cursor_is_db`, `mdb_txn_flags`, `MDB_REMAP_CHUNKS`
+and the reader page cache (`MDB_RPAGE_CACHE`, in-memory only; the source of
+lmdb-go#45).
 
 ## 3. How far the 0.9 layout reaches into rlmdb today
 
@@ -202,10 +203,14 @@ version is `MDB_VERSION_MISMATCH` unless we are the exclusive opener, which
 is what C does when it re-initialises the table.
 
 Default for new environments: V09, so files stay readable by everything
-that ships today. Resolution order, same as lmdb-go: per-environment setter,
+that ships today, and because almost all programs are written for LMDB 0.9
+today (owner, 2026-11-03; this may change in the future). Resolution
+order, same as lmdb-go: per-environment setter,
 then process default setter, then the environment variable
-`RLMDB_DEFAULT_FORMAT` (`0.9` | `1.0`), then V09. The variable is honoured
-everywhere, including the drop-in `liblmdb`, and is documented as
+`RLMDB_DEFAULT_FORMAT` (`0.9` | `1.0`), then V09 (the C API's LMDB 1.0
+stub, which stands in for C 1.0, ends the chain with V10 instead,
+`EnvironmentBuilder::fallback_format`; §4.4). The variable is honoured
+everywhere, including the C libraries, and is documented as
 **experimental**: it may be removed or restricted in a later release, so
 programs and deployments should prefer the setters. The reason for the
 caveat: a stray variable in a service's environment silently creates 1.0
@@ -239,12 +244,13 @@ Implemented, except the converting copy:
   `process_default_format()`, `default_format()` (the resolution of §4.2)
   and `DEFAULT_FORMAT_ENV`; `Format::name`/`Format::from_name` (`"0.9"`,
   `"1.0"`).
-* `RoCursor::current_is_db` / `RwTxn::cursor_is_db`: 1.0's
+* `RoCursor::is_db`, `RwCursor::is_db` / `RwTxn::cursor_is_db`: 1.0's
   `mdb_cursor_is_db`, which the tools' `-a` needs.
 * `rlmdb::version_info() -> &'static VersionInfo` with `rlmdb` (crate
-  version), `lmdb` (what `mdb_version` reports, 0.9.85), `v09` and `v10`
-  (the C releases each format matches, 0.9.37 and 1.0.3 today);
-  `Display` prints the single-line form of §4.4.
+  version), `lmdb` (what `mdb_version` reports where rlmdb stands in for
+  C 0.9, 0.9.85; the C API's `librlmdb` puts its own version there),
+  `v09` and `v10` (the C releases each format matches, 0.9.37 and 1.0.3
+  today); `Display` prints the single-line form of §4.4.
 * `Environment::copy_to(.., CopyFormat)`: a compacting copy that re-encodes
   pages in the other format is natural here because rlmdb owns both
   encoders; it walks the tree like `MDB_CP_COMPACT` and rebuilds nodes. This
@@ -252,11 +258,15 @@ Implemented, except the converting copy:
   first cut; wanted soon after, where it can replace or reimplement
   `github.com/wojas/lmdbconvert`.
 
-### 4.4 C API: `rlmdb_*` additions, `lmdb.h` untouched
+### 4.4 C API: `rlmdb_*` additions, upstream `lmdb.h`
 
-`rlmdb-capi` keeps shipping the unmodified 0.9.37 `lmdb.h` and the `mdb_*`
-symbols. New entry points go in a second header `include/rlmdb.h`
-(implemented as below; the header's comments document them):
+`rlmdb-capi` ships an unmodified upstream `lmdb.h` and the `mdb_*`
+symbols: at first 0.9.37's, since the owner's decision of 2026-11-03
+(§6) LMDB 1.0.3's, the public API of `librlmdb` (a superset of 0.9's with
+the same ABI; programs written for 0.9 compile against 0.9's `lmdb.h` and
+link against the same symbols). New entry points go in a second header
+`include/rlmdb.h`, which compiles after either `lmdb.h` (implemented as
+below; the header's comments document them):
 
 ```c
 #define RLMDB_FORMAT_UNKNOWN 0
@@ -270,11 +280,11 @@ int  rlmdb_set_default_format(unsigned format);             /* process-wide, 0 r
 int  rlmdb_env_set_pagesize(MDB_env *env, unsigned size);   /* 1.0's mdb_env_set_pagesize */
 ```
 
-`rlmdb.h` also carries the 1.0 constants a program needs with a 1.0
-environment: `MDB_PREVSNAPSHOT`, `MDB_ENCRYPT`, and the 1.0 error codes
-(`MDB_PROBLEM .. MDB_ADDR_BUSY`, -30779 .. -30769), under their upstream
-names and values so that a program compiled against upstream 1.0's `lmdb.h`
-sees the same numbers. `mdb_strerror` learns those messages.
+The 1.0 constants a program needs with a 1.0 environment
+(`MDB_PREVSNAPSHOT`, `MDB_ENCRYPT`, and the 1.0 error codes `MDB_PROBLEM ..
+MDB_ADDR_BUSY`, -30779 .. -30769) come from 1.0's `lmdb.h`; `rlmdb.h`
+carried copies of them while the shipped `lmdb.h` was 0.9's. `mdb_strerror`
+learns those messages, also for programs built with 0.9's header.
 
 No rlmdb-specific error codes: a format conflict is `MDB_VERSION_MISMATCH`,
 an unreadable header `MDB_INVALID`, an unsupported 1.0 feature in a file
@@ -282,19 +292,22 @@ the 1.0 code for it (`MDB_ENV_ENCRYPTION`, `MDB_BAD_CHECKSUM`).
 
 Version reporting:
 
-* `mdb_version()` reports **0.9.85** ("LMDB 0.9.85: (rlmdb)"), so a program
-  can tell rlmdb from any real 0.9.x release while staying in the 0.9
-  series it is a drop-in for. The shipped `lmdb.h` keeps `MDB_VERSION_PATCH
-  36`; a run-time patch level above the header's is the normal LMDB
-  situation and `mdb_version` is what programs are told to check.
-  `rlmdb::consts::MDB_VERSION_PATCH` and `lmdb_version()` change to 85.
+* `mdb_version()` of `librlmdb` reports **rlmdb's own version** (owner,
+  2026-11-03: programs link against it explicitly) and returns the line of
+  `rlmdb_version_string()`. The stubs, which stand in for a C release,
+  report **0.9.85** ("LMDB 0.9.85: (rlmdb 0.0.0)") and **1.0.85**, so a
+  program can tell rlmdb from any real release while staying in the
+  series it is a drop-in for; a run-time patch level above the header's is
+  the normal LMDB situation. `rlmdb::consts::MDB_VERSION_PATCH` and
+  `lmdb_version()` say 85 (the tools' `-V`, the 0.9 stub). Until
+  2026-11-03 `librlmdb` reported 0.9.85 too.
 * A new struct answers the real questions:
 
 ```c
 typedef struct rlmdb_version_info {
 	unsigned	size;		/* sizeof(rlmdb_version_info) of the library; fields are only ever appended */
 	int		rlmdb_major, rlmdb_minor, rlmdb_patch;	/* the Rust crate version */
-	int		lmdb_major, lmdb_minor, lmdb_patch;	/* what mdb_version() reports: 0, 9, 85 */
+	int		lmdb_major, lmdb_minor, lmdb_patch;	/* what mdb_version() reports: librlmdb rlmdb's, the stubs 0, 9, 85 and 1, 0, 85 */
 	int		v09_major, v09_minor, v09_patch;	/* C release the 0.9 format and API match: 0, 9, 37 */
 	int		v10_major, v10_minor, v10_patch;	/* C release the 1.0 format and API match: 1, 0, 3 */
 } rlmdb_version_info;
@@ -306,8 +319,10 @@ const char *rlmdb_version_string(void);			/* static, one line */
   The one-line string prints everything a bug report needs:
 
 ```
-rlmdb 0.0.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3)
+rlmdb 0.0.0 (mdb_version 0.0.0; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3)
 ```
+
+  (from `librlmdb`; the stubs say `mdb_version 0.9.85` and `1.0.85`)
 
   Programs read the version numbers from the struct instead of parsing
   the string; opt-in features, once there are any, will be listed by name
@@ -318,26 +333,52 @@ Behaviour of existing functions:
 
 * `rlmdb_env_get_format` tells the format of an environment; `mdb_version`
   does not change with it.
-* `mdb_env_get_maxkeysize` returns 511 before open unless V10 was
-  requested, then the 1.0 value for the page size a new environment would
-  get (`rlmdb_env_set_pagesize`, else the OS page size); after open the
-  environment's value. (C 1.0 returns 0 before the open: `me_maxkey` is
+* `mdb_env_get_maxkeysize` returns, before open, the value of the format a
+  new environment would get through the whole chain (request, process
+  default, variable, the library's format): 511 for V09, else the 1.0 value
+  for the page size it would get (`rlmdb_env_set_pagesize`, else the OS
+  page size); after open the environment's value. (C 1.0 returns 0 before the open: `me_maxkey` is
   only computed in `mdb_env_open2`; 1.0 documents it as only valid after
   open.)
-* `mdb_env_open` refuses `MDB_PREVSNAPSHOT` with `EINVAL` for both formats
-  until it is implemented.
+* `mdb_env_open` takes `MDB_PREVSNAPSHOT` for both formats (§7): a
+  per-process choice, whose commit leaves what a writer on the previous
+  snapshot leaves in either format.
 * `mdb_env_set_flags` rejects `MDB_ENCRYPT` until encryption exists.
 * The key and data copies of `write.rs` (a caller's pointer may alias the
   page the put changes) are sized per environment: keys up to its maximum
   key size (on the heap above 511 bytes, so 0.9 environments copy to the
   stack as before), data up to half and `MDB_MULTIPLE` items up to a whole
   page of `max(page size, 32 KiB)`, which is 0.9's 16/32 KiB unchanged.
+
+Later (after stage 5), the C API grew from one `liblmdb` into three
+libraries built from one implementation (`rlmdb-capi/DETAILS.md`):
+`librlmdb` (`-lrlmdb`), the library to build programs with, and two stubs
+named like C LMDB that stand in for one C release each in programs built
+against it (`liblmdb.so.0`, `mdb_version` 0.9.85, new environments V09;
+`liblmdb.so`, `mdb_version` 1.0.85, new environments V10); `librlmdb`'s
+new environments are V09 too, as almost all programs are written for 0.9
+today (this may change). They differ only in their names, their versions
+and the end of the default-format chain, fixed when each is linked (no
+setting, no load-time code). All three export the same functions: 0.9's
+`lmdb.h`'s, the 13 that LMDB 1.0's `lmdb.h` adds, and `rlmdb.h`'s. (At
+first `rlmdb.h` declared the 13 too, for rlmdb's 0.9 `lmdb.h`; with 1.0's
+`lmdb.h` shipped instead, it holds only the `rlmdb_*` functions.)
+`mdb_env_set_pagesize`, `mdb_txn_flags`, `mdb_cursor_is_db`,
+two-phase commit (`mdb_txn_prepare`, `mdb_env_rollback`, stage 7) and the
+incremental backups (`mdb_env_incr_dump`, `mdb_env_incr_dumpfd`,
+`mdb_env_incr_loadfd`, stage 7, 1.0 environments) are implemented; the
+functions of the other features of stage 7 (`mdb_env_set_encrypt`,
+`mdb_env_set_checksum`) and the crypto modules (`mdb_modload`,
+`mdb_modunload`, `mdb_modsetup`) make C 1.0's argument checks and return
+`ENOTSUP` (`mdb_modload` NULL, `mdb_modunload` nothing; after
+`mdb_modsetup` asked for encryption or checksums, `mdb_env_open` returns
+`ENOTSUP`).
   `mdb_dbi_open` copies the name in write transactions: a 1.0 key of the
   main DB ends with the name's NUL, so passing it back is natural there.
 * `mdb_drop` of the main DB, through every API, does what C 1.0 does in a
   1.0 environment (`MDB_DBIS_BUSY`, named databases deleted first;
   `KNOWN_C_BUGS.md`, section "LMDB 1.0").
-* Return codes stay `lmdb.h`'s (0.9's) where 1.0 changed them
+* Return codes stay 0.9's where 1.0 changed them
   (`EACCES` for writes in a read-only transaction, 1.0:
   `MDB_IS_READONLY`).
 
@@ -395,7 +436,7 @@ The interop matrix of 1.0, as built (`interop/README.md` has the details):
 
 * **Four peers.** `Peer::C` (`cpeer`, C 0.9), `Peer::C10` (`cpeer10`, the
   same C program on C 1.0), `Peer::Rust` (`rpeer`) and `Peer::COnRust`
-  (`cpeer_capi`, the C program on rlmdb's `liblmdb.a`). The C peers open
+  (`cpeer_capi`, the C program on rlmdb's `librlmdb.a`). The C peers open
   their own release's format only; `rpeer` and `cpeer_capi` take
   `--format 1.0` (`EnvironmentBuilder::format`, and under `LMDB_RUST`
   `rlmdb_env_set_format`) and `--pagesize N` (`EnvironmentBuilder::page_size`,
@@ -500,6 +541,19 @@ the Rust and C peers open without it.
 5. The format-converting copy is out of the first cut, wanted soon after;
    it may replace or reimplement `github.com/wojas/lmdbconvert`. (§4.3)
 
+Later decisions (owner, 2026-11-03), for the three C libraries:
+
+6. The public C API of `librlmdb` is LMDB 1.0's plus rlmdb's own
+   functions: `include/lmdb.h` is the pristine 1.0.3 header, `rlmdb.h`
+   holds only the `rlmdb_*` functions and compiles after either `lmdb.h`.
+   (§4.4)
+7. `librlmdb` reports rlmdb's own version from `mdb_version`, as programs
+   link against it explicitly; the stubs keep 0.9.85 and 1.0.85. This
+   supersedes item 1 for `librlmdb`. (§4.4)
+8. New environments stay LMDB 0.9 by default in `librlmdb` and the 0.9
+   stub, because almost all programs are written for 0.9 today; this may
+   change in the future. Only the 1.0 stub defaults to 1.0. (§4.2)
+
 ## 7. Effort, in order
 
 1. `Layout` descriptor and threading it through `format/` and the write
@@ -540,4 +594,50 @@ the Rust and C peers open without it.
    1.0 and rlmdb.
 6. Soon after: the format-converting copy (`convert-copy`), replacing
    `lmdbconvert`.
-7. Later: `MDB_PREVSNAPSHOT`, 2PC, checksums, encryption.
+7. Later: checksums, encryption. Their C functions are exported already
+   and return `ENOTSUP` until then (§4.4); so do the crypto modules,
+   which are not planned.
+   Done: two-phase commit, in both formats: `RwTxn::prepare` and
+   `PreparedTxn` (`mdb_txn_prepare`: the commit split before its meta
+   page write, which `PreparedTxn::commit` does) and
+   `Environment::rollback` (`mdb_env_rollback`: the newest meta page
+   overwritten with C 1.0's page without a snapshot). A prepared commit
+   writes exactly what a plain commit writes, so 0.9 files are what C 0.9
+   writes and 1.0 files what C 1.0 writes (`write_differential.rs`,
+   `interop/tests/write_differential10.rs`); the rolled-back page is C
+   1.0's byte for byte, which C 0.9 reads as no snapshot. Differences
+   from C 1.0, all where C breaks the environment or its own memory:
+   `KNOWN_C_BUGS.md` rows 61 to 64 (a reader of the snapshot stops a
+   rollback; a rollback leaves no second one; a prepare that ends the
+   transaction).
+   Done too: `MDB_PREVSNAPSHOT`, for both formats, as C 1.0 has it but for
+   four bugs (`KNOWN_C_BUGS.md` rows 67 to 70):
+   `EnvironmentFlags::PREV_SNAPSHOT`, `mdb_env_open`, the tools' `-v`, the
+   interop scenario `prev_snapshot`. A prepared transaction's commit ends
+   the flag as a plain commit does. A rollback while the flag is set is
+   C's, of the newest commit (the reported txnid plus one: with the flag
+   the environment reports the previous snapshot), and then ends the
+   flag, where C keeps it and reports the page the rollback wrote
+   (row 71).
+   Done: incremental backups of 1.0 environments (they select pages by
+   `mp_txnid`, which 0.9 pages lack: `ENOTSUP` there):
+   `Environment::incr_dump` and `incr_dump_to_path`
+   (`mdb_env_incr_dumpfd`, `mdb_env_incr_dump`, `mdb_dump -i`) scan the
+   file as C 1.0 does, `Environment::incr_load` (`mdb_env_incr_loadfd`,
+   `mdb_load -i`) applies a dump of either side; a chain restores the
+   source byte for byte (`interop/tests/incr10.rs`). C 1.0's dump steps
+   from header to header through free pages, and after a freed overflow
+   run is partly reused it dumps stale bytes as pages that no load
+   restores correctly, steps over live pages or fails (`KNOWN_C_BUGS.md`
+   row 72). rlmdb's records are only pages whose header names their own
+   position with a txnid between the base and the snapshot, so each is
+   the file's own bytes and every page of the snapshot written since is
+   among them; where no stale page is involved the dumps are C's bytes. A
+   dump of only the pages the trees reach (random access, not a copy of
+   the file's blocks) may come later as an optional mode. The load
+   checks what C's does not (rows 65 and 66: cut or malformed input, the
+   environment's transactions and readers, `mti_txnid` published), writes
+   each dump's meta pages after its data pages, synced as a commit's
+   (row 65: the base's meta pages survive an interrupted load), and
+   needs no `MDB_WRITEMAP`, which `lmdb.h` asks for and C's code does not
+   use.

@@ -1,23 +1,28 @@
 /** @file rlmdb.h
  *	@brief rlmdb extensions to the LMDB C API
  *
- *	rlmdb is a rewrite of LMDB in Rust. Its C library (liblmdb.a,
- *	liblmdb.so, liblmdb.dylib, built from rlmdb-capi) exports the
- *	functions of the unmodified lmdb.h (LMDB 0.9.37's) and, declared here, a
- *	few of its own that C LMDB does not have, plus the LMDB 1.0 constants a
- *	program needs with a 1.0 environment. A program that calls the
- *	functions needs the rlmdb library; one that only includes lmdb.h works
- *	with either.
+ *	rlmdb is a rewrite of LMDB in Rust. Its C library (librlmdb: link
+ *	with -lrlmdb; built from rlmdb-capi, as are two stubs named liblmdb
+ *	that stand in for C LMDB 0.9 and 1.0) has the API of the lmdb.h next
+ *	to this header, LMDB 1.0's, unmodified, and exports every function of
+ *	LMDB 0.9's lmdb.h too, with the same ABI. This header declares the
+ *	few functions of rlmdb's own that C LMDB does not have. A program that
+ *	calls them needs an rlmdb library; one that only includes lmdb.h works
+ *	with C LMDB too.
  *
- *	This header includes lmdb.h.
+ *	Include it after either lmdb.h: LMDB 1.0's (rlmdb's API), or LMDB
+ *	0.9's, for a program written for LMDB 0.9 that also uses these
+ *	functions. It only needs #MDB_env and plain C types, which both have.
+ *	Included without an lmdb.h before it, it includes the one next to it.
  *
  *	@section rlmdb_version_sec Which library is this?
- *	#mdb_version() reports 0.9.85 in rlmdb, a patch level above every real
- *	LMDB 0.9 release, while lmdb.h keeps the 0.9.37 #MDB_VERSION_PATCH. A
- *	run-time patch level above the header's is normal for LMDB, and
- *	#mdb_version() is what programs are told to check. #rlmdb_version()
- *	tells the rest: the rlmdb version and the C LMDB release whose file
- *	format each supported format matches.
+ *	#mdb_version() of librlmdb reports rlmdb's own version: a program
+ *	links against librlmdb explicitly. The LMDB 0.9 stub reports 0.9.85
+ *	and the LMDB 1.0 stub 1.0.85, a patch level above every real release
+ *	of the series each stands in for, so that a program built for C LMDB
+ *	that compares the major and minor numbers with its lmdb.h's still runs
+ *	on them. #rlmdb_version() tells the rest: the rlmdb version and the C
+ *	LMDB release whose file format each supported format matches.
  *
  *	@section rlmdb_format_sec Data-file formats
  *	rlmdb reads and writes the data files of LMDB 0.9 (#RLMDB_FORMAT_09,
@@ -31,7 +36,10 @@
  *	<li>the process default of #rlmdb_set_default_format(), else
  *	<li>the format the environment variable RLMDB_DEFAULT_FORMAT names
  *		("0.9" or "1.0"; any other value is ignored), else
- *	<li>LMDB 0.9, which every C LMDB release reads.
+ *	<li>the library's: LMDB 0.9 in librlmdb and the LMDB 0.9 stub, as
+ *		almost all programs are written for LMDB 0.9 today (and every C
+ *		LMDB release reads its files; this may change in a later release);
+ *		LMDB 1.0 in the LMDB 1.0 stub.
  *	</ol>
  *	RLMDB_DEFAULT_FORMAT is experimental: it may be removed or restricted in
  *	a later release, so programs should use the functions. Requesting the other
@@ -41,11 +49,19 @@
  *
  *	In an LMDB 1.0 environment keys may be longer than 511 bytes
  *	(#mdb_env_get_maxkeysize() after the open), the page size can be chosen
- *	with #rlmdb_env_set_pagesize(), and named databases are stored under
- *	their name with its terminating NUL, as C 1.0 does. The 1.0 features
- *	beyond its data file are not implemented: #MDB_PREVSNAPSHOT and
- *	#MDB_ENCRYPT give EINVAL, and opening an encrypted or checksummed 1.0
- *	file fails with #MDB_ENV_ENCRYPTION or #MDB_BAD_CHECKSUM.
+ *	(LMDB 1.0's mdb_env_set_pagesize(), or #rlmdb_env_set_pagesize() with
+ *	0.9's lmdb.h), and named databases are stored under their name with its
+ *	terminating NUL, as C 1.0 does. Two-phase commit (mdb_txn_prepare(),
+ *	mdb_env_rollback()) and MDB_PREVSNAPSHOT work in both formats,
+ *	incremental backups (mdb_env_incr_dumpfd(), mdb_env_incr_dump(),
+ *	mdb_env_incr_loadfd()) in 1.0 environments (ENOTSUP in 0.9 ones). The
+ *	other 1.0 features beyond its data file are not implemented:
+ *	MDB_ENCRYPT and MDB_REMAP_CHUNKS give EINVAL, opening an encrypted or
+ *	checksummed 1.0 file fails with MDB_ENV_ENCRYPTION or
+ *	MDB_BAD_CHECKSUM, and the functions of encryption, checksums and
+ *	crypto modules return ENOTSUP (rlmdb-capi/DETAILS.md lists them). With
+ *	0.9's lmdb.h, LMDB 1.0's error codes are numbers without names;
+ *	#mdb_strerror() knows their texts.
  *
  *	@copyright See COPYRIGHT in the top-level directory of rlmdb.
  *	Redistribution and use in source and binary forms, with or without
@@ -56,7 +72,10 @@
 #ifndef _RLMDB_H_
 #define _RLMDB_H_
 
+/* Both LMDB releases' lmdb.h define _LMDB_H_: whichever came first stays. */
+#ifndef _LMDB_H_
 #include "lmdb.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -78,7 +97,7 @@ extern "C" {
 typedef struct rlmdb_version_info {
 	unsigned	size;		/**< sizeof(rlmdb_version_info) of the library */
 	int		rlmdb_major, rlmdb_minor, rlmdb_patch;	/**< The rlmdb version */
-	int		lmdb_major, lmdb_minor, lmdb_patch;	/**< What #mdb_version() reports: 0, 9, 85 */
+	int		lmdb_major, lmdb_minor, lmdb_patch;	/**< What #mdb_version() reports: the rlmdb version in librlmdb, 0, 9, 85 in the LMDB 0.9 stub, 1, 0, 85 in the LMDB 1.0 stub */
 	int		v09_major, v09_minor, v09_patch;	/**< C release the 0.9 format and API match */
 	int		v10_major, v10_minor, v10_patch;	/**< C release the 1.0 format matches */
 } rlmdb_version_info;
@@ -92,11 +111,13 @@ const rlmdb_version_info *rlmdb_version(void);
 
 	/** @brief Return the version information as one line of text.
 	 *
-	 * For example "rlmdb 0.0.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37;
-	 * format 1.0 = LMDB 1.0.3)". Meant for logs and bug reports: programs
-	 * read the version numbers from #rlmdb_version() instead of parsing it,
-	 * and opt-in features, once there are any, will be listed by name
-	 * (rlmdb issue #2).
+	 * For example "rlmdb 0.0.0 (mdb_version 0.0.0; format 0.9 = LMDB 0.9.37;
+	 * format 1.0 = LMDB 1.0.3)" in librlmdb, whose #mdb_version() returns
+	 * the same string ("mdb_version 0.9.85" and "mdb_version 1.0.85" in the
+	 * stubs, which return LMDB's "LMDB 0.9.85: (rlmdb 0.0.0)" form there).
+	 * Meant for logs and bug reports: programs read the version numbers
+	 * from #rlmdb_version() instead of parsing it, and opt-in features, once
+	 * there are any, will be listed by name (rlmdb issue #2).
 	 * @return A static string, valid for the life of the process; it must not
 	 * be modified or freed.
 	 */
@@ -188,8 +209,9 @@ int rlmdb_set_default_format(unsigned format);
 
 	/** @brief Set the size of DB pages in bytes (LMDB 1.0).
 	 *
-	 * LMDB 1.0's mdb_env_set_pagesize(), under rlmdb's prefix because
-	 * lmdb.h is LMDB 0.9's. The size defaults to the OS page size; it only
+	 * The same as LMDB 1.0's mdb_env_set_pagesize(), under rlmdb's prefix,
+	 * for programs that compile against LMDB 0.9's lmdb.h, which lacks it.
+	 * The size defaults to the OS page size; it only
 	 * applies to a new LMDB 1.0 environment (an existing one keeps the page
 	 * size recorded in its file). LMDB 0.9 has no such setting:
 	 * #mdb_env_open() fails with EINVAL if the environment turns out to be
@@ -205,73 +227,6 @@ int rlmdb_set_default_format(unsigned format);
 	 * </ul>
 	 */
 int rlmdb_env_set_pagesize(MDB_env *env, unsigned size);
-/**	@} */
-
-/** @defgroup rlmdb_v10 Constants of LMDB 1.0
- *
- * The LMDB 1.0 values a program may meet with a 1.0 environment, under
- * their upstream names and with the values of LMDB 1.0's lmdb.h
- * (mdb.RE/1.0, LMDB 1.0.3), so that code written for 1.0 compiles and sees
- * the same numbers. Each is only defined here if no other header did.
- * #mdb_strerror() knows the error codes.
- *	@{
- */
-#ifndef MDB_ENCRYPT
-	/** Encrypted environment (LMDB 1.0's mdb_env_set_encrypt()). Not
-	 * implemented: #mdb_env_open() and #mdb_env_set_flags() refuse it
-	 * with EINVAL. */
-#define MDB_ENCRYPT		0x2000U
-#endif
-#ifndef MDB_PREVSNAPSHOT
-	/** Use the previous snapshot rather than the latest one. Not
-	 * implemented: #mdb_env_open() refuses it with EINVAL, for
-	 * environments of either format. */
-#define MDB_PREVSNAPSHOT	0x2000000
-#endif
-#ifndef MDB_PROBLEM
-	/** Unexpected problem - txn should abort */
-#define MDB_PROBLEM		(-30779)
-#endif
-#ifndef MDB_BAD_CHECKSUM
-	/** Page checksum incorrect (opening a 1.0 file with checksums) */
-#define MDB_BAD_CHECKSUM	(-30778)
-#endif
-#ifndef MDB_CRYPTO_FAIL
-	/** Encryption/decryption failed */
-#define MDB_CRYPTO_FAIL		(-30777)
-#endif
-#ifndef MDB_ENV_ENCRYPTION
-	/** Environment encryption mismatch (opening an encrypted 1.0 file) */
-#define MDB_ENV_ENCRYPTION	(-30776)
-#endif
-#ifndef MDB_TXN_PENDING
-	/** Transaction was already prepared */
-#define MDB_TXN_PENDING		(-30775)
-#endif
-#ifndef MDB_CANT_ROLLBACK
-	/** Environment can't rollback the last transaction */
-#define MDB_CANT_ROLLBACK	(-30774)
-#endif
-#ifndef MDB_DBIS_BUSY
-	/** Can't drop main DBI while other DBIs are open */
-#define MDB_DBIS_BUSY	(-30773)
-#endif
-#ifndef MDB_SHORT_WRITE
-	/** Write was incomplete */
-#define MDB_SHORT_WRITE	(-30772)
-#endif
-#ifndef MDB_ENV_BUSY
-	/** Env is busy, can't use previous snapshot */
-#define MDB_ENV_BUSY	(-30771)
-#endif
-#ifndef MDB_IS_READONLY
-	/** Env or txn is read-only, can't write */
-#define MDB_IS_READONLY	(-30770)
-#endif
-#ifndef MDB_ADDR_BUSY
-	/** Requested map address is unavailable */
-#define MDB_ADDR_BUSY	(-30769)
-#endif
 /**	@} */
 /**	@} */
 
