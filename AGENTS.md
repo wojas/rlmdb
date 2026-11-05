@@ -195,6 +195,24 @@ deferred until the core has been validated through the C API.
   `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` must be
   clean. MSRV is in `Cargo.toml` (`rust-version`).
 
+## 7a. Writing: clear language
+
+Write PR descriptions, issues, commit messages, READMEs and other
+user-facing docs in clear, plain language. Readers should understand them
+on the first read, without knowing the code.
+
+* Start with what the change does and why. Details come after.
+* Use short sentences and common words. Put one idea in each sentence.
+* Explain a term before you use it. Do not rely on internal shorthand.
+* Show an example where it helps, and use a table or a list for several
+  similar items, instead of long paragraphs full of parentheses.
+* Give each part its own heading.
+* In a PR, list behaviour changes in their own section, so that they can
+  be reviewed before the merge.
+
+Code comments and design documents follow the same spirit; they may be
+denser where precision needs it.
+
 ## 8. Testing: C is the oracle
 
 * The C library and tools are built from `tests/lmdb-c/0.9` at test
