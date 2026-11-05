@@ -831,7 +831,9 @@ fn a_dump_while_writing_is_a_snapshot() {
         for _ in 0..5 {
             dumps.push(dump(src, t0));
         }
-        stop_tx.send(()).unwrap();
+        // The writer may already have stopped on its own (after its last
+        // key, on a fast machine), dropping the receiver; that is fine.
+        let _ = stop_tx.send(());
         writer.join().unwrap();
         dumps
     });
