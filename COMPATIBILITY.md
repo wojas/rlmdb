@@ -171,6 +171,21 @@ checks what it checks on macOS instead (`INTEROP_NO_ROBUST_MUTEX`).
   (`SEM_UNDO` frees the semaphore, the flag the dead holder left set makes
   the next holder recover, as C 1.0's `mdb_sem_wait`; the `killed_writer`
   scenario checks both on OpenBSD).
+* On OpenBSD, NetBSD and DragonFly the exclusive opener of a 1.0
+  environment finds the SysV set at the lock file's `ftok` key that the
+  last user left behind, if it died with the environment open, but it may
+  also find another program's set whose key collides. C 1.0 takes over
+  any set of two or more semaphores that the set's mode lets it use
+  (`KNOWN_C_BUGS.md` row 46). rlmdb takes over a set of two that the
+  stale lock file names in `mtb_semid` (a crashed user's, of any account)
+  or that its own account owns (or any, as root), and refuses any other
+  with `EEXIST`. A set that a C 1.0 exclusive opener has
+  taken over is named in the lock file afterwards, and rlmdb then takes
+  it too: the refusal protects another program's set only until a C
+  process opens the environment first. Attaching to a set, while another
+  process has the environment open, makes C's `IPC_STAT`/`IPC_SET` check
+  on both sides, which only the set's owner, its creator and root pass.
+  Checked by hand on OpenBSD with two accounts, C 1.0 and rlmdb.
 * Reader slots of dead processes stay until `mdb_reader_check` (C or Rust,
   `mdb_stat -rr` of either) or an exclusive re-open clears them, as in C.
 * When a writer of either side grows the data file beyond another
@@ -324,7 +339,7 @@ All of these run on macOS and, through `scripts/linux-test.sh`, on Linux;
 | Concurrent C and Rust processes on one environment | `interop` (three peers per format: C, Rust, C-on-Rust; all nine writer/reader pairs; concurrent writer loops of both with reader loops of all three; `three_peers`; the same for LMDB 1.0 below), `rlmdb/tests/c_concurrency.rs`, `rlmdb-capi/tests/concurrency.rs` and `cross_process.rs` |
 | Lock file created by either side | `interop` `reader_creates_lock_file`, `rlmdb/tests/c_concurrency.rs` (`rust_creates_environment_c_uses_it`, `c_creates_environment_rust_attaches`, `exclusive_opener_resizes_small_lock_file`) |
 | Lock file format 2 (LMDB 1.0): every offset, size and `MDB_LOCK_FORMAT` equals C 1.0's; `mti_format` per platform; macOS semaphore names | `interop/tests/lockfile10.rs` `lock_file_lines_match_c` (`layout_dump` and `layout_dump10` vs `LOCK_V09`/`LOCK_V10`), `rlmdb` unit tests in `format/lockfile.rs` (the measured values, the `MDB_lock_desc` formula for all three platforms) and `os/shared_lock.rs` (`mdb_pack85` names) |
-| BSD lock primitives: the SysV semaphore set of 1.0 lock files (created, attached through the stored id with `IPC_STAT`/`IPC_SET`, taken and released, a holder that dies reported to the next as `OwnerDied`, removed by the last user), `ftok` as libc computes it; NetBSD's short names; the per-BSD layouts | `rlmdb` unit tests in `os/shared_lock.rs` (`sysv::tests`, built on macOS too, which has the same SysV interface; `imp::tests::v09_name_length`) and `format/lockfile.rs` (`lock_format_v2_per_platform`; `freebsd_layout` and `bsd_semaphore_layout` run only on those systems) |
+| BSD lock primitives: the SysV semaphore set of 1.0 lock files (created, attached through the stored id with `IPC_STAT`/`IPC_SET`, taken and released, a holder that dies reported to the next as `OwnerDied`, removed by the last user; which existing set at the key the exclusive opener takes over: two semaphores, and named by the stale lock file or ours, `KNOWN_C_BUGS.md` row 46), `ftok` as libc computes it; NetBSD's short names; the per-BSD layouts | `rlmdb` unit tests in `os/shared_lock.rs` (`sysv::tests`, built on macOS too, which has the same SysV interface; `imp::tests::v09_name_length`) and `format/lockfile.rs` (`lock_format_v2_per_platform`; `freebsd_layout` and `bsd_semaphore_layout` run only on those systems) |
 | Lock file format 2 shared with C 1.0 processes: an rlmdb `Environment` attaches to C 1.0's table (header, `mtb_mutexid` equal to C's hash, C's table size, C's reader in `reader_list` as in `mdb_stat10 -r`, writer lock exclusive both ways, a killed C reader cleared by `reader_check`) and C 1.0 attaches to rlmdb's (lists the Rust reader, `mdb_stat10 -e` sees rlmdb's table size, a C commit moves `mti_txnid`) | `interop/tests/lockfile10.rs` `rust_attaches_to_c10_lock_file`, `c10_attaches_to_rust_lock_file` |
 | Lock files of the two versions refuse each other while held (`MDB_VERSION_MISMATCH` from rlmdb, C 0.9 and C 1.0; rlmdb meets one when a data file of the other format replaced the one a live process uses, and leaves the table alone), and an exclusive opener of either implementation re-initialises a stale table of the other version | `interop/tests/lockfile10.rs` `lock_versions_refuse_each_other`, `stale_lock_files_of_the_other_version_are_reinitialised` and the two tests above; `rlmdb` `core::reader` unit test `exclusive_opener_reinitialises_other_version` |
 | Reader table, stale readers, `mdb_reader_check` | `interop` `readers_list`, `stale_reader_cleared_by_reader`, `stale_reader_cleared_by_mdb_stat`; `rlmdb-tools/tests/readers.rs` |

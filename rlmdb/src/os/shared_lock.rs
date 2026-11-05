@@ -34,8 +34,12 @@
 //!   `semget(ftok(lockfile, 'M'), 2, mode | IPC_CREAT)`, sets both values
 //!   to 1 and stores its id in `mtb_semid`; the others check it with
 //!   `IPC_STAT` and `IPC_SET` (mdb10.c lines 6096-6110 and 6165-6173).
-//!   Unlike C, the exclusive opener refuses an existing set of the key
-//!   that is not ours to reset (`KNOWN_C_BUGS.md` row 46).
+//!   Unlike C, the exclusive opener takes over an existing set of the key
+//!   only if it has two semaphores and is this environment's: the lock
+//!   file it is about to reset names it in `mtb_semid` (a process that
+//!   died with the environment open left both behind), or the set is
+//!   ours (`IPC_SET` succeeds). Any other set fails the open with
+//!   `EEXIST` (`KNOWN_C_BUGS.md` row 46).
 //!   Every `semop` uses `SEM_UNDO`, so the kernel releases the semaphore
 //!   of a process that dies holding it, and the flag in the lock file
 //!   (`mti_rlocked`, `mti_wlocked`) that the dead holder left set makes
@@ -511,7 +515,14 @@ mod imp {
                 }
                 #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
                 (LockObjects::SysVSemaphores, Some(wlock)) if layout.rlock_size == 8 => {
-                    let (r, w) = super::sysv::create(map, &md, mode, layout.rlock, wlock)?;
+                    let (r, w) = super::sysv::create(
+                        map,
+                        &md,
+                        mode,
+                        layout.lock_format,
+                        layout.rlock,
+                        wlock,
+                    )?;
                     return Ok(SharedLocks::sysv(r, w));
                 }
                 _ => return Err(einval()),
@@ -693,6 +704,8 @@ mod imp {
 ))]
 mod sysv {
     use super::{LockMap, LockStatus};
+    use crate::consts::MDB_MAGIC;
+    use crate::format::lockfile::{TXNINFO_FORMAT, TXNINFO_MAGIC};
     use libc::{c_int, c_short, c_ushort};
     use std::fs::Metadata;
     use std::io;
@@ -882,15 +895,32 @@ mod sysv {
         Ok(())
     }
 
-    /// Checks that set `semid`, which `semget` returned for the lock
-    /// file's key, is one [`create`] may reset. C 1.0 resets whatever set
-    /// it gets (`KNOWN_C_BUGS.md` row 46); the key is `ftok`'s, which keeps 8
-    /// bits of the device and 16 of the inode, so another program's set
-    /// can have it.
+    /// The set that the lock file mapped in `map` names, as an earlier
+    /// user of the environment left it: `mtb_semid` at `rlock`, if the
+    /// file holds a table of this version and platform (`mti_magic` is
+    /// `MDB_MAGIC`, `mti_format` is `lock_format`). `None` for a new file
+    /// (all zeros: an id of 0 is a valid one) or a table of another
+    /// version, where `rlock` holds something else.
     ///
-    /// * We pass [`check_access`], which every other opener must pass too
-    ///   ([`attach`]). If we do not, the set is another user's: its error
-    ///   (`EACCES`, `EPERM`).
+    /// Read by the exclusive opener before it resets the table: the file
+    /// is then as the last process that had the environment open left it,
+    /// and if that process died, `mtb_semid` names the set it was using.
+    fn named_set(map: &LockMap, lock_format: u32, rlock: usize) -> Option<c_int> {
+        let ours =
+            map.load_u32(TXNINFO_MAGIC) == MDB_MAGIC && map.load_u32(TXNINFO_FORMAT) == lock_format;
+        ours.then(|| map.load_i32(rlock))
+    }
+
+    /// Checks that set `semid`, which `semget` returned for the lock
+    /// file's key, is one [`create`] may reset; `named` is the set the
+    /// stale lock file names ([`named_set`]) and `owner` is
+    /// [`check_access`], which only the set's owner or creator or root
+    /// pass (a parameter only so that the tests can play another user,
+    /// which needs a second account). C 1.0 resets whatever set it gets
+    /// (`KNOWN_C_BUGS.md` row 46); the key is `ftok`'s, which keeps 8 bits
+    /// of the device and 16 of the inode, so another program's set can
+    /// have it.
+    ///
     /// * The set has exactly two semaphores, else `EEXIST`. `semget` with
     ///   `nsems` 2 returns an existing set only if it has at least two,
     ///   and semaphore number 2 exists only in a larger one: `GETVAL` of
@@ -899,40 +929,64 @@ mod sysv {
     ///   these BSDs.) `SETALL` of a larger set would read one value per
     ///   semaphore from our two-element array and overwrite the other
     ///   program's semaphores.
+    /// * And it is this environment's: either the lock file names it
+    ///   (`named` is `semid`: a process that had the environment open died
+    ///   and left the set behind, whoever it ran as), or we pass `owner`,
+    ///   the check C's other openers make ([`attach`]): the set is ours.
+    ///   Otherwise it is another program's set whose key collides with the
+    ///   lock file's, or a set of the environment that the lock file no
+    ///   longer names and another account made, which nothing tells apart:
+    ///   `EEXIST`, where C takes it over if its mode lets it.
     ///
-    /// A refused set is left as it is.
-    fn check_reusable(semid: c_int) -> io::Result<()> {
-        check_access(semid, &mut SemidDs([0; 512]))?;
+    /// A refused set is left as it is; errors other than a refusal (the
+    /// set removed meanwhile) are returned as they are.
+    fn check_reusable(
+        semid: c_int,
+        named: Option<c_int>,
+        owner: impl FnOnce(c_int) -> io::Result<()>,
+    ) -> io::Result<()> {
         // SAFETY: GETVAL takes no further argument.
         if unsafe { semctl(semid, 2, GETVAL) } >= 0 {
             return Err(io::Error::from_raw_os_error(libc::EEXIST));
         }
         let e = io::Error::last_os_error();
-        if e.raw_os_error() == Some(libc::EINVAL) {
-            Ok(())
-        } else {
-            Err(e)
+        if e.raw_os_error() != Some(libc::EINVAL) {
+            return Err(e);
+        }
+        if named == Some(semid) {
+            return Ok(());
+        }
+        match owner(semid) {
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EPERM | libc::EACCES)) => {
+                Err(io::Error::from_raw_os_error(libc::EEXIST))
+            }
+            r => r,
         }
     }
 
     /// Creates (or reuses) the set for a lock file that we hold
     /// exclusively and whose metadata is `md`, sets both semaphores to 1,
     /// and stores its id at `rlock` (`mti_semid`) and cleared flags
-    /// (`mdb_env_setup_locks`, `*excl > 0`). An existing set of the key
-    /// that is not ours to reset is refused ([`check_reusable`]).
+    /// (`mdb_env_setup_locks`, `*excl > 0`). The lock file still holds
+    /// what its last user left; if that is a table of format
+    /// `lock_format`, the set it names may be reused. An existing set of
+    /// the key that is not this environment's is refused
+    /// ([`check_reusable`]).
     pub fn create(
         map: &LockMap,
         md: &Metadata,
         mode: u32,
+        lock_format: u32,
         rlock: usize,
         wlock: usize,
     ) -> io::Result<(SysVSemaphore, SysVSemaphore)> {
+        let named = named_set(map, lock_format, rlock);
         // SAFETY: semget takes plain integers.
         let semid = unsafe { semget(ftok_key(md), 2, (mode & 0o777) as c_int | libc::IPC_CREAT) };
         if semid < 0 {
             return Err(io::Error::last_os_error());
         }
-        check_reusable(semid)?;
+        check_reusable(semid, named, |id| check_access(id, &mut SemidDs([0; 512])))?;
         let mut vals: [c_ushort; 2] = [1, 1];
         // SAFETY: SETALL reads one value per semaphore of the set from
         // `arg.array`, and `check_reusable` found two, as many as `vals`
@@ -1029,34 +1083,78 @@ mod sysv {
             assert_eq!(unsafe { semctl(semid, 0, SETALL, vals.as_mut_ptr()) }, 0);
         }
 
+        /// `mti_format` of the version 2 lock file of OpenBSD, NetBSD and
+        /// DragonFly (`MDB_LOCK_TYPE` 8), which the tests' lock files
+        /// carry.
+        const FORMAT: u32 = 0x2889_a002;
+
+        /// What a process that died with the environment open leaves in
+        /// the lock file: a version 2 table naming set `semid`, with both
+        /// flags still set.
+        fn name_set(map: &LockMap, semid: c_int) {
+            map.store_u32(TXNINFO_MAGIC, MDB_MAGIC);
+            map.store_u32(TXNINFO_FORMAT, FORMAT);
+            map.store_i32(RLOCK, semid);
+            map.store_i32(RLOCK + size_of::<c_int>(), 1);
+            map.store_i32(WLOCK, 1);
+        }
+
+        /// What `IPC_SET` says to us for a set of another account (its
+        /// owner and creator someone else, we not root), which one account
+        /// cannot make: stands in for `check_access` in `check_reusable`.
+        fn not_owner(_: c_int) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(libc::EPERM))
+        }
+
+        /// The owner check `create` makes.
+        fn owner(semid: c_int) -> io::Result<()> {
+            check_access(semid, &mut SemidDs([0; 512]))
+        }
+
+        fn errno<T>(r: io::Result<T>) -> Option<i32> {
+            r.err().and_then(|e| e.raw_os_error())
+        }
+
         /// Another program's set at the lock file's key with more
         /// semaphores than ours: `create` refuses it and changes nothing
         /// (C 1.0's `SETALL` would read three values from its two-element
-        /// array).
+        /// array). The size check comes first: the set is ours (the owner
+        /// branch would take it), and a lock file that names it does not
+        /// help either.
         #[test]
         fn create_refuses_larger_set() {
             let (f, id) = file_with_set(3);
             let _remove = Remove(id);
             set_all(id, &mut [11, 12, 13]);
             let map = LockMap::map(&f, 4096).unwrap();
-            let err = create(&map, &f.metadata().unwrap(), 0o600, RLOCK, WLOCK)
+            let md = f.metadata().unwrap();
+            let err = create(&map, &md, 0o600, FORMAT, RLOCK, WLOCK)
                 .err()
                 .unwrap();
             assert_eq!(err.raw_os_error(), Some(libc::EEXIST));
             assert_eq!([value(id, 0), value(id, 1), value(id, 2)], [11, 12, 13]);
             assert_eq!(map.load_i32(RLOCK), 0);
+
+            name_set(&map, id);
+            let err = create(&map, &md, 0o600, FORMAT, RLOCK, WLOCK)
+                .err()
+                .unwrap();
+            assert_eq!(err.raw_os_error(), Some(libc::EEXIST));
+            assert_eq!([value(id, 0), value(id, 1), value(id, 2)], [11, 12, 13]);
+            assert_eq!(map.load_i32(RLOCK + size_of::<c_int>()), 1);
         }
 
-        /// A set of two at the key (as a process that died with the
-        /// environment open leaves it) is ours: `create` takes it over and
-        /// resets both semaphores.
+        /// The owner branch: a set of two at the key that we own, with a
+        /// lock file that names no set (new, or reset since): `create`
+        /// takes it over and resets both semaphores, as C does.
         #[test]
         fn create_reuses_set_of_two() {
             let (f, id) = file_with_set(2);
             let _remove = Remove(id);
             set_all(id, &mut [0, 0]);
             let map = LockMap::map(&f, 4096).unwrap();
-            let (r, w) = create(&map, &f.metadata().unwrap(), 0o600, RLOCK, WLOCK).unwrap();
+            assert_eq!(named_set(&map, FORMAT, RLOCK), None);
+            let (r, w) = create(&map, &f.metadata().unwrap(), 0o600, FORMAT, RLOCK, WLOCK).unwrap();
             assert_eq!((r.semid, w.semid, map.load_i32(RLOCK)), (id, id, id));
             assert_eq!((value(id, READER), value(id, WRITER)), (1, 1));
             // The size `check_reusable` probed for is the one IPC_STAT
@@ -1069,6 +1167,72 @@ mod sysv {
                 assert_eq!(unsafe { semctl(id, 0, libc::IPC_STAT, &mut ds) }, 0);
                 assert_eq!({ ds.sem_nsems }, 2);
             }
+        }
+
+        /// The lock-file branch: the lock file names the set of two at the
+        /// key, as a process that died with the environment open leaves
+        /// them. `check_reusable` takes it without the owner check, so a
+        /// set another account left behind would be taken too (played by
+        /// `not_owner`); `create` then resets the set and the flags.
+        #[test]
+        fn create_takes_over_set_the_lock_file_names() {
+            let (f, id) = file_with_set(2);
+            let _remove = Remove(id);
+            set_all(id, &mut [0, 0]);
+            let map = LockMap::map(&f, 4096).unwrap();
+            name_set(&map, id);
+            assert_eq!(named_set(&map, FORMAT, RLOCK), Some(id));
+            check_reusable(id, Some(id), not_owner).unwrap();
+
+            let (r, w) = create(&map, &f.metadata().unwrap(), 0o600, FORMAT, RLOCK, WLOCK).unwrap();
+            assert_eq!((r.semid, w.semid, map.load_i32(RLOCK)), (id, id, id));
+            assert_eq!((value(id, READER), value(id, WRITER)), (1, 1));
+            assert_eq!((map.load_i32(RLOCK + 4), map.load_i32(WLOCK)), (0, 0));
+        }
+
+        /// A set of two at the key that the lock file does not name: taken
+        /// if it is ours (owner branch), refused with `EEXIST` if it is
+        /// another account's (played by `not_owner`): another program's
+        /// set whose key collides, which C would take over. The lock file
+        /// names no set (new: `None`), another set, or names this one in a
+        /// table of another format (then `rlock` is not `mtb_semid`).
+        /// Errors other than a refusal pass through.
+        #[test]
+        fn check_reusable_refuses_unnamed_set_of_another_account() {
+            let (f, id) = file_with_set(2);
+            let _remove = Remove(id);
+            set_all(id, &mut [3, 4]);
+            let map = LockMap::map(&f, 4096).unwrap();
+            name_set(&map, id);
+            let other_format = named_set(&map, FORMAT ^ 0x1000, RLOCK);
+            assert_eq!(other_format, None);
+            for named in [None, Some(id.wrapping_add(1)), other_format] {
+                assert_eq!(
+                    errno(check_reusable(id, named, not_owner)),
+                    Some(libc::EEXIST)
+                );
+                check_reusable(id, named, owner).unwrap();
+            }
+            let removed = |_| Err(io::Error::from_raw_os_error(libc::EINVAL));
+            assert_eq!(errno(check_reusable(id, None, removed)), Some(libc::EINVAL));
+            assert_eq!((value(id, READER), value(id, WRITER)), (3, 4));
+        }
+
+        /// The lock file names a set only if it holds a version 2 table of
+        /// this platform: a new file is all zeros, and 0 is a valid id.
+        #[test]
+        fn named_set_needs_a_table_of_this_format() {
+            let f = tempfile::tempfile().unwrap();
+            f.set_len(4096).unwrap();
+            let map = LockMap::map(&f, 4096).unwrap();
+            assert_eq!(named_set(&map, FORMAT, RLOCK), None);
+            name_set(&map, 0);
+            assert_eq!(named_set(&map, FORMAT, RLOCK), Some(0));
+            map.store_i32(RLOCK, 7);
+            assert_eq!(named_set(&map, FORMAT, RLOCK), Some(7));
+            assert_eq!(named_set(&map, FORMAT + 1, RLOCK), None);
+            map.store_u32(TXNINFO_MAGIC, 0);
+            assert_eq!(named_set(&map, FORMAT, RLOCK), None);
         }
 
         #[test]
@@ -1089,7 +1253,7 @@ mod sysv {
             let f = tempfile::tempfile().unwrap();
             f.set_len(4096).unwrap();
             let map = LockMap::map(&f, 4096).unwrap();
-            let (r, w) = create(&map, &f.metadata().unwrap(), 0o600, RLOCK, WLOCK).unwrap();
+            let (r, w) = create(&map, &f.metadata().unwrap(), 0o600, FORMAT, RLOCK, WLOCK).unwrap();
             let _remove = Remove(r.semid);
             assert_eq!(map.load_i32(RLOCK), r.semid);
             assert_eq!((value(r.semid, READER), value(r.semid, WRITER)), (1, 1));
