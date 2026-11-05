@@ -19,7 +19,9 @@ use common::*;
 fn second_open_under_another_name_is_ebusy() {
     let b = builder();
     let exe = b.test_program("capi_alias", Lib::Rust);
-    let scratch = b.scratch("capi_alias");
+    // The program writes copies into it (`mdb_env_copy`): on the disk, see
+    // `Builder::disk_scratch`.
+    let scratch = b.disk_scratch("capi_alias");
     let [env_a, env_b, env_c] = ["a", "b", "c"].map(|name| {
         let path = scratch.join(name);
         fs::create_dir(&path).unwrap();

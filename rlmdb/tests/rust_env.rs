@@ -10,7 +10,7 @@ use rlmdb::{
 };
 
 fn tmp() -> tempfile::TempDir {
-    tempfile::tempdir().unwrap()
+    common::tempdir()
 }
 
 #[test]

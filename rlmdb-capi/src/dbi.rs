@@ -392,7 +392,7 @@ unsafe fn compare(
         return match c_function_of(cmp) {
             // SAFETY: f is the comparator the program installed; a and b
             // are valid values (checked above).
-            Some(f) => unsafe { f(a, b) },
+            Some(f) => crate::callback::call("a comparison function", || unsafe { f(a, b) }),
             // Not one of ours (installed through the Rust API).
             None => sign(cmp(sa, sb)),
         };

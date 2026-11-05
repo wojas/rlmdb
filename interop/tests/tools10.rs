@@ -145,10 +145,30 @@ fn assert_same(tool: &str, args: &[&str]) -> Run {
     r
 }
 
+/// A new temporary directory: under `$RLMDB_TEST_SCRATCH` if set (CI
+/// points it at a file system in memory), else in the system's temporary
+/// directory. Copies go to [`disk_tmp`].
 fn tmp() -> tempfile::TempDir {
+    let mut b = tempfile::Builder::new();
+    b.prefix("interop-tools10-");
+    match std::env::var_os(interop::SCRATCH_VAR) {
+        Some(dir) if !dir.is_empty() => {
+            std::fs::create_dir_all(&dir).unwrap();
+            b.tempdir_in(dir).unwrap()
+        }
+        _ => b.tempdir().unwrap(),
+    }
+}
+
+/// A new temporary directory under `target/tmp`, on the disk, whatever
+/// `$RLMDB_TEST_SCRATCH` says, for the targets of copies: C and rlmdb
+/// write them with `O_DIRECT` on Linux, which a disk file system honours
+/// (writes aligned to its logical block size) and tmpfs ignores
+/// (`interop::TestEnv::derived_on_disk`).
+fn disk_tmp() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("interop-tools10-")
-        .tempdir()
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
         .unwrap()
 }
 
@@ -498,7 +518,8 @@ fn drop_runs(dir: &Path, src: &Path, tag: &str) {
 
 #[test]
 fn mdb_copy_matches_mdb_copy10() {
-    let dir = tmp();
+    // Holds the copies: on the disk, see `disk_tmp`.
+    let dir = disk_tmp();
     for ps in [1024, 65536] {
         let src = c10_env(dir.path(), ps);
         for compact in [false, true] {

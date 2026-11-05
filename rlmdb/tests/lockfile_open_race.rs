@@ -35,6 +35,8 @@
     windows
 ))]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -145,7 +147,7 @@ fn spawn_worker(dir: &Path, format: Format, iterations: u64) -> Child {
 }
 
 fn race(format: Format) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().to_path_buf();
     let iterations = iterations();
     drop(open_env(&path, format).unwrap());

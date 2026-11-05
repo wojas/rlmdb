@@ -90,12 +90,12 @@ pub fn two_phase_commit(pair: Pair) -> Result<()> {
     };
     let other = pair.other(tp);
     let env = new_env(&pair, 64 * MIB)?;
-    let base = DataSet::new("base", 500, 1);
+    let base = DataSet::new("base", pair.scaled(500), 1);
     base.fill(pair.writer, &env, &[])?;
     let t0 = stat(pair.reference(), &env)?.last_txnid;
 
     // 1. Prepare, read, commit.
-    let two = DataSet::new("two", 400, 2).with(&["--big", "5000"]);
+    let two = DataSet::new("two", pair.scaled(400), 2).with(&["--big", "5000"]);
     let mut prepared = tp
         .on("prepare", &env)
         .args([super::hold_secs().as_str(), "--until-stdin"])
@@ -115,7 +115,7 @@ pub fn two_phase_commit(pair: Pair) -> Result<()> {
     audit(&pair, &env)?;
 
     // 2. Prepare, then abort.
-    let three = DataSet::new("three", 300, 3);
+    let three = DataSet::new("three", pair.scaled(300), 3);
     let mut aborted = tp
         .on("prepare", &env)
         .args([super::hold_secs().as_str(), "--until-stdin", "--abort"])
@@ -130,7 +130,7 @@ pub fn two_phase_commit(pair: Pair) -> Result<()> {
     );
     sees(&pair, other, &env, t0 + 1, &[&base, &two], &["three"])?;
     audit(&pair, &env)?;
-    let four = DataSet::new("four", 200, 4);
+    let four = DataSet::new("four", pair.scaled(200), 4);
     four.fill(other, &env, &[])?;
     sees(
         &pair,
@@ -144,7 +144,7 @@ pub fn two_phase_commit(pair: Pair) -> Result<()> {
     // 3. A process dies between the phases. Nobody else has the
     // environment open, so the next opener re-initialises the lock file
     // (and with it a writer lock that is not robust, see killed_writer).
-    let five = DataSet::new("five", 300, 5);
+    let five = DataSet::new("five", pair.scaled(300), 5);
     let mut dying = tp
         .on("prepare", &env)
         .args([super::hold_secs().as_str(), "--until-stdin"])
@@ -158,7 +158,7 @@ pub fn two_phase_commit(pair: Pair) -> Result<()> {
         "audit after a death between the phases: {report:?}"
     ));
     audit(&pair, &env)?;
-    let six = DataSet::new("six", 200, 6);
+    let six = DataSet::new("six", pair.scaled(200), 6);
     six.fill(other, &env, &[])?;
     sees(
         &pair,
@@ -171,7 +171,7 @@ pub fn two_phase_commit(pair: Pair) -> Result<()> {
     audit(&pair, &env)?;
 
     // 4. A commit rolled back.
-    let seven = DataSet::new("seven", 300, 7).with(&["--big", "5000"]);
+    let seven = DataSet::new("seven", pair.scaled(300), 7).with(&["--big", "5000"]);
     seven.fill(tp, &env, &[])?;
     let out = tp.on("rollback", &env).arg("last").run()?;
     ensure!(
@@ -197,7 +197,7 @@ pub fn two_phase_commit(pair: Pair) -> Result<()> {
             "{tp}: a second rollback in a row:\n{again}"
         );
     }
-    let eight = DataSet::new("eight", 200, 8);
+    let eight = DataSet::new("eight", pair.scaled(200), 8);
     eight.fill(other, &env, &[])?;
     sees(
         &pair,

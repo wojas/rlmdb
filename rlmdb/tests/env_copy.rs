@@ -65,7 +65,8 @@ fn check_copies(c: &CTools, src: &Path, dbs: &[Option<&str>]) {
     let ps = open_ro(src).page_size();
     for compact in [false, true] {
         let what = if compact { "compacting" } else { "plain" };
-        let dst = tempfile::tempdir().unwrap();
+        // A copy target: on the disk (`O_DIRECT`, see `common::disk_tempdir`).
+        let dst = common::disk_tempdir();
         {
             let env = open_ro(src);
             env.copy_to_path(dst.path(), compact).unwrap();
@@ -78,7 +79,7 @@ fn check_copies(c: &CTools, src: &Path, dbs: &[Option<&str>]) {
         let rust = fs::read(dst.path().join("data.mdb")).unwrap();
         let via_fd = {
             let env = open_ro(src);
-            let mut file = tempfile::tempfile().unwrap();
+            let mut file = tempfile::tempfile_in(common::scratch_root()).unwrap();
             #[cfg(unix)]
             env.copy_to_fd(file.as_fd(), compact).unwrap();
             #[cfg(windows)]
@@ -132,7 +133,7 @@ fn value(i: usize, len: usize) -> Vec<u8> {
 #[test]
 fn overflow_value_in_main_db_loaded_by_c() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = dir.path().join("env");
     c.load(&env, None, &[], &[(b"k1".to_vec(), value(1, 20000))]);
     check_copies(c, &env, &[None]);
@@ -141,7 +142,7 @@ fn overflow_value_in_main_db_loaded_by_c() {
 #[test]
 fn overflow_values_in_main_and_named_dbs() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     {
         let env = open_rw(dir.path());
         let mut t = env.begin_rw_txn().unwrap();
@@ -175,7 +176,7 @@ fn overflow_values_in_main_and_named_dbs() {
 #[test]
 fn dupsort_dupfixed_and_free_pages() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     {
         let env = open_rw(dir.path());
         let mut t = env.begin_rw_txn().unwrap();
@@ -236,7 +237,7 @@ fn dupsort_dupfixed_and_free_pages() {
 #[test]
 fn large_environment_with_buffer_reuse() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     {
         let env = open_rw(dir.path());
         for round in 0..4usize {
@@ -269,11 +270,11 @@ fn large_environment_with_buffer_reuse() {
 fn empty_environments() {
     let c = require_c!();
     // Brand new.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     drop(open_rw(dir.path()));
     check_copies(c, dir.path(), &[None]);
     // Empty main DB with flags: meta 1 of the compacted copy has txnid 1.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     {
         let env = open_rw(dir.path());
         let mut t = env.begin_rw_txn().unwrap();
@@ -282,7 +283,7 @@ fn empty_environments() {
     }
     check_copies(c, dir.path(), &[None]);
     // Everything deleted again.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     {
         let env = open_rw(dir.path());
         let mut t = env.begin_rw_txn().unwrap();
@@ -299,7 +300,7 @@ fn empty_environments() {
 
 #[test]
 fn no_sub_dir_copy_and_plain_copy_while_writing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("flat.mdb");
     let env = Environment::builder()
         .map_size(16 << 20)
@@ -316,8 +317,10 @@ fn no_sub_dir_copy_and_plain_copy_while_writing() {
     let mut t = env.begin_rw_txn().unwrap();
     put(&mut t, Dbi::MAIN, b"new", b"value");
     t.commit().unwrap();
+    // The copy targets: on the disk (`O_DIRECT`, see `common::disk_tempdir`).
+    let targets = common::disk_tempdir();
     for compact in [false, true] {
-        let target = dir.path().join(format!("copy-{compact}.mdb"));
+        let target = targets.path().join(format!("copy-{compact}.mdb"));
         env.copy_to_path(&target, compact).unwrap();
         let copy = Environment::builder()
             .flags(EnvironmentFlags::NO_SUB_DIR | EnvironmentFlags::READ_ONLY)
@@ -344,7 +347,7 @@ fn no_sub_dir_copy_and_plain_copy_while_writing() {
 #[test]
 fn plain_copy_never_emits_a_meta_newer_than_its_snapshot() {
     for format in [Format::V09, Format::V10] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = common::tempdir();
         let mut b = Environment::builder();
         b.map_size(64 << 20)
             .flags(EnvironmentFlags::NO_SYNC)
@@ -387,7 +390,8 @@ fn plain_copy_never_emits_a_meta_newer_than_its_snapshot() {
         assert_eq!(env.info().unwrap().last_txnid as u64, txnid + 1);
         assert_eq!(env.begin_ro_txn().unwrap().id(), txnid);
 
-        let target = tempfile::tempdir().unwrap();
+        // A copy target: on the disk (`O_DIRECT`, see `common::disk_tempdir`).
+        let target = common::disk_tempdir();
         env.copy_to_path(target.path(), false).unwrap();
         let copy = fs::read(target.path().join("data.mdb")).unwrap();
         // The source's bytes up to the snapshot's last page, but for the
@@ -422,7 +426,7 @@ fn plain_copy_never_emits_a_meta_newer_than_its_snapshot() {
         if let Some(c) = c {
             let mut theirs = c_copy(c, dir.path(), false);
             assert!(theirs[commit_part(other)] == bytes[META_MAPSIZE..]);
-            let theirs_dir = tempfile::tempdir().unwrap();
+            let theirs_dir = common::tempdir();
             fs::write(theirs_dir.path().join("data.mdb"), &theirs).unwrap();
             let copied = open_ro(theirs_dir.path());
             assert_eq!(copied.info().unwrap().last_txnid as u64, txnid + 1);
@@ -440,7 +444,8 @@ fn plain_copy_never_emits_a_meta_newer_than_its_snapshot() {
         put(&mut t, Dbi::MAIN, b"next", b"value");
         t.commit().unwrap();
         assert_eq!(env.info().unwrap().last_txnid as u64, txnid + 1);
-        let target = tempfile::tempdir().unwrap();
+        // A copy target: on the disk (`O_DIRECT`, see `common::disk_tempdir`).
+        let target = common::disk_tempdir();
         env.copy_to_path(target.path(), false).unwrap();
         let copy = fs::read(target.path().join("data.mdb")).unwrap();
         if let Some(c) = c {

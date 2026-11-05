@@ -45,6 +45,7 @@ pub mod pagecmp;
 mod peer;
 pub mod report;
 pub mod scenarios;
+pub mod scope;
 mod testenv;
 pub mod tools;
 
@@ -54,4 +55,4 @@ pub use peer::{
 };
 /// The data-file format of an environment (`rlmdb::Format`): LMDB 0.9 or 1.0.
 pub use rlmdb::Format;
-pub use testenv::{LargePermit, TestEnv};
+pub use testenv::{register_target_tmpdir, LargePermit, TestEnv, SCRATCH_VAR};

@@ -10,6 +10,8 @@
 //! in a test binary of their own: no other test opens an environment while
 //! one of them has the variable set.
 
+mod common;
+
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -48,7 +50,7 @@ impl Drop for Defaults {
 fn tmp() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("rlmdb-defmt-")
-        .tempdir()
+        .tempdir_in(common::scratch_root())
         .unwrap()
 }
 

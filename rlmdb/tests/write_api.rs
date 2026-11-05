@@ -31,7 +31,7 @@ fn errno(e: Error) -> i32 {
 
 #[test]
 fn value_size_limits() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env_at(dir.path(), 16 << 20);
     let mut txn = env.begin_rw_txn().unwrap();
     let plain = txn.create_db(Some("plain"), DatabaseFlags::CREATE).unwrap();
@@ -91,7 +91,7 @@ fn value_size_limits() {
 
 #[test]
 fn keyexist_and_append_rules() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env_at(dir.path(), 16 << 20);
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn.create_db(None, DatabaseFlags::empty()).unwrap();
@@ -127,7 +127,7 @@ fn keyexist_and_append_rules() {
 
 #[test]
 fn dupsort_rules() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env_at(dir.path(), 16 << 20);
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn
@@ -172,7 +172,7 @@ fn dupsort_rules() {
 
 #[test]
 fn cursor_current_rules() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env_at(dir.path(), 16 << 20);
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn.create_db(None, DatabaseFlags::empty()).unwrap();
@@ -213,7 +213,7 @@ fn cursor_current_rules() {
 fn current_dup_that_does_not_fit_its_subpage() {
     // KNOWN_C_BUGS.md row 15: MDB_CURRENT with a longer duplicate in a full
     // sub-page. lmdb.h says this is a delete followed by an insert.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env_at(dir.path(), 16 << 20);
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn
@@ -244,7 +244,7 @@ fn current_dup_that_does_not_fit_its_subpage() {
 
 #[test]
 fn read_your_writes_and_abort() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env_at(dir.path(), 16 << 20);
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn.create_db(None, DatabaseFlags::empty()).unwrap();
@@ -294,7 +294,7 @@ fn read_your_writes_and_abort() {
 
 #[test]
 fn database_handles() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = Environment::builder()
         .max_dbs(2)
         .flags(EnvironmentFlags::NO_SYNC)
@@ -353,7 +353,7 @@ fn database_handles() {
 
 #[test]
 fn main_db_flags_block_named_dbs() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env_at(dir.path(), 16 << 20);
     let mut txn = env.begin_rw_txn().unwrap();
     txn.create_db(None, DatabaseFlags::DUP_SORT).unwrap();
@@ -377,7 +377,7 @@ fn main_db_flags_block_named_dbs() {
 
 #[test]
 fn read_only_environment() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     drop(env_at(dir.path(), 1 << 20));
     let env = Environment::builder()
         .flags(EnvironmentFlags::READ_ONLY)
@@ -388,7 +388,7 @@ fn read_only_environment() {
 
 #[test]
 fn map_full_poisons_the_transaction() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env_at(dir.path(), 1 << 20);
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn.create_db(None, DatabaseFlags::empty()).unwrap();
@@ -414,7 +414,7 @@ fn map_full_poisons_the_transaction() {
 
 #[test]
 fn set_map_size_and_resize() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env_at(dir.path(), 1 << 20);
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn.create_db(None, DatabaseFlags::empty()).unwrap();
@@ -455,7 +455,7 @@ fn set_map_size_and_resize() {
 #[test]
 fn map_resized_by_another_process() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env_at(dir.path(), 1 << 20);
     let txn = env.begin_rw_txn().unwrap();
     txn.commit().unwrap();
@@ -486,7 +486,7 @@ fn map_resized_by_another_process() {
 
 #[test]
 fn reserve_and_multiple() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env_at(dir.path(), 16 << 20);
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn.create_db(Some("r"), DatabaseFlags::CREATE).unwrap();
@@ -548,7 +548,7 @@ fn reserve_and_multiple() {
 
 #[test]
 fn dupfixed_without_dupsort_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let env = env_at(dir.path(), 16 << 20);
     let mut txn = env.begin_rw_txn().unwrap();
     let db = txn
@@ -615,7 +615,7 @@ fn current_outside_leaf(
     flags: DatabaseFlags,
 ) {
     let shape = format!("{format:?}, page size {ps:?}, flags {flags:?}");
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let mut b = Environment::builder();
     b.format(format)
         .max_dbs(4)
@@ -797,7 +797,7 @@ fn current_with_another_key() {
 fn current_other_key(format: Format, ps: Option<usize>, flags: DatabaseFlags) {
     use std::collections::BTreeMap;
     let shape = format!("{format:?}, page size {ps:?}, flags {flags:?}");
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let mut b = Environment::builder();
     b.format(format)
         .max_dbs(4)
@@ -1007,7 +1007,7 @@ fn count_after_another_cursors_put() {
 /// One shape of [`count_after_another_cursors_put`].
 fn count_after_put(format: Format, ps: Option<usize>, flags: DatabaseFlags) {
     let shape = format!("{format:?}, page size {ps:?}, flags {flags:?}");
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let mut b = Environment::builder();
     b.format(format)
         .max_dbs(200)
@@ -1304,7 +1304,7 @@ fn walk_c(c: &mut impl Moves, op: CursorOp, all: &[u32], what: &str) {
 /// One shape of [`moves_after_a_failed_search`].
 fn moves_after_failed_search(format: Format, ps: Option<usize>, flags: DatabaseFlags) {
     let shape = format!("{format:?}, page size {ps:?}, flags {flags:?}");
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let mut b = Environment::builder();
     b.format(format)
         .max_dbs(4)

@@ -1969,7 +1969,7 @@ fn run_seed(
     deadline: Option<Instant>,
     total: &mut Stats,
 ) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path();
     let ps = common::os_page_size();
     let mut cx = Cx {
@@ -2113,6 +2113,11 @@ fn run_seed(
 
 #[test]
 fn model() {
+    // The full scope only (Linux x86-64 CI, nightly, scripts/check-all.sh):
+    // it tests the write path's logic, not the platform.
+    if common::full_scope_only("model") {
+        return;
+    }
     let secs = env_u64("MODEL_SECS", 30);
     let txns = env_u64("MODEL_TXNS", 150) as usize;
     let only = std::env::var("MODEL_SEED")

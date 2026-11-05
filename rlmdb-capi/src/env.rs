@@ -476,7 +476,9 @@ pub unsafe extern "C" fn mdb_reader_list(
         };
         // SAFETY: func is the caller's message callback; line is a valid
         // NUL-terminated string for the duration of the call.
-        result = unsafe { func(line.as_ptr(), ctx) };
+        result = crate::callback::call("the message function of mdb_reader_list", || unsafe {
+            func(line.as_ptr(), ctx)
+        });
         if result < 0 {
             break;
         }

@@ -9,12 +9,13 @@
 //! nullable C function pointer).
 //!
 //! The callback types use the `"C-unwind"` ABI: the calling convention is
-//! C's, but an exception that a C++ callback throws may unwind through the
-//! library's Rust frames. Every exported function is `extern "C"`, so such
-//! an exception aborts the process at the library boundary instead of
-//! unwinding into the caller's C frames (with a plain `"C"` callback type it
-//! would be undefined behaviour). A callback that `longjmp`s out of the
-//! library skips Rust frames and is undefined behaviour. A callback that
+//! C's, but a callback may unwind (a C++ exception, a Rust panic) into the
+//! library (with a plain `"C"` callback type that would be undefined
+//! behaviour). The library calls every callback through `callback::call`,
+//! which aborts the process where the callback returned by unwinding,
+//! before any frame of the library or the program is unwound. A callback
+//! that `longjmp`s out of the library skips Rust frames and is undefined
+//! behaviour. A callback that
 //! frees the transaction or a cursor it was called for aborts the process
 //! (see "Re-entrancy" in `crate::handles`).
 

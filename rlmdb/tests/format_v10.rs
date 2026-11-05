@@ -8,6 +8,8 @@
 //! them, is checked across processes in `interop` (`write_differential10.rs`,
 //! `format10.rs`).
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -20,7 +22,7 @@ use rlmdb::{
 fn tmp() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("rlmdb-v10-")
-        .tempdir()
+        .tempdir_in(common::scratch_root())
         .unwrap()
 }
 

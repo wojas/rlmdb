@@ -37,7 +37,8 @@ const ALL_ENVS: &[&str] = &[
 #[test]
 fn copies() {
     for &name in ALL_ENVS {
-        let dir = tempdir();
+        // Holds the copies (`mdb_copy`): on the disk, see `disk_tempdir`.
+        let dir = disk_tempdir();
         let src = env_copy(name, dir.path());
         let nosub = name == "nosubdir";
         let extra: &[&str] = if nosub { &["-n"] } else { &[] };
@@ -117,7 +118,8 @@ fn copies() {
 
 #[test]
 fn copy_errors_and_usage() {
-    let dir = tempdir();
+    // Holds the copies (`mdb_copy`): on the disk, see `disk_tempdir`.
+    let dir = disk_tempdir();
     let src = env_copy("named", dir.path());
     let s = p(&src);
     let existing = dir.path().join("existing");

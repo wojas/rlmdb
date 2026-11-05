@@ -9,6 +9,8 @@
 //! on a page; a cursor that a failed move left on a page (past either end,
 //! a failed `MDB_SET`) reports the node it is still on.
 
+mod common;
+
 use rlmdb::{
     CursorOp, DatabaseFlags, Dbi, Environment, Format, RoCursor, RwCursor, RwTxn, Transaction,
     WriteFlags,
@@ -17,7 +19,7 @@ use rlmdb::{
 fn tmp() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("rlmdb-is-db-")
-        .tempdir()
+        .tempdir_in(common::scratch_root())
         .unwrap()
 }
 

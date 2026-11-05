@@ -216,6 +216,15 @@ deferred until the core has been validated through the C API.
   A new scenario goes into `interop/src/scenarios` and runs in both
   formats: take the reference peer, the tools and the page size from the
   `Pair`, never `Peer::C` or the 0.9 tools directly.
+* The CI runs the whole suite on Linux x86-64 and the platform suite
+  (`RLMDB_TEST_SCOPE=platform`) on macOS, Windows and Linux arm64; the
+  nightly runs the whole suite everywhere (`interop/README.md`, "Scope").
+  A new test runs in both scopes unless it only repeats on another
+  platform what Linux checks (another page size, more of the generic
+  matrix, mutation or model runs): then it returns early with a SKIPPED
+  note in the platform suite (`interop::scope`,
+  `common::full_scope_only`), and a new scenario that depends on the
+  platform goes into `scenarios::PLATFORM_SCENARIOS`.
 * Run `scripts/check-all.sh` (fmt, clippy, doc, host tests, then the same
   tests in a Linux container via `scripts/linux-test.sh`) before declaring
   work done. `--no-linux` skips the container only for quick iteration.
@@ -240,7 +249,15 @@ deferred until the core has been validated through the C API.
   differential tests for anything that affects what is written, `interop/`
   scenarios for anything cross-process.
 * Test scratch directories must be per process (tests run in parallel and
-  in shared containers).
+  in shared containers). Make them with the helpers of the crate's tests
+  (`common::tempdir`, `Builder::scratch`, `TestEnv::new`, …), which honour
+  `$RLMDB_TEST_SCRATCH` (CI points it at a file system in memory). The
+  target of a copy (`copy_to_path`, `mdb_copy`, a peer's `copy`) goes to
+  the disk helper instead (`common::disk_tempdir`,
+  `Builder::disk_scratch`, `TestEnv::derived_on_disk`) unless any copy
+  error is accepted (the robustness tests): copies are written with
+  `O_DIRECT` on Linux, whose alignment only a disk file system checks.
+  Nothing else the tests check differs on tmpfs.
 
 ## 9. Not implemented yet, and what that means
 

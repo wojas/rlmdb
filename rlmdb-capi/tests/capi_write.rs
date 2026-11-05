@@ -17,7 +17,9 @@ use common::*;
 fn run_capi_write(lib: Lib) -> String {
     let b = builder();
     let exe = b.test_program("capi_write", lib);
-    let scratch = b.scratch(&format!("write-{}", lib.name()));
+    // The program writes copies into it (`mdb_env_copy`): on the disk, see
+    // `Builder::disk_scratch`.
+    let scratch = b.disk_scratch(&format!("write-{}", lib.name()));
     let out = run_in(lib, &exe, &scratch);
     check_environments(&scratch);
     out

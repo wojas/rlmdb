@@ -968,13 +968,36 @@ impl Builder {
         self.program_with("cpeer", &sources, lib, &["-I", include.to_str().unwrap()])
     }
 
-    /// A fresh scratch directory.
+    /// A fresh scratch directory for a test's environments: under
+    /// `$RLMDB_TEST_SCRATCH` if set (CI points it at a file system in
+    /// memory), else in this process's directory under `target/tmp`. Not
+    /// for the target of a copy: see [`disk_scratch`](Self::disk_scratch).
     pub fn scratch(&self, name: &str) -> PathBuf {
-        let d = self.dir.join("scratch").join(name);
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
+        let root = match std::env::var_os("RLMDB_TEST_SCRATCH") {
+            Some(dir) if !dir.is_empty() => PathBuf::from(dir)
+                .join("capi")
+                .join(self.dir.file_name().unwrap()),
+            _ => self.dir.join("scratch"),
+        };
+        fresh_dir(root.join(name))
     }
+
+    /// A fresh directory in this process's directory under `target/tmp`,
+    /// on the disk, whatever `$RLMDB_TEST_SCRATCH` says: for programs that
+    /// write copies (`mdb_env_copy`, `mdb_copy`) into the directory they
+    /// are given. rlmdb and C open a copy's target with `O_DIRECT` on
+    /// Linux, which a disk file system honours (writes must be aligned to
+    /// its logical block size, `KNOWN_C_BUGS.md` row 34) and tmpfs ignores.
+    pub fn disk_scratch(&self, name: &str) -> PathBuf {
+        fresh_dir(self.dir.join("disk").join(name))
+    }
+}
+
+/// `dir`, emptied or created.
+fn fresh_dir(dir: PathBuf) -> PathBuf {
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 /// Runs `cmd`, panicking (with its output) unless it succeeds.

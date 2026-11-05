@@ -38,22 +38,23 @@ pub fn alternating_writers(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 256 * MIB)?;
     let (a, b) = (pair.writer, pair.reader);
     let sets = [
-        DataSet::new("alt", 2000, 71),
-        DataSet::new("altd", 400, 72).with(&["--dupsort", "--dups", "12"]),
-        DataSet::new("altb", 90, 73).with(&["--big", "20000"]),
-        DataSet::new("altf", 30, 74).with(&["--dupfixed", "--dups", "700"]),
+        DataSet::new("alt", pair.scaled(2000), 71),
+        DataSet::new("altd", pair.scaled(400), 72).with(&["--dupsort", "--dups", "12"]),
+        DataSet::new("altb", pair.scaled(90), 73).with(&["--big", "20000"]),
+        DataSet::new("altf", 30, 74).with(&["--dupfixed", "--dups", &pair.scaled_arg(700)]),
     ];
+    let per_txn = [300, 150, 100].map(|n| pair.scaled_arg(n));
     for ds in &sets {
-        ds.fill(a, &env, &["--per-txn", "300"])?;
+        ds.fill(a, &env, &["--per-txn", &per_txn[0]])?;
         verify_all(&pair, &env, ds)?;
-        ds.delete(b, &env, 3, &["--per-txn", "150"])?;
+        ds.delete(b, &env, 3, &["--per-txn", &per_txn[1]])?;
         verify_all(&pair, &env, &ds.after_delete(3))?;
         ds.fill(a, &env, &[])?; // overwrites, and adds the deleted items back
         verify_all(&pair, &env, ds)?;
         ds.delete(b, &env, 2, &[])?;
         verify_all(&pair, &env, &ds.after_delete(2))?;
         ds.after_delete(2)
-            .delete(a, &env, 1, &["--per-txn", "100"])?;
+            .delete(a, &env, 1, &["--per-txn", &per_txn[2]])?;
         verify_all(&pair, &env, &ds.after_delete(1))?;
         ds.fill(b, &env, &["--append"])?;
         verify_all(&pair, &env, ds)?;
@@ -90,27 +91,34 @@ pub fn delete_heavy(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 512 * MIB)?;
     let (w, r) = (pair.writer, pair.reader);
     let sets = [
-        DataSet::new("dh", 12000, 81).with(&["--valsize", "100"]),
-        DataSet::new("dhd", 1200, 82).with(&["--dupsort", "--dups", "60"]),
-        DataSet::new("dhs", 12, 86).with(&["--dupsort", "--dups", "1500", "--valsize", "40"]),
-        DataSet::new("dhf", 40, 83).with(&["--dupfixed", "--dups", "2500"]),
-        DataSet::new("dhb", 300, 84).with(&["--big", "12000"]),
-        DataSet::new("dhi", 6000, 85).with(&["--intkey"]),
+        DataSet::new("dh", pair.scaled(12000), 81).with(&["--valsize", "100"]),
+        DataSet::new("dhd", pair.scaled(1200), 82).with(&["--dupsort", "--dups", "60"]),
+        DataSet::new("dhs", 12, 86).with(&[
+            "--dupsort",
+            "--dups",
+            &pair.scaled_arg(1500),
+            "--valsize",
+            "40",
+        ]),
+        DataSet::new("dhf", 40, 83).with(&["--dupfixed", "--dups", &pair.scaled_arg(2500)]),
+        DataSet::new("dhb", pair.scaled(300), 84).with(&["--big", "12000"]),
+        DataSet::new("dhi", pair.scaled(6000), 85).with(&["--intkey"]),
     ];
+    let per_txn = [3000, 500, 2000, 700].map(|n| pair.scaled_arg(n));
     for ds in &sets {
-        ds.fill(w, &env, &["--per-txn", "3000"])?;
+        ds.fill(w, &env, &["--per-txn", &per_txn[0]])?;
     }
     let full = audit(&pair, &env)?;
 
     for ds in &sets {
-        ds.delete(r, &env, 3, &["--per-txn", "500"])?;
+        ds.delete(r, &env, 3, &["--per-txn", &per_txn[1]])?;
         verify_by(&[w, pair.reference()], &env, &ds.after_delete(3))?;
     }
     audit(&pair, &env)?;
 
     for ds in &sets {
         ds.after_delete(3)
-            .delete(w, &env, 1, &["--per-txn", "2000"])?;
+            .delete(w, &env, 1, &["--per-txn", &per_txn[2]])?;
         verify_by(&[r, pair.reference()], &env, &ds.after_delete(1))?;
     }
     let empty = audit(&pair, &env)?;
@@ -129,7 +137,7 @@ pub fn delete_heavy(pair: Pair) -> Result<()> {
 
     for ds in &sets {
         ds.fill(r, &env, &[])?;
-        ds.delete(w, &env, 2, &["--per-txn", "700"])?;
+        ds.delete(w, &env, 2, &["--per-txn", &per_txn[3]])?;
         verify_by(&[r, pair.reference()], &env, &ds.after_delete(2))?;
     }
     let refilled = audit(&pair, &env)?;
@@ -157,17 +165,23 @@ pub fn delete_heavy(pair: Pair) -> Result<()> {
 pub fn drop_clear_dbs(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 256 * MIB)?;
     let sets = [
-        (DataSet::new("dp", 3000, 91), false),
+        (DataSet::new("dp", pair.scaled(3000), 91), false),
         (
-            DataSet::new("dpd", 300, 92).with(&["--dupsort", "--dups", "300", "--valsize", "40"]),
+            DataSet::new("dpd", 300, 92).with(&[
+                "--dupsort",
+                "--dups",
+                &pair.scaled_arg(300),
+                "--valsize",
+                "40",
+            ]),
             true,
         ),
         (
-            DataSet::new("dpb", 100, 93).with(&["--big", "30000"]),
+            DataSet::new("dpb", pair.scaled(100), 93).with(&["--big", "30000"]),
             false,
         ),
         (
-            DataSet::new("dpf", 30, 94).with(&["--dupfixed", "--dups", "2000"]),
+            DataSet::new("dpf", 30, 94).with(&["--dupfixed", "--dups", &pair.scaled_arg(2000)]),
             true,
         ),
     ];
@@ -276,10 +290,16 @@ fn first_difference(a: &[u8], b: &[u8], psize: u32) -> String {
 pub fn copy_cross(pair: Pair) -> Result<()> {
     let env = new_env(&pair, 256 * MIB)?;
     let sets = [
-        DataSet::new("cp", 2500, 121),
-        DataSet::new("cpd", 25, 122).with(&["--dupsort", "--dups", "1200", "--valsize", "40"]),
-        DataSet::new("cpb", 60, 123).with(&["--big", "25000"]),
-        DataSet::new("cpi", 1000, 124).with(&["--intkey"]),
+        DataSet::new("cp", pair.scaled(2500), 121),
+        DataSet::new("cpd", 25, 122).with(&[
+            "--dupsort",
+            "--dups",
+            &pair.scaled_arg(1200),
+            "--valsize",
+            "40",
+        ]),
+        DataSet::new("cpb", pair.scaled(60), 123).with(&["--big", "25000"]),
+        DataSet::new("cpi", pair.scaled(1000), 124).with(&["--intkey"]),
     ];
     for ds in &sets {
         ds.fill(pair.writer, &env, &[])?;
@@ -292,10 +312,11 @@ pub fn copy_cross(pair: Pair) -> Result<()> {
     let mut copies: Vec<(Peer, bool, TestEnv)> = Vec::new();
     for peer in pair.verifiers() {
         for compact in [false, true] {
-            let target = env.derived(&format!(
+            // On the disk, as every copy target (`TestEnv::derived_on_disk`).
+            let target = env.derived_on_disk(&format!(
                 "{peer}-{}",
                 if compact { "compact" } else { "plain" }
-            ));
+            ))?;
             let copier = pair.capable(peer, "copy");
             let mut cmd = copier.on("copy", &env).arg(target.path());
             if compact {
@@ -501,7 +522,7 @@ fn writer_gets_lock(peer: Peer, env: &TestEnv, seed: u32) -> Result<()> {
 pub fn killed_writer(pair: Pair) -> Result<()> {
     let robust = super::writer_lock_recovers(pair.format);
     let env = new_env(&pair, 512 * MIB)?;
-    let ds = DataSet::new("data", 1000, 111);
+    let ds = DataSet::new("data", pair.scaled(1000), 111);
     ds.fill(pair.writer, &env, &[])?;
     pair.writer
         .on("writer-loop", &env)
@@ -580,174 +601,197 @@ pub fn killed_writer(pair: Pair) -> Result<()> {
 /// The write script of [`same_writes_same_pages`]: every fill variant,
 /// deletes of each kind, `mdb_drop` both ways, a deterministic writer loop
 /// (nested transactions, aborts; bounded by commits, not time) and
-/// `nested-test`.
-const SAME_WRITES: &[&[&str]] = &[
-    &["fill", "plain", "3000", "1", "--per-txn", "700"],
-    &[
-        "fill",
-        "dups",
-        "500",
-        "2",
-        "--dupsort",
-        "--dups",
-        "9",
-        "--per-txn",
-        "77",
-    ],
-    &[
-        "fill",
-        "sub",
-        "20",
-        "3",
-        "--dupsort",
-        "--dups",
-        "900",
-        "--valsize",
-        "40",
-    ],
-    &["fill", "fixed", "20", "4", "--dupfixed", "--dups", "900"],
-    // 1-byte items: mp_upper of their P_LEAF2 pages lies past the page end.
-    &[
-        "fill",
-        "fixed1",
-        "20",
-        "11",
-        "--dupfixed",
-        "--dups",
-        "256",
-        "--valsize",
-        "1",
-    ],
-    &[
-        "fill",
-        "fixed2",
-        "20",
-        "12",
-        "--dupfixed",
-        "--dups",
-        "1500",
-        "--valsize",
-        "2",
-    ],
-    &[
-        "fill",
-        "intdup",
-        "30",
-        "5",
-        "--intdup",
-        "--dups",
-        "300",
-        "--valsize",
-        "4",
-    ],
-    &[
-        "fill",
-        "ints",
-        "800",
-        "6",
-        "--intkey",
-        "--big",
-        "20000",
-        "--per-txn",
-        "100",
-    ],
-    &["fill", "app", "1000", "7", "--append", "--per-txn", "300"],
-    &[
-        "fill", "appd", "200", "8", "--revdup", "--dups", "7", "--append",
-    ],
-    &["fill", "res", "100", "9", "--reserve", "--big", "9000"],
-    &["fill", "rev", "700", "10", "--revkey", "--valsize", "200"],
-    &[
-        "delete",
-        "dups",
-        "500",
-        "2",
-        "--dupsort",
-        "--dups",
-        "9",
-        "--every",
-        "3",
-        "--per-txn",
-        "50",
-    ],
-    &["delete", "plain", "3000", "1", "--every", "2"],
-    &[
-        "delete",
-        "sub",
-        "20",
-        "3",
-        "--dupsort",
-        "--dups",
-        "900",
-        "--valsize",
-        "40",
-        "--every",
-        "3",
-    ],
-    &[
-        "delete",
-        "fixed",
-        "20",
-        "4",
-        "--dupfixed",
-        "--dups",
-        "900",
-        "--every",
-        "2",
-    ],
-    &[
-        "delete",
-        "fixed1",
-        "20",
-        "11",
-        "--dupfixed",
-        "--dups",
-        "256",
-        "--valsize",
-        "1",
-        "--every",
-        "3",
-    ],
-    &[
-        "delete",
-        "fixed2",
-        "20",
-        "12",
-        "--dupfixed",
-        "--dups",
-        "1500",
-        "--valsize",
-        "2",
-        "--every",
-        "3",
-    ],
-    &[
-        "delete",
-        "ints",
-        "800",
-        "6",
-        "--intkey",
-        "--big",
-        "20000",
-        "--every",
-        "1",
-        "--per-txn",
-        "99",
-    ],
-    &["drop", "rev"],
-    &["drop", "appd", "--delete"],
-    &[
-        "writer-loop",
-        "wl",
-        "600",
-        "5",
-        "--nosync",
-        "--max-commits",
-        "60",
-    ],
-    &["nested-test"],
-    &["fill", "plain", "3000", "1", "--per-txn", "1000"],
-];
+/// `nested-test`. The item counts are [`Pair::scaled`] (keys, or the
+/// duplicates of DBs whose keys have sub-DBs, and the items per
+/// transaction): the script of the OS page size is the same at every
+/// page size.
+fn same_writes(pair: &Pair) -> Vec<Vec<String>> {
+    let n = |count: u32| pair.scaled_arg(count);
+    let step = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+    vec![
+        step(&["fill", "plain", &n(3000), "1", "--per-txn", &n(700)]),
+        step(&[
+            "fill",
+            "dups",
+            &n(500),
+            "2",
+            "--dupsort",
+            "--dups",
+            "9",
+            "--per-txn",
+            &n(77),
+        ]),
+        step(&[
+            "fill",
+            "sub",
+            "20",
+            "3",
+            "--dupsort",
+            "--dups",
+            &n(900),
+            "--valsize",
+            "40",
+        ]),
+        step(&["fill", "fixed", "20", "4", "--dupfixed", "--dups", &n(900)]),
+        // 1-byte items: mp_upper of their P_LEAF2 pages lies past the page
+        // end. 256 is every value there is.
+        step(&[
+            "fill",
+            "fixed1",
+            "20",
+            "11",
+            "--dupfixed",
+            "--dups",
+            "256",
+            "--valsize",
+            "1",
+        ]),
+        step(&[
+            "fill",
+            "fixed2",
+            "20",
+            "12",
+            "--dupfixed",
+            "--dups",
+            &n(1500),
+            "--valsize",
+            "2",
+        ]),
+        step(&[
+            "fill",
+            "intdup",
+            "30",
+            "5",
+            "--intdup",
+            "--dups",
+            &n(300),
+            "--valsize",
+            "4",
+        ]),
+        step(&[
+            "fill",
+            "ints",
+            &n(800),
+            "6",
+            "--intkey",
+            "--big",
+            "20000",
+            "--per-txn",
+            &n(100),
+        ]),
+        step(&[
+            "fill",
+            "app",
+            &n(1000),
+            "7",
+            "--append",
+            "--per-txn",
+            &n(300),
+        ]),
+        step(&[
+            "fill",
+            "appd",
+            &n(200),
+            "8",
+            "--revdup",
+            "--dups",
+            "7",
+            "--append",
+        ]),
+        step(&["fill", "res", &n(100), "9", "--reserve", "--big", "9000"]),
+        step(&["fill", "rev", &n(700), "10", "--revkey", "--valsize", "200"]),
+        step(&[
+            "delete",
+            "dups",
+            &n(500),
+            "2",
+            "--dupsort",
+            "--dups",
+            "9",
+            "--every",
+            "3",
+            "--per-txn",
+            &n(50),
+        ]),
+        step(&["delete", "plain", &n(3000), "1", "--every", "2"]),
+        step(&[
+            "delete",
+            "sub",
+            "20",
+            "3",
+            "--dupsort",
+            "--dups",
+            &n(900),
+            "--valsize",
+            "40",
+            "--every",
+            "3",
+        ]),
+        step(&[
+            "delete",
+            "fixed",
+            "20",
+            "4",
+            "--dupfixed",
+            "--dups",
+            &n(900),
+            "--every",
+            "2",
+        ]),
+        step(&[
+            "delete",
+            "fixed1",
+            "20",
+            "11",
+            "--dupfixed",
+            "--dups",
+            "256",
+            "--valsize",
+            "1",
+            "--every",
+            "3",
+        ]),
+        step(&[
+            "delete",
+            "fixed2",
+            "20",
+            "12",
+            "--dupfixed",
+            "--dups",
+            &n(1500),
+            "--valsize",
+            "2",
+            "--every",
+            "3",
+        ]),
+        step(&[
+            "delete",
+            "ints",
+            &n(800),
+            "6",
+            "--intkey",
+            "--big",
+            "20000",
+            "--every",
+            "1",
+            "--per-txn",
+            &n(99),
+        ]),
+        step(&["drop", "rev"]),
+        step(&["drop", "appd", "--delete"]),
+        step(&[
+            "writer-loop",
+            "wl",
+            "600",
+            "5",
+            "--nosync",
+            "--max-commits",
+            "60",
+        ]),
+        step(&["nested-test"]),
+        step(&["fill", "plain", &n(3000), "1", "--per-txn", &n(1000)]),
+    ]
+}
 
 /// The writer and the reader each run the same script of writes on an
 /// environment of their own; after every step the two data files must
@@ -763,9 +807,9 @@ pub fn same_writes_same_pages(pair: Pair) -> Result<()> {
     for (peer, env) in peers.iter().zip(&envs) {
         create(*peer, env, 256 * MIB)?;
     }
-    for step in SAME_WRITES {
+    for step in same_writes(&pair) {
         for (peer, env) in peers.iter().zip(&envs) {
-            peer.on(step[0], env).args(&step[1..]).run()?;
+            peer.on(&step[0], env).args(&step[1..]).run()?;
         }
         crate::pagecmp::compare_data_files(&envs[0].data_file(), &envs[1].data_file()).map_err(
             |e| {

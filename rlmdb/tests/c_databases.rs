@@ -74,7 +74,7 @@ fn check_db(
 }
 
 fn mtest_env(c: &CTools, prog: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = c.mtest(prog, dir.path());
     if std::env::var_os("LMDB_KEEP_TMP").is_some() {
         // Debugging aid: keep a copy of the generated environment.
@@ -198,7 +198,7 @@ fn sorted_set(mut v: Vec<Pair>) -> Vec<Pair> {
 #[test]
 fn overflow_values() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     let ps = os_page_size().min(32768);
     let nodemax = rlmdb::format::node_max(ps);
@@ -234,7 +234,7 @@ fn overflow_values() {
 #[test]
 fn deep_tree_long_keys() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     let mut rng = Rng(0x1234_5678);
     let mut pairs: Vec<Pair> = (0..12_000u32)
@@ -265,7 +265,7 @@ fn deep_tree_long_keys() {
 #[test]
 fn integer_keys_and_dups() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     let mut rng = Rng(77);
     // INTEGERKEY, 4-byte keys.
@@ -339,7 +339,7 @@ fn integer_keys_and_dups() {
 #[test]
 fn reverse_key_and_dup() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     let mut rng = Rng(99);
     let words: Vec<Vec<u8>> = (0..500)
@@ -375,7 +375,7 @@ fn reverse_key_and_dup() {
 #[test]
 fn dupsort_subpages_and_subdbs() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     // Keys with 1, a few, and thousands of duplicates: plain nodes,
     // sub-pages (F_DUPDATA) and sub-DBs (F_DUPDATA|F_SUBDATA).
@@ -412,7 +412,7 @@ fn dupsort_subpages_and_subdbs() {
 #[test]
 fn many_named_dbs_and_handles() {
     let c = require_c!();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     let path = dir.path().join("env");
     for i in 0..5 {
         let pairs: Vec<Pair> = (0..10 * (i + 1))

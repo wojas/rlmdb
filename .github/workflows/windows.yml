@@ -1,8 +1,16 @@
-# Windows x86-64 with both Rust toolchains: lints, rustdoc and the whole test
-# suite. The tests build the C reference library from tests/lmdb-c with the
-# toolchain's C compiler: MSVC's cl (found by the cc crate in the runner's
-# Visual Studio) or MinGW-w64's gcc from MSYS2. Formatting does not depend on
-# the platform and is checked in ci.yml.
+# Windows x86-64: lints and rustdoc with both Rust toolchains, the tests
+# with MSVC's, the primary one: the platform suite (RLMDB_TEST_SCOPE=
+# platform, see interop/README.md; nightly.yml runs the whole suite on
+# Windows, and ci.yml on Linux x86-64). With MinGW-w64's only what
+# depends on the compilers: that everything compiles (clippy, rustdoc), that
+# the three C libraries build, and that C programs compile, link and run
+# against them (the rlmdb-capi tests, the install test included); the
+# rlmdb, rlmdb-tools, interop and bench tests do not run there, as the
+# compilers are not expected to make a difference to them. The tests build
+# the C reference library from tests/lmdb-c with the toolchain's C compiler:
+# MSVC's cl (found by the cc crate in the runner's Visual Studio) or
+# MinGW-w64's gcc from MSYS2. Formatting does not depend on the platform and
+# is checked in ci.yml.
 #
 # The checkout keeps the repository's line endings (no core.autocrlf): the
 # tests compare files and outputs byte for byte.
@@ -21,7 +29,8 @@
 # a margin on top: even on D:, with the scenarios of all page sizes running
 # in parallel on the runner's four cores, a C 1.0 fill or delete with
 # 256-byte pages has taken over five minutes (a 300 s margin failed three
-# runs out of four). A peer that hangs still fails the test, later.
+# runs out of four). A peer that hangs still fails the test, later. (The
+# MinGW-w64 job runs no interop scenarios and needs no such margin.)
 name: Windows
 
 on:
@@ -47,6 +56,15 @@ jobs:
     steps:
       - name: line endings as committed
         run: git config --global core.autocrlf false
+      # Microsoft Defender scans every file the build and the tests write
+      # and every program they start (each interop test binary starts
+      # hundreds of peer processes, and C's write-through commits write
+      # the tests' environments page by page): not in the workspace (the
+      # build), the runner's temp directory (the tests' environments, and
+      # MSYS2) and the toolchain.
+      - name: no Defender scans of the build and the tests
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}", "${{ runner.temp }}", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -58,9 +76,10 @@ jobs:
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-      - name: test
+      - name: test (platform suite)
         run: cargo test --workspace --no-fail-fast
         env:
+          RLMDB_TEST_SCOPE: platform
           TMP: ${{ runner.temp }}
           TEMP: ${{ runner.temp }}
           INTEROP_TIMEOUT_SECS: "900"
@@ -72,6 +91,10 @@ jobs:
     steps:
       - name: line endings as committed
         run: git config --global core.autocrlf false
+      # As in the MSVC job.
+      - name: no Defender scans of the build and the tests
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}", "${{ runner.temp }}", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
       - uses: actions/checkout@v5
       - uses: msys2/setup-msys2@v2
         id: msys2
@@ -95,9 +118,14 @@ jobs:
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-      - name: test
-        run: cargo test --workspace --no-fail-fast
+      # librlmdb and the two liblmdb stubs (static and shared), which the
+      # C programs of the next step link against.
+      - name: C libraries
+        run: cargo build -p librlmdb -p lmdb09-stub -p lmdb10-stub
+      # C programs (the test programs, upstream's mtest*.c and tools, the
+      # C peer) built with gcc against the libraries and run.
+      - name: test (C API)
+        run: cargo test -p rlmdb-capi --no-fail-fast
         env:
           TMP: ${{ runner.temp }}
           TEMP: ${{ runner.temp }}
-          INTEROP_TIMEOUT_SECS: "900"
