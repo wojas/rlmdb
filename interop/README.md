@@ -20,10 +20,10 @@ environment and checking what each sees.
   at test time (once per test process), because cargo builds `librlmdb.a`
   (its package, `librlmdb`, is a dev-dependency of this crate) only after
   build scripts run.
-* `rpeer` and `cpeer_capi` run in plain compatibility mode: they disable
-  every opt-in feature that is on by default (`rlmdb::features`,
-  `rlmdb_features`; none is so far), so that the matrix compares what they
-  write with C byte for byte. A feature's own scenarios turn it on.
+* `rpeer` and `cpeer_capi` turn off every opt-in feature that is on by
+  default. The tests compare what they write with what C writes, byte for
+  byte, and a feature may write differently. (No feature is on by default
+  yet.) Tests of a feature turn it on themselves.
 * `layout_dump` (`c/layout_dump.c`) `#include`s `mdb.c` and prints
   `sizeof`/`offsetof`/`alignof` of every on-disk and lock-file struct.
 * The upstream tools `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` and
