@@ -56,7 +56,10 @@
 # changes or removes an entry. QEMU_LD_PREFIX points the emulator at the
 # cross compiler's target libraries. QEMU user mode has no robust futexes (a
 # mutex whose owner died is never marked EOWNERDEAD, in C too), which
-# INTEROP_NO_ROBUST_MUTEX tells the interop tests. Emulation is slow: run
+# INTEROP_NO_ROBUST_MUTEX tells the interop tests. Its write(2) checks the
+# whole buffer before writing, so one that runs past a mapping fails with
+# EFAULT having written nothing, where Linux writes up to the fault
+# (INTEROP_NO_PARTIAL_WRITE). Emulation is slow: run
 # one crate at a time; INTEROP_TIMEOUT_SECS, the interop tests' limit per
 # program, defaults to 900 s here.
 #
@@ -125,7 +128,7 @@ if [ -n "${LINUX_TEST_TARGET:-}" ]; then
     -e CARGO_TARGET_${tvar}_LINKER=$gnu-gcc
     -e CC_$cvar=$gnu-gcc -e CXX_$cvar=$gnu-g++ -e AR_$cvar=$gnu-ar
     -e CC=$gnu-gcc -e CXX=$gnu-g++ -e AR=$gnu-ar
-    -e QEMU_LD_PREFIX=/usr/$gnu -e INTEROP_NO_ROBUST_MUTEX=1
+    -e QEMU_LD_PREFIX=/usr/$gnu -e INTEROP_NO_ROBUST_MUTEX=1 -e INTEROP_NO_PARTIAL_WRITE=1
     -e INTEROP_TIMEOUT_SECS=${INTEROP_TIMEOUT_SECS:-900} --privileged"
   qemu=${gnu%%-*}
   bf=/proc/sys/fs/binfmt_misc
