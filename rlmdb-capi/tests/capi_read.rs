@@ -2,7 +2,7 @@
 //! C API and its error codes. It runs against the C library first (the
 //! oracle: the expectations hold for C LMDB 0.9.37) and then against the
 //! Rust library; both must report no failures. Known gaps of the Rust
-//! implementation are printed by the Rust build (see README.md).
+//! implementation are printed by the Rust build (see DETAILS.md).
 
 mod common;
 

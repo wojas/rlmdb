@@ -351,7 +351,7 @@ Behaviour of existing functions:
   page of `max(page size, 32 KiB)`, which is 0.9's 16/32 KiB unchanged.
 
 Later (after stage 5), the C API grew from one `liblmdb` into three
-libraries built from one implementation (`rlmdb-capi/README.md`):
+libraries built from one implementation (`rlmdb-capi/DETAILS.md`):
 `librlmdb` (`-lrlmdb`), the library to build programs with, and two stubs
 named like C LMDB that stand in for one C release each in programs built
 against it (`liblmdb.so.0`, `mdb_version` 0.9.85, new environments V09;

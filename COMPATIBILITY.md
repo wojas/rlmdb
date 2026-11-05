@@ -295,7 +295,7 @@ of it changes the files or what another process concludes about them.
   `rlmdb.h` declares rlmdb's own functions; programs written for 0.9 may
   compile against 0.9's `lmdb.h` (with `rlmdb.h` after it) and link
   against the same symbols.
-* Through the C API (`rlmdb-capi/README.md`, "Differences from C LMDB
+* Through the C API (`rlmdb-capi/DETAILS.md`, "Differences from C LMDB
   0.9.37"): opening one environment twice in a process is `EBUSY`
   (except under `MDB_NOLOCK`, where handles share one in-process reader
   table and writer lock); NULL
@@ -386,19 +386,19 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
 * **The C API** (`rlmdb-capi`) opens 1.0 environments through the `mdb_*`
   functions, which its `lmdb.h`, LMDB 1.0's, declares with 1.0's
   constants and 1.0's functions, and `rlmdb.h` for the format functions
-  (`rlmdb-capi/README.md`; a program written for 0.9 includes 0.9's
+  (`rlmdb-capi/DETAILS.md`; a program written for 0.9 includes 0.9's
   `lmdb.h` and `rlmdb.h` and has all but 1.0's 13 functions): keys and
   `MDB_DUPSORT` items up to the environment's `mdb_env_get_maxkeysize`,
   1.0's page sizes (`mdb_env_set_pagesize`), `mdb_txn_flags`,
   `mdb_cursor_is_db`, `mdb_strerror` of 1.0's codes, two-phase commit
   (`mdb_txn_prepare`, `mdb_env_rollback`, in both formats; the
   differences, `KNOWN_C_BUGS.md` rows 61 to 64, are in
-  `rlmdb-capi/README.md`), incremental backups (`mdb_env_incr_dumpfd`,
+  `rlmdb-capi/DETAILS.md`), incremental backups (`mdb_env_incr_dumpfd`,
   `mdb_env_incr_dump`, `mdb_env_incr_loadfd`, 1.0 environments only:
   dumps that C 1.0 and rlmdb load into each other's copies with the same
   result, the source's file, and that are C 1.0's bytes but where C's
   dump takes stale free pages for pages, `interop/tests/incr10.rs`; the
-  differences, rows 65, 66 and 72 to 74, are in `rlmdb-capi/README.md`). Every C
+  differences, rows 65, 66 and 72 to 74, are in `rlmdb-capi/DETAILS.md`). Every C
   library (`librlmdb` and the two stubs) exports all 13 functions LMDB
   1.0's `lmdb.h` adds; those of 1.0's encryption, checksums and crypto
   modules make C 1.0's argument checks and return `ENOTSUP` (rlmdb

@@ -1,4 +1,4 @@
-//! `scripts/install-libs.sh` and the ways README.md says to use what it
+//! `scripts/install-libs.sh` and the ways DETAILS.md says to use what it
 //! installs (Unix; the script runs under MSYS2 on Windows, untested here).
 //!
 //! The script installs the libraries cargo built for the tests into a

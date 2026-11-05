@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build rlmdb's C libraries (rlmdb-capi) and install them with the headers
-# and a pkg-config file, in the layout of rlmdb-capi/README.md
+# and a pkg-config file, in the layout of rlmdb-capi/DETAILS.md
 # ("Installing"):
 #
 #   $LIBDIR/librlmdb.a, $LIBDIR/librlmdb.so      (macOS: librlmdb.dylib)
@@ -81,7 +81,7 @@ else
 fi
 
 # System libraries a program needs next to the static library (rustc's
-# native-static-libs; rlmdb-capi/README.md has the table).
+# native-static-libs; rlmdb-capi/DETAILS.md has the table).
 case $triple in
   *-linux-gnu*) syslibs="-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc" ;;
   *-apple-darwin) syslibs="-liconv" ;;
