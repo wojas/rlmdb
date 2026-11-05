@@ -40,7 +40,7 @@ static int checks, failures;
 #ifdef LMDB_RUST
 #define GAP(name, cond) do { if (cond) { failures++; \
 	fprintf(stderr, "%s:%d: known gap \"%s\" now behaves like C: " \
-		"update the test and rlmdb-capi/README.md\n", __FILE__, __LINE__, name); \
+		"update the test and rlmdb-capi/DETAILS.md\n", __FILE__, __LINE__, name); \
 	} else printf("known gap: %s\n", name); } while (0)
 #else
 #define GAP(name, cond) CHECK(cond)
@@ -104,7 +104,7 @@ static void test_version(void)
 	char *s = mdb_version(&ma, &mi, &pa), e[256];
 
 	/* Both builds use the 0.9.37 lmdb.h. C reports the header's version at
-	 * run time; librlmdb reports rlmdb's (README.md, "Differences from C
+	 * run time; librlmdb reports rlmdb's (DETAILS.md, "Differences from C
 	 * LMDB 0.9.37"), which capi_version.c checks in detail. */
 	CHECK(MDB_VERSION_FULL == MDB_VERINT(0, 9, 37));
 #ifdef LMDB_RUST

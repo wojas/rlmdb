@@ -347,7 +347,7 @@ pub fn file_size(file: &File) -> io::Result<u64> {
 /// bounds check against the slice's length, which does not change, so in
 /// practice the reader sees wrong data or gets `MDB_CORRUPTED`. Formally
 /// it is undefined behaviour in Rust, which is why it is listed with the
-/// residual risks (`rlmdb-capi/README.md`, "Undefined behaviour that
+/// residual risks (`rlmdb-capi/DETAILS.md`, "Undefined behaviour that
 /// remains").
 pub struct DataMap {
     ptr: *mut u8,

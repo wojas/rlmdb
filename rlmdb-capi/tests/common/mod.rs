@@ -327,7 +327,7 @@ pub fn rust_cdylib() -> PathBuf {
 
 /// System libraries a C program needs when linking Rust's `librlmdb.a`
 /// (`cargo rustc -p librlmdb --lib --crate-type staticlib -- --print
-/// native-static-libs`; see README.md).
+/// native-static-libs`; see DETAILS.md).
 pub fn rust_native_libs() -> &'static [&'static str] {
     if cfg!(all(windows, target_env = "msvc")) {
         &[

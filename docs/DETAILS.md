@@ -80,7 +80,7 @@ The C API differs from C only where that does not change the files. Read
 transactions are never bound to a thread (as with `MDB_NOTLS`), a second
 open of one environment fails with `EBUSY`, misuse that crashes C returns
 `EINVAL`, and plain C bugs are not copied. The full list is in
-[`rlmdb-capi/README.md`](../rlmdb-capi/README.md#differences-from-c-lmdb-0937),
+[`rlmdb-capi/DETAILS.md`](../rlmdb-capi/DETAILS.md#differences-from-c-lmdb-0937),
 the bugs in [`KNOWN_C_BUGS.md`](../KNOWN_C_BUGS.md).
 
 ## Safety
@@ -90,7 +90,7 @@ mutexes, file I/O) and in the C API's FFI layer. Page parsing and the
 B-tree are safe Rust over byte slices. The Rust types reject the usual
 LMDB mistakes at compile time; the C library cannot, so C misuse stays
 as dangerous as in C
-([list](../rlmdb-capi/README.md#undefined-behaviour-that-remains)).
+([list](../rlmdb-capi/DETAILS.md#undefined-behaviour-that-remains)).
 
 A damaged or crafted file gives an error, not a crash, panic or hang
 (`rlmdb/tests/robust_*.rs`). Two cases are not covered, as in C: damage

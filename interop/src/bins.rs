@@ -179,7 +179,7 @@ pub fn lmdb10_src() -> &'static Path {
 }
 
 /// System libraries a C program needs next to the Rust `librlmdb.a` (as
-/// `rlmdb-capi/README.md` lists them; on macOS the compiler driver adds
+/// `rlmdb-capi/DETAILS.md` lists them; on macOS the compiler driver adds
 /// them).
 fn rust_native_libs() -> &'static [&'static str] {
     if cfg!(all(windows, target_env = "msvc")) {

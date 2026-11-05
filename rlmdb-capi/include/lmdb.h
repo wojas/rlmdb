@@ -4,7 +4,7 @@
  * (tests/lmdb-c/1.0/lmdb.h, the pinned mdb.RE/1.0 release), copied by
  * scripts/update-c-sources.sh. librlmdb and the liblmdb stubs implement
  * this API; rlmdb.h declares rlmdb's own functions, and
- * rlmdb-capi/README.md lists the differences from C LMDB. A program
+ * rlmdb-capi/DETAILS.md lists the differences from C LMDB. A program
  * written for LMDB 0.9 may compile against 0.9's lmdb.h instead: the
  * libraries export its functions, with the same ABI.
  */

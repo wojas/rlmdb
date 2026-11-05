@@ -113,7 +113,7 @@ The tests build C LMDB 0.9.37 and 1.0 from `tests/lmdb-c/` and check Rust agains
 ## Documents
 
 * [`docs/DETAILS.md`](docs/DETAILS.md): what is implemented, platforms, tests, and links to the design documents
-* [`rlmdb-capi/README.md`](rlmdb-capi/README.md): the C library in full
+* [`rlmdb-capi/README.md`](rlmdb-capi/README.md): using the C library ([details](rlmdb-capi/DETAILS.md))
 * [`COMPATIBILITY.md`](COMPATIBILITY.md): compatibility promises and their tests
 * [`KNOWN_C_BUGS.md`](KNOWN_C_BUGS.md): C bugs rlmdb fixes instead of copying
 * [`bench/RESULTS.md`](bench/RESULTS.md): benchmarks against C

@@ -11,7 +11,8 @@ must respect. The details live in:
 * `DESIGN.md`: goals, the on-disk and lock-file format, architecture.
 * `COMPATIBILITY.md`: the compatibility contract and which test checks it.
 * `KNOWN_C_BUGS.md`: C bugs not ported (and the few ported on purpose).
-* `rlmdb-capi/README.md`: the C API and its documented deviations.
+* `rlmdb-capi/README.md`: using the C API; `rlmdb-capi/DETAILS.md`: its
+  documented deviations.
 * `bench/README.md`, `bench/RESULTS.md`: benchmarks against C.
 
 ## 1. Binary compatibility with C LMDB 0.9 comes first
@@ -95,7 +96,7 @@ PR nn in commit messages, docs and comments (`ITS#nnnn` is safe).
   naming a live page, a lock file with a forged `mti_txnid` or a cleared
   live reader slot): a writer may then rewrite a page under a live
   reader's slice, as in C; see `os::DataMap` and the residual-risk list
-  in `rlmdb-capi/README.md`.
+  in `rlmdb-capi/DETAILS.md`.
 * Meta pages are written concurrently by other processes: read them with
   volatile reads into an owned value, validate, and re-check `mti_txnid`.
 * `RwTxn` is `!Send` (the Linux writer mutex is thread-owned). Read
@@ -137,7 +138,7 @@ deferred until the core has been validated through the C API.
   behave identically against it.
 * Argument validation follows `mdb.c`: same checks, same order, same
   return codes. Misuse that crashes C (NULL handles, use after free)
-  returns `EINVAL` instead; keep that list in `rlmdb-capi/README.md`
+  returns `EINVAL` instead; keep that list in `rlmdb-capi/DETAILS.md`
   current.
 * The layer is thin: no database logic in `rlmdb-capi`. Lifetimes are
   erased in one place (`erased.rs`); handle ownership is explicit.

@@ -39,7 +39,7 @@ static int checks, failures;
 
 #define OK(expr) RC(expr, 0)
 
-/* A documented difference (README.md): C returns c_rc, Rust rust_rc. */
+/* A documented difference (DETAILS.md): C returns c_rc, Rust rust_rc. */
 #ifdef LMDB_RUST
 #define DIFFERS(expr, c_rc, rust_rc) RC(expr, rust_rc)
 #else
@@ -49,7 +49,7 @@ static int checks, failures;
 #ifdef LMDB_RUST
 #define GAP(name, cond) do { if (cond) { failures++; \
 	fprintf(stderr, "%s:%d: known gap \"%s\" now behaves like C: " \
-		"update the test and rlmdb-capi/README.md\n", __FILE__, __LINE__, name); \
+		"update the test and rlmdb-capi/DETAILS.md\n", __FILE__, __LINE__, name); \
 	} else printf("known gap: %s\n", name); } while (0)
 #define DEVIATION(stmt) do { stmt; } while (0)
 #else

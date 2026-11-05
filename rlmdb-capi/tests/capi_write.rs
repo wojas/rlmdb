@@ -4,7 +4,7 @@
 //! library; both must report no failures, and the traces they print (`T
 //! ...` lines: statistics, counts, keys and values they observe) must be
 //! identical. Known gaps of the Rust implementation are printed by the
-//! Rust build (see README.md). Every environment the two runs leave behind
+//! Rust build (see DETAILS.md). Every environment the two runs leave behind
 //! (including the copies) must pass the C peer's page audit
 //! (`check-freelist`).
 

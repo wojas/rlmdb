@@ -59,7 +59,7 @@
  *	MDB_ENCRYPT and MDB_REMAP_CHUNKS give EINVAL, opening an encrypted or
  *	checksummed 1.0 file fails with MDB_ENV_ENCRYPTION or
  *	MDB_BAD_CHECKSUM, and the functions of encryption, checksums and
- *	crypto modules return ENOTSUP (rlmdb-capi/README.md lists them). With
+ *	crypto modules return ENOTSUP (rlmdb-capi/DETAILS.md lists them). With
  *	0.9's lmdb.h, LMDB 1.0's error codes are numbers without names;
  *	#mdb_strerror() knows their texts.
  *
