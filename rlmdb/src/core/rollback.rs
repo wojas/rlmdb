@@ -238,6 +238,6 @@ impl Environment {
 /// the meta pages and is not the `(pgno_t)-1` of a page a rollback wrote
 /// (the condition under which `TxnCore::set_snapshot` takes a snapshot,
 /// `KNOWN_C_BUGS.md` row 49).
-pub(crate) fn holds_snapshot(meta: &Meta) -> bool {
+fn holds_snapshot(meta: &Meta) -> bool {
     meta.last_pgno >= NUM_METAS as u64 - 1 && meta.last_pgno != u64::MAX
 }

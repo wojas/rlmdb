@@ -12,11 +12,10 @@
 //! or in one free record), that a reader of an older snapshot keeps its
 //! pages, that the next writer reuses the freed pages sooner than without
 //! the feature, that the previous snapshot stays intact when a later writer
-//! writes pages and aborts, that a split commit cannot be rolled back, the
-//! completion of a pair a dying process left half written, a failed second
-//! meta write, `NO_LOCK` (with a stale reader in another process's
-//! footsteps), and that nothing changes with the feature off or where one
-//! record suffices. The feature is rlmdb's own, so there is no C oracle;
+//! writes pages and aborts, that a split commit cannot be rolled back, a
+//! pair a dying process left half written, failed meta writes, `NO_LOCK`
+//! (with a stale reader in another process's footsteps), and that nothing
+//! changes with the feature off or where one record suffices. The feature is rlmdb's own, so there is no C oracle;
 //! the format is C's (a free DB of txnid keys and page lists, two meta
 //! pages with consecutive txnids).
 
@@ -581,12 +580,12 @@ fn an_aborting_successor_leaves_the_previous_meta_page_intact() {
 
 /// A process died between the two meta writes (here: the second page is
 /// put back by hand): the file holds the split commit's snapshot and the
-/// one before it, two or more txnids apart. The next rlmdb writer first
-/// completes the pair, feature on or off, before it reuses any page; an
-/// environment opened with `PREV_SNAPSHOT` reads the old snapshot instead
-/// and leaves the file alone.
+/// one before it, two or more txnids apart. Nothing repairs it: an
+/// environment opened with `PREV_SNAPSHOT` reads the old snapshot, a
+/// writer begins after the newest one without writing anything, and its
+/// commit replaces the old page.
 #[test]
-fn a_half_written_pair_is_completed_at_the_next_begin() {
+fn a_half_written_pair_is_left_as_it_is() {
     for (format, psize) in layouts() {
         let dir = common::tempdir();
         let env = builder(format, psize, true).open(dir.path()).unwrap();
@@ -618,29 +617,24 @@ fn a_half_written_pair_is_completed_at_the_next_begin() {
         );
         drop(txn);
         drop(prev);
-        // A writer under PREV_SNAPSHOT discards the split commit instead:
-        // it begins from the old snapshot, and nothing is completed.
-        let mut b = builder(format, psize, false);
-        b.flags(EnvironmentFlags::NO_SYNC | EnvironmentFlags::PREV_SNAPSHOT);
-        let prev = b.open(dir.path()).unwrap();
-        let txn = prev.begin_rw_txn().unwrap();
-        assert_eq!(txn.id(), old_id + 1);
-        drop(txn);
-        drop(prev);
-        let env = builder(format, psize, false).open(dir.path()).unwrap();
-        let m = metas(&env, dir.path());
-        assert_eq!([m[old_page].txnid, m[old_page ^ 1].txnid], [old_id, f - 1]);
-        assert_eq!(env.info().unwrap().last_txnid as u64, f - 1);
 
-        // A writer completes the pair first, then begins after it.
-        let txn = env.begin_rw_txn().unwrap();
-        assert_eq!(txn.id(), f + 1);
-        drop(txn);
-        check_pair(&env, dir.path(), t, f);
+        // A writer begins after the newest snapshot and writes nothing
+        // before its commit, which replaces the old page.
+        let env = builder(format, psize, false).open(dir.path()).unwrap();
+        let pair = |env: &Environment| {
+            let m = metas(env, dir.path());
+            [m[old_page].txnid, m[old_page ^ 1].txnid]
+        };
+        assert_eq!(pair(&env), [old_id, f - 1]);
+        assert_eq!(env.info().unwrap().last_txnid as u64, f - 1);
+        let mut txn = env.begin_rw_txn().unwrap();
+        assert_eq!(txn.id(), f);
+        assert_eq!(pair(&env), [old_id, f - 1]);
+        txn.put(Dbi::MAIN, &key(0), &value(0, 2, len), WriteFlags::empty())
+            .unwrap();
+        txn.commit().unwrap();
+        assert_eq!(pair(&env), [f, f - 1]);
         check_pages(&env);
-        // Idempotent: nothing to complete now.
-        assert_eq!(env.begin_rw_txn().unwrap().id(), f + 1);
-        check_pair(&env, dir.path(), t, f);
     }
 }
 
@@ -699,9 +693,8 @@ fn a_failed_first_meta_write_fails_the_commit() {
 /// The second meta write fails and the page did not reach the file (the
 /// injected failure puts the old page back): the commit stands under the
 /// first txnid, which stays published, and returns success. The
-/// environment is unusable in this process: a write transaction is
-/// refused before it could complete the pair. A reopened environment
-/// completes it at its first write transaction.
+/// environment is unusable in this process. A reopened environment finds
+/// the commit, and the next commit takes the txnid the prepare reported.
 #[test]
 fn a_failed_second_meta_write_that_did_not_land() {
     let dir = common::tempdir();
@@ -726,23 +719,32 @@ fn a_failed_second_meta_write_that_did_not_land() {
     });
     let (t, f) = delete_prepared(&env, 0, count);
     assert_eq!(env.info().unwrap().last_txnid as u64, f - 1);
-    let m = metas(&env, dir.path());
-    assert_eq!([m[old_page].txnid, m[old_page ^ 1].txnid], [old_id, f - 1]);
-    // Unusable, and no repair attempted: the file is as it was.
+    let pair = |env: &Environment| {
+        let m = metas(env, dir.path());
+        [m[old_page].txnid, m[old_page ^ 1].txnid]
+    };
+    assert_eq!(pair(&env), [old_id, f - 1]);
     assert!(matches!(
         env.begin_rw_txn().map(drop),
         Err(rlmdb::Error::Mdb(MdbError::Panic))
     ));
-    let m = metas(&env, dir.path());
-    assert_eq!([m[old_page].txnid, m[old_page ^ 1].txnid], [old_id, f - 1]);
     drop(env);
     let again = builder(Format::V10, Some(1024), true)
         .open(dir.path())
         .unwrap();
     assert_eq!(again.info().unwrap().last_txnid as u64, f - 1);
-    assert_eq!(again.begin_rw_txn().unwrap().id(), f + 1);
     check_split(&again, t, f);
-    check_pair(&again, dir.path(), t, f);
+    let mut txn = again.begin_rw_txn().unwrap();
+    assert_eq!(txn.id(), f);
+    txn.put(
+        Dbi::MAIN,
+        &key(0),
+        &value(0, 2, big(&again)),
+        WriteFlags::empty(),
+    )
+    .unwrap();
+    txn.commit().unwrap();
+    assert_eq!(pair(&again), [f, f - 1]);
     check_pages(&again);
 }
 

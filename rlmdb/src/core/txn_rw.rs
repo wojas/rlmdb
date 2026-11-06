@@ -320,19 +320,6 @@ impl<'env> RwTxn<'env> {
         }
         // From here on, dropping `lock` unlocks again.
         let mut lock = WriterLock::acquire(env)?;
-        // A commit that split the pages it freed and stopped after its first
-        // meta page left the snapshot before it on the other meta page:
-        // complete the pair before this transaction may reuse that
-        // snapshot's pages (feature `split-freelist`). Not with
-        // PREV_SNAPSHOT, which asks for that snapshot, and not on a handle
-        // a failed meta page write made unusable (`set_snapshot` would
-        // refuse the transaction anyway; nothing may be written before).
-        if env.has_fatal_error() {
-            return Err(crate::error::MdbError::Panic.into());
-        }
-        if !env.has_prev_snapshot() {
-            env.complete_split_pair()?;
-        }
         let (last, meta) = match env.lock_region() {
             Some(l) => {
                 let t = l.txnid();

@@ -231,13 +231,12 @@ Each is described with the exact sequence of events in the details page.
   existing race in C LMDB (`KNOWN_C_BUGS.md` row 31); the feature makes
   it easier to hit. rlmdb readers are not affected.
   ([5.1](split-freelist-details.md#51-c-readers-copying-a-meta-page-that-is-being-rewritten))
-* If the writing process dies between the two meta writes, the database
-  is fine as it is, but the state before the transaction stays on one
-  meta page for one more transaction. An rlmdb writer writes the second
-  meta page before it writes anything else, as extra protection: if a C
-  writer comes first, writes pages and then aborts, a rollback to that
-  old state (`MDB_PREVSNAPSHOT`, the tools' `-v`, C 1.0's
-  `mdb_env_rollback`) would read overwritten pages.
+* If the writing process dies between the two meta writes, the file
+  holds the committed state under one ID and the state before it under
+  the other. The database is fine; the next writer's commit replaces the
+  old page. Until then, a read of the old state on purpose
+  (`MDB_PREVSNAPSHOT`, the tools' `-v`, C 1.0's `mdb_env_rollback`) can
+  get overwritten pages if that writer reused them and then aborted.
   ([5.2](split-freelist-details.md#52-death-between-the-two-meta-writes))
 * On macOS, a synced write is two system calls. A process death between
   them, followed by a power loss, can damage the previous snapshot on

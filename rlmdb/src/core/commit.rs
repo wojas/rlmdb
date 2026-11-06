@@ -47,16 +47,14 @@ use crate::core::cursor_put::PutData;
 use crate::core::dbi::{Dbi, DB_DIRTY, DB_USRVALID, DB_VALID};
 use crate::core::dirty::PageSlot;
 use crate::core::env::Environment;
-use crate::core::freelist::SPLIT_ID_MARGIN;
 use crate::core::page_ops;
-use crate::core::rollback::holds_snapshot;
 use crate::core::txn::Transaction;
 use crate::core::txn_rw::{RwTxn, TXN_DIRTY, TXN_SPILLS};
 use crate::core::wcursor::CRef;
 use crate::error::{Error, MdbError, Result};
 use crate::flags::DatabaseFlags;
 use crate::format::layout::{Layout, META_MAPSIZE, META_SIZE};
-use crate::format::meta::{pick_newest, Meta};
+use crate::format::meta::Meta;
 use crate::format::node::F_SUBDATA;
 use crate::format::page::{P_DIRTY, P_KEEP, P_LOOSE, P_OVERFLOW};
 use crate::os;
@@ -275,8 +273,9 @@ impl<'env> RwTxn<'env> {
     /// published) and returns success. The page is not written back: if
     /// the duplicate reached the file it is as good as `P`, and it is
     /// published. The environment is marked unusable in this process, as
-    /// after any failed meta write. The next rlmdb writer completes the
-    /// pair ([`Environment::complete_split_pair`]).
+    /// after any failed meta write. The file is consistent either way, and
+    /// the next writer's commit replaces the page
+    /// (`docs/split-freelist-details.md`).
     pub(crate) fn write_meta(&mut self) -> Result<()> {
         let env = self.core.env;
         let txnid = self.core.txnid;
@@ -619,10 +618,9 @@ pub(crate) fn write_meta_page(
 /// Writes `meta`, the snapshot of the newest meta page once more under the
 /// next txnid, into meta page `meta.txnid & 1`, through the synchronous
 /// descriptor unless the environment has `NO_SYNC` (macOS: an
-/// `F_FULLFSYNC` too): the second meta page of a commit that split its
-/// free pages (feature `split-freelist`, [`RwTxn::write_meta`]) or of
-/// [`Environment::complete_split_pair`]. Returns whether the page holds it
-/// afterwards. The caller has published `meta.txnid - 1`, the newest
+/// `F_FULLFSYNC` too): the second meta page of a commit that split the
+/// pages it freed (feature `split-freelist`, [`RwTxn::write_meta`]).
+/// Returns whether the page holds it afterwards. The caller has published `meta.txnid - 1`, the newest
 /// snapshot, so no reader copies this page unchecked while it is written.
 ///
 /// Unlike [`write_meta_page`], a failure writes nothing back: the page
@@ -658,63 +656,6 @@ pub(crate) fn write_duplicate_meta(env: &Environment, meta: &Meta) -> bool {
             env.set_fatal_error();
             env.meta_ids(toggle).is_some_and(|(_, t)| t == meta.txnid)
         }
-    }
-}
-
-impl Environment {
-    /// Completes the pair of meta pages of a commit that split its free
-    /// pages (feature `split-freelist`) and stopped after its first meta
-    /// page (the process died between the two writes, or the second write
-    /// failed: [`RwTxn::write_meta`]): if both meta pages hold snapshots
-    /// and the newest is two or more txnids ahead of the other, writes the
-    /// newest snapshot once more under the next txnid into the other page
-    /// and publishes that txnid, as the commit would have. Called by
-    /// [`RwTxn::begin`], holding the writer lock, before the transaction
-    /// may reuse any page: the old snapshot's pages are listed in the split
-    /// records, and reusing them while a meta page still names it would
-    /// leave that page pointing at overwritten pages for anyone who reads
-    /// the previous snapshot on purpose (`PREV_SNAPSHOT`, the tools' `-v`,
-    /// [`Environment::rollback`]).
-    ///
-    /// Nothing else leaves two committed snapshots that far apart: a new
-    /// environment has two meta pages with txnid 0, a rollback leaves a
-    /// page that holds no snapshot, and every commit (C's or rlmdb's)
-    /// writes the txnid one above the newest. A page with txnid 0 is the
-    /// initial one, not a committed snapshot (C's `mdb_env_rollback` takes
-    /// it so too): a file with one next to any snapshot is left alone, as
-    /// is a damaged file whose newest txnid is on the page of the other
-    /// parity. Not with `PREV_SNAPSHOT`, where the older snapshot is the
-    /// one wanted, and not on a handle a failed meta page write made
-    /// unusable (the caller checks both). On failure the begin fails with
-    /// the error.
-    pub(crate) fn complete_split_pair(&self) -> Result<()> {
-        let metas = [self.read_meta(0)?, self.read_meta(1)?];
-        let newest = pick_newest(&metas);
-        let (current, other) = (metas[newest], metas[newest ^ 1]);
-        if other.txnid == 0
-            || !holds_snapshot(&current)
-            || !holds_snapshot(&other)
-            || current.txnid < other.txnid.saturating_add(2)
-            || (current.txnid & 1) as usize != newest
-            || current.txnid.checked_add(2 + SPLIT_ID_MARGIN).is_none()
-        {
-            return Ok(());
-        }
-        // Readers re-check the published txnid after copying a meta page:
-        // name the newest snapshot before rewriting the other page. With a
-        // lock file it is named already unless the dying writer had not
-        // published it yet.
-        self.publish_txnid(current.txnid);
-        let dup = Meta {
-            txnid: current.txnid + 1,
-            map_size: current.map_size.max(self.map_size() as u64),
-            ..current
-        };
-        if !write_duplicate_meta(self, &dup) {
-            return Err(Error::errno(libc::EIO));
-        }
-        self.publish_txnid(dup.txnid);
-        Ok(())
     }
 }
 
