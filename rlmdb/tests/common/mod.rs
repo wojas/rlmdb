@@ -1402,6 +1402,14 @@ pub fn stale_dup_record(op: &str, prev: &str, rl: &str, pairs: &[Pair]) -> bool 
     }
 }
 
+/// The key (hex) of the position a cursor-op line reports, if it is on an
+/// item.
+fn cur_key(line: &str) -> Option<&str> {
+    line.split("| cur rc=0 k=")
+        .nth(1)
+        .and_then(|k| k.split(' ').next())
+}
+
 /// Runs the same random cursor operations through C and Rust and asserts
 /// identical results and positions.
 pub fn differential(
@@ -1445,7 +1453,30 @@ pub fn differential(
         } else {
             assert_eq!(c_lines.len(), r_lines.len());
         }
+        // KNOWN_C_BUGS.md row 59, the key whose duplicates C may be walking
+        // with another key's record: set by a move into them after a failed
+        // exact search that gave the same item in C and Rust (both records
+        // end, or start, with the same value), cleared once both cursors
+        // agree on another position.
+        let mut stale_key: Option<&str> = None;
         for (i, (cl, rl)) in c_lines.iter().zip(&r_lines).enumerate() {
+            if cl == rl {
+                if i > 0
+                    && c_lines[i - 1] == r_lines[i - 1]
+                    && stale_dup_record(&ops[i], &r_lines[i - 1], rl, pairs)
+                {
+                    stale_key = cur_key(rl);
+                } else if stale_key.is_some() && cur_key(rl) != stale_key {
+                    stale_key = None;
+                }
+            } else if stale_key.is_some() && (cur_key(cl) == stale_key || cur_key(rl) == stale_key)
+            {
+                eprintln!(
+                    "NOTE: known C bug, row 59 (stale duplicates record, a later op) at op {i}: C {cl}, Rust {rl}"
+                );
+                c_bugs += 1;
+                break;
+            }
             // KNOWN_C_BUGS.md: past the end of a page (after a failed SET)
             // C's mdb_cursor_next reads NODEPTR(mp, ki) unchecked; a stale
             // pointer slot can make it "succeed" with garbage while staying
