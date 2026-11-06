@@ -31,10 +31,9 @@
 //! # Splitting the pages a transaction frees (`split-freelist`)
 //!
 //! Not in C LMDB 0.9 or 1.0: the opt-in feature
-//! [`Feature::SplitFreelist`]. It follows the `MDB_SPLIT_FREELIST` patch
-//! of the PowerDNS fork of LMDB (`mdb_freelist_save`,
-//! `mdb_env_write_meta`), without its `mdb_txn_set_commit_txnid`: the
-//! final txnid is [`PreparedTxn::id`](crate::PreparedTxn::id).
+//! [`Feature::SplitFreelist`], which changes what `mdb_freelist_save` and
+//! `mdb_env_write_meta` do here. The final txnid is
+//! [`PreparedTxn::id`](crate::PreparedTxn::id).
 //!
 //! C saves all pages a transaction freed as one record. Each page number
 //! takes 8 bytes, so deleting 4 GB of data with 4 KiB pages (about a
@@ -61,9 +60,9 @@
 //!   `W` runs. After a split commit the next writer may reuse every split
 //!   record, which list the pages of the snapshot before the commit. That
 //!   is safe only because that snapshot is on no meta page any more: both
-//!   pages hold the committed state, as after two ordinary commits. (The
-//!   PowerDNS patch writes one meta page and leaves the old snapshot on
-//!   the other; anything that reads the previous snapshot on purpose,
+//!   pages hold the committed state, as after two ordinary commits. (With
+//!   one meta page written, the old snapshot would stay on the other, and
+//!   anything that reads the previous snapshot on purpose,
 //!   `PREV_SNAPSHOT`, the tools' `-v`, `mdb_env_rollback`, could then read
 //!   pages a later writer overwrote.)
 //! * The keys are unique. Records this transaction loaded for reuse
@@ -573,10 +572,9 @@ impl<'env> RwTxn<'env> {
                         continue;
                     }
                     // Once split, never save one record instead: the split
-                    // records would stay and list the pages twice. (The
-                    // PowerDNS patch does; unreachable: it needs the list
-                    // to grow by records after the first pass, at the end
-                    // of the txnid range.)
+                    // records would stay and list the pages twice.
+                    // (Unreachable: it needs the list to grow by records
+                    // after the first pass, at the end of the txnid range.)
                     if started {
                         return Err(crate::error::Error::errno(libc::EOVERFLOW));
                     }

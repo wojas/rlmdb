@@ -525,8 +525,8 @@ fn a_split_commit_cannot_be_rolled_back() {
     }
 }
 
-/// The case the single meta page of the C patch got wrong: after the split
-/// commit, the next writer reuses the pages of the snapshot before it,
+/// The case a single meta page would get wrong: after the split commit,
+/// the next writer reuses the pages of the snapshot before it,
 /// writes them (a prepare) and does not commit. The previous meta page
 /// holds the split commit's own snapshot, so `PREV_SNAPSHOT` and a
 /// rollback find intact data, not the overwritten snapshot.
@@ -786,8 +786,8 @@ fn a_failed_second_meta_write_keeps_the_commit() {
 /// snapshot, not the one its txnid names, and a writer of this process,
 /// which reads the file's newest meta page, reuses the old snapshot's
 /// pages meanwhile. The reader sees intact data (the committed state)
-/// throughout. With a single meta write (the C patch) it read the old
-/// snapshot while the writer overwrote it.
+/// throughout. With a single meta write it would read the old snapshot
+/// while the writer overwrote it.
 #[test]
 fn nolock_stale_reader_keeps_intact_data() {
     let dir = common::tempdir();

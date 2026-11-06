@@ -94,10 +94,9 @@ pub enum Feature {
     ///   [`NO_SYNC`](crate::EnvironmentFlags::NO_SYNC)).
     ///
     /// The files keep their format: C LMDB and rlmdb without the feature
-    /// read and write them. The records follow the `MDB_SPLIT_FREELIST`
-    /// patch of the PowerDNS fork of LMDB; the two meta pages are rlmdb's
-    /// addition. `docs/split-freelist.md` in the repository explains the
-    /// feature, `docs/split-freelist-details.md` why it is safe.
+    /// read and write them. `docs/split-freelist.md` in the repository
+    /// explains the feature, `docs/split-freelist-details.md` why it is
+    /// safe.
     SplitFreelist,
 }
 

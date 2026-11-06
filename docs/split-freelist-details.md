@@ -3,11 +3,8 @@
 This page is the reasoning behind the `split-freelist` feature
 ([`split-freelist.md`](split-freelist.md)): what a split commit writes,
 why it writes both meta pages, what every reader and writer sees, and
-what remains. It documents what rlmdb does. The free-list records follow
-a C patch, `MDB_SPLIT_FREELIST` in the PowerDNS fork of LMDB (the C
-library bundled with `github.com/PowerDNS/lmdb-go`, branch
-`freelist-split-experiment`); where rlmdb departs from that patch, this
-page says why.
+what remains. It documents what rlmdb does, and explains the directions
+not taken.
 
 Throughout, `T` is the ID a write transaction began with, the previous
 commit is `T − 1`, and the examples use `T = 100`.
@@ -143,8 +140,7 @@ of the 1.0 format are stamped with `P` (section 4.5).
 
 ### 2.3 Why both meta pages
 
-If the commit wrote only the first meta page, as the C patch does, the
-file would be:
+If the commit wrote only the first meta page, the file would be:
 
 ```
 page 0: ID 102 (current)   page 1: ID 99 (the old snapshot, still valid)
@@ -173,8 +169,8 @@ the right-hand column:
 | `rollback` of the split commit, then read | the aborted writer's value, permanently | refused |
 | `NO_LOCK`: a reader in another process with an old cached ID, while a local writer prepares | its data overwritten under it | intact |
 
-The C patch's own argument holds for pure C 0.9, which has neither
-`PREV_SNAPSHOT` nor `rollback`. It does not hold for rlmdb or LMDB 1.0.
+One meta page would be enough for pure C 0.9, which has neither
+`PREV_SNAPSHOT` nor `rollback`. It is not enough for rlmdb or LMDB 1.0.
 With both meta pages written, nothing names snapshot 99 any more; its
 pages are listed in records 100 to 102, and reusing them is as safe as
 after any two ordinary commits. Readers that began on 99 keep it through
@@ -285,7 +281,7 @@ a dump since 103 includes nothing of this commit.
 | A pair left half written (section 4.2, row 4) | the next rlmdb writer completes it before it reuses any page: it publishes the newest ID, writes the newest snapshot once more under the next ID into the other page (synced), and publishes that. Not under `PREV_SNAPSHOT`, which asks for the old snapshot. Only an interrupted split commit leaves two committed snapshots two or more IDs apart: a new file has ID 0 on both pages (ID 0 is "no snapshot", and a page with it is left alone), and a rollback leaves a page with no snapshot. |
 | Nested transactions | their freed pages join the parent's; only the top-level commit saves the free list and writes meta pages. |
 | Spilling during the save | record pages are ordinary dirty pages; spilled ones land in free or new slots. |
-| Transaction IDs near the end of the range | A transaction splits only if the writer after it would still have an ID at least 16 below 2⁶⁴. The highest ID marks a free reader slot, and near 2⁶⁴ C 1.0's per-writer work ID wraps to zero. If a save has already split and the IDs would run out on a rerun, the commit fails with `EOVERFLOW`; falling back to one record there would list pages twice (the C patch does). In practice this is unreachable: it needs about 10¹⁹ commits. |
+| Transaction IDs near the end of the range | A transaction splits only if the writer after it would still have an ID at least 16 below 2⁶⁴. The highest ID marks a free reader slot, and near 2⁶⁴ C 1.0's per-writer work ID wraps to zero. If a save has already split and the IDs would run out on a rerun, the commit fails with `EOVERFLOW`; falling back to one record there would list pages twice. In practice this is unreachable: it needs about 10¹⁹ commits. |
 | Unchanged | copies and `mdb_stat -ff` walk the free list record by record; `MDB_NOSYNC` syncs nothing and promises nothing, as in stock; with `MDB_WRITEMAP`, rlmdb writes all pages with `pwrite`, meta pages included, so the synced writes need nothing special. |
 
 ## 5. What remains
@@ -321,8 +317,8 @@ other page. Durability is fine. Damage needs three more things:
   `NO_LOCK` ID.
 
 Any two-write protocol has such a window; this one is the length of one
-synced write. The C patch's single write has no such window but exposes
-the old snapshot after every split commit until the next commit.
+synced write. A single meta write would have no such window, but would
+expose the old snapshot after every split commit until the next commit.
 
 ### 5.3 macOS
 
@@ -392,16 +388,16 @@ rose: nothing has been published yet, so that is always clean.
 | Decision | Why |
 |---|---|
 | The ID the prepare reports is `D`, the second meta page's. | It is the last committed ID after the commit, which is what a program compares against `mdb_env_info`. |
-| A transaction with nothing to write reports the ID it began with. | Nothing is published, so there is no commit ID. The C patch reports the previous commit's ID instead; a program that rolls back on failure would then roll back the previous commit. |
-| No `mdb_txn_set_commit_txnid` (the C patch's way to get the ID). | The two-phase commit already has the final ID, for both data formats, through the existing API. |
+| A transaction with nothing to write reports the ID it began with. | Nothing is published, so there is no commit ID. Reporting the previous commit's ID instead would make a program that rolls back on failure roll back the previous commit. |
+| No separate function to get the published ID. | The two-phase commit already has it, for both data formats, through the existing API. |
 | Both meta writes are synchronous in every mode except `MDB_NOSYNC`. | Section 3. |
-| A half-written pair is completed at the next begin, feature on or off. | The state arises only from an interrupted split commit (or from the PowerDNS patch's writers). Completing it before reusing pages is always safe; it removes the old snapshot, as the commit itself would have. |
+| A half-written pair is completed at the next begin, feature on or off. | The state arises only from an interrupted split commit. Completing it before reusing pages is always safe; it removes the old snapshot, as the commit itself would have. |
 
 Alternatives considered and not taken:
 
 | Alternative | Why not |
 |---|---|
-| One meta write (the C patch) | Section 2.3. |
+| One meta write | Section 2.3. |
 | One meta write, plus rlmdb refusing `PREV_SNAPSHOT` and `-v` on such a file | Protects rlmdb only; C 1.0's `PREV_SNAPSHOT` and rollback stay exposed. |
 | Write the second meta page at the next writer's begin instead of in the commit | C writers would not, so the hole stays whenever a C writer follows. Kept only as the repair of a half-written pair. |
 | Keys that the next writer cannot reuse | Impossible. With one meta write and a commit as 100, the next writer (101) may reuse every key up to 99. Only key 100 is kept, and keys from 101 up belong to later writers. So there is room for only one protected record. |
