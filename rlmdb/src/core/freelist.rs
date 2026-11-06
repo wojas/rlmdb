@@ -27,6 +27,65 @@
 //! (`MDB_RESERVE`) and filling it in at the end. The port keeps C's exact
 //! sequence of operations, which determines which pages end up where; see
 //! the comments in [`RwTxn::freelist_save`].
+//!
+//! # Splitting the pages a transaction frees (`split-freelist`)
+//!
+//! Not in C LMDB 0.9 or 1.0: the opt-in feature
+//! [`Feature::SplitFreelist`], which changes what `mdb_freelist_save` and
+//! `mdb_env_write_meta` do here. The final txnid is
+//! [`PreparedTxn::id`](crate::PreparedTxn::id).
+//!
+//! C saves all pages a transaction freed as one record. Each page number
+//! takes 8 bytes, so deleting 4 GB of data with 4 KiB pages (about a
+//! million pages) needs a record of 8 MB, in one contiguous run of about
+//! 2,000 overflow pages. The free list
+//! rarely has such a run, so the file grows for it, and a transaction that
+//! only deletes data can fail with `MDB_MAP_FULL`.
+//!
+//! With the feature, a transaction whose freed pages need more than one
+//! page of record (`maxfree_1pg` page numbers) saves them in `n` records
+//! of at most one page each, under the consecutive keys `T .. T + n - 1`,
+//! where `T` is the transaction's own txnid. Its txnid then becomes
+//! `P = T + (n & !1)`, the first txnid at or above the last key with the
+//! parity of `T`, and the commit writes its snapshot into both meta
+//! pages: under `P`, and once more under `P + 1` into the page that held
+//! the snapshot before (`RwTxn::write_meta`). The format does not change
+//! (the free DB maps txnids to page lists): C reads, reclaims and writes
+//! such a free DB as any other, though no test runs C over these files.
+//! Why it is safe:
+//!
+//! * C's reuse rule lets a writer `W` reuse a record once its key is
+//!   below `W - 1` and below every reader's snapshot. Keeping key `W - 1`
+//!   keeps the pages of the snapshot on the other meta page intact while
+//!   `W` runs. After a split commit the next writer may reuse every split
+//!   record, which list the pages of the snapshot before the commit. That
+//!   is safe only because that snapshot is on no meta page any more: both
+//!   pages hold the committed state, as after two ordinary commits. (With
+//!   one meta page written, the old snapshot would stay on the other, and
+//!   anything that reads the previous snapshot on purpose,
+//!   `PREV_SNAPSHOT`, the tools' `-v`, `mdb_env_rollback`, could then read
+//!   pages a later writer overwrote.)
+//! * The keys are unique. Records this transaction loaded for reuse
+//!   (`pghead`) are written back under keys of at most `pglast`, below
+//!   `T`; every split key is at most `P`; later transactions get txnids
+//!   above `P + 1`.
+//! * All keys are at least `T`, so a reader of a snapshot before this
+//!   commit keeps every split record from reuse, as always.
+//! * `P` has the parity of `T`, so the first meta write goes to the page
+//!   that the previous commit did not use, and the snapshot before stays
+//!   intact until the commit is on disk; `P + 1` then replaces it. Both
+//!   writes are synced also with `NO_META_SYNC`: a writer that takes over
+//!   after this process dies may reuse the old snapshot's pages, which is
+//!   safe only once the new snapshot is on disk (`NO_SYNC` promises
+//!   nothing and stays as it is).
+//! * The transaction's txnid changes to `P` only after the last put into
+//!   the free DB, so the save reclaims only records below `T - 1`.
+//!
+//! A transaction whose freed pages fit one page saves them as C does, as
+//! does one whose txnids would come within [`SPLIT_ID_MARGIN`] of
+//! `u64::MAX` (once a save has split, it fails with `EOVERFLOW` instead
+//! of falling back). `docs/split-freelist-details.md` has the full
+//! account.
 
 use crate::consts::*;
 use crate::core::cursor::{corrupted, cursor_first, cursor_next, cursor_set, Cursor, CursorOp};
@@ -35,10 +94,28 @@ use crate::core::dirty::PageSlot;
 use crate::core::txn_rw::{RwTxn, TXN_ERROR};
 use crate::core::wcursor::CRef;
 use crate::error::{MdbError, Result};
+use crate::feature::Feature;
 use crate::format::get_u64;
 use crate::format::layout::{Format, OverflowRef};
 use crate::format::page::{P_DIRTY, P_LOOSE};
 use crate::idl::Idl;
+
+/// How far below `u64::MAX` the txnid of the writer after a split commit
+/// must stay for the commit to split: above `u64::MAX - 16` C 1.0's
+/// per-writer work id (`(txnid | 15) + 1`, mdb.c 1.0 line 3399) wraps to
+/// 0, which would let that writer change committed pages in place; and
+/// `u64::MAX` marks a free reader slot.
+pub(crate) const SPLIT_ID_MARGIN: u64 = 16;
+
+/// Whether a transaction with txnid `txnid` may split its freed pages over
+/// `n` records: the writer after its commit, `txnid + (n | 1) + 1`, stays
+/// [`SPLIT_ID_MARGIN`] below `u64::MAX`.
+fn may_split(txnid: u64, n: usize) -> bool {
+    (n as u64 | 1)
+        .checked_add(1 + SPLIT_ID_MARGIN)
+        .and_then(|ids| txnid.checked_add(ids))
+        .is_some()
+}
 
 /// Reads a free DB key (a native `txnid_t`).
 fn txnid_key(key: &[u8]) -> Result<u64> {
@@ -399,16 +476,34 @@ impl<'env> RwTxn<'env> {
     /// `mdb_freelist_save`: write the free list of this transaction and what
     /// is left of `pghead` into the free DB. Called by commit.
     ///
+    /// With the feature `split-freelist` the pages this transaction freed
+    /// may go into several records (see the module documentation); the
+    /// transaction's txnid is then its first meta page's, `P`, and
+    /// `WriteState::split_from` the one it began with.
+    ///
     /// The cursor is tracked (C uses an untracked one); see
     /// `KNOWN_C_BUGS.md` row 11.
     pub(crate) fn freelist_save(&mut self) -> Result<()> {
+        let split = self.core.env.has_feature(Feature::SplitFreelist);
+        let txnid = self.core.txnid;
+        let mut commit_id = txnid;
         let slot = self.open_slot(FREE_DBI as usize, true);
-        let rc = self.freelist_save0(CRef::main(slot));
+        let rc = self.freelist_save0(CRef::main(slot), split, &mut commit_id);
         self.close_slot(slot);
-        rc
+        rc?;
+        // Nothing allocates from the free DB any more: the txnid becomes
+        // `commit_id`.
+        if commit_id != txnid {
+            self.w.split_from = Some(txnid);
+            self.core.txnid = commit_id;
+        }
+        Ok(())
     }
 
-    fn freelist_save0(&mut self, mc: CRef) -> Result<()> {
+    /// The loop of `mdb_freelist_save`. `split`: the feature
+    /// `split-freelist` is on; `commit_id` is the txnid of the first meta page, the
+    /// transaction's own unless the pages it freed were split.
+    fn freelist_save0(&mut self, mc: CRef, split: bool, commit_id: &mut u64) -> Result<()> {
         // `pghead` can grow and shrink during this call; `pglast` and
         // `free_pgs` can only grow. Page numbers cannot disappear from
         // `free_pgs`.
@@ -453,6 +548,37 @@ impl<'env> RwTxn<'env> {
                 total_room = 0;
                 head_room = 0;
                 self.del_at(mc, 0)?;
+            }
+
+            if split {
+                if freecnt == 0 && !self.w.free_pgs.is_empty() {
+                    // Touch the last page of the free DB before deciding:
+                    // the pages that frees may make one record too big.
+                    match self.page_search_modify(mc, None, crate::core::cursor::PS_LAST) {
+                        Err(e) if !e.not_found() => return Err(e),
+                        _ => {}
+                    }
+                }
+                // Split only where one record would need more than a page
+                // and the txnids stay clear of the end of the range. Write
+                // all records again if the list grew since; split a single
+                // record that grew past one page while it was written.
+                let n = self.w.free_pgs.len().div_ceil(maxfree_1pg as usize);
+                let started = *commit_id != txnid;
+                if n > 1 && (freecnt < self.w.free_pgs.len() || !started) {
+                    if may_split(txnid, n) {
+                        (freecnt, *commit_id) =
+                            self.save_split_free_pgs(mc, maxfree_1pg as usize)?;
+                        continue;
+                    }
+                    // Once split, never save one record instead: the split
+                    // records would stay and list the pages twice.
+                    // (Unreachable: it needs the list to grow by records
+                    // after the first pass, at the end of the txnid range.)
+                    if started {
+                        return Err(crate::error::Error::errno(libc::EOVERFLOW));
+                    }
+                }
             }
 
             // Save the IDL of pages freed by this txn, to a single record.
@@ -582,6 +708,56 @@ impl<'env> RwTxn<'env> {
     }
 }
 
+impl RwTxn<'_> {
+    /// Saves the pages this transaction freed in records of at most
+    /// `maxfree` page numbers (one page each), under the keys from the
+    /// transaction's txnid `T` up (feature `split-freelist`, see the module
+    /// documentation). Returns how many pages were saved and the txnid of
+    /// the first meta page, `T + (n & !1)` for `n` records (the commit
+    /// publishes one more).
+    ///
+    /// The full records come first, so that a pass after the list grew
+    /// rewrites them in place and only the last one grows. The lowest page
+    /// numbers go under the lowest key: that record is read first, and
+    /// `mdb_page_alloc` prefers low pages. A put may append to the list
+    /// (when it touches a page of the free DB), never change the entries
+    /// sorted before it, so each record is filled in right after its put;
+    /// the caller comes back if the list grew.
+    fn save_split_free_pgs(&mut self, mc: CRef, maxfree: usize) -> Result<(usize, u64)> {
+        let txnid = self.core.txnid;
+        self.w.free_pgs.sort();
+        // As for a single record: a page in the list twice would be handed
+        // out twice (`KNOWN_C_BUGS.md` row 50).
+        if !self.w.free_pgs.is_sorted_desc() {
+            return Err(corrupted());
+        }
+        let freecnt = self.w.free_pgs.len();
+        let n = freecnt.div_ceil(maxfree) as u64;
+        let mut id = txnid;
+        let mut end = freecnt;
+        while end > 0 {
+            let len = end.min(maxfree);
+            let size = (len + 1) * 8;
+            self.put_at(mc, &id.to_ne_bytes(), PutData::reserve(size), MDB_RESERVE)?;
+            let loc = self.data_loc(mc)?;
+            let ids = std::mem::take(&mut self.w.free_pgs);
+            let part = &ids.as_slice()[end - len..end];
+            let written = self
+                .loc_mut(loc)
+                .map(|out| Idl::encode_slice_into(part, out));
+            self.w.free_pgs = ids;
+            if !written? {
+                return Err(corrupted());
+            }
+            end -= len;
+            id += 1;
+        }
+        let commit_id = txnid + (n & !1);
+        debug_assert!(id - 1 <= commit_id && commit_id & 1 == txnid & 1);
+        Ok((freecnt, commit_id))
+    }
+}
+
 /// `mdb_find_oldest`: the oldest snapshot any reader uses, or our txnid
 /// minus one if there is none older. Without a lock file C looks at no
 /// reader at all; here the in-memory table of this process's readers
@@ -670,6 +846,81 @@ mod tests {
             + fst.leaf_pages
             + fst.overflow_pages;
         assert_eq!(2 + in_trees + free, grown + 1);
+    }
+
+    /// Feature `split-freelist`: transactions that free and reclaim many
+    /// pages at once, at small pages, with a reader pinning a snapshot for
+    /// a while; the page audit (every page used once) after each commit,
+    /// and the pinned snapshot's pages untouched by the later writers.
+    #[test]
+    fn split_free_pages_audit() {
+        use crate::core::audit::{audit, page_use};
+        use crate::feature::Feature;
+        use crate::format::Format;
+        let dir = tempfile::tempdir().unwrap();
+        let env = Environment::builder()
+            .map_size(64 << 20)
+            .format(Format::V10)
+            .page_size(256)
+            .flags(EnvironmentFlags::NO_SYNC)
+            .enable(Feature::SplitFreelist)
+            .open(dir.path())
+            .unwrap();
+        let mut splits = 0;
+        let mut pinned = None;
+        for round in 0..40u32 {
+            let mut txn = env.begin_rw_txn().unwrap();
+            let t = txn.id();
+            for i in 0..300u32 {
+                let k = (i * 7 + round * 13) % 500;
+                if (i + round) % 3 == 0 {
+                    txn.del(Dbi::MAIN, &k.to_be_bytes(), None).unwrap();
+                } else {
+                    let v = vec![round as u8; 20 + (i as usize * 37) % 700];
+                    txn.put(Dbi::MAIN, &k.to_be_bytes(), &v, WriteFlags::empty())
+                        .unwrap();
+                }
+            }
+            let prepared = txn.prepare().unwrap();
+            let f = prepared.id();
+            prepared.commit().unwrap();
+            if f != t {
+                // The second meta page's txnid: the first one's is the last
+                // split key or one above it.
+                assert_eq!((f - t) % 2, 1);
+                splits += 1;
+                let recs = free_records(&env);
+                assert!(recs.iter().filter(|(id, _)| *id >= t).count() > 1);
+                assert!(recs.iter().all(|(id, _)| *id < f));
+            }
+            audit(&env);
+            match round % 10 {
+                2 => {
+                    let txn = env.begin_ro_txn().unwrap();
+                    let uses = page_use(&txn);
+                    let bytes: Vec<(u64, Vec<u8>)> = uses
+                        .tree
+                        .iter()
+                        .map(|&p| (p, page_bytes(&txn, p)))
+                        .collect();
+                    pinned = Some((txn, bytes));
+                }
+                8 => {
+                    let (txn, bytes) = pinned.take().unwrap();
+                    for (p, b) in bytes {
+                        assert_eq!(page_bytes(&txn, p), b, "page {p}");
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(splits >= 10, "{splits} split commits");
+    }
+
+    /// The first page-size bytes of page `p` in the snapshot of `txn`.
+    fn page_bytes(txn: &crate::core::RoTxn<'_>, p: u64) -> Vec<u8> {
+        let ps = txn.env().page_size();
+        txn.core().page(p).unwrap().bytes()[..ps].to_vec()
     }
 
     #[test]

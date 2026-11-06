@@ -948,9 +948,12 @@ impl Environment {
     }
 
     /// Runs the hook of [`Environment::after_next_meta_write`], then returns
-    /// the failure [`Environment::fail_next_meta_sync`] asked for; each
-    /// once.
+    /// the failure [`Environment::fail_next_meta_sync`] asked for before
+    /// this write; each once. A failure the hook asks for applies to the
+    /// next meta page write (a commit that split the pages it freed writes
+    /// two, `RwTxn::write_meta`).
     pub(crate) fn injected_meta_sync_error(&self) -> std::io::Result<()> {
+        let fault = self.meta_sync_fault.swap(0, Ordering::Relaxed);
         let hook = self
             .meta_write_hook
             .lock()
@@ -959,10 +962,7 @@ impl Environment {
         if let Some(hook) = hook {
             hook();
         }
-        if self.meta_sync_fault.load(Ordering::Relaxed) == 0 {
-            return Ok(());
-        }
-        match self.meta_sync_fault.swap(0, Ordering::Relaxed) {
+        match fault {
             0 => Ok(()),
             errno => Err(std::io::Error::from_raw_os_error(errno)),
         }

@@ -96,6 +96,16 @@ impl Environment {
     ///   the rollback of an odd txnid C would roll back again and leave no
     ///   snapshot at all (`KNOWN_C_BUGS.md` row 62). Here the previous meta
     ///   page must also hold a snapshot a commit wrote.
+    /// * `MdbError::CantRollback` if the previous meta page holds the same
+    ///   snapshot as the newest one (the same trees and last page): the
+    ///   rollback would change no data. That is how a commit that split
+    ///   its free pages (feature
+    ///   [`split-freelist`](crate::Feature::SplitFreelist)) leaves the
+    ///   meta pages: it cannot be undone, and this refusal keeps a
+    ///   two-phase commit from taking a rollback for an undo (C 1.0 rolls
+    ///   back to the same data and reports success). A program that needs
+    ///   the undo aborts the prepared transaction when
+    ///   [`PreparedTxn::id`] is higher than the transaction's ID was.
     /// * `MdbError::CantRollback` if a read transaction (of any process
     ///   using the lock file, or without one of this process) still reads
     ///   `txnid`: rolling back under it would let the next writer
@@ -153,6 +163,15 @@ impl Environment {
         if !holds_snapshot(&previous) || newest != (txnid & 1) as usize {
             return Err(MdbError::CantRollback.into());
         }
+        // Not in C: a commit that split the pages it freed (feature
+        // `split-freelist`, `RwTxn::write_meta`) wrote its snapshot into
+        // both meta pages. Rolling it back would publish the previous page
+        // and leave the data as it is: not an undo, which a two-phase
+        // commit would take for one. (C's rollback does just that.) Rolling
+        // back any commit that changed nothing is refused the same way.
+        if previous.dbs == current.dbs && previous.last_pgno == current.last_pgno {
+            return Err(MdbError::CantRollback.into());
+        }
         // New readers take the previous snapshot from here on; then no
         // reader may be left on `txnid` (see the module documentation). A
         // failure puts back what was published: `txnid`, or with
@@ -183,7 +202,7 @@ impl Environment {
             last_pgno: u64::MAX,
             txnid: txnid & 1,
         };
-        if let Err(e) = write_meta_page(self, newest, &rolled_back, Some(&current)) {
+        if let Err(e) = write_meta_page(self, newest, &rolled_back, Some(&current), false) {
             self.publish_txnid(published);
             return Err(e);
         }
@@ -207,7 +226,7 @@ impl Environment {
     /// Sets the last committed txnid that new read transactions take
     /// (`mti_txnid`, or without a lock file the state the file's handles in
     /// this process share). The caller holds the writer lock.
-    fn publish_txnid(&self, txnid: u64) {
+    pub(crate) fn publish_txnid(&self, txnid: u64) {
         match self.readers() {
             ReaderTable::Shared(lock) => lock.set_txnid(txnid),
             ReaderTable::Local(local) => local.set_txnid(txnid),

@@ -100,6 +100,11 @@ pub(crate) struct WriteState {
     /// `mm_mapsize` of the meta page a top-level transaction began from
     /// (for `mdb_env_write_meta`).
     pub(crate) base_mapsize: u64,
+    /// The txnid a top-level transaction began with, if the free-list save
+    /// split the pages it freed over several records and the transaction
+    /// commits under a higher txnid (feature `split-freelist`, see
+    /// `RwTxn::save_split_free_pgs`); `None` otherwise.
+    pub(crate) split_from: Option<u64>,
     /// Handles closed by `drop_db` in this transaction (or its committed
     /// children): slot index, the environment slot and its sequence number
     /// before the close, so that a nested transaction that aborts can
@@ -321,8 +326,24 @@ impl<'env> RwTxn<'env> {
                 (t, env.read_meta((t & 1) as usize)?)
             }
             None => {
-                // With PREV_SNAPSHOT the older one, as in C.
+                // With PREV_SNAPSHOT the older one, as in C. Name it in the
+                // state the file's handles in this process share, where
+                // `mti_txnid` would be, before this transaction reuses any
+                // page: another process may have committed since this
+                // process last did (`NO_LOCK` leaves keeping the processes
+                // apart to the caller), and a reader of ours that starts
+                // from the txnid it last saw must not land on a snapshot
+                // whose pages this transaction may reuse. With ordinary
+                // commits that cannot happen (the page it copies holds one
+                // of the two newest snapshots, whose pages every writer
+                // keeps); after a split commit of another process that
+                // stopped between its two meta writes, the old snapshot on
+                // that page is several txnids behind (`RoTxn::take_snapshot`,
+                // `docs/split-freelist-details.md`).
                 let m = env.pick_meta()?;
+                if let Some(local) = env.local_shared() {
+                    local.set_txnid(m.txnid);
+                }
                 (m.txnid, m)
             }
         };

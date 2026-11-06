@@ -28,7 +28,7 @@ const V10_RELEASE: (i32, i32, i32) = (1, 0, 3);
 /// stub; `librlmdb` and the 1.0 stub put their own `mdb_version` in it):
 ///
 /// ```text
-/// rlmdb 0.0.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3; features: test-feature)
+/// rlmdb 0.0.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3; features: split-freelist)
 /// ```
 ///
 /// The opt-in features of the build ([`crate::features`]) come last, each
@@ -150,7 +150,7 @@ mod tests {
         let v = version_info();
         let expected = format!(
             "rlmdb {} (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; \
-             format 1.0 = LMDB 1.0.3; features: test-feature)",
+             format 1.0 = LMDB 1.0.3; features: split-freelist)",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(v.to_string(), expected);
@@ -168,7 +168,7 @@ mod tests {
         assert_eq!(
             v.to_string(),
             "rlmdb 0.2.0 (mdb_version 0.9.85; format 0.9 = LMDB 0.9.37; \
-             format 1.0 = LMDB 1.0.3; features: test-feature)"
+             format 1.0 = LMDB 1.0.3; features: split-freelist)"
         );
     }
 

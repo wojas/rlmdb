@@ -147,22 +147,24 @@ off unless you turn it on. Turning a feature on never breaks
 compatibility: C programs can still open, read and write the
 environment.
 
-This release has one feature, `test-feature`. It does nothing. It is
-there so that you can try the functions below. It will be removed when
-the first real feature is added.
+This release has one feature:
+
+| Name | Default | What it does |
+|------|---------|--------------|
+| `split-freelist` | off | A write transaction that frees many pages saves them in several small free-list records instead of one big one. See [below](#split-freelist). |
 
 Turn a feature on before you open the environment:
 
 ```c
 mdb_env_create(&env);
-rlmdb_env_enable_feature(env, "test-feature");
+rlmdb_env_enable_feature(env, "split-freelist");
 mdb_env_open(env, "./db", 0, 0644);
 ```
 
 If you cannot change the program, use the `RLMDB_FEATURES` variable:
 
 ```sh
-RLMDB_FEATURES=test-feature ./prog
+RLMDB_FEATURES=split-freelist ./prog
 ```
 
 To turn a feature off, put a `-` before its name. Separate names with
@@ -192,6 +194,60 @@ Each feature has a default:
 `rlmdb_features()` lists the features the library knows.
 `rlmdb_version_string()` lists them too, for logs: a `*` after a name
 means on by default, a `!` means always on.
+
+### `split-freelist`
+
+When a write transaction deletes data, the numbers of the pages it no
+longer uses go into the free list, one record per transaction. Each page
+takes 8 bytes in that record. Deleting 4 GB of data with 4 KiB pages frees about a
+million pages, so the record takes 8 MB, and it must be stored in one
+piece: about 2,000 pages in a row. The file rarely has that much free
+space in one piece, so it grows. A transaction that only deletes data
+can then fail with `MDB_MAP_FULL`.
+
+With `split-freelist`, such a transaction saves the pages in several
+records of at most one page each. Only transactions that free more than
+about 500 pages (with 4 KiB pages; about 2,000 with 16 KiB pages) split;
+all others commit as before. The file format does not change: C LMDB
+reads and writes these files as usual.
+
+It is safe to turn on unless your program counts transaction IDs or
+rolls back commits. Three things change:
+
+* **The transaction ID.** Each record uses one transaction ID, and the
+  commit uses one more, so a transaction that splits its record commits
+  under a higher ID than `mdb_txn_id()` reported while it was open. To
+  learn the ID the commit publishes, call `mdb_txn_prepare()` first:
+  after it, `mdb_txn_id()` returns that ID. Then call
+  `mdb_txn_commit()`.
+
+  ```c
+  rc = mdb_txn_prepare(txn);
+  if (rc) {
+  	mdb_txn_abort(txn);
+  	return rc;
+  }
+  id = mdb_txn_id(txn);          /* the ID the commit publishes */
+  rc = mdb_txn_commit(txn);
+  ```
+
+* **No rollback.** Such a commit writes its data into both meta pages,
+  so `mdb_env_rollback()` cannot undo it: rlmdb returns
+  `MDB_CANT_ROLLBACK`. If your program needs to undo a commit, check
+  after `mdb_txn_prepare()` whether the ID rose, and call
+  `mdb_txn_abort()` then instead of committing.
+
+* **Syncing.** The meta pages of such a commit are always written to
+  disk before the commit returns, also with `MDB_NOMETASYNC`.
+  `MDB_NOSYNC` is not affected.
+
+`mdb_txn_prepare()` is declared in rlmdb's `lmdb.h` (the LMDB 1.0 header)
+and works with files of both formats. A program written for LMDB 0.9's
+header can declare it itself. Without it, the program can use the
+feature but cannot learn its commit's ID without a race.
+[`docs/split-freelist.md`](../docs/split-freelist.md) explains the
+feature; [`docs/split-freelist-details.md`](../docs/split-freelist-details.md)
+explains why it is safe.
 
 ## Environment variables
 

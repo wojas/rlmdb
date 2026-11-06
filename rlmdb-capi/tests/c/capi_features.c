@@ -5,9 +5,11 @@
  * RLMDB_IGNORE_ENV and RLMDB_DEFAULT_FORMAT as a handle reads them (by
  * default) or not (after rlmdb_env_read_environment(env, 0)); the program's
  * requests winning over the variables; the error codes and their texts;
- * the features in rlmdb_version_string. C LMDB has none of this, so there
- * is no C build. The only feature is the placeholder "test-feature", off by
- * default.
+ * the features in rlmdb_version_string; and that with "split-freelist",
+ * mdb_txn_id after mdb_txn_prepare is the ID the commit publishes. C LMDB
+ * has none of this, so there is no C build. The only feature is
+ * "split-freelist", off by default; what it does to the files is tested
+ * in Rust (rlmdb/tests/split_freelist.rs).
  *
  *   capi_features <scratch-dir>
  *
@@ -35,7 +37,7 @@ static int checks, failures;
 
 #define OK(expr) RC(expr, 0)
 
-#define TEST "test-feature"
+#define TEST "split-freelist"
 
 static const char *scratch;
 static int ndirs;
@@ -125,8 +127,8 @@ static void test_list(void)
 	state = 99;
 	RC(rlmdb_feature_default("no-such-feature", &state), RLMDB_UNKNOWN_FEATURE);
 	RC(rlmdb_feature_default("", &state), RLMDB_UNKNOWN_FEATURE);
-	RC(rlmdb_feature_default("Test-Feature", &state), RLMDB_UNKNOWN_FEATURE);
-	RC(rlmdb_feature_default("test-feature\xff", &state), RLMDB_UNKNOWN_FEATURE);
+	RC(rlmdb_feature_default("Split-Freelist", &state), RLMDB_UNKNOWN_FEATURE);
+	RC(rlmdb_feature_default("split-freelist\xff", &state), RLMDB_UNKNOWN_FEATURE);
 	CHECK(state == 99);
 	RC(rlmdb_feature_default(NULL, &state), EINVAL);
 	RC(rlmdb_feature_default(TEST, NULL), EINVAL);
@@ -134,7 +136,7 @@ static void test_list(void)
 		"RLMDB_UNKNOWN_FEATURE: Unknown feature") == 0);
 	CHECK(strcmp(mdb_strerror(RLMDB_FEATURE_IS_FIXED),
 		"RLMDB_FEATURE_IS_FIXED: Feature cannot be disabled") == 0);
-	CHECK(strstr(rlmdb_version_string(), "; features: test-feature)") != NULL);
+	CHECK(strstr(rlmdb_version_string(), "; features: split-freelist)") != NULL);
 }
 
 static void test_requests(void)
@@ -208,7 +210,7 @@ static void test_variables(void)
 	setenv("RLMDB_FEATURES", "", 1);
 	CHECK(on_with(PLAIN) == 0);
 	/* A typo fails the open, before any file is made. */
-	setenv("RLMDB_FEATURES", TEST ",tset-feature", 1);
+	setenv("RLMDB_FEATURES", TEST ",splt-freelist", 1);
 	RC(open_with(PLAIN, &on), RLMDB_UNKNOWN_FEATURE);
 	RC(open_with(ENABLE, &on), RLMDB_UNKNOWN_FEATURE);
 	CHECK(on_with(NO_VARS) == 0);
@@ -258,6 +260,76 @@ static void test_variables(void)
 	unsetenv("RLMDB_DEFAULT_FORMAT");
 }
 
+/* The IDs of a write transaction that deletes `n` values of 2000 bytes
+ * (two overflow pages each at 1 KiB pages) with "split-freelist" on or
+ * off: in *before mdb_txn_id while it is open, in *prepared after
+ * mdb_txn_prepare, in *after the last txnid of mdb_env_info after the
+ * commit. 0 on success. */
+static int split_ids(int split, size_t *before, size_t *prepared, size_t *after)
+{
+	static char buf[2000];
+	MDB_env *env;
+	MDB_txn *txn;
+	MDB_dbi dbi;
+	MDB_envinfo info;
+	MDB_val key, data;
+	unsigned i, k;
+	int rc = 0;
+	OK(mdb_env_create(&env));
+	OK(rlmdb_env_read_environment(env, 0));
+	OK(rlmdb_env_set_format(env, RLMDB_FORMAT_10));
+	OK(mdb_env_set_pagesize(env, 1024));
+	OK(mdb_env_set_mapsize(env, 16 << 20));
+	if (split)
+		OK(rlmdb_env_enable_feature(env, TEST));
+	OK(mdb_env_open(env, new_dir(), MDB_NOSYNC, 0644));
+	OK(mdb_txn_begin(env, NULL, 0, &txn));
+	OK(mdb_dbi_open(txn, NULL, 0, &dbi));
+	key.mv_size = sizeof(k);
+	key.mv_data = &k;
+	data.mv_size = sizeof(buf);
+	data.mv_data = buf;
+	for (k = 0; k < 1000; k++)
+		OK(mdb_put(txn, dbi, &key, &data, 0));
+	OK(mdb_txn_commit(txn));
+	OK(mdb_txn_begin(env, NULL, 0, &txn));
+	for (k = 0; k < 1000; k++)
+		OK(mdb_del(txn, dbi, &key, NULL));
+	*before = mdb_txn_id(txn);
+	rc = mdb_txn_prepare(txn);
+	*prepared = mdb_txn_id(txn);
+	if (rc == 0)
+		rc = mdb_txn_commit(txn);
+	else
+		mdb_txn_abort(txn);
+	OK(mdb_env_info(env, &info));
+	*after = info.me_last_txnid;
+	for (i = 0; i < 2; i++) {
+		/* The next write transaction follows the ID published. */
+		OK(mdb_txn_begin(env, NULL, 0, &txn));
+		CHECK(mdb_txn_id(txn) == *after + 1);
+		mdb_txn_abort(txn);
+	}
+	mdb_env_close(env);
+	return rc;
+}
+
+/* "split-freelist": a transaction that frees over 1000 pages saves them
+ * in records of about 120 page numbers (one 1 KiB page each) and commits
+ * under a higher ID (the second of the two meta pages it writes, of the
+ * other parity than the one it began with); mdb_txn_id reports that ID
+ * after mdb_txn_prepare, and it is the one published. Without the
+ * feature the ID does not change. */
+static void test_split_freelist(void)
+{
+	size_t before, prepared, after;
+	OK(split_ids(0, &before, &prepared, &after));
+	CHECK(prepared == before && after == before);
+	OK(split_ids(1, &before, &prepared, &after));
+	CHECK(prepared > before && (prepared - before) % 2 == 1);
+	CHECK(after == prepared);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2) {
@@ -271,6 +343,7 @@ int main(int argc, char **argv)
 	test_list();
 	test_requests();
 	test_variables();
+	test_split_freelist();
 	printf("capi_features: %d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

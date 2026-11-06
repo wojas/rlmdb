@@ -151,14 +151,17 @@ fn the_tools_read_the_variables_unless_ignored() {
         let r = run_env(Impl::Rust, "mdb_load", &argv, &input, dir.path(), vars);
         (r, format_of(&env))
     };
-    let (r, format) = load("feature", &[("RLMDB_FEATURES", "test-feature")]);
+    let (r, format) = load("feature", &[("RLMDB_FEATURES", "split-freelist")]);
     assert_eq!(
         (r.code, format),
         (0, Some(Format::V09)),
         "{}",
         r.stderr_str()
     );
-    let (r, format) = load("typo", &[("RLMDB_FEATURES", "test-feature,tset-feature")]);
+    let (r, format) = load(
+        "typo",
+        &[("RLMDB_FEATURES", "split-freelist,splt-freelist")],
+    );
     assert_eq!(r.code, 1);
     // After the header's warnings (db_pagesize= in a 0.9 load).
     assert!(
@@ -170,7 +173,7 @@ fn the_tools_read_the_variables_unless_ignored() {
     );
     assert_eq!(format, None);
     let ignored = [
-        ("RLMDB_FEATURES", "tset-feature"),
+        ("RLMDB_FEATURES", "splt-freelist"),
         ("RLMDB_DEFAULT_FORMAT", "1.0"),
         ("RLMDB_IGNORE_ENV", "1"),
     ];

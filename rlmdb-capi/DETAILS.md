@@ -283,7 +283,7 @@ const char *rlmdb_version_string(void);		/* static, one line */
   fields the library has.
 * `rlmdb_version_string()` returns everything in one line, for logs and
   bug reports: `rlmdb 0.0.0 (mdb_version 0.0.0; format 0.9 = LMDB 0.9.37;
-  format 1.0 = LMDB 1.0.3; features: test-feature)` in `librlmdb`
+  format 1.0 = LMDB 1.0.3; features: split-freelist)` in `librlmdb`
   (`mdb_version 0.9.85` and `mdb_version 1.0.85` in the stubs). The opt-in
   features of the library come last, each name followed by `*` if it is
   on by default and `!` if it is fixed; the part is left out without
@@ -431,9 +431,8 @@ int rlmdb_env_read_environment(MDB_env *env, int on);           /* before mdb_en
 * Features are named by strings that are never renamed or retired: one
   that graduates to always on stays listed as `RLMDB_FEATURE_FIXED`. A
   name the library does not know (also one that is not UTF-8) is
-  `RLMDB_UNKNOWN_FEATURE`, never `EINVAL`. The only feature today is the
-  placeholder `test-feature` (off by default, changes nothing), which
-  will be removed when the first real feature is added.
+  `RLMDB_UNKNOWN_FEATURE`, never `EINVAL`. The only feature today is
+  `split-freelist` (off by default; see the README).
 * At `mdb_env_open` each feature starts at its default, then
   `RLMDB_FEATURES` applies if the handle reads the variables, then the
   program's `rlmdb_env_enable_feature` / `rlmdb_env_disable_feature`,

@@ -88,9 +88,16 @@
  *	the last entry wins: "RLMDB_FEATURES=a,b -c". An unknown name there
  *	makes #mdb_env_open() fail with #RLMDB_UNKNOWN_FEATURE, a '-' on a
  *	fixed feature with #RLMDB_FEATURE_IS_FIXED, so that a typo is noticed.
- *	The only feature of this release is "test-feature", off by default,
- *	which changes nothing but its own state: a placeholder for trying the
- *	functions, removed when the first real feature is added.
+ *	The only feature of this release is "split-freelist", off by default:
+ *	a write transaction that frees many pages saves them in free-list
+ *	records of at most one page each, instead of one record that needs a
+ *	contiguous run of overflow pages. Such a transaction commits under a
+ *	higher transaction ID than #mdb_txn_id() reported while it was open,
+ *	writing its snapshot into both meta pages under two consecutive IDs;
+ *	after #mdb_txn_prepare(), #mdb_txn_id() reports the ID the commit
+ *	publishes. Such a commit cannot be undone with mdb_env_rollback()
+ *	(MDB_CANT_ROLLBACK). Its meta pages are written synchronously also
+ *	with #MDB_NOMETASYNC. The files keep their format.
  *
  *	@section rlmdb_environ_sec Environment variables
  *	An environment handle reads rlmdb's environment variables when it is

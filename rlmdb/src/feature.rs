@@ -61,10 +61,43 @@ pub const FEATURES_ENV: &str = "RLMDB_FEATURES";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Feature {
-    /// `test-feature`: changes nothing. A placeholder that lets programs
-    /// and tests exercise the mechanism until the first real feature
-    /// exists; it is removed then.
-    TestFeature,
+    /// `split-freelist` (off by default): a write transaction that frees
+    /// many pages saves them in several free-list records of at most one
+    /// page each, instead of one big record.
+    ///
+    /// C LMDB saves the pages a transaction freed as one record, 8 bytes
+    /// per page, which needs a contiguous run of overflow pages: deleting
+    /// 4 GB of data with 4 KiB pages frees about a million pages, whose
+    /// record of 8 MB needs about 2,000 pages in a row. The free list
+    /// rarely has such a run, so the file grows for it, and a transaction
+    /// that only deletes data can fail with `MDB_MAP_FULL`. With this
+    /// feature that record is split.
+    ///
+    /// It is safe to turn on unless the program counts transaction IDs or
+    /// rolls back commits.
+    ///
+    /// What changes for the program:
+    ///
+    /// * A transaction that splits its record commits under a higher
+    ///   transaction ID than [`Transaction::id`](crate::Transaction::id)
+    ///   reported while it was open. Each record takes one ID, and the
+    ///   commit writes its snapshot into both meta pages under two
+    ///   consecutive IDs. The ID it publishes is
+    ///   [`PreparedTxn::id`](crate::PreparedTxn::id), after
+    ///   [`RwTxn::prepare`](crate::RwTxn::prepare).
+    /// * Such a commit cannot be undone with
+    ///   [`Environment::rollback`](crate::Environment::rollback), which
+    ///   refuses it. A program that needs the undo aborts the prepared
+    ///   transaction when its ID rose.
+    /// * Both meta page writes of such a commit are synchronous, also with
+    ///   [`NO_META_SYNC`](crate::EnvironmentFlags::NO_META_SYNC) (not with
+    ///   [`NO_SYNC`](crate::EnvironmentFlags::NO_SYNC)).
+    ///
+    /// The files keep their format: C LMDB and rlmdb without the feature
+    /// read and write them. `docs/split-freelist.md` in the repository
+    /// explains the feature, `docs/split-freelist-details.md` why it is
+    /// safe.
+    SplitFreelist,
 }
 
 /// The default state of a feature in a build, which is also where it is in
@@ -107,8 +140,8 @@ pub struct FeatureInfo {
 /// The features of this build, in the order of [`Feature`] (each at the
 /// index of its discriminant).
 static FEATURES: [FeatureInfo; 1] = [FeatureInfo {
-    feature: Feature::TestFeature,
-    name: "test-feature",
+    feature: Feature::SplitFreelist,
+    name: "split-freelist",
     default: FeatureDefault::Off,
 }];
 
@@ -415,7 +448,7 @@ mod tests {
 
     #[test]
     fn requests() {
-        let f = Feature::TestFeature;
+        let f = Feature::SplitFreelist;
         let mut r = FeatureRequests::new();
         assert_eq!(r.requested(f), None);
         assert!(!r.is_enabled(f));
@@ -454,11 +487,11 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(Feature::TestFeature.default_state(), FeatureDefault::Off);
-        assert_eq!(version_list(), "test-feature");
-        let set = resolve(FeatureRequests::new(), Some("test-feature")).unwrap();
-        assert!(set.contains(Feature::TestFeature));
+        assert_eq!(Feature::SplitFreelist.default_state(), FeatureDefault::Off);
+        assert_eq!(version_list(), "split-freelist");
+        let set = resolve(FeatureRequests::new(), Some("split-freelist")).unwrap();
+        assert!(set.contains(Feature::SplitFreelist));
         let set = resolve(FeatureRequests::new(), None).unwrap();
-        assert!(!set.contains(Feature::TestFeature));
+        assert!(!set.contains(Feature::SplitFreelist));
     }
 }
