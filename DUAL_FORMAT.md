@@ -322,7 +322,7 @@ const char *rlmdb_version_string(void);			/* static, one line */
   The one-line string prints everything a bug report needs:
 
 ```
-rlmdb 0.0.0 (mdb_version 0.0.0; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3; features: test-feature)
+rlmdb 0.0.0 (mdb_version 0.0.0; format 0.9 = LMDB 0.9.37; format 1.0 = LMDB 1.0.3; features: split-freelist)
 ```
 
   (from `librlmdb`; the stubs say `mdb_version 0.9.85` and `1.0.85`)

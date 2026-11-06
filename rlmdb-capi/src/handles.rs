@@ -596,6 +596,9 @@ impl MDB_txn {
                 crate::SUCCESS
             }
             Ok(prepared) => {
+                // `mdb_txn_id` reports the ID the commit publishes, which
+                // the prepare may have raised (feature `split-freelist`).
+                txn.txnid.set(prepared.txn().id());
                 *state = TxnState::Prepared(prepared);
                 crate::SUCCESS
             }

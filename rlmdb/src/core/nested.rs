@@ -200,6 +200,7 @@ impl<'env> RwTxn<'env> {
             cursors,
             base_main: None,
             base_mapsize: self.w.base_mapsize,
+            split_from: None,
             dropped: Vec::new(),
             scratch: std::mem::take(&mut self.w.scratch),
             flush: Vec::new(),

@@ -161,7 +161,7 @@ int main(void)
 	CHECK(rlmdb_env_set_pagesize(NULL, 4096) == EINVAL);
 	CHECK(rlmdb_env_set_format(NULL, RLMDB_FORMAT_10) == EINVAL);
 	CHECK(rlmdb_features() != NULL);
-	CHECK(rlmdb_env_enable_feature(NULL, "test-feature") == EINVAL);
+	CHECK(rlmdb_env_enable_feature(NULL, "split-freelist") == EINVAL);
 	CHECK(rlmdb_env_read_environment(NULL, 0) == EINVAL);
 	CHECK(RLMDB_UNKNOWN_FEATURE == -30600 && RLMDB_FEATURE_IS_FIXED == -30601);
 	CHECK(RLMDB_FEATURE_OFF == 0 && RLMDB_FEATURE_ON == 1 && RLMDB_FEATURE_FIXED == 2);

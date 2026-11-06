@@ -116,6 +116,7 @@ The tests build C LMDB 0.9.37 and 1.0 from `tests/lmdb-c/` and check Rust agains
 * [`rlmdb-capi/README.md`](rlmdb-capi/README.md): using the C library ([details](rlmdb-capi/DETAILS.md))
 * [`COMPATIBILITY.md`](COMPATIBILITY.md): compatibility promises and their tests
 * [`KNOWN_C_BUGS.md`](KNOWN_C_BUGS.md): C bugs rlmdb fixes instead of copying
+* [`docs/split-freelist.md`](docs/split-freelist.md): the opt-in feature `split-freelist` ([details](docs/split-freelist-details.md))
 * [`bench/RESULTS.md`](bench/RESULTS.md): benchmarks against C
 
 ## License

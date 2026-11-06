@@ -100,6 +100,11 @@ pub(crate) struct WriteState {
     /// `mm_mapsize` of the meta page a top-level transaction began from
     /// (for `mdb_env_write_meta`).
     pub(crate) base_mapsize: u64,
+    /// The txnid a top-level transaction began with, if the free-list save
+    /// split the pages it freed over several records and the transaction
+    /// commits under a higher txnid (feature `split-freelist`, see
+    /// `RwTxn::save_split_free_pgs`); `None` otherwise.
+    pub(crate) split_from: Option<u64>,
     /// Handles closed by `drop_db` in this transaction (or its committed
     /// children): slot index, the environment slot and its sequence number
     /// before the close, so that a nested transaction that aborts can
@@ -315,6 +320,19 @@ impl<'env> RwTxn<'env> {
         }
         // From here on, dropping `lock` unlocks again.
         let mut lock = WriterLock::acquire(env)?;
+        // A commit that split the pages it freed and stopped after its first
+        // meta page left the snapshot before it on the other meta page:
+        // complete the pair before this transaction may reuse that
+        // snapshot's pages (feature `split-freelist`). Not with
+        // PREV_SNAPSHOT, which asks for that snapshot, and not on a handle
+        // a failed meta page write made unusable (`set_snapshot` would
+        // refuse the transaction anyway; nothing may be written before).
+        if env.has_fatal_error() {
+            return Err(crate::error::MdbError::Panic.into());
+        }
+        if !env.has_prev_snapshot() {
+            env.complete_split_pair()?;
+        }
         let (last, meta) = match env.lock_region() {
             Some(l) => {
                 let t = l.txnid();

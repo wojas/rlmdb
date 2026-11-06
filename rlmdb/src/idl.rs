@@ -219,12 +219,19 @@ impl Idl {
     /// space it reserved for it). `false`, with nothing written, if it is
     /// not.
     pub fn encode_into(&self, out: &mut [u8]) -> bool {
-        if out.len() != (self.ids.len() + 1) * 8 {
+        Idl::encode_slice_into(&self.ids, out)
+    }
+
+    /// Writes `ids` encoded as [`Idl::encode_append`] encodes them into
+    /// `out`, which must be exactly that long. `false`, with nothing
+    /// written, if it is not.
+    pub fn encode_slice_into(ids: &[u64], out: &mut [u8]) -> bool {
+        if out.len() != (ids.len() + 1) * 8 {
             return false;
         }
         let (count, rest) = out.split_at_mut(8);
-        count.copy_from_slice(&(self.ids.len() as u64).to_ne_bytes());
-        for (dst, id) in rest.chunks_exact_mut(8).zip(&self.ids) {
+        count.copy_from_slice(&(ids.len() as u64).to_ne_bytes());
+        for (dst, id) in rest.chunks_exact_mut(8).zip(ids) {
             dst.copy_from_slice(&id.to_ne_bytes());
         }
         true

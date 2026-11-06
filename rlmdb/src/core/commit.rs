@@ -23,6 +23,14 @@
 //! 7. with `MDB_PREVSNAPSHOT`, share the exclusive lock and clear the flag
 //!    (`Environment::end_prev_snapshot`).
 //!
+//! A commit that split the pages it freed over several free-list records
+//! (feature `split-freelist`, see `freelist`) does steps 5 and 6 twice:
+//! its meta page under its txnid `P`, synced also with `NO_META_SYNC`;
+//! then the same snapshot once more under `P + 1` into the other meta
+//! page, synced too, so that the two meta pages hold consecutive txnids
+//! and both describe the committed state, as after two ordinary commits
+//! ([`RwTxn::write_meta`]).
+//!
 //! Steps 1 to 4 are the prepare phase (`RwTxn::prepare0`, what
 //! `mdb_txn_prepare` does), 5 to 7 the meta phase (`RwTxn::write_meta`,
 //! what `mdb_txn_commit` of a prepared transaction does); a plain commit
@@ -39,14 +47,16 @@ use crate::core::cursor_put::PutData;
 use crate::core::dbi::{Dbi, DB_DIRTY, DB_USRVALID, DB_VALID};
 use crate::core::dirty::PageSlot;
 use crate::core::env::Environment;
+use crate::core::freelist::SPLIT_ID_MARGIN;
 use crate::core::page_ops;
+use crate::core::rollback::holds_snapshot;
 use crate::core::txn::Transaction;
 use crate::core::txn_rw::{RwTxn, TXN_DIRTY, TXN_SPILLS};
 use crate::core::wcursor::CRef;
 use crate::error::{Error, MdbError, Result};
 use crate::flags::DatabaseFlags;
 use crate::format::layout::{Layout, META_MAPSIZE, META_SIZE};
-use crate::format::meta::Meta;
+use crate::format::meta::{pick_newest, Meta};
 use crate::format::node::F_SUBDATA;
 use crate::format::page::{P_DIRTY, P_KEEP, P_LOOSE, P_OVERFLOW};
 use crate::os;
@@ -236,18 +246,46 @@ impl<'env> RwTxn<'env> {
     /// meta page of the txnid they find there and re-check it afterwards,
     /// as with `mti_txnid` (`RoTxn::take_snapshot`), so it must not name
     /// the page being rewritten: first it is set to the snapshot this
-    /// transaction began from (`txnid - 1`, on the other meta page), where
-    /// it stays if the write or the sync fails. It already is that unless
-    /// another process committed since this process last published a
-    /// commit.
+    /// transaction began from (on the other meta page), where it stays if
+    /// the write or the sync fails. It already is that unless another
+    /// process committed since this process last published a commit.
+    ///
+    /// # A commit that split the pages it freed
+    ///
+    /// The txnid is the one the transaction commits as: its own, or a
+    /// higher one `P` of the same parity if the free-list save split the
+    /// pages it freed (feature `split-freelist`, see the module
+    /// documentation of `freelist`). Such a commit:
+    ///
+    /// 1. writes its meta page under `P` through the synchronous
+    ///    descriptor, also with `NO_META_SYNC`;
+    /// 2. publishes `P`;
+    /// 3. writes the same snapshot once more, under `P + 1`, into the
+    ///    other meta page (the one that held the snapshot it began from),
+    ///    synced too;
+    /// 4. publishes `P + 1`.
+    ///
+    /// The order matters: `P` is published before the other page is
+    /// rewritten, so that a reader copying that page notices (it
+    /// re-checks the published txnid). Both writes are synced, so that no
+    /// writer that takes over after this process dies can reuse the old
+    /// snapshot's pages before the new snapshot is on disk in both pages.
+    ///
+    /// If the second write fails, the commit stands (`P` is durable and
+    /// published) and returns success. The page is not written back: if
+    /// the duplicate reached the file it is as good as `P`, and it is
+    /// published. The environment is marked unusable in this process, as
+    /// after any failed meta write. The next rlmdb writer completes the
+    /// pair ([`Environment::complete_split_pair`]).
     pub(crate) fn write_meta(&mut self) -> Result<()> {
         let env = self.core.env;
         let txnid = self.core.txnid;
+        let began_as = self.w.split_from.unwrap_or(txnid);
         let toggle = (txnid & 1) as usize;
         // Persist any increases of mapsize config. Meta page `toggle ^ 1`
-        // is the one this transaction began from (it holds txnid - 1), and
-        // only a writer changes meta pages, so its map size is still the
-        // one read at begin.
+        // is the one this transaction began from (it holds `began_as - 1`),
+        // and only a writer changes meta pages, so its map size is still
+        // the one read at begin.
         let mapsize = self.w.base_mapsize.max(env.map_size() as u64);
         let dbs = self.core.dbs.borrow();
         let meta = Meta {
@@ -267,20 +305,41 @@ impl<'env> RwTxn<'env> {
             txnid,
             ..meta
         });
-        let local = env.local_shared();
-        if let Some(local) = local {
-            local.set_txnid(txnid.wrapping_sub(1));
+        if let Some(local) = env.local_shared() {
+            local.set_txnid(began_as.wrapping_sub(1));
         }
-        write_meta_page(env, toggle, &meta, restore.as_ref())?;
-        if let Some(lock) = env.lock_region() {
-            lock.set_txnid(txnid);
-        }
-        if let Some(local) = local {
-            local.set_txnid(txnid);
+        let split = self.w.split_from.is_some();
+        write_meta_page(env, toggle, &meta, restore.as_ref(), split)?;
+        env.publish_txnid(txnid);
+        let mut published = txnid;
+        if split {
+            // The other meta page still holds the snapshot this transaction
+            // began from; the split records list its pages, which the next
+            // writer may reuse. Replace it with this snapshot under the
+            // next txnid, so that nothing names it any more.
+            debug_assert_eq!(
+                env.meta_ids(toggle ^ 1).map(|(_, t)| t),
+                Some(began_as.wrapping_sub(1))
+            );
+            let dup = Meta {
+                txnid: txnid + 1,
+                ..meta
+            };
+            if write_duplicate_meta(env, &dup) {
+                env.publish_txnid(dup.txnid);
+                published = dup.txnid;
+            }
         }
         // C reaches this after a plain commit's meta page write and after a
         // prepared transaction's (`prepared:` in `_mdb_txn_commit`).
-        env.end_prev_snapshot(txnid)
+        env.end_prev_snapshot(published)
+    }
+
+    /// The txnid the commit of this transaction publishes: its txnid, or
+    /// one more if the free-list save split the pages it freed (feature
+    /// `split-freelist`: the second meta page's, see [`RwTxn::write_meta`]).
+    pub(crate) fn commit_id(&self) -> u64 {
+        self.core.txnid + u64::from(self.w.split_from.is_some())
     }
 
     /// `mdb_txn_prepare` (LMDB 1.0's two-phase commit): write everything
@@ -334,6 +393,7 @@ impl<'env> RwTxn<'env> {
     /// txn.put(db, b"key", b"new", WriteFlags::empty())?;
     /// let prepared = txn.prepare()?;
     /// // The data pages are on disk; the other participants prepare too.
+    /// // The ID the commit will publish:
     /// let id = prepared.id();
     /// prepared.commit()?;
     /// // If another participant fails now, the commit can be rolled back:
@@ -347,9 +407,11 @@ impl<'env> RwTxn<'env> {
             return Err(Error::einval());
         }
         match self.prepare0() {
+            // The ID the commit publishes: the free-list save may have
+            // raised it (feature `split-freelist`).
             Ok(true) => Ok(PreparedTxn {
+                id: self.commit_id(),
                 txn: Some(self),
-                id,
             }),
             Ok(false) => {
                 self.end(true);
@@ -386,15 +448,28 @@ pub struct PreparedTxn<'env> {
     /// The transaction after its prepare phase; `None` if the prepare
     /// ended it (it had nothing to write).
     txn: Option<RwTxn<'env>>,
-    /// Its txnid.
+    /// The txnid its commit publishes (the one it began with if it has
+    /// nothing to write).
     id: u64,
 }
 
 impl PreparedTxn<'_> {
     /// The transaction's ID (`mdb_txn_id`): the txnid the commit publishes
-    /// (and which [`Environment::rollback`] takes afterwards). A
-    /// transaction with nothing to write publishes nothing; this is the ID
-    /// it had.
+    /// (the ID [`Environment::rollback`] takes, where the commit can be
+    /// rolled back). A transaction with nothing to write publishes
+    /// nothing; this is the ID it had.
+    ///
+    /// This is the final ID. With the feature
+    /// [`split-freelist`](crate::Feature::SplitFreelist) it may be higher
+    /// than the [`Transaction::id`](crate::Transaction::id) the transaction
+    /// had before the prepare: a transaction that freed many pages saves
+    /// them in several free-list records, one ID each, and commits under
+    /// a higher ID. Only the prepare decides this, so a program that needs
+    /// the ID its commit publishes (to tell its own commits from those of
+    /// other writers) prepares and then commits, instead of committing at
+    /// once. Such a commit cannot be undone with
+    /// [`Environment::rollback`] afterwards; a program that needs that
+    /// aborts the prepared transaction when the ID is higher than it was.
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -414,6 +489,14 @@ impl PreparedTxn<'_> {
     /// the new pages, which nothing refers to, and the environment is
     /// unusable in this process: every later transaction fails with
     /// [`MdbError::Panic`] (`MDB_FATAL_ERROR`) until it is opened again.
+    ///
+    /// A transaction that split the pages it freed (feature
+    /// [`split-freelist`](crate::Feature::SplitFreelist)) writes two meta
+    /// pages, both synced also with `NO_META_SYNC`, and publishes
+    /// [`id`](PreparedTxn::id) with the second. If the second write fails,
+    /// the commit stands under the first txnid and returns success; the
+    /// environment is unusable in this process all the same (see
+    /// `RwTxn::write_meta` and `docs/split-freelist-details.md`).
     pub fn commit(mut self) -> Result<()> {
         let Some(mut txn) = self.txn.take() else {
             return Ok(());
@@ -479,7 +562,9 @@ impl PreparedTxn<'_> {
 /// contents are `meta` (used by the commit and by
 /// [`Environment::rollback`]): writes its tail, from `mm_mapsize` on,
 /// through the `O_DSYNC` descriptor unless the environment has `NO_SYNC`
-/// or `NO_META_SYNC` (macOS: then an `F_FULLFSYNC` too). If the write or
+/// or, without `force_sync`, `NO_META_SYNC` (macOS: then an
+/// `F_FULLFSYNC` too). `force_sync` is for a commit that split its free
+/// pages (feature `split-freelist`, see `freelist`). If the write or
 /// that sync fails, `restore` (if any) is written over it with the plain
 /// descriptor, so that the page in the page cache is not used, the
 /// environment is marked unusable (`MDB_FATAL_ERROR`), and the error is
@@ -489,6 +574,7 @@ pub(crate) fn write_meta_page(
     toggle: usize,
     meta: &Meta,
     restore: Option<&Meta>,
+    force_sync: bool,
 ) -> Result<()> {
     let ps = env.page_size();
     let flags = env.raw_flags();
@@ -497,7 +583,12 @@ pub(crate) fn write_meta_page(
     meta.write(&mut buf);
     // Write to the SYNC fd unless NO_SYNC/NO_META_SYNC. (The meta fd goes
     // to the same file, but writing to it also syncs to disk.)
-    let sync_fd = flags & (MDB_NOSYNC | MDB_NOMETASYNC) == 0;
+    let no_sync = if force_sync {
+        MDB_NOSYNC
+    } else {
+        MDB_NOSYNC | MDB_NOMETASYNC
+    };
+    let sync_fd = flags & no_sync == 0;
     let fd = match (sync_fd, env.meta_file()) {
         (true, Some(f)) => f,
         _ => env.data_file(),
@@ -523,6 +614,108 @@ pub(crate) fn write_meta_page(
     }
     env.invalidate_map((toggle * ps) as u64, ps);
     Ok(())
+}
+
+/// Writes `meta`, the snapshot of the newest meta page once more under the
+/// next txnid, into meta page `meta.txnid & 1`, through the synchronous
+/// descriptor unless the environment has `NO_SYNC` (macOS: an
+/// `F_FULLFSYNC` too): the second meta page of a commit that split its
+/// free pages (feature `split-freelist`, [`RwTxn::write_meta`]) or of
+/// [`Environment::complete_split_pair`]. Returns whether the page holds it
+/// afterwards. The caller has published `meta.txnid - 1`, the newest
+/// snapshot, so no reader copies this page unchecked while it is written.
+///
+/// Unlike [`write_meta_page`], a failure writes nothing back: the page
+/// then holds either the old snapshot or this one, both valid, and this
+/// one is the better content (the old snapshot's pages may be reused). If
+/// the page reads back with `meta.txnid`, the write reached the file and
+/// the caller may publish it. Either way the environment is marked
+/// unusable in this process (`MDB_FATAL_ERROR`), as after any failed meta
+/// page write: the disk failed a write.
+pub(crate) fn write_duplicate_meta(env: &Environment, meta: &Meta) -> bool {
+    let ps = env.page_size();
+    let toggle = (meta.txnid & 1) as usize;
+    let off = (toggle * ps + env.layout().meta_offset() + META_MAPSIZE) as u64;
+    let mut buf = [0u8; META_SIZE];
+    meta.write(&mut buf);
+    let sync_fd = env.raw_flags() & MDB_NOSYNC == 0;
+    let fd = match (sync_fd, env.meta_file()) {
+        (true, Some(f)) => f,
+        _ => env.data_file(),
+    };
+    let written = os::write_all_at(fd, &buf[META_MAPSIZE..], off).and_then(|()| {
+        if cfg!(any(target_os = "macos", target_os = "ios")) && sync_fd {
+            if let Some(f) = env.meta_file() {
+                os::fdatasync(f)?;
+            }
+        }
+        env.injected_meta_sync_error()
+    });
+    env.invalidate_map((toggle * ps) as u64, ps);
+    match written {
+        Ok(()) => true,
+        Err(_) => {
+            env.set_fatal_error();
+            env.meta_ids(toggle).is_some_and(|(_, t)| t == meta.txnid)
+        }
+    }
+}
+
+impl Environment {
+    /// Completes the pair of meta pages of a commit that split its free
+    /// pages (feature `split-freelist`) and stopped after its first meta
+    /// page (the process died between the two writes, or the second write
+    /// failed: [`RwTxn::write_meta`]): if both meta pages hold snapshots
+    /// and the newest is two or more txnids ahead of the other, writes the
+    /// newest snapshot once more under the next txnid into the other page
+    /// and publishes that txnid, as the commit would have. Called by
+    /// [`RwTxn::begin`], holding the writer lock, before the transaction
+    /// may reuse any page: the old snapshot's pages are listed in the split
+    /// records, and reusing them while a meta page still names it would
+    /// leave that page pointing at overwritten pages for anyone who reads
+    /// the previous snapshot on purpose (`PREV_SNAPSHOT`, the tools' `-v`,
+    /// [`Environment::rollback`]).
+    ///
+    /// Nothing else leaves two committed snapshots that far apart: a new
+    /// environment has two meta pages with txnid 0, a rollback leaves a
+    /// page that holds no snapshot, and every commit (C's or rlmdb's)
+    /// writes the txnid one above the newest. A page with txnid 0 is the
+    /// initial one, not a committed snapshot (C's `mdb_env_rollback` takes
+    /// it so too): a file with one next to any snapshot is left alone, as
+    /// is a damaged file whose newest txnid is on the page of the other
+    /// parity. Not with `PREV_SNAPSHOT`, where the older snapshot is the
+    /// one wanted, and not on a handle a failed meta page write made
+    /// unusable (the caller checks both). On failure the begin fails with
+    /// the error.
+    pub(crate) fn complete_split_pair(&self) -> Result<()> {
+        let metas = [self.read_meta(0)?, self.read_meta(1)?];
+        let newest = pick_newest(&metas);
+        let (current, other) = (metas[newest], metas[newest ^ 1]);
+        if other.txnid == 0
+            || !holds_snapshot(&current)
+            || !holds_snapshot(&other)
+            || current.txnid < other.txnid.saturating_add(2)
+            || (current.txnid & 1) as usize != newest
+            || current.txnid.checked_add(2 + SPLIT_ID_MARGIN).is_none()
+        {
+            return Ok(());
+        }
+        // Readers re-check the published txnid after copying a meta page:
+        // name the newest snapshot before rewriting the other page. With a
+        // lock file it is named already unless the dying writer had not
+        // published it yet.
+        self.publish_txnid(current.txnid);
+        let dup = Meta {
+            txnid: current.txnid + 1,
+            map_size: current.map_size.max(self.map_size() as u64),
+            ..current
+        };
+        if !write_duplicate_meta(self, &dup) {
+            return Err(Error::errno(libc::EIO));
+        }
+        self.publish_txnid(dup.txnid);
+        Ok(())
+    }
 }
 
 /// Prepares dirty page `page` (flags `flags`, pages of `ps` bytes) for
