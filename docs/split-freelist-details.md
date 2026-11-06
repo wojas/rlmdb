@@ -252,7 +252,7 @@ LMDB either.
 | A reader on 98 or older | S4 rewrites its meta page, but it copied that page at its begin and never reads it again. As in stock. |
 | An rlmdb reader beginning during S4–S7 | it may copy a meta page while it is being rewritten, but it re-checks the published ID afterwards and throws the copy away if the ID changed. |
 | A C reader (0.9 or 1.0) that pinned 99 just before S5 and copies meta page 1 while S6 rewrites it | C does not re-check after the copy: for that one transaction it can see 103's data under the ID 99, or a mix of records (section 5.1). |
-| `NO_LOCK`: a reader in our process with an old cached ID, after another process did a split commit | its cached ID names meta page 1, which now holds 103's roots: a complete, intact snapshot. It reads the committed state (and may report the old ID: an existing quirk of `NO_LOCK`). Nothing it reads is reusable by any writer. |
+| `NO_LOCK`: a reader in our process with an old cached ID, after another process did a split commit | its cached ID names meta page 1, which now holds 103's roots: a complete, intact snapshot. It reads the committed state (and may report the old ID: an existing quirk of `NO_LOCK`). Nothing it reads is reusable by any writer. If the other process died between its two writes, a writer of ours names the newest snapshot at its begin (section 5.2). |
 
 ### 4.5 LMDB 1.0 files
 
@@ -309,12 +309,22 @@ commit.
 If the process dies after S4 and before S6 completes, the file holds
 102 on one meta page and 99 on the other: consistent, and durable (102
 is on disk). Nothing repairs this. The next writer begins as 103, as
-after any commit, and its own commit replaces 99. Until that commit, the
-window of the one-meta-page design exists for one transaction: if that
-writer reuses 99's pages and then does not commit (a spill, a prepare
-that aborts, a death), a read of the old snapshot on purpose
-(`PREV_SNAPSHOT`, the tools' `-v`, C 1.0's `mdb_env_rollback`) gets
-overwritten pages. The database itself is fine throughout.
+after any commit, and the next commit replaces 99. Until that commit,
+the window of the one-meta-page design exists: if a writer reuses 99's
+pages and then does not commit (a spill, a prepare that aborts, a
+death), a read of the old snapshot on purpose (`PREV_SNAPSHOT`, the
+tools' `-v`, `rollback`, rlmdb's or C 1.0's) gets overwritten pages.
+The database itself is fine throughout.
+
+`NO_LOCK` needs one more thing in this state. A reader of a process
+without a lock file starts from the last ID that process saw, which may
+be 99 while the file already holds 102: it would copy page 1, the old
+snapshot, after a writer of its own process had begun reusing that
+snapshot's pages. So a writer without a lock file names the file's
+newest snapshot in the process's shared state at its begin, as the lock
+file's `mti_txnid` would; a reader that starts after that takes 102.
+(With ordinary commits this cannot happen: the page such a reader copies
+holds one of the two newest snapshots, whose pages every writer keeps.)
 
 Writing the missing second page at the next writer's begin was
 considered and not taken: a begin that writes to the file is unwanted
@@ -360,8 +370,9 @@ environment then fails with `MDB_PANIC`:
 
 * the prepare reported 103. If the second write did not reach the file,
   the commit is 102, and 103 is still free;
-* the next commit, by any writer, gets 103. A program that treats 103
-  as its own would miss that commit;
+* the next writer begins as 103; its commit, if it changes something and
+  does not itself split, publishes 103. A program that treats 103 as its
+  own would miss that commit;
 * after reopening, read the last ID with `mdb_env_info` again.
 
 This needs a disk that fails on the second of two writes a few

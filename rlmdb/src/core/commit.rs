@@ -265,9 +265,12 @@ impl<'env> RwTxn<'env> {
     ///
     /// The order matters: `P` is published before the other page is
     /// rewritten, so that a reader copying that page notices (it
-    /// re-checks the published txnid). Both writes are synced, so that no
-    /// writer that takes over after this process dies can reuse the old
-    /// snapshot's pages before the new snapshot is on disk in both pages.
+    /// re-checks the published txnid). Both writes are synced, so that a
+    /// writer that takes over after this process dies finds the new
+    /// snapshot on disk before it may reuse the old snapshot's pages; if
+    /// this process died between the writes, the old snapshot is still on
+    /// the other page until that writer's commit
+    /// (`docs/split-freelist-details.md`, section 5.2).
     ///
     /// If the second write fails, the commit stands (`P` is durable and
     /// published) and returns success. The page is not written back: if

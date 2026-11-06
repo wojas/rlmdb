@@ -834,6 +834,58 @@ fn nolock_stale_reader_keeps_intact_data() {
     check_pages(&env);
 }
 
+/// `NO_LOCK` after another process's split commit stopped between its
+/// two meta writes: the old snapshot is still on the meta page that this
+/// process's last-seen txnid names, and a writer of this process reuses
+/// its pages. The writer names the newest snapshot in the process's
+/// shared state at its begin, so a reader that starts meanwhile takes
+/// that one and sees intact data. (A reader that started before it pins
+/// the old snapshot, which the writer then keeps.)
+#[test]
+fn nolock_stale_reader_after_a_half_written_pair() {
+    let dir = common::tempdir();
+    let b = nolock_builder();
+    let env = b.open(dir.path()).unwrap();
+    let len = big(&env);
+    let count = values_for(&env, 3.5);
+    fill(&env, 0, count, 1);
+    let old_id = env.info().unwrap().last_txnid as u64;
+    let ps = env.page_size();
+    let old_page = (old_id & 1) as usize;
+    let file = dir.path().join("data.mdb");
+    let before = file_pages(dir.path(), ps, 2)[old_page * ps..(old_page + 1) * ps].to_vec();
+    let f = helper_split(dir.path());
+    // The other process died between its two meta writes.
+    write_page(&file, ps, old_page, &before);
+
+    let mut w = env.begin_rw_txn().unwrap();
+    assert_eq!(
+        w.id(),
+        f,
+        "the writer begins after the file's newest commit"
+    );
+    for i in 0..count {
+        w.put(Dbi::MAIN, &key(i), &value(i, 2, len), WriteFlags::empty())
+            .unwrap();
+    }
+    let r = env.begin_ro_txn().unwrap();
+    assert_eq!(r.id(), f - 1, "the reader takes the newest snapshot");
+    for i in 0..count {
+        assert_eq!(r.get(Dbi::MAIN, &key(i)).unwrap(), None);
+    }
+    let p = w.prepare().unwrap();
+    for i in 0..count {
+        assert_eq!(
+            r.get(Dbi::MAIN, &key(i)).unwrap(),
+            None,
+            "value {i} appeared"
+        );
+    }
+    p.abort();
+    drop(r);
+    check_pages(&env);
+}
+
 fn nolock_builder() -> EnvironmentBuilder {
     let mut b = builder(Format::V10, Some(1024), true);
     b.flags(EnvironmentFlags::NO_LOCK);

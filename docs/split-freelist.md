@@ -133,9 +133,9 @@ yet.
 
 A split commit writes two meta pages instead of one, and both are
 written to disk before the commit returns, also with `MDB_NOMETASYNC`.
-The cost is one extra synced write per split commit; it matters most
-with `MDB_NOMETASYNC`, where ordinary commits sync nothing.
-`MDB_NOSYNC` is not affected. [Details, section 3](split-freelist-details.md#3-the-commit-step-by-step)
+In the default mode that is one extra synced write per split commit.
+With `MDB_NOMETASYNC`, where an ordinary commit syncs only its data, it
+is two. `MDB_NOSYNC` is not affected. [Details, section 3](split-freelist-details.md#3-the-commit-step-by-step)
 explains why both writes are synced.
 
 ## Getting the ID
@@ -233,10 +233,10 @@ Each is described with the exact sequence of events in the details page.
   ([5.1](split-freelist-details.md#51-c-readers-copying-a-meta-page-that-is-being-rewritten))
 * If the writing process dies between the two meta writes, the file
   holds the committed state under one ID and the state before it under
-  the other. The database is fine; the next writer's commit replaces the
-  old page. Until then, a read of the old state on purpose
-  (`MDB_PREVSNAPSHOT`, the tools' `-v`, C 1.0's `mdb_env_rollback`) can
-  get overwritten pages if that writer reused them and then aborted.
+  the other. The database is fine; the next commit replaces the old
+  page. Until then, a read of the old state on purpose
+  (`MDB_PREVSNAPSHOT`, the tools' `-v`, `rollback`) can get overwritten
+  pages if a writer reused them and then aborted.
   ([5.2](split-freelist-details.md#52-death-between-the-two-meta-writes))
 * On macOS, a synced write is two system calls. A process death between
   them, followed by a power loss, can damage the previous snapshot on
