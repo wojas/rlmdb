@@ -128,16 +128,8 @@ with "Operation not supported".
 !!! warning "Incremental backups with the tools of C LMDB"
 
     At the time of writing, with LMDB 1.0.3, the tools of C LMDB have
-    two bugs in incremental backups:
-
-    - `mdb_dump -i` can leave out pages that are in use, or write old
-      contents in their place, after a large value was deleted and its
-      pages were partly used again. The restored environment is then
-      not the source.
-    - `mdb_load -i` takes a dump that was cut short for a complete one.
-
-    rlmdb's tools do not have these bugs. A dump made with rlmdb's
-    `mdb_dump` can be loaded with either `mdb_load`.
+    bugs that make incremental backups unreliable. rlmdb's tools do not
+    have them.
 
 A chain starts with a plain copy and continues with one dump per backup:
 

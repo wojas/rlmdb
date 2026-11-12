@@ -32,10 +32,11 @@ The `mdb_*` commands on the site are rlmdb's own tools. Say what they
 add, such as working on both formats. Do not tell readers to avoid
 C LMDB or its tools.
 
-Where a page has to mention a bug of C LMDB, state it as a fact with the
-version it was seen in: "At the time of writing, with LMDB 1.0.3, ...".
-The bug may be fixed later, and the page should not read as a verdict
-on C LMDB.
+Where a page has to mention a bug of C LMDB, say in one sentence what
+it means for the reader, with the version it was seen in: "At the time
+of writing, with LMDB 1.0.3, the tools of C LMDB have bugs that make
+incremental backups unreliable." Do not describe the bug itself. It may
+be fixed later, and the page should not read as a verdict on C LMDB.
 
 ## A practical guide, not a specification
 
