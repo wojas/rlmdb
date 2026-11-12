@@ -12,9 +12,9 @@ the files as before.
 
 LMDB does not overwrite a page that a reader may still use. When a write
 transaction stops using pages, because it deletes data or replaces it,
-it writes their page numbers into the *free list*, so that later
+it writes their page numbers into the *freelist*, so that later
 transactions can use the pages again. Each transaction adds one record
-to the free list, with 8 bytes for every page it freed.
+to the freelist, with 8 bytes for every page it freed.
 
 A big delete makes a big record. Take a delete of 4 GB of data with
 4 KiB pages:
@@ -51,10 +51,11 @@ With `split-freelist`, a transaction that frees many pages writes
 several records of one page each. They fit into single free pages, as in
 the last line of the picture.
 
-Only large transactions split their record: those that free more pages
-than one record page can list. That is about 500 pages with 4 KiB pages,
-and about 2,000 with 16 KiB pages. Every other commit works exactly as
-without the feature.
+Only large transactions split their record: those that free more than
+about 2 MB of pages, by deleting or replacing that much data. That
+number is for 4 KiB pages, the usual size on Linux and Windows. With the
+16 KiB pages of an Apple Silicon Mac it is about 32 MB. Every other
+commit works exactly as without the feature.
 
 ## Turn it on
 
@@ -88,9 +89,8 @@ without the feature.
 
 ## What changes for your program
 
-It is safe to turn on unless your program counts transaction IDs or
-rolls commits back. Three things change, and only for a commit that
-splits its record.
+It is safe to turn on unless your program counts transaction IDs. Two
+things change, and only for a commit that splits its record.
 
 ### The transaction ID jumps
 
@@ -101,8 +101,8 @@ had while it was open:
 ```text
 A transaction begins as 100 and needs two records:
 
-  100   free-list record
-  101   free-list record
+  100   freelist record
+  101   freelist record
   102   the commit, written to the first meta page
   103   the commit, written to the second meta page   ← published
 ```
@@ -110,25 +110,12 @@ A transaction begins as 100 and needs two records:
 The next transaction is 104. Code that expects every commit to add 1 to
 the last transaction ID is wrong with this feature.
 
-### The commit cannot be rolled back
-
-A data file has two meta pages. Normally one holds the newest commit and
-the other the commit before it, which is what `mdb_env_rollback` goes
-back to.
-
-A commit that splits its record writes itself into both meta pages. The
-commit before it is then gone from the file, and `mdb_env_rollback`
-returns `MDB_CANT_ROLLBACK`. For the same reason, opening the
-environment with `MDB_PREVSNAPSHOT` shows this commit, not the one
-before it.
-
-If your program must be able to undo a commit, it can find out in time.
-See the next section.
-
 ### Two synced writes
 
-A commit that splits its record writes both meta pages to disk before it
-returns, also with `MDB_NOMETASYNC`. `MDB_NOSYNC` is not affected.
+A data file has two meta pages. An ordinary commit writes one of them. A
+commit that splits its record writes both, and both reach the disk
+before it returns, also with `MDB_NOMETASYNC`. `MDB_NOSYNC` is not
+affected.
 
 ## Get the ID your commit publishes
 
@@ -139,42 +126,27 @@ ID, then commit:
 === "C"
 
     ```c
-    size_t began_as, published;
+    size_t published;
 
-    began_as = mdb_txn_id(txn);
     rc = mdb_txn_prepare(txn);          /* writes the data, publishes nothing */
     if (rc) {
         mdb_txn_abort(txn);
         return rc;
     }
     published = mdb_txn_id(txn);        /* the ID the commit will have */
-    if (published != began_as) {
-        /* This commit splits its record. It cannot be rolled back. */
-    }
     rc = mdb_txn_commit(txn);
     ```
 
 === "Rust"
 
     ```rust
-    let began_as = txn.id();
     let prepared = txn.prepare()?;      // writes the data, publishes nothing
     let published = prepared.id();      // the ID the commit will have
-    if published != began_as {
-        // This commit splits its record. It cannot be rolled back.
-    }
     prepared.commit()?;
     ```
 
-For a transaction that deleted about 3,000 large values, this printed:
-
-```text
-began as 5, commits as 8
-```
-
-A program that needs to undo commits aborts the prepared transaction
-when the ID rose, instead of committing it. Nothing has been published
-at that point, so the abort always works.
+In a test, a transaction that deleted about 3,000 large values began as
+5 and committed as 8.
 
 Do not read the ID from `mdb_env_info` after the commit. Another writer
 may have committed in between.
@@ -197,12 +169,11 @@ working on the environment as usual.
 - Readers see the state before the transaction, and then the committed
   state. There is nothing in between.
 - The last transaction ID rises by more than one.
-- `mdb_stat -ff` lists several free-list records for the transaction.
+- `mdb_stat -ff` lists several freelist records for the transaction.
 
 ## Rare cases
 
-Two cases are worth knowing. Both concern single moments during a split
-commit, and neither damages the data file.
+Three cases are worth knowing. None of them damages the data file.
 
 - **A C LMDB reader that begins at the moment the commit writes its
   second meta page** can get wrong results or errors in that one read
@@ -211,7 +182,11 @@ commit, and neither damages the data file.
 - **A writer that dies between the two meta writes** leaves a database
   that is fine, with the commit in it. The next commit tidies up. Until
   then, looking at the previous state on purpose (`MDB_PREVSNAPSHOT`,
-  the tools' `-v`, a rollback) is not reliable.
+  the tools' `-v`) is not reliable.
+- **Going back to the commit before a split commit is not possible.**
+  The split commit fills both meta pages, so the earlier one is no
+  longer in the file. `mdb_env_rollback` returns `MDB_CANT_ROLLBACK`,
+  and `MDB_PREVSNAPSHOT` shows the split commit itself.
 
 The repository has the full reasoning, with every scenario that was
 checked:

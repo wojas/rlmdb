@@ -171,6 +171,7 @@ to the LMDB reference at <http://www.lmdb.tech/doc/>.
 | stub | shim, wrapper |
 | format 0.9, format 1.0 | version 1, data version 3, v10 |
 | feature | option, flag (for `split-freelist` and its kind) |
+| freelist | free list, free-list |
 
 ## Formatting
 
