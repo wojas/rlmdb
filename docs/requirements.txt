@@ -1,0 +1,2 @@
+# The documentation build. Pinned: Zensical is young and changes quickly.
+zensical==0.1.1

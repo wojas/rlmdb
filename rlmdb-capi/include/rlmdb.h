@@ -38,8 +38,9 @@
  *		("0.9" or "1.0"; any other value is ignored), if the environment
  *		reads the variables (@ref rlmdb_environ_sec), else
  *	<li>the library's: LMDB 0.9 in librlmdb and the LMDB 0.9 stub, as
- *		almost all programs are written for LMDB 0.9 today (and every C
- *		LMDB release reads its files; this may change in a later release);
+ *		almost all programs are written for LMDB 0.9 today (C LMDB 0.9
+ *		and 1.0 each open only their own format; this default may change
+ *		in a later release);
  *		LMDB 1.0 in the LMDB 1.0 stub.
  *	</ol>
  *	RLMDB_DEFAULT_FORMAT is experimental: it may be removed or restricted in

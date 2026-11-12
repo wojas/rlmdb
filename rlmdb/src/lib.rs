@@ -1,14 +1,21 @@
-//! A rewrite of [LMDB](http://www.lmdb.tech/) 0.9 in Rust that is binary
-//! compatible with the C library (0.9.37): the data file (`data.mdb`) and
-//! the lock file (`lock.mdb`) have exactly the C layout, so C and Rust
-//! processes can use one environment at the same time, reading and
-//! writing, with the same reader table and the same writer lock.
+//! LMDB rewritten in Rust: a library that reads and writes the data file
+//! (`data.mdb`) and the lock file (`lock.mdb`) of
+//! [LMDB](http://www.lmdb.tech/) exactly as the C library does, so that C
+//! and Rust processes can use one environment at the same time, reading
+//! and writing, with the same reader table and the same writer lock.
 //!
-//! It is a rewrite, not a binding: no C code is linked. The C API
-//! (`librlmdb.a`/`.so`/`.dylib`, and stubs named `liblmdb` that stand in
-//! for C LMDB 0.9 and 1.0) is the separate `rlmdb-capi` crate, the command
-//! line tools are `rlmdb-tools`; both are built on this crate. See `README.md` for an overview and
-//! `COMPATIBILITY.md` for the exact compatibility contract.
+//! It is a rewrite, not a binding: no C code is linked. It handles the
+//! files of both C releases, LMDB 0.9 (0.9.37) and LMDB 1.0 (1.0.3), each
+//! with its own lock file ([`Format`]).
+//!
+//! This crate is the engine and its Rust API. The C API (`librlmdb`, and
+//! stubs named `liblmdb` that stand in for C LMDB 0.9 and 1.0) is the
+//! separate `rlmdb-capi` crate, the command line tools are `rlmdb-tools`;
+//! both are built on this crate.
+//!
+//! The guides are at <https://rlmdb.wojas.nl/>: getting started, locking
+//! and the opt-in features. `COMPATIBILITY.md` in the repository has the
+//! exact compatibility contract.
 //!
 //! # Layers
 //!
@@ -30,6 +37,24 @@
 //! * [`idl`]: sorted page-number lists (free lists, dirty lists).
 //! * [`feature`]: opt-in features, enabled by name
 //!   ([`EnvironmentBuilder::enable_feature`], [`features`]).
+//! * [`version`]: which rlmdb this is, and the C release each format
+//!   matches ([`version_info`]).
+//!
+//! # Data formats
+//!
+//! C LMDB 0.9 and 1.0 store data in different formats, and each opens
+//! only its own. This crate opens both. An existing environment opens in
+//! its format; [`sniff_format`] tells which one that is. A new one is
+//! LMDB 0.9 unless the program asks for 1.0
+//! ([`EnvironmentBuilder::format`]).
+//!
+//! An LMDB 1.0 environment allows longer keys and page sizes from 256
+//! bytes to 64 KiB ([`EnvironmentBuilder::page_size`]). Of LMDB 1.0's
+//! API, two-phase commit ([`RwTxn::prepare`], [`Environment::rollback`])
+//! and [`EnvironmentFlags::PREV_SNAPSHOT`] work for environments of both
+//! formats, incremental backups ([`Environment::incr_dump`]) for 1.0
+//! environments. Encryption and page checksums are not implemented: files
+//! that use them are refused. Nor is `MDB_VL32`.
 //!
 //! # Environment variables
 //!
@@ -138,17 +163,18 @@
 //!   a thread may hold several. This is C's `MDB_NOTLS` behaviour, which a
 //!   C peer cannot tell apart (the lock file does not record it). An
 //!   [`RwTxn`] is `!Send`: on Linux the writer lock is a pthread mutex
-//!   owned by the thread that took it.
+//!   owned by the thread that took it, and so is the mutex on Windows.
 //! * Corrupt or truncated files give `MdbError::Corrupted` or
 //!   `MdbError::PageNotFound`, never a panic or an out-of-bounds read.
 //!
 //! # `unsafe` policy
 //!
 //! All `unsafe` code lives in the private `os` module: the memory maps of
-//! the data and lock files, `fcntl` record locks, positional I/O and
-//! syncing, and the process-shared locks (robust pthread mutexes on Linux,
-//! POSIX named semaphores on macOS). Every `unsafe` block has a
-//! `// SAFETY:` comment. Every other module is `#[forbid(unsafe_code)]`:
+//! the data and lock files, the file locks, positional I/O and syncing,
+//! and the locks that processes share (robust pthread mutexes on Linux
+//! and FreeBSD, POSIX named semaphores on macOS, those or SysV semaphores
+//! on the other BSDs, named mutexes on Windows). Every `unsafe` block has
+//! a `// SAFETY:` comment. Every other module is `#[forbid(unsafe_code)]`:
 //! page parsing, B-tree logic, the free list and the reader table are safe
 //! Rust over byte slices and atomics. The one invariant the safe code
 //! relies on is LMDB's own: pages reachable from a snapshot that a reader
@@ -157,19 +183,21 @@
 //!
 //! # Platforms
 //!
-//! 64-bit Unix only (a `compile_error!` elsewhere). Tested on macOS
-//! (arm64; POSIX named semaphores, 16 KiB pages) and Linux with glibc
-//! (aarch64 in Docker; robust pthread mutexes, 4 KiB pages). The lock file
-//! layout follows `size_of::<pthread_mutex_t>()` on Linux, FreeBSD and
-//! Android, so x86-64 glibc works the same way, but only the layouts above
-//! are tested against C. FreeBSD, OpenBSD, NetBSD and DragonFly use the
-//! lock primitives, sync calls and layouts of C's build there (POSIX
-//! named semaphores, and SysV semaphores for LMDB 1.0 lock files, on all
-//! but FreeBSD); they compile but are untested (`COMPATIBILITY.md`).
-//! Windows and 32-bit targets are out of scope, as
-//! are the LMDB 1.0 features (`MDB_VL32`, encryption, checksums);
-//! `MDB_PREVSNAPSHOT` works for environments of both formats
-//! ([`EnvironmentFlags::PREV_SNAPSHOT`]).
+//! 64-bit targets only (a `compile_error!` elsewhere: the file format
+//! depends on the size of `size_t`). The lock file is the one C LMDB
+//! builds on the same platform, so an environment is shared between
+//! programs of one platform ABI, in C or Rust.
+//!
+//! * Tested in CI: Linux with glibc on x86-64 and arm64 (robust pthread
+//!   mutexes, 4 KiB pages), macOS on arm64 (POSIX named semaphores,
+//!   16 KiB pages), Windows on x86-64 with MSVC and MinGW-w64 (named
+//!   mutexes), and big-endian Linux (s390x) under emulation.
+//! * FreeBSD (robust pthread mutexes) and OpenBSD (POSIX named
+//!   semaphores, and SysV semaphores for LMDB 1.0 lock files) are tested
+//!   by hand; FreeBSD also runs in CI every week.
+//! * NetBSD, DragonFly and Android use the locks, sync calls and layouts
+//!   of C's build there, and are untested (`COMPATIBILITY.md`).
+//!
 //! `MDB_FIXEDMAP`, `MDB_MAPASYNC` and `MDB_NOMEMINIT` are accepted and
 //! ignored; `MDB_WRITEMAP` is accepted without a writable map, with C's
 //! limits (no nested transactions), and refused for writing on OpenBSD

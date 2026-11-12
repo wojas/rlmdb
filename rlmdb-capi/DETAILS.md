@@ -335,8 +335,9 @@ int rlmdb_env_set_pagesize(MDB_env *env, unsigned size);    /* LMDB 1.0's mdb_en
   (`rlmdb_set_default_format`), else the format the environment variable
   `RLMDB_DEFAULT_FORMAT` names (`0.9` or `1.0`; other values are ignored),
   else the library's: LMDB 0.9 in `librlmdb` and the 0.9 stub, because
-  almost all programs are written for LMDB 0.9 today (and every C release
-  reads its files; this may change in a later release), LMDB 1.0 in the
+  almost all programs are written for LMDB 0.9 today (C LMDB 0.9 and 1.0
+  each open only their own format; this default may change in a later
+  release), LMDB 1.0 in the
   1.0 stub (so that a program built for C 1.0 gets 1.0 files without
   asking). An explicit choice of the program wins over the variable and
   the library. **The variable is experimental**: it may be removed or
