@@ -250,12 +250,10 @@ unless you ask for it with `.read_environment(true)`.
 
 ## API reference
 
-The API documentation is generated from the source. In a project that
-depends on rlmdb:
-
-```sh
-cargo doc -p rlmdb --open
-```
+The [Rust API reference](../api/rlmdb/index.html) describes every type
+and function of the crate. It is generated from the source, and the same
+pages come out of `cargo doc -p rlmdb --open` in a project that depends
+on rlmdb.
 
 Keys and values are bytes for now. A typed layer in the style of `heed`
 is planned.

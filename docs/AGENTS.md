@@ -192,19 +192,37 @@ abort.
 ## Building the site
 
 The site is built with [Zensical](https://zensical.org). The release is
-pinned in `requirements.txt`.
+pinned in `requirements.txt`. `scripts/build-docs.sh` builds everything
+into `site/`, which is not committed:
 
 ```sh
-uvx --with-requirements docs/requirements.txt zensical serve          # preview with live reload
-uvx --with-requirements docs/requirements.txt zensical build --strict # what CI runs
+scripts/build-docs.sh            # the pages and the Rust API reference; what CI runs
+scripts/build-docs.sh --no-api   # the pages only, which is quicker
+```
+
+The script builds in strict mode, which fails on broken links between
+pages. Run it before you commit.
+
+For a preview with live reload while you write:
+
+```sh
+uvx --with-requirements docs/requirements.txt zensical serve
 ```
 
 Without `uv`: `pip install -r docs/requirements.txt` in a virtual
-environment, then the same `zensical` commands. Run them from the
-repository root. The output goes to `site/`, which is not committed.
+environment, then `zensical serve`. Run it from the repository root.
 
-`--strict` fails on broken links between pages. Run it before you
-commit.
+The Rust API reference is rustdoc's output for the `rlmdb` crate. The
+script puts it under `site/api/`. Link to it with a relative path, as to
+a page: `../api/rlmdb/index.html`. In the live preview these links lead
+nowhere.
+
+## Publishing
+
+The site is published at <https://rlmdb.wojas.nl/> by
+`.github/workflows/docs.yml`. Every push to main that changes the pages
+or the `rlmdb` crate builds the site and replaces the published one.
+Pull requests are built but not published.
 
 ## Adding a page
 
@@ -213,7 +231,7 @@ commit.
 2. Add it to `nav` in `zensical.toml`. A page that is not listed there
    does not appear in the navigation.
 3. Run every command and example on the page.
-4. Build with `--strict`.
+4. Build the site with `scripts/build-docs.sh --no-api`.
 
 ## Other files in this directory
 

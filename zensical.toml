@@ -1,11 +1,13 @@
-# The documentation site, built with Zensical (https://zensical.org) from
-# the Markdown in docs/. docs/AGENTS.md says how to write for it and how
-# to build it; docs/requirements.txt pins the Zensical release.
+# The documentation site, https://rlmdb.wojas.nl/, built with Zensical
+# (https://zensical.org) from the Markdown in docs/. docs/AGENTS.md says
+# how to write for it; scripts/build-docs.sh builds it, with the Rust API
+# documentation under api/; docs/requirements.txt pins the Zensical
+# release.
 
 [project]
 site_name = "rlmdb"
 site_description = "A drop-in replacement for the LMDB C library, written in Rust: liblmdb for C programs, the mdb_* tools, and a Rust API."
-site_url = "https://wojas.github.io/rlmdb/"
+site_url = "https://rlmdb.wojas.nl/"
 copyright = "Copyright 2026 rlmdb's contributors. Distributed under the OpenLDAP Public License 2.8."
 
 repo_url = "https://github.com/wojas/rlmdb"
@@ -48,6 +50,9 @@ nav = [
     "features/index.md",
     { "split-freelist" = "features/split-freelist.md" },
   ] },
+  # Not a page of docs/: rustdoc's output, which scripts/build-docs.sh
+  # puts next to the pages.
+  { "Rust API reference" = "api/rlmdb/index.html" },
 ]
 
 [project.theme]

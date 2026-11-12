@@ -28,7 +28,7 @@ flowchart LR
 - **The `mdb_*` tools.** `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`
   and `mdb_drop`, with the options and output of the C tools.
 - **A Rust library.** The `rlmdb` crate has a safe API and links no C
-  code.
+  code. See its [API reference](api/rlmdb/index.html).
 
 ## Where to start
 

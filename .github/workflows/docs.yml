@@ -1,7 +1,14 @@
-# Builds the documentation site (docs/, zensical.toml) in strict mode, so
-# that a broken link between pages fails the check. docs/AGENTS.md says
-# how the site is written and built. The site is not deployed from here
-# yet.
+# The documentation site, https://rlmdb.wojas.nl/ (GitHub Pages).
+#
+# scripts/build-docs.sh builds it: the pages of docs/ with Zensical in
+# strict mode, so that a broken link between pages fails the check, and
+# the Rust API documentation of the rlmdb crate under api/.
+# docs/AGENTS.md says how the pages are written.
+#
+# Pull requests only build. A push to main also publishes the result.
+# The custom domain is a setting of the repository (Settings > Pages),
+# not a file of the site: with a deployment from a workflow, GitHub
+# ignores a CNAME file.
 name: Docs
 
 on:
@@ -10,22 +17,36 @@ on:
     paths:
       - docs/**
       - zensical.toml
+      - scripts/build-docs.sh
       - .github/workflows/docs.yml
+      # The Rust API documentation comes from the crate's sources.
+      - rlmdb/**
+      - Cargo.toml
+      - Cargo.lock
   pull_request:
     paths:
       - docs/**
       - zensical.toml
+      - scripts/build-docs.sh
       - .github/workflows/docs.yml
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# One deployment at a time; a running one is finished, not cancelled.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   build:
     name: Build the site
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -33,5 +54,28 @@ jobs:
           python-version: 3.x
       - name: Install Zensical
         run: pip install -r docs/requirements.txt
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: zensical build --clean --strict
+        run: scripts/build-docs.sh
+      - name: Upload the site
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    name: Publish
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v5
+        id: deployment
