@@ -3,13 +3,19 @@
 With the `MDB_NOLOCK` flag an environment has no lock file. Nothing
 coordinates it between processes any more.
 
-!!! warning "Only for environments that one process uses"
+!!! danger "This flag can destroy your data"
 
-    Without a lock file, nothing stops a second process from writing
-    while yours reads or writes. The result is a damaged environment or
-    wrong data, without an error at the time it happens. Use this flag
-    only when you know that no other process touches the environment
-    while yours has it open.
+    Use it only when you understand what it removes and can guarantee
+    the rest yourself.
+
+    - **Nothing stops a second process from writing** while yours reads
+      or writes. The result is a damaged environment or wrong data,
+      with no error at the time it happens.
+    - **C LMDB does not protect readers from writers**, not even inside
+      one process. A write transaction reuses pages that a running read
+      transaction still reads, and the values that transaction returned
+      change under it. rlmdb does protect them, as this page explains,
+      but a program that relies on that is not safe on C LMDB.
 
 ## What it turns off
 
@@ -31,8 +37,13 @@ coordinates it between processes any more.
 ## What rlmdb still does for you
 
 In C LMDB, `MDB_NOLOCK` also removes the coordination inside your own
-process. The program must make sure that only one write transaction
-runs, and that no read transaction is active while it does.
+process. Without a reader table, a writer does not know which snapshots
+are in use. It reuses the pages that earlier commits freed, also while
+a read transaction still reads them. That transaction then sees other
+data in the same place: a value it read a moment ago has changed, or a
+page no longer makes sense. The program must make sure that only one
+write transaction runs, and that no read transaction is active while it
+does.
 
 rlmdb keeps that coordination. It moves it from the lock file into the
 memory of the process:
@@ -87,6 +98,13 @@ reader still sees alice@example.com
 
 If one process opens the environment more than once with `MDB_NOLOCK`,
 all its handles share the same writer lock and reader table.
+
+!!! warning "This is rlmdb's behaviour, not LMDB's"
+
+    If the same program may also run on C LMDB, for example because it
+    loads rlmdb through a [stub](../getting-started/replace-c-lmdb.md)
+    and can go back, it must still follow C LMDB's rule: no read
+    transaction while a write transaction runs.
 
 ## What it cannot do
 

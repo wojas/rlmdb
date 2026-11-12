@@ -144,7 +144,8 @@ Use a table to look something up: a few rows, a few words per cell.
 
 Use a callout (`!!! note`, `!!! warning`) for something that would
 interrupt the text but that some readers need. At most one or two on a
-page. Use a collapsed one (`??? note`) for material few readers need,
+page. Use `!!! danger` where a mistake loses or damages data, and put it
+before the reader can make the mistake. Use a collapsed one (`??? note`) for material few readers need,
 such as static linking.
 
 ## References to the implementation

@@ -190,9 +190,10 @@ do.
 - **A local file system.** Do not put an environment on a network file
   system. File locks and shared memory do not work reliably there.
 - **Processes of the same kind.** Every process that shares an
-  environment must run on the same operating system and use the same C
-  library. [Lock implementations by platform](platforms.md) has the
-  details.
+  environment must run on the same operating system, with the same byte
+  order and the same C library. A mismatch is not always reported.
+  [Lock implementations by platform](platforms.md#who-can-share-an-environment)
+  has the details.
 
 If you cannot meet these, or you need no coordination at all, see
 [Running without locks](nolock.md).

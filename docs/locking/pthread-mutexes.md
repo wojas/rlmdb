@@ -77,10 +77,12 @@ to another thread, and dropping it aborts it.
   began it.
 - **The same C library in every process.** The size and the content of a
   mutex are private to the C library: 40 bytes with glibc on x86-64, 48
-  on arm64, 8 on FreeBSD. glibc and musl do not agree on it. With format
-  1.0 some mismatches are caught when the environment is opened
-  (`MDB_VERSION_MISMATCH`). With format 0.9 none are: the open
-  succeeds and the locks do not work.
+  on arm64, 8 on FreeBSD. glibc and musl do not agree on it. A mismatch
+  is not always reported. With format 1.0 some are caught when the
+  environment is opened (`MDB_VERSION_MISMATCH`). With format 0.9 none
+  are. The open then succeeds and the locks do not work: writers hang,
+  or two write at once and damage the environment. See
+  [Who can share an environment](platforms.md#who-can-share-an-environment).
 - **A local file system.** Robust mutexes in a file need shared memory
   that the kernel manages on one machine.
 
@@ -90,5 +92,6 @@ to another thread, and dropping it aborts it.
 |---|---|
 | Writers wait and one process is in a long write transaction | End that transaction or that process. |
 | Writers wait in one process only | A thread left a write transaction open. Restart the process. |
-| `MDB_VERSION_MISMATCH` when opening | Another process with a different C library or architecture has the environment open. |
+| `MDB_VERSION_MISMATCH` when opening | A process of another kind has the environment open. Do not let them share it. |
+| Hangs or `MDB_CORRUPTED` after a new kind of program joined | Suspect a mismatch that was not reported. Stop all processes and check who shares the environment. |
 | The data file keeps growing | Look for long or stale readers: [How locking works](index.md#when-it-gets-in-your-way). |
