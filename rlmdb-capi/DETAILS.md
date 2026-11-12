@@ -73,6 +73,7 @@ native-static-libs`):
 | Platform | Link line |
 |---|---|
 | Linux (glibc) | `librlmdb.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc` |
+| Android | `librlmdb.a -ldl -llog -lunwind -lm -lc` |
 | macOS | `librlmdb.a` (rustc lists `-liconv -lSystem -lc -lm`; the compiler driver adds the last three) |
 | Windows, MinGW-w64 (`x86_64-pc-windows-gnu`) | `librlmdb.a -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp` |
 | Windows, MSVC (`x86_64-pc-windows-msvc`) | `rlmdb.lib legacy_stdio_definitions.lib kernel32.lib ntdll.lib userenv.lib ws2_32.lib dbghelp.lib` (compile with `cl /MD`: the library uses the dynamic C runtime, `msvcrt`) |

@@ -84,6 +84,7 @@ fi
 # native-static-libs; rlmdb-capi/DETAILS.md has the table).
 case $triple in
   *-linux-gnu*) syslibs="-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc" ;;
+  *-linux-android*) syslibs="-ldl -llog -lunwind -lm -lc" ;;
   *-apple-darwin) syslibs="-liconv" ;;
   *-freebsd) syslibs="-lrt -lutil -lexecinfo -lkvm -lmemstat -lprocstat -ldevstat -lpthread -lgcc_s -lc -lm" ;;
   *-netbsd) syslibs="-lutil -lrt -lexecinfo -lpthread -lgcc_s -lc -lm" ;;

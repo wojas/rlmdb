@@ -431,6 +431,8 @@ pub fn rust_native_libs() -> &'static [&'static str] {
             "-lm",
             "-lcompiler_rt",
         ]
+    } else if cfg!(target_os = "android") {
+        &["-ldl", "-llog", "-lunwind", "-lm", "-lc"]
     } else if cfg!(target_os = "dragonfly") {
         &[
             "-lrt",
