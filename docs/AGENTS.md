@@ -173,6 +173,12 @@ to the LMDB reference at <http://www.lmdb.tech/doc/>.
 | feature | option, flag (for `split-freelist` and its kind) |
 | freelist | free list, free-list |
 
+Keep "abort" and "roll back" apart. A program *aborts* a write
+transaction that is still open, which is ordinary and always works. Only
+`mdb_env_rollback` *rolls back*, and always say what: "rolling back an
+already committed transaction". Readers take a bare "rollback" for an
+abort.
+
 ## Formatting
 
 - Markdown, wrapped at about 72 columns.

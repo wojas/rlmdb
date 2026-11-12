@@ -94,21 +94,26 @@ things change, and only for a commit that splits its record.
 
 ### The transaction ID jumps
 
-Each record needs a transaction ID of its own, and the commit needs two
-more. So the commit is published under a higher ID than the transaction
-had while it was open:
+Each record is stored under a transaction ID of its own, starting with
+the one the transaction began with. The commit itself is written twice,
+under two consecutive IDs. So it is published under a higher ID than the
+transaction had while it was open:
 
 ```text
 A transaction begins as 100 and needs two records:
 
   100   freelist record
   101   freelist record
-  102   the commit, written to the first meta page
-  103   the commit, written to the second meta page   ← published
+  102   the commit, written to one meta page
+  103   the commit, written to the other meta page   ← published
 ```
 
-The next transaction is 104. Code that expects every commit to add 1 to
-the last transaction ID is wrong with this feature.
+The next transaction is 104. With more records the jump is larger: the
+ID rises by 3 for two or three records, by 5 for four or five, and so
+on.
+
+Code that expects every commit to add 1 to the last transaction ID is
+wrong with this feature.
 
 ### Two synced writes
 
@@ -183,10 +188,13 @@ Three cases are worth knowing. None of them damages the data file.
   that is fine, with the commit in it. The next commit tidies up. Until
   then, looking at the previous state on purpose (`MDB_PREVSNAPSHOT`,
   the tools' `-v`) is not reliable.
-- **Going back to the commit before a split commit is not possible.**
-  The split commit fills both meta pages, so the earlier one is no
-  longer in the file. `mdb_env_rollback` returns `MDB_CANT_ROLLBACK`,
-  and `MDB_PREVSNAPSHOT` shows the split commit itself.
+- **Rolling back an already committed transaction is not possible
+  after a split commit.** `mdb_env_rollback` takes the last commit out
+  of the file again, after it was committed. A split commit fills both
+  meta pages, so the commit before it is no longer in the file, and
+  `mdb_env_rollback` returns `MDB_CANT_ROLLBACK`. `MDB_PREVSNAPSHOT`
+  shows the split commit itself. Aborting a write transaction that is
+  still open is something else, and it works as always.
 
 The repository has the full reasoning, with every scenario that was
 checked:
