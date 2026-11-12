@@ -66,9 +66,8 @@ flowchart LR
   rlmdb opens both. New environments are 0.9 unless you ask for 1.0.
 - **Damaged files give errors.** Every read is bounds-checked, so a
   corrupt or crafted file does not crash the program.
-- **Speed.** On x86-64 Linux, reads are as fast as C LMDB. Writes take
-  about 13% longer on average, and up to 49% longer for sequential
-  appends. The
+- **Speed.** On x86-64 Linux, reads are as fast as C LMDB and writes take
+  about 13% longer. The
   [benchmark results](https://github.com/wojas/rlmdb/blob/main/bench/RESULTS.md)
   have the numbers.
 - **Platforms.** Tested on 64-bit Linux, macOS, Windows, FreeBSD and
