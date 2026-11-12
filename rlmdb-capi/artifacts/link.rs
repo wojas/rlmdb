@@ -13,8 +13,9 @@
 //   another still uses LMDB. On Linux the library is linked with `-z
 //   nodelete` (`DF_1_NODELETE`, as if loaded with `RTLD_NODELETE`):
 //   `dlclose` keeps it, and a later `dlopen` gets the same, already
-//   initialised copy. The BSDs, also ELF, get the same flag (untested
-//   there). macOS needs no flag: dyld never unloads an image with
+//   initialised copy. Android and the BSDs, also ELF, get the same flag
+//   (Android's linker honours it, checked in a Termux container; untested
+//   on the BSDs). macOS needs no flag: dyld never unloads an image with
 //   thread-local variables, and Rust's standard library has them.
 //   `rlmdb-capi/tests/capi_dlopen.rs` checks both. Windows needs no flag
 //   either: `FreeLibrary` unloads the DLL with its last reference, as it
@@ -26,7 +27,7 @@
 fn link_options(soname: &str, dylib: &str) {
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     match os.as_str() {
-        "linux" | "freebsd" | "openbsd" | "netbsd" | "dragonfly" => {
+        "linux" | "android" | "freebsd" | "openbsd" | "netbsd" | "dragonfly" => {
             println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,{soname}");
             println!("cargo:rustc-cdylib-link-arg=-Wl,-z,nodelete");
         }

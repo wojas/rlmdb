@@ -203,7 +203,12 @@ fn lock_file_header() {
             let mt1 = txbody.next_multiple_of(64);
             assert_eq!(get("offsetof(MDB_txninfo.mt2.mt2_wmutex)"), mt1);
             assert_eq!(readers, mt1 + size.next_multiple_of(64));
-            assert_eq!(get("MDB_ROBUST_SUPPORTED"), 1);
+            // Robust everywhere but on Android, whose bionic has no robust
+            // mutexes (mdb10.c line 365).
+            assert_eq!(
+                get("MDB_ROBUST_SUPPORTED"),
+                u64::from(!cfg!(target_os = "android"))
+            );
         }
         // System V semaphores (OpenBSD, NetBSD, DragonFly): the set's id
         // and the reader flag, two `int`s, follow the reader count; the

@@ -20,6 +20,12 @@
 //!   (Windows) ships OpenBSD's `getopt` and prints the same messages with
 //!   `argv[0]` as given. MSVC has no `getopt`; C tools built with it here
 //!   get `tests/compat/msvc/unistd.h`, which behaves the same.
+//! * **Bionic** (Android) has FreeBSD's `getopt_long.c` with its GNU
+//!   wording: BSD's parsing, the messages `"<argv[0]>: invalid option -- x"`
+//!   (`illegal option` when `POSIXLY_CORRECT` is set) and
+//!   `"<argv[0]>: option requires an argument -- x"`, with `argv[0]` as
+//!   given. A `-` at the end of a cluster (`-n-`) ends the options and
+//!   leaves that whole argument as the first operand.
 //!
 //! Common to both: `--` ends the options, a lone `-` is an operand, options
 //! can be clustered (`-ff`), and an option argument is either the rest of
@@ -45,6 +51,13 @@ pub enum Flavor {
     /// FreeBSD's `getopt`: as [`Flavor::Bsd`], with the program's base
     /// name in the messages.
     FreeBsd,
+    /// Bionic's `getopt` (Android): as [`Flavor::Bsd`], but `invalid
+    /// option` unless `POSIXLY_CORRECT` is set, and a `-` that ends a
+    /// cluster ends the options.
+    Bionic {
+        /// Whether `POSIXLY_CORRECT` is set (BSD's wording then).
+        posixly_correct: bool,
+    },
 }
 
 impl Flavor {
@@ -60,6 +73,10 @@ impl Flavor {
             Flavor::OpenBsd
         } else if cfg!(target_os = "freebsd") {
             Flavor::FreeBsd
+        } else if cfg!(target_os = "android") {
+            Flavor::Bionic {
+                posixly_correct: std::env::var_os("POSIXLY_CORRECT").is_some(),
+            }
         } else {
             Flavor::Bsd
         }
@@ -144,8 +161,19 @@ impl<'a> GetOpt<'a> {
                 m.push(c);
                 m.extend_from_slice(b"'\n");
             }
-            Flavor::Bsd | Flavor::Mingw | Flavor::OpenBsd | Flavor::FreeBsd => {
+            Flavor::Bsd
+            | Flavor::Mingw
+            | Flavor::OpenBsd
+            | Flavor::FreeBsd
+            | Flavor::Bionic { .. } => {
                 let what = match (self.flavor, what) {
+                    (Flavor::Bionic { posixly_correct }, "invalid option") => {
+                        if posixly_correct {
+                            "illegal option"
+                        } else {
+                            "invalid option"
+                        }
+                    }
                     (Flavor::Bsd | Flavor::FreeBsd, "invalid option") => "illegal option",
                     (_, "invalid option") => "unknown option",
                     _ => what,
@@ -197,6 +225,13 @@ impl<'a> GetOpt<'a> {
         let c = arg[self.pos];
         self.pos += 1;
         let at_end = self.pos >= arg.len();
+        if c == b'-' && at_end && matches!(self.flavor, Flavor::Bionic { .. }) {
+            // getopt_long.c: "-" not in the optstring and nothing after it
+            // returns -1 without moving on, so `-n-` is an operand again.
+            self.pos = 0;
+            self.done = true;
+            return None;
+        }
         match self.lookup(c) {
             None => {
                 if at_end {
@@ -266,6 +301,9 @@ mod tests {
     }
 
     const GNU: Flavor = Flavor::Gnu { permute: true };
+    const BIONIC: Flavor = Flavor::Bionic {
+        posixly_correct: false,
+    };
 
     #[test]
     fn clusters_and_arguments() {
@@ -275,6 +313,7 @@ mod tests {
             Flavor::Mingw,
             Flavor::OpenBsd,
             Flavor::FreeBsd,
+            BIONIC,
         ] {
             let (opts, ops) = parse(&["p", "-ef", "-sname", "-s", "-x", "db"], flavor);
             assert_eq!(
@@ -311,6 +350,7 @@ mod tests {
             Flavor::Mingw,
             Flavor::OpenBsd,
             Flavor::FreeBsd,
+            BIONIC,
         ] {
             let (opts, ops) = parse(&["p", "-e", "--", "-f"], flavor);
             assert_eq!(opts, vec![Opt::Flag(b'e')]);
@@ -375,6 +415,35 @@ mod tests {
             opts[0],
             Opt::Invalid(b"p: option requires an argument -- s\n".to_vec())
         );
+        // Bionic: BSD's parsing with GNU's wording, argv[0] as given; BSD's
+        // wording with POSIXLY_CORRECT (measured in a Termux container).
+        let (opts, ops) = parse(&["/x/mdb_stat", "db", "-x"], BIONIC);
+        assert!(opts.is_empty());
+        assert_eq!(ops, argv(&["db", "-x"]));
+        let (opts, _) = parse(&["/x/mdb_stat", "-ex"], BIONIC);
+        assert_eq!(
+            opts[1],
+            Opt::Invalid(b"/x/mdb_stat: invalid option -- x\n".to_vec())
+        );
+        let posix = Flavor::Bionic {
+            posixly_correct: true,
+        };
+        let (opts, _) = parse(&["p", "-x"], posix);
+        assert_eq!(opts[0], Opt::Invalid(b"p: illegal option -- x\n".to_vec()));
+        let (opts, _) = parse(&["p", "-s"], BIONIC);
+        assert_eq!(
+            opts[0],
+            Opt::Invalid(b"p: option requires an argument -- s\n".to_vec())
+        );
+        let (opts, _) = parse(&["p", "-:"], BIONIC);
+        assert_eq!(opts[0], Opt::Invalid(b"p: invalid option -- :\n".to_vec()));
+        // A '-' that ends a cluster ends the options; inside one it is an
+        // unknown option.
+        let (opts, ops) = parse(&["p", "-e-", "db"], BIONIC);
+        assert_eq!(opts, vec![Opt::Flag(b'e')]);
+        assert_eq!(ops, argv(&["-e-", "db"]));
+        let (opts, _) = parse(&["p", "-e-x"], BIONIC);
+        assert_eq!(opts[1], Opt::Invalid(b"p: invalid option -- -\n".to_vec()));
         // "--foo" is the option '-' for both (no long options).
         let (opts, _) = parse(&["p", "--foo"], Flavor::Bsd);
         assert_eq!(opts[0], Opt::Invalid(b"p: illegal option -- -\n".to_vec()));

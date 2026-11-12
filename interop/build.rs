@@ -447,6 +447,12 @@ fn c_build(lmdb_dir: &Path) -> cc::Build {
     if !target_windows() {
         b.flag("-pthread");
     }
+    // On Android, define `ANDROID`, as Android's build systems do: C 0.9
+    // tests it to build without robust mutexes (bionic has none; mdb.c line
+    // 297).
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        b.define("ANDROID", None);
+    }
     b.flag("-W")
         .flag("-Wall")
         .flag("-Wno-unused-parameter")
