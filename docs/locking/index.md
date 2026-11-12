@@ -10,7 +10,7 @@ programs on rlmdb and programs on C LMDB share an environment.
 
 ## The rules in short
 
-- **Readers never wait.** Any number of read transactions run at the same
+- **Reading takes no lock.** Many read transactions run at the same
   time. Each reads one snapshot: the state of the last commit when it
   began.
 - **One writer at a time.** A second write transaction waits until the
@@ -67,7 +67,8 @@ transaction when the data is ready.
 ## Read transactions
 
 A read transaction takes no lock while it reads. When it begins, it
-writes the snapshot it uses into its slot of the reader table. You can
+takes a slot in the reader table, which needs a lock for a moment, and
+writes the snapshot it uses into the slot. You can
 see the table with `mdb_stat -r`:
 
 ```console

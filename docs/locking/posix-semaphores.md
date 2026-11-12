@@ -76,8 +76,9 @@ no other process has it open. So the way out is to close it everywhere:
 3. Start them again. The first one to open the environment creates new
    semaphores, and writers run again.
 
-The data is not affected. The write transaction of the dead process was
-never committed.
+The data is not affected. Changes that were not committed are gone. If
+the process died at the very end of a commit, that commit may be
+complete and visible.
 
 !!! warning "Do not delete the lock file to fix this"
 

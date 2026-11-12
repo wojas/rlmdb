@@ -153,8 +153,8 @@ carla: carla@example.com
 carlos: carlos@example.com
 ```
 
-The cost depends on the number of matches, not on the size of the
-database.
+The search goes straight to the first match and reads only the matches.
+It does not scan the database.
 
 The same loop answers "everything from A up to B": start at A and stop at
 the first key that is not below B.
@@ -175,10 +175,11 @@ This is why key design matters in LMDB. Choose keys so that the entries
 you want to find together sort together:
 
 - Keys are bytes, so they need not be text. A Unix timestamp stored as
-  8 bytes, big-endian, sorts by time: `timestamp.to_be_bytes()`. A time
-  window is then a range.
-- Store every number that way: big-endian, with a fixed width.
-  Little-endian numbers do not sort by value.
+  an unsigned number of 8 bytes, big-endian, sorts by time:
+  `timestamp.to_be_bytes()`. A time window is then a range.
+- Store every unsigned number that way: big-endian, with a fixed width.
+  Little-endian numbers do not sort by value, and neither do negative
+  ones.
 - Text works too when it sorts the way you search. Timestamps such as
   `2026-11-12T10:15:00Z` sort by time.
 - Keys with a common prefix, such as `order/1042/item/3`, keep one

@@ -42,8 +42,9 @@ process, gets the lock together with that mark. Before it continues, it
 looks up the last commit that reached the data file and clears the
 reader slots of dead processes.
 
-You do not have to do anything. The transaction of the dead process was
-never committed.
+You do not have to do anything. Changes that were not committed are
+gone. If the process died at the very end of a commit, that commit may
+be complete and visible.
 
 ## What can still block
 

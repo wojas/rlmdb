@@ -127,7 +127,9 @@ for decoration.
 - Keep a diagram to about eight boxes, with a few words in each. Label
   the arrows where the label carries the meaning.
 - For data layouts, cursor positions and timelines, a small text figure
-  in a `text` code block is often clearer than a drawing.
+  in a `text` code block is often clearer than a drawing. Where columns
+  must line up, use plain ASCII characters: block symbols are wider than
+  letters in some fonts.
 - The text next to the diagram must make sense without it.
 
 ## Tables

@@ -30,8 +30,7 @@ Two properties of the mutexes matter:
   thread dies, the kernel marks the mutex, and the next thread that
   locks it learns that its owner is gone.
 
-Nothing exists outside the lock file. There is no kernel object to list
-or to clean up.
+There is nothing for you to list or to clean up outside the lock file.
 
 ## If a process dies holding the lock
 
@@ -42,8 +41,9 @@ the news that its owner died. Before it continues, it:
 2. clears the reader slots of dead processes,
 3. marks the mutex as usable again.
 
-Then it runs as usual. The transaction of the dead process was never
-committed, so nothing of it is visible.
+Then it runs as usual. Changes that were not committed are gone. If the
+process died at the very end of a commit, that commit may be complete
+and visible.
 
 The same happens for the reader-table mutex.
 

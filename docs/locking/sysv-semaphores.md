@@ -47,8 +47,9 @@ holder died, and repairs the state before it continues: it looks up the
 last commit that reached the data file and clears the reader slots of
 dead processes.
 
-You do not have to do anything. The transaction of the dead process was
-never committed.
+You do not have to do anything. Changes that were not committed are
+gone. If the process died at the very end of a commit, that commit may
+be complete and visible.
 
 ## What can still block
 
@@ -75,9 +76,11 @@ waits until that process ends.
   Processes of different accounts cannot share an environment in format
   1.0 here. The open fails with a permission error.
 - **Keys can collide.** The key is short, so another program's semaphore
-  set can have the key of your lock file. rlmdb then refuses to open the
-  environment with `EEXIST`, where C LMDB would take the other program's
-  set over.
+  set can have the key of your lock file. rlmdb refuses a set that is
+  not its own with `EEXIST`, where C LMDB would take it over. It cannot
+  tell every case apart: a set of two semaphores that your own account
+  owns looks like a leftover of the environment, and rlmdb takes it
+  over.
 - **A crash can leave a set behind.** If the last process dies instead
   of closing the environment, its set stays in the kernel. The next
   process to open the environment takes it over, so this only costs a
@@ -101,13 +104,14 @@ environment open.
 |---|---|
 | Opening fails with `ENOSPC` | The system is out of semaphore sets. Remove leftover sets or raise the limits. |
 | Opening fails with a permission error | Another account created the set. Run the processes as one account. |
-| Opening fails with `EEXIST` | Another set has the lock file's key. See below. |
+| Opening fails with `EEXIST` or `EINVAL` | Another set has the lock file's key. See below. |
 | Writers wait and one process is in a long write transaction | End that transaction or that process. |
 | The data file keeps growing | Look for long or stale readers: [How locking works](index.md#when-it-gets-in-your-way). |
 
-### Opening fails with `EEXIST`
+### Opening fails with `EEXIST` or `EINVAL`
 
-Find the set with `ipcs -s`.
+Another semaphore set has the key of the lock file. `EINVAL` means that
+set has only one semaphore. Find the set with `ipcs -s`.
 
 - If it is a leftover of this environment that another account created,
   remove it with `ipcrm -s <id>` as that account or as root.
