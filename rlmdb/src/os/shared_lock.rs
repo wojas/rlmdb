@@ -5,7 +5,8 @@
 //! They must be the very objects a C process on the same platform uses, so
 //! the implementation follows the C build:
 //!
-//! * **Linux/FreeBSD** (`MDB_USE_POSIX_MUTEX`, `MDB_USE_ROBUST`): two
+//! * **Linux, FreeBSD, illumos, Solaris** (`MDB_USE_POSIX_MUTEX`,
+//!   `MDB_USE_ROBUST`): two
 //!   process-shared, robust `pthread_mutex_t`s stored *inside* the lock file
 //!   at `mti_rmutex` / `mti_wmutex`. Only the exclusive opener initialises
 //!   them (`mdb_env_setup_locks`, mdb.c line 4882). If a holder dies,
@@ -85,7 +86,8 @@ pub struct SharedLocks {
 }
 
 // ===========================================================================
-// Linux / FreeBSD: robust process-shared pthread mutexes in the lock file.
+// Linux, FreeBSD, illumos, Solaris: robust process-shared pthread mutexes in
+// the lock file; on Android the same mutexes, not robust.
 // ===========================================================================
 
 #[cfg(not(any(
@@ -119,12 +121,47 @@ mod imp {
         ) as *mut libc::pthread_mutex_t
     }
 
-    /// `PTHREAD_PROCESS_SHARED`, which the `libc` crate does not define for
-    /// Android (bionic's `<pthread.h>`: 1).
+    /// The process-shared and robust mutex calls, from `libc` where it has
+    /// them.
+    #[cfg(not(any(target_os = "android", target_os = "illumos", target_os = "solaris")))]
+    mod sys {
+        pub use libc::{
+            pthread_mutex_consistent, pthread_mutexattr_setpshared, pthread_mutexattr_setrobust,
+            PTHREAD_MUTEX_ROBUST, PTHREAD_PROCESS_SHARED,
+        };
+    }
+
+    /// Android: `PTHREAD_PROCESS_SHARED`, which the `libc` crate does not
+    /// define there (bionic's `<pthread.h>`: 1). Bionic has no robust
+    /// mutexes.
     #[cfg(target_os = "android")]
-    const PTHREAD_PROCESS_SHARED: libc::c_int = 1;
-    #[cfg(not(target_os = "android"))]
-    use libc::PTHREAD_PROCESS_SHARED;
+    mod sys {
+        pub use libc::pthread_mutexattr_setpshared;
+        pub const PTHREAD_PROCESS_SHARED: libc::c_int = 1;
+    }
+
+    /// illumos and Solaris: the calls the `libc` crate does not bind there,
+    /// with the prototypes of their `<pthread.h>`, and
+    /// `PTHREAD_MUTEX_ROBUST` (`LOCK_ROBUST`, 0x40, `<sys/synch.h>`).
+    #[cfg(any(target_os = "illumos", target_os = "solaris"))]
+    mod sys {
+        use libc::{c_int, pthread_mutex_t, pthread_mutexattr_t};
+
+        pub use libc::PTHREAD_PROCESS_SHARED;
+        pub const PTHREAD_MUTEX_ROBUST: c_int = 0x40;
+
+        extern "C" {
+            pub fn pthread_mutexattr_setpshared(
+                attr: *mut pthread_mutexattr_t,
+                pshared: c_int,
+            ) -> c_int;
+            pub fn pthread_mutexattr_setrobust(
+                attr: *mut pthread_mutexattr_t,
+                robust: c_int,
+            ) -> c_int;
+            pub fn pthread_mutex_consistent(mutex: *mut pthread_mutex_t) -> c_int;
+        }
+    }
 
     /// Makes the mutexes `attr` initialises robust, where C does
     /// (`MDB_ROBUST_SUPPORTED`, mdb.c line 5038): everywhere but Android.
@@ -135,7 +172,7 @@ mod imp {
     #[cfg(not(target_os = "android"))]
     unsafe fn set_robust(attr: &mut libc::pthread_mutexattr_t) -> libc::c_int {
         // SAFETY: attr is initialised (the caller's contract).
-        unsafe { libc::pthread_mutexattr_setrobust(attr, libc::PTHREAD_MUTEX_ROBUST) }
+        unsafe { sys::pthread_mutexattr_setrobust(attr, sys::PTHREAD_MUTEX_ROBUST) }
     }
 
     /// Android: nothing to do, the mutexes stay plain process-shared ones
@@ -199,7 +236,7 @@ mod imp {
         #[cfg(not(target_os = "android"))]
         pub fn mark_consistent(&self) -> io::Result<()> {
             // SAFETY: as in `lock`; we hold the mutex in EOWNERDEAD state.
-            check(unsafe { libc::pthread_mutex_consistent(self.mutex) })
+            check(unsafe { sys::pthread_mutex_consistent(self.mutex) })
         }
 
         /// Never needed on Android: a mutex that is not robust never
@@ -240,7 +277,8 @@ mod imp {
                 );
                 let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
                 check(libc::pthread_mutexattr_init(&mut attr))?;
-                let mut rc = libc::pthread_mutexattr_setpshared(&mut attr, PTHREAD_PROCESS_SHARED);
+                let mut rc =
+                    sys::pthread_mutexattr_setpshared(&mut attr, sys::PTHREAD_PROCESS_SHARED);
                 if rc == 0 {
                     rc = set_robust(&mut attr);
                 }

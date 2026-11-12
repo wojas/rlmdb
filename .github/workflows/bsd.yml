@@ -1,13 +1,17 @@
-# EXPERIMENTAL: the tests of rlmdb and rlmdb-capi in a FreeBSD virtual
-# machine, the way to run them on a BSD without a BSD machine. FreeBSD is
-# marked untested in COMPATIBILITY.md until this has passed and someone has
-# read the results; until then a failure does not fail the workflow.
+# The tests in virtual machines of systems the CI has no runners for.
 #
-# The VM gets Rust from the FreeBSD packages; the C compiler the tests use
-# to build the reference library is the base system's cc (clang). The
-# interop suite is not run here (it needs the C 1.0 build as well and has
-# not been ported to the BSDs).
-name: BSD (experimental)
+# FreeBSD (EXPERIMENTAL): the tests of rlmdb and rlmdb-capi, the way to run
+# them on a BSD without a BSD machine. FreeBSD is marked untested in
+# COMPATIBILITY.md until this has passed and someone has read the results;
+# until then a failure does not fail the workflow. The VM gets Rust from
+# the FreeBSD packages; the C compiler the tests use to build the reference
+# library is the base system's cc (clang). The interop suite is not run
+# there.
+#
+# illumos: the whole workspace suite, the interop matrix included, in an
+# OmniOS VM. Its "-build" image has GCC, which builds the C reference
+# libraries; Rust comes from rustup.
+name: BSD and illumos VMs
 
 on:
   workflow_dispatch:
@@ -37,3 +41,23 @@ jobs:
             cc --version
             rustc --version
             cargo test -p rlmdb -p rlmdb-capi --no-fail-fast
+
+  illumos:
+    name: illumos tests (OmniOS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+      - name: cargo test in an OmniOS VM
+        uses: vmactions/omnios-vm@v1
+        with:
+          release: r151060-build
+          copyback: false
+          prepare: |
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          run: |
+            . "$HOME/.cargo/env"
+            uname -a
+            gcc --version | head -1
+            rustc --version
+            CC=gcc cargo test --workspace --no-fail-fast

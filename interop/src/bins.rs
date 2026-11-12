@@ -257,6 +257,34 @@ fn rust_native_libs() -> &'static [&'static str] {
             "-lc",
             "-lm",
         ]
+    } else if cfg!(target_os = "illumos") {
+        &[
+            "-lsendfile",
+            "-llgrp",
+            "-lsocket",
+            "-lposix4",
+            "-lpthread",
+            "-lresolv",
+            "-lnsl",
+            "-lumem",
+            "-lgcc_s",
+            "-lc",
+            "-lm",
+            "-lrt",
+        ]
+    } else if cfg!(target_os = "solaris") {
+        &[
+            "-lsendfile",
+            "-llgrp",
+            "-lsocket",
+            "-lposix4",
+            "-lpthread",
+            "-lresolv",
+            "-lgcc_s",
+            "-lc",
+            "-lm",
+            "-lrt",
+        ]
     } else {
         &[]
     }

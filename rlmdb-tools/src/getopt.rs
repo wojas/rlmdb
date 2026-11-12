@@ -26,6 +26,10 @@
 //!   `"<argv[0]>: option requires an argument -- x"`, with `argv[0]` as
 //!   given. A `-` at the end of a cluster (`-n-`) ends the options and
 //!   leaves that whole argument as the first operand.
+//! * **illumos and Solaris** parse and word their messages as BSD does,
+//!   with `argv[0]` as given, but take an argument that starts with `--`
+//!   (and is not `--` itself) for one unknown long option:
+//!   `"<argv[0]>: illegal option -- foo"` for `--foo`.
 //!
 //! Common to both: `--` ends the options, a lone `-` is an operand, options
 //! can be clustered (`-ff`), and an option argument is either the rest of
@@ -58,6 +62,9 @@ pub enum Flavor {
         /// Whether `POSIXLY_CORRECT` is set (BSD's wording then).
         posixly_correct: bool,
     },
+    /// The `getopt` of illumos and Solaris: as [`Flavor::Bsd`], but `--foo`
+    /// is one unknown option, named `foo` in the message.
+    Illumos,
 }
 
 impl Flavor {
@@ -73,6 +80,8 @@ impl Flavor {
             Flavor::OpenBsd
         } else if cfg!(target_os = "freebsd") {
             Flavor::FreeBsd
+        } else if cfg!(any(target_os = "illumos", target_os = "solaris")) {
+            Flavor::Illumos
         } else if cfg!(target_os = "android") {
             Flavor::Bionic {
                 posixly_correct: std::env::var_os("POSIXLY_CORRECT").is_some(),
@@ -165,7 +174,8 @@ impl<'a> GetOpt<'a> {
             | Flavor::Mingw
             | Flavor::OpenBsd
             | Flavor::FreeBsd
-            | Flavor::Bionic { .. } => {
+            | Flavor::Bionic { .. }
+            | Flavor::Illumos => {
                 let what = match (self.flavor, what) {
                     (Flavor::Bionic { posixly_correct }, "invalid option") => {
                         if posixly_correct {
@@ -174,7 +184,9 @@ impl<'a> GetOpt<'a> {
                             "invalid option"
                         }
                     }
-                    (Flavor::Bsd | Flavor::FreeBsd, "invalid option") => "illegal option",
+                    (Flavor::Bsd | Flavor::FreeBsd | Flavor::Illumos, "invalid option") => {
+                        "illegal option"
+                    }
                     (_, "invalid option") => "unknown option",
                     _ => what,
                 };
@@ -222,6 +234,16 @@ impl<'a> GetOpt<'a> {
         }
         let args = self.args;
         let arg = &args[self.index];
+        if self.pos == 1 && arg[1] == b'-' && self.flavor == Flavor::Illumos {
+            // "--foo" (not "--", handled above): the whole argument is one
+            // unknown option.
+            let mut m = self.prog_name().to_vec();
+            m.extend_from_slice(b": illegal option -- ");
+            m.extend_from_slice(&arg[2..]);
+            m.push(b'\n');
+            self.next_argument();
+            return Some(Opt::Invalid(m));
+        }
         let c = arg[self.pos];
         self.pos += 1;
         let at_end = self.pos >= arg.len();
@@ -314,6 +336,7 @@ mod tests {
             Flavor::OpenBsd,
             Flavor::FreeBsd,
             BIONIC,
+            Flavor::Illumos,
         ] {
             let (opts, ops) = parse(&["p", "-ef", "-sname", "-s", "-x", "db"], flavor);
             assert_eq!(
@@ -351,6 +374,7 @@ mod tests {
             Flavor::OpenBsd,
             Flavor::FreeBsd,
             BIONIC,
+            Flavor::Illumos,
         ] {
             let (opts, ops) = parse(&["p", "-e", "--", "-f"], flavor);
             assert_eq!(opts, vec![Opt::Flag(b'e')]);
@@ -444,6 +468,21 @@ mod tests {
         assert_eq!(ops, argv(&["-e-", "db"]));
         let (opts, _) = parse(&["p", "-e-x"], BIONIC);
         assert_eq!(opts[1], Opt::Invalid(b"p: invalid option -- -\n".to_vec()));
+        // illumos: BSD's messages, argv[0] as given, "--foo" one option
+        // (measured on OmniOS r151060).
+        let (opts, ops) = parse(&["/x/mdb_stat", "db", "-x"], Flavor::Illumos);
+        assert!(opts.is_empty());
+        assert_eq!(ops, argv(&["db", "-x"]));
+        let (opts, _) = parse(&["/x/mdb_stat", "-ex"], Flavor::Illumos);
+        assert_eq!(
+            opts[1],
+            Opt::Invalid(b"/x/mdb_stat: illegal option -- x\n".to_vec())
+        );
+        let (opts, _) = parse(&["p", "-e", "--foo", "db"], Flavor::Illumos);
+        assert_eq!(
+            opts[1],
+            Opt::Invalid(b"p: illegal option -- foo\n".to_vec())
+        );
         // "--foo" is the option '-' for both (no long options).
         let (opts, _) = parse(&["p", "--foo"], Flavor::Bsd);
         assert_eq!(opts[0], Opt::Invalid(b"p: illegal option -- -\n".to_vec()));

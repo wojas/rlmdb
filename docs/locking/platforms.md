@@ -8,7 +8,7 @@ Find your platform, then read the page of its lock:
 
 | Platform | Lock | After a writer crashes |
 |---|---|---|
-| Linux, FreeBSD | [Robust pthread mutexes](pthread-mutexes.md) | The next writer recovers |
+| Linux, FreeBSD, illumos, Solaris | [Robust pthread mutexes](pthread-mutexes.md) | The next writer recovers |
 | Android | [Pthread mutexes](pthread-mutexes.md#on-android), not robust | Writers wait until you step in |
 | macOS | [POSIX named semaphores](posix-semaphores.md) | Writers wait until you step in |
 | OpenBSD, NetBSD, DragonFly with format 0.9 | [POSIX named semaphores](posix-semaphores.md) | Writers wait until you step in |
@@ -19,7 +19,7 @@ The last column is the difference that matters most in practice. On
 macOS and Android, and with format 0.9 on three of the BSDs, a process
 that is killed in a write transaction leaves the writer lock taken.
 
-NetBSD and DragonFly are implemented but not tested yet.
+NetBSD, DragonFly and Solaris are implemented but not tested yet.
 
 ## What is the same everywhere
 

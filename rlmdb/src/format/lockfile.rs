@@ -14,8 +14,8 @@
 //! The layout depends on how the platform implements the two shared locks
 //! (reader table mutex `rmutex`, writer mutex `wmutex`), see [`LockObjects`]:
 //!
-//! * **Linux/FreeBSD** (`MDB_USE_POSIX_MUTEX`): the `pthread_mutex_t`s live in
-//!   the file. `MNAME_LEN == sizeof(pthread_mutex_t)`.
+//! * **Linux, Android, FreeBSD, illumos, Solaris** (`MDB_USE_POSIX_MUTEX`): the
+//!   `pthread_mutex_t`s live in the file. `MNAME_LEN == sizeof(pthread_mutex_t)`.
 //! * **macOS** (`MDB_USE_POSIX_SEM`): two POSIX named semaphores. Version 1
 //!   stores their 32-byte *names* (`MNAME_LEN == 32`); version 2 stores a
 //!   64-bit hash, `mtb_mutexid`, that the names are derived from, and has no
@@ -61,7 +61,8 @@
 //! MDB_reader, both versions (64 bytes each):
 //!   u64  mr_txnid  (!0 when the slot is owned but not in a txn)
 //!   i32  mr_pid    (0 when the slot is free)
-//!   u64  mr_tid    (pthread_t, at offset 16)
+//!   pthread_t mr_tid (8 bytes at offset 16; on illumos and Solaris an
+//!                     unsigned int, 4 bytes at offset 12)
 //! ```
 //!
 //! The numbers, measured with `layout_dump` and `layout_dump10` (interop
@@ -233,12 +234,19 @@ mod platform {
     pub const LOCK_TYPE_V2: usize = super::lock_type_posix_sem(RLOCK_V2.1);
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "illumos",
+    target_os = "solaris"
+))]
 mod platform {
     use super::LockObjects;
 
     /// `MNAME_LEN` with `MDB_USE_POSIX_MUTEX`: `sizeof(pthread_mutex_t)`
-    /// (40 on x86-64 glibc, 48 on aarch64 glibc, 8 on FreeBSD).
+    /// (40 on x86-64 glibc, 48 on aarch64 glibc, 8 on FreeBSD, 24 on
+    /// illumos and Solaris).
     pub const MNAME_LEN: usize = core::mem::size_of::<libc::pthread_mutex_t>();
     /// `alignof(pthread_mutex_t)`.
     pub const MUTEX_ALIGN: usize = core::mem::align_of::<libc::pthread_mutex_t>();
@@ -314,10 +322,12 @@ mod platform {
     target_os = "openbsd",
     target_os = "netbsd",
     target_os = "dragonfly",
+    target_os = "illumos",
+    target_os = "solaris",
     windows
 )))]
 compile_error!(
-    "lmdb: unsupported platform; the lock file layout is only known for Linux, macOS, the BSDs and Windows"
+    "lmdb: unsupported platform; the lock file layout is only known for Linux, Android, macOS, the BSDs, illumos, Solaris and Windows"
 );
 
 // --- version 1 (LMDB 0.9) -------------------------------------------------
@@ -367,15 +377,23 @@ pub const READER_SIZE: usize = align_up(24, CACHELINE);
 pub const READER_TXNID: usize = 0;
 /// Offset of `mr_pid` (`pid_t`, i32) within a reader slot.
 pub const READER_PID: usize = 8;
-/// Offset of `mr_tid` (`pthread_t`, 8 bytes) within a reader slot.
+/// Offset of `mr_tid` (`pthread_t`) within a reader slot: after the `int`
+/// pid, aligned for `pthread_t` (16 where it is 8 bytes; 12 on illumos and
+/// Solaris, where it is an `unsigned int`).
 #[cfg(unix)]
-pub const READER_TID: usize = 16;
+pub const READER_TID: usize = align_up(READER_PID + 4, core::mem::align_of::<libc::pthread_t>());
 /// Offset of `mr_tid` within a reader slot on Windows: `MDB_THR_T` is a
 /// `DWORD` there (`GetCurrentThreadId()`), right after the `int` pid.
 #[cfg(windows)]
 pub const READER_TID: usize = 12;
-/// Size of `mr_tid`: 8 (`pthread_t`) on Unix, 4 (`DWORD`) on Windows.
-pub const READER_TID_SIZE: usize = if cfg!(windows) { 4 } else { 8 };
+/// Size of `mr_tid`: `sizeof(pthread_t)` on Unix (8; 4 on illumos and
+/// Solaris), 4 (`DWORD`) on Windows.
+#[cfg(unix)]
+pub const READER_TID_SIZE: usize = core::mem::size_of::<libc::pthread_t>();
+/// Size of `mr_tid`: `sizeof(pthread_t)` on Unix (8; 4 on illumos and
+/// Solaris), 4 (`DWORD`) on Windows.
+#[cfg(windows)]
+pub const READER_TID_SIZE: usize = 4;
 
 // --- version 2 (LMDB 1.0) -------------------------------------------------
 

@@ -444,6 +444,34 @@ pub fn rust_native_libs() -> &'static [&'static str] {
             "-lc",
             "-lm",
         ]
+    } else if cfg!(target_os = "illumos") {
+        &[
+            "-lsendfile",
+            "-llgrp",
+            "-lsocket",
+            "-lposix4",
+            "-lpthread",
+            "-lresolv",
+            "-lnsl",
+            "-lumem",
+            "-lgcc_s",
+            "-lc",
+            "-lm",
+            "-lrt",
+        ]
+    } else if cfg!(target_os = "solaris") {
+        &[
+            "-lsendfile",
+            "-llgrp",
+            "-lsocket",
+            "-lposix4",
+            "-lpthread",
+            "-lresolv",
+            "-lgcc_s",
+            "-lc",
+            "-lm",
+            "-lrt",
+        ]
     } else {
         // macOS: -lSystem -lc -lm, all implied by the compiler driver.
         &[]
@@ -471,6 +499,8 @@ pub fn target_triple() -> String {
         "macos" => format!("{arch}-apple-darwin"),
         "linux" => format!("{arch}-unknown-linux-gnu"),
         "android" => format!("{arch}-linux-android"),
+        "solaris" if arch == "sparc64" => "sparcv9-sun-solaris".to_string(),
+        "solaris" => format!("{arch}-pc-solaris"),
         "windows" if cfg!(target_env = "msvc") => format!("{arch}-pc-windows-msvc"),
         "windows" => format!("{arch}-pc-windows-gnu"),
         os => format!("{arch}-unknown-{os}"),

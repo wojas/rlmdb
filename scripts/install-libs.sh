@@ -65,7 +65,7 @@ case $triple in
   *-apple-darwin) kind=macos ;;
   *-windows-msvc) kind=msvc ;;
   *-windows-gnu*) kind=mingw ;;
-  *-linux-*|*-freebsd|*-netbsd|*-openbsd|*-dragonfly) kind=elf ;;
+  *-linux-*|*-freebsd|*-netbsd|*-openbsd|*-dragonfly|*-illumos|*-solaris) kind=elf ;;
   *) echo "install-libs.sh: unsupported target $triple" >&2; exit 2 ;;
 esac
 
@@ -90,6 +90,8 @@ case $triple in
   *-netbsd) syslibs="-lutil -lrt -lexecinfo -lpthread -lgcc_s -lc -lm" ;;
   *-openbsd) syslibs="-lpthread -lc++abi -lc -lm -lutil -lexecinfo -lcompiler_rt" ;;
   *-dragonfly) syslibs="-lrt -lutil -lexecinfo -lkvm -lpthread -lgcc_pic -lc -lm" ;;
+  *-illumos) syslibs="-lsendfile -llgrp -lsocket -lposix4 -lpthread -lresolv -lnsl -lumem -lgcc_s -lc -lm -lrt" ;;
+  *-solaris) syslibs="-lsendfile -llgrp -lsocket -lposix4 -lpthread -lresolv -lgcc_s -lc -lm -lrt" ;;
   *-windows-gnu*) syslibs="-lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp" ;;
   *-windows-msvc) syslibs="-llegacy_stdio_definitions -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp" ;;
   *) syslibs= ;;

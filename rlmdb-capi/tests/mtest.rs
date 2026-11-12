@@ -36,15 +36,28 @@ use common::*;
 /// The seeds every `mtest*` program runs with.
 const SEEDS: [u32; 2] = [MTEST_SEED, 7];
 
-/// `0x...` (a `%p` value) replaced by `PTR`; on Windows, where `%p` is 16
-/// hex digits without `0x`, words of that form.
+/// `0x...` (a `%p` value) replaced by `PTR`. On Windows, where `%p` is 16
+/// hex digits without `0x`, words of that form; on illumos and Solaris,
+/// where it is hex digits without `0x` and as many as the value needs, the
+/// hex word after `key:` or `data:` (where the programs print pointers).
 fn without_pointers(s: &str) -> String {
-    if cfg!(windows) {
+    let solarish = cfg!(any(target_os = "illumos", target_os = "solaris"));
+    if cfg!(windows) || solarish {
+        let mut previous = "";
         return s
             .split(' ')
             .map(|w| {
                 let hex = w.trim_end_matches(['\r', '\n']);
-                if hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                let is_hex = !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit());
+                let pointer = if solarish {
+                    // The word before may end a line: "bar\nkey:".
+                    let label = previous.rsplit('\n').next().unwrap_or("");
+                    is_hex && matches!(label, "key:" | "data:")
+                } else {
+                    is_hex && hex.len() == 16
+                };
+                previous = w;
+                if pointer {
                     w.replacen(hex, "PTR", 1)
                 } else {
                     w.to_owned()

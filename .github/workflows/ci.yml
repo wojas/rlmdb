@@ -92,11 +92,12 @@ jobs:
 
   bsd-check:
     # Checks that the workspace, its tests included, compiles for FreeBSD,
-    # NetBSD and Android. The runner has no sysroot of theirs for the C
-    # reference library, so the interop and bench build scripts skip it
-    # (RLMDB_SKIP_C_BUILD, see interop/build.rs). bsd.yml runs the tests in
-    # a FreeBSD VM weekly, nightly.yml in a Termux container (Android).
-    name: Check BSD and Android targets
+    # NetBSD, illumos, Solaris and Android and passes clippy there. The
+    # runner has no sysroot of these systems for the C reference library,
+    # so the interop and bench build scripts skip it (RLMDB_SKIP_C_BUILD,
+    # see interop/build.rs). bsd.yml runs the tests in FreeBSD and OmniOS
+    # (illumos) VMs weekly, nightly.yml in a Termux container (Android).
+    name: Check BSD, illumos, Solaris and Android targets
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -105,7 +106,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-freebsd,x86_64-unknown-netbsd,x86_64-linux-android
+          targets: x86_64-unknown-freebsd,x86_64-unknown-netbsd,x86_64-unknown-illumos,x86_64-pc-solaris,x86_64-linux-android
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: check FreeBSD
@@ -116,5 +117,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --target x86_64-unknown-freebsd -- -D warnings
       - name: clippy NetBSD
         run: cargo clippy --workspace --all-targets --target x86_64-unknown-netbsd -- -D warnings
+      - name: clippy illumos
+        run: cargo clippy --workspace --all-targets --target x86_64-unknown-illumos -- -D warnings
+      - name: clippy Solaris
+        run: cargo clippy --workspace --all-targets --target x86_64-pc-solaris -- -D warnings
       - name: clippy Android
         run: cargo clippy --workspace --all-targets --target x86_64-linux-android -- -D warnings
