@@ -46,6 +46,11 @@ nav = [
     { "Windows named mutexes" = "locking/windows-mutexes.md" },
     { "Running without locks" = "locking/nolock.md" },
   ] },
+  { "Operations" = [
+    { "Map size and file growth" = "operations/map-size.md" },
+    { "Errors and what to do" = "operations/errors.md" },
+    { "Backups" = "operations/backups.md" },
+  ] },
   { "Features" = [
     "features/index.md",
     { "split-freelist" = "features/split-freelist.md" },
