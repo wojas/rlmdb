@@ -241,8 +241,8 @@ let env = Environment::builder()
   LMDB 1.0, which allows longer keys. The default is 0.9, the format
   of the C LMDB that most programs use today. C LMDB 0.9 and 1.0 each
   open only their own format. An existing environment keeps its format.
-- **`enable_feature("split-freelist")?`** turns on an opt-in feature by
-  name.
+- **`enable_feature("split-freelist")?`** turns on a
+  [feature](../features/index.md) by name.
 
 Unlike the C library, the Rust library reads no environment variables
 unless you ask for it with `.read_environment(true)`.

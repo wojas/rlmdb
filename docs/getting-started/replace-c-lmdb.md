@@ -146,12 +146,12 @@ environment variables cover what it would need them for:
 
 | Variable | What it does |
 |---|---|
-| `RLMDB_FEATURES` | Turns opt-in features on or off by name. |
+| `RLMDB_FEATURES` | Turns [features](../features/index.md) on or off by name. |
 | `RLMDB_DEFAULT_FORMAT` | Sets the format of new environments: `0.9` or `1.0`. Experimental. |
 | `RLMDB_IGNORE_ENV` | Set it to `1` to make rlmdb ignore the other two. |
 
 For example, to turn on
-[`split-freelist`](https://github.com/wojas/rlmdb/blob/main/docs/split-freelist.md),
+[`split-freelist`](../features/split-freelist.md),
 which keeps large deletes from growing the file:
 
 ```sh

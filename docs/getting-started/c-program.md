@@ -296,7 +296,7 @@ rlmdb does not convert an environment from one format to the other.
   format of an environment on disk.
 - **Features.** `rlmdb_env_enable_feature` turns on an opt-in feature
   such as
-  [`split-freelist`](https://github.com/wojas/rlmdb/blob/main/docs/split-freelist.md).
+  [`split-freelist`](../features/split-freelist.md).
   `rlmdb_features` lists what the library knows.
 - **Version.** `rlmdb_version_string` returns one line for logs and bug
   reports.

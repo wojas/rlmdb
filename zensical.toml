@@ -15,13 +15,15 @@ docs_dir = "docs"
 
 # Files in docs/ that are not pages of the site: the writing guide, the
 # pinned build dependencies, and reference documents that are read in the
-# repository (they link to files outside docs/).
+# repository (they link to files outside docs/). The leading slash ties a
+# pattern to docs/ itself: without it, "split-freelist.md" would also
+# exclude features/split-freelist.md.
 exclude_docs = """
-AGENTS.md
-requirements.txt
-DETAILS.md
-split-freelist.md
-split-freelist-details.md
+/AGENTS.md
+/requirements.txt
+/DETAILS.md
+/split-freelist.md
+/split-freelist-details.md
 """
 
 # Every page of the site is listed here. A new page needs an entry.
@@ -41,6 +43,10 @@ nav = [
     { "SysV semaphores" = "locking/sysv-semaphores.md" },
     { "Windows named mutexes" = "locking/windows-mutexes.md" },
     { "Running without locks" = "locking/nolock.md" },
+  ] },
+  { "Features" = [
+    "features/index.md",
+    { "split-freelist" = "features/split-freelist.md" },
   ] },
 ]
 
