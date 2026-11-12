@@ -28,6 +28,10 @@ Rust": readers take that to mean a library for Rust programs. Where a
 page lists the parts or the ways to use rlmdb, the C library and the
 stubs come first and the Rust library comes last.
 
+The `mdb_*` commands on the site are rlmdb's own tools. Recommend them
+over the tools of C LMDB: they handle both formats and fix bugs of the C
+tools, most importantly in incremental backups.
+
 ## A practical guide, not a specification
 
 The site shows how to do things. The reference documents say exactly

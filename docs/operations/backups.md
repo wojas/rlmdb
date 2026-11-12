@@ -7,6 +7,12 @@ began.
 This page covers the copy, the compacting copy, a dump as text, and
 incremental backups.
 
+The commands on this page are rlmdb's own `mdb_*` tools. Use them rather
+than the tools of C LMDB: they have the same names and options, they
+work on environments of both formats, and they fix bugs that matter for
+backups. [The command-line tools](../getting-started/index.md#the-command-line-tools)
+says how to build them.
+
 ## What to back up
 
 Only `data.mdb`. The lock file holds no data and is set up again when
@@ -118,6 +124,21 @@ backup. It is much smaller than a copy when little has changed.
 Incremental backups need an environment in format 1.0. In format 0.9
 the pages do not record when they were written, and the commands fail
 with "Operation not supported".
+
+!!! warning "Do not use the tools of C LMDB for incremental backups"
+
+    Take and restore incremental backups with rlmdb's `mdb_dump` and
+    `mdb_load`. The tools of C LMDB 1.0 have bugs here that lose data
+    without saying so:
+
+    - Its `mdb_dump -i` can leave out pages that are in use, or write
+      old contents in their place, after a large value was deleted and
+      its pages were partly used again. The restored environment is then
+      not the source.
+    - Its `mdb_load -i` takes a dump that was cut short for a complete
+      one.
+
+    rlmdb's tools do not have these bugs.
 
 A chain starts with a plain copy and continues with one dump per backup:
 
