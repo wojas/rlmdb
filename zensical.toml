@@ -33,6 +33,15 @@ nav = [
     { "Use rlmdb in a C program" = "getting-started/c-program.md" },
     { "Use rlmdb in Rust" = "getting-started/rust.md" },
   ] },
+  { "Locking" = [
+    "locking/index.md",
+    { "Lock implementations by platform" = "locking/platforms.md" },
+    { "Robust pthread mutexes" = "locking/pthread-mutexes.md" },
+    { "POSIX named semaphores" = "locking/posix-semaphores.md" },
+    { "SysV semaphores" = "locking/sysv-semaphores.md" },
+    { "Windows named mutexes" = "locking/windows-mutexes.md" },
+    { "Running without locks" = "locking/nolock.md" },
+  ] },
 ]
 
 [project.theme]

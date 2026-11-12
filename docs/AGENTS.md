@@ -126,8 +126,8 @@ for decoration.
   follows the light and dark theme and is edited as text.
 - Keep a diagram to about eight boxes, with a few words in each. Label
   the arrows where the label carries the meaning.
-- For data layouts and cursor positions, a small text figure in a `text`
-  code block is often clearer than a drawing.
+- For data layouts, cursor positions and timelines, a small text figure
+  in a `text` code block is often clearer than a drawing.
 - The text next to the diagram must make sense without it.
 
 ## Tables
