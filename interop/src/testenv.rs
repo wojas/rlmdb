@@ -111,7 +111,7 @@ fn temp_root_in(dir: Option<PathBuf>) -> Result<Arc<TempDir>> {
 }
 
 /// [`temp_root_in`] `$RLMDB_TEST_SCRATCH`, if set.
-fn temp_root() -> Result<Arc<TempDir>> {
+pub(crate) fn temp_root() -> Result<Arc<TempDir>> {
     temp_root_in(
         std::env::var_os(SCRATCH_VAR)
             .filter(|d| !d.is_empty())

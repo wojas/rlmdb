@@ -223,21 +223,61 @@ pub fn static_lib_name(name: &str) -> String {
     }
 }
 
-/// The file `name` that cargo built for a dev-dependency of this crate:
-/// next to the test executable (`deps/`), else one level up.
+/// The file `name` that cargo built for a dev-dependency of this crate
+/// ([`find_built_file`]).
 fn built_file(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("test executable path");
-    let deps = exe.parent().expect("deps dir");
-    for dir in [deps, deps.parent().unwrap_or(deps)] {
-        let lib = dir.join(name);
-        if lib.exists() {
-            return lib;
+    find_built_file(&exe, name).unwrap_or_else(|| {
+        panic!(
+            "{name} not found among cargo's outputs for {}; build with `cargo test -p rlmdb-capi`",
+            exe.display()
+        )
+    })
+}
+
+/// The directory of cargo's outputs for this build profile
+/// (`target/<profile>`), found from the path of the running test
+/// executable. Cargo before 1.100 puts that in `target/<profile>/deps`;
+/// cargo 1.100's build directory keeps it in
+/// `target/<profile>/build/<package>/<hash>/out`.
+fn profile_dir(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    if dir.file_name()? == "deps" {
+        return dir.parent().map(Path::to_path_buf);
+    }
+    let build = exe.ancestors().nth(4)?;
+    if build.file_name()? == "build" {
+        return build.parent().map(Path::to_path_buf);
+    }
+    None
+}
+
+/// The file `name` that cargo built for this profile: in
+/// `target/<profile>` (where cargo copies the outputs of the packages it
+/// was asked to build), in `deps` (cargo before 1.100) or in
+/// `build/<package>/<hash>/out` (cargo 1.100, also for dependencies). The
+/// newest if there are several: a target directory may hold the outputs of
+/// older builds.
+fn find_built_file(exe: &Path, name: &str) -> Option<PathBuf> {
+    let profile = profile_dir(exe)?;
+    let mut candidates = vec![profile.join(name), profile.join("deps").join(name)];
+    if let Ok(packages) = std::fs::read_dir(profile.join("build")) {
+        for package in packages.flatten() {
+            if let Ok(units) = std::fs::read_dir(package.path()) {
+                for unit in units.flatten() {
+                    candidates.push(unit.path().join("out").join(name));
+                }
+            }
         }
     }
-    panic!(
-        "{name} not found next to {}; build with `cargo test -p rlmdb-capi`",
-        exe.display()
-    );
+    candidates
+        .into_iter()
+        .filter_map(|p| {
+            let modified = std::fs::metadata(&p).ok()?.modified().ok()?;
+            Some((modified, p))
+        })
+        .max()
+        .map(|(_, p)| p)
 }
 
 /// The static library of `artifact` (`librlmdb.a`, `liblmdb09.a`, ...;

@@ -111,11 +111,9 @@ fn rpeer_path() -> Result<PathBuf> {
     if let Some(p) = option_env!("INTEROP_RPEER") {
         candidates.push(p.into());
     }
-    if let Ok(exe) = std::env::current_exe() {
-        // target/<profile>/deps/<test>-<hash> -> target/<profile>/rpeer
-        if let Some(profile_dir) = exe.parent().and_then(|deps| deps.parent()) {
-            candidates.push(profile_dir.join(format!("rpeer{}", std::env::consts::EXE_SUFFIX)));
-        }
+    // Among cargo's outputs: target/<profile>/rpeer, where cargo copies it.
+    if let Some(p) = bins::built_file(&format!("rpeer{}", std::env::consts::EXE_SUFFIX)) {
+        candidates.push(p);
     }
     candidates.into_iter().find(|p| p.is_file()).ok_or_else(|| {
         Error::new(
