@@ -1,0 +1,37 @@
+# Builds the documentation site (docs/, zensical.toml) in strict mode, so
+# that a broken link between pages fails the check. docs/AGENTS.md says
+# how the site is written and built. The site is not deployed from here
+# yet.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - zensical.toml
+      - .github/workflows/docs.yml
+  pull_request:
+    paths:
+      - docs/**
+      - zensical.toml
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.x
+      - name: Install Zensical
+        run: pip install -r docs/requirements.txt
+      - name: Build
+        run: zensical build --clean --strict

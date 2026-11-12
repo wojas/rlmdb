@@ -1,0 +1,88 @@
+# The documentation site, built with Zensical (https://zensical.org) from
+# the Markdown in docs/. docs/AGENTS.md says how to write for it and how
+# to build it; docs/requirements.txt pins the Zensical release.
+
+[project]
+site_name = "rlmdb"
+site_description = "A drop-in replacement for the LMDB C library, written in Rust: liblmdb for C programs, the mdb_* tools, and a Rust API."
+site_url = "https://wojas.github.io/rlmdb/"
+copyright = "Copyright 2026 rlmdb's contributors. Distributed under the OpenLDAP Public License 2.8."
+
+repo_url = "https://github.com/wojas/rlmdb"
+repo_name = "wojas/rlmdb"
+
+docs_dir = "docs"
+
+# Files in docs/ that are not pages of the site: the writing guide, the
+# pinned build dependencies, and reference documents that are read in the
+# repository (they link to files outside docs/).
+exclude_docs = """
+AGENTS.md
+requirements.txt
+DETAILS.md
+split-freelist.md
+split-freelist-details.md
+"""
+
+# Every page of the site is listed here. A new page needs an entry.
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = [
+    "getting-started/index.md",
+    { "Replace C LMDB in an existing program" = "getting-started/replace-c-lmdb.md" },
+    { "Use rlmdb in a C program" = "getting-started/c-program.md" },
+    { "Use rlmdb in Rust" = "getting-started/rust.md" },
+  ] },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.code.copy",
+  "content.tabs.link",      # choosing "macOS" in one set of tabs switches them all
+  "navigation.footer",
+  "navigation.indexes",     # a section's index.md is the section's own page
+  "navigation.instant",
+  "navigation.sections",
+  "navigation.top",
+  "search.highlight",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/wojas/rlmdb"
+
+# Only the extensions the pages use (docs/AGENTS.md, "Formatting").
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.details = {}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true

@@ -14,6 +14,8 @@ must respect. The details live in:
 * `rlmdb-capi/README.md`: using the C API; `rlmdb-capi/DETAILS.md`: its
   documented deviations.
 * `bench/README.md`, `bench/RESULTS.md`: benchmarks against C.
+* `docs/AGENTS.md`: how to write the user documentation, the website
+  built from `docs/`.
 
 ## 1. Binary compatibility with C LMDB 0.9 comes first
 
@@ -214,6 +216,9 @@ on the first read, without knowing the code.
 
 Code comments and design documents follow the same spirit; they may be
 denser where precision needs it.
+
+The pages of the documentation site have their own guide, which goes
+further: `docs/AGENTS.md`.
 
 ## 8. Testing: C is the oracle
 
