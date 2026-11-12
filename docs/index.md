@@ -26,8 +26,8 @@ flowchart LR
   the name `liblmdb`. Put it in front of C LMDB and the program runs on
   rlmdb without a rebuild.
 - **The `mdb_*` tools.** `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`
-  and `mdb_drop`, with the options and output of the C tools. They work
-  on both formats and fix bugs of the C tools.
+  and `mdb_drop`, with the options and output of the C tools, for
+  environments of both formats.
 - **A Rust library.** The `rlmdb` crate has a safe API and links no C
   code. See its [API reference](api/rlmdb/index.html).
 

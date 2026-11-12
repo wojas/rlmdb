@@ -80,9 +80,5 @@ This puts `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` and `mdb_drop`
 into `target/release/`. They take the options of the C tools and print
 the same output, so the LMDB man pages apply.
 
-Prefer them to the tools of C LMDB:
-
-- **One set of tools for both formats.** C LMDB's tools each handle the
-  format of their own release only.
-- **Bugs of the C tools are fixed**, most importantly in incremental
-  backups. See [Backups](../operations/backups.md).
+One set of tools works on environments of both formats. The tools of
+C LMDB each handle the format of their own release.
