@@ -233,7 +233,8 @@ let env = Environment::builder()
 - **`map_size`** is the largest size the data file can reach. The
   default is 1 MiB, as in C LMDB, which is too small for most programs.
   Past the limit, writes fail with `MdbError::MapFull`. It reserves
-  address space, not disk space, so be generous.
+  address space, not disk space, so be generous. See
+  [Map size and file growth](../operations/map-size.md).
 - **`max_dbs`** is how many named databases this process can have open
   at once. It sizes a table in memory. It is not stored in the file, and
   it does not limit how many databases the environment contains. The

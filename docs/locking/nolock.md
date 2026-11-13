@@ -122,7 +122,7 @@ This includes the `mdb_*` tools, which use a lock file. Run `mdb_stat`,
 `mdb_dump` or `mdb_copy` on such an environment only while your program
 is stopped. To make a backup while it runs, let the program copy the
 environment itself, with `mdb_env_copy` in C or `env.copy_to_path` in
-Rust.
+Rust. See [Backups](../operations/backups.md#copy-from-inside-a-program).
 
 ## Turning it on
 

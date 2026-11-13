@@ -28,6 +28,16 @@ Rust": readers take that to mean a library for Rust programs. Where a
 page lists the parts or the ways to use rlmdb, the C library and the
 stubs come first and the Rust library comes last.
 
+The `mdb_*` commands on the site are rlmdb's own tools. Say what they
+add, such as working on both formats. Do not tell readers to avoid
+C LMDB or its tools.
+
+Where a page has to mention a bug of C LMDB, say in one sentence what
+it means for the reader, with the version it was seen in: "At the time
+of writing, with LMDB 1.0.3, the tools of C LMDB have bugs that make
+incremental backups unreliable." Do not describe the bug itself. It may
+be fixed later, and the page should not read as a verdict on C LMDB.
+
 ## A practical guide, not a specification
 
 The site shows how to do things. The reference documents say exactly

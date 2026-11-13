@@ -79,3 +79,6 @@ cargo build --release -p rlmdb-tools
 This puts `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` and `mdb_drop`
 into `target/release/`. They take the options of the C tools and print
 the same output, so the LMDB man pages apply.
+
+One set of tools works on environments of both formats. The tools of
+C LMDB each handle the format of their own release.
