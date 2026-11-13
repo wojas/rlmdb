@@ -1,13 +1,11 @@
 # Formatting, lints, rustdoc and the tests on every push and pull request,
 # on the platforms rlmdb is tested on (Windows: windows.yml). The tests
 # build the C reference library from tests/lmdb-c with the runner's C
-# compiler; no git history or network access is needed after the checkout
-# (the android job installs Termux's packages).
+# compiler; no git history or network access is needed after the checkout.
 #
-# Linux x86-64 runs the whole test suite. Linux arm64, macOS and Android
-# (in a Termux container, the android job) run the platform suite
-# (RLMDB_TEST_SCOPE=platform, see interop/README.md): what depends on the
-# platform (unit and format tests, the lock file, readers
+# Linux x86-64 runs the whole test suite. Linux arm64 and macOS run the
+# platform suite (RLMDB_TEST_SCOPE=platform, see interop/README.md): what
+# depends on the platform (unit and format tests, the lock file, readers
 # and concurrency, the C API, tools and install tests, the differential
 # tests at the OS page size, the reader and lock-file scenarios of the
 # interop matrix and a smoke set of the others); the rest of the matrix,
@@ -93,12 +91,12 @@ jobs:
           RLMDB_TEST_SCOPE: ${{ matrix.scope }}
 
   bsd-check:
-    # FreeBSD and NetBSD are supported but untested (COMPATIBILITY.md):
-    # this only checks that the workspace, its tests included, compiles for
-    # them. The runner has no BSD sysroot for the C reference library, so
-    # the interop and bench build scripts skip it (RLMDB_SKIP_C_BUILD, see
-    # interop/build.rs). bsd.yml runs the tests in a FreeBSD VM.
-    name: Check BSD targets
+    # Checks that the workspace, its tests included, compiles for FreeBSD,
+    # NetBSD and Android. The runner has no sysroot of theirs for the C
+    # reference library, so the interop and bench build scripts skip it
+    # (RLMDB_SKIP_C_BUILD, see interop/build.rs). bsd.yml runs the tests in
+    # a FreeBSD VM weekly, nightly.yml in a Termux container (Android).
+    name: Check BSD and Android targets
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -107,7 +105,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-freebsd,x86_64-unknown-netbsd
+          targets: x86_64-unknown-freebsd,x86_64-unknown-netbsd,x86_64-linux-android
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: check FreeBSD
@@ -118,28 +116,5 @@ jobs:
         run: cargo clippy --workspace --all-targets --target x86_64-unknown-freebsd -- -D warnings
       - name: clippy NetBSD
         run: cargo clippy --workspace --all-targets --target x86_64-unknown-netbsd -- -D warnings
-
-  android:
-    # Android: clippy for the Android target, then the platform suite in a
-    # Termux container on the runner (scripts/termux-test.sh: Android's
-    # bionic and Termux's Rust and clang on the runner's Linux kernel; not a
-    # device or an emulator). The C reference libraries are built there by
-    # Termux's clang. nightly.yml runs the whole suite in the container.
-    name: Android x86-64 (Termux)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-linux-android
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: clippy
+      - name: clippy Android
         run: cargo clippy --workspace --all-targets --target x86_64-linux-android -- -D warnings
-        env:
-          RLMDB_SKIP_C_BUILD: 1
-      - name: test in Termux
-        run: scripts/termux-test.sh
-        env:
-          RLMDB_TEST_SCOPE: platform
