@@ -90,7 +90,9 @@ interop tests link the C peer this way, tested on OpenBSD and FreeBSD, see
 -lprocstat -ldevstat -lpthread -lgcc_s -lc -lm`, NetBSD `-lutil -lrt
 -lexecinfo -lpthread -lgcc_s -lc -lm`, OpenBSD `-lpthread -lc++abi -lc -lm
 -lutil -lexecinfo -lcompiler_rt`, DragonFly `-lrt -lutil -lexecinfo -lkvm
--lpthread -lgcc_pic -lc -lm`.
+-lpthread -lgcc_pic -lc -lm`. On illumos `-lsendfile -llgrp -lsocket
+-lposix4 -lpthread -lresolv -lnsl -lumem -lgcc_s -lc -lm -lrt`, on Solaris
+the same without `-lnsl -lumem`.
 
 Load only one of the three into a process: each is a complete copy of
 the library with its own process-wide state, as two different C

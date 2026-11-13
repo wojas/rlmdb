@@ -152,6 +152,22 @@ pub fn write_all_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
     file.write_all_at(buf, offset)
 }
 
+#[cfg(not(target_os = "solaris"))]
+use libc::pwritev as sys_pwritev;
+
+// `pwritev`, which the `libc` crate does not bind for Solaris (11.4 has it,
+// `<sys/uio.h>`).
+#[cfg(target_os = "solaris")]
+extern "C" {
+    #[link_name = "pwritev"]
+    fn sys_pwritev(
+        fd: libc::c_int,
+        iov: *const libc::iovec,
+        iovcnt: libc::c_int,
+        offset: libc::off_t,
+    ) -> libc::ssize_t;
+}
+
 /// `pwritev`: write `bufs` back to back starting at `offset`, in one system
 /// call where possible. Returns the number of bytes written by that call
 /// (callers loop on short writes, as `mdb_page_flush` does).
@@ -168,7 +184,7 @@ pub fn pwritev(file: &File, bufs: &[&[u8]], offset: u64) -> io::Result<usize> {
         // SAFETY: every iovec points at a live, readable slice of the stated
         // length for the duration of the call; the fd is valid.
         let n = unsafe {
-            libc::pwritev(
+            sys_pwritev(
                 file.as_raw_fd(),
                 iov.as_ptr(),
                 iov.len() as libc::c_int,
@@ -240,7 +256,9 @@ pub fn fsync(file: &File) -> io::Result<()> {
 
 /// Asks the OS not to cache what is written through `file` (as
 /// `mdb_fopen` does for `mdb_env_copy` targets): `F_NOCACHE` on macOS,
-/// `O_DIRECT` elsewhere, nothing on OpenBSD (which has neither). Best
+/// `O_DIRECT` elsewhere, nothing on OpenBSD and Solaris (which have
+/// neither; the `libc` crate has a value for Solaris, which Solaris does
+/// not know). Best
 /// effort, failures are ignored like in C. With `O_DIRECT`, writes must
 /// come from buffers aligned to the OS page size and have sizes that are
 /// multiples of it.
@@ -257,7 +275,7 @@ pub fn set_nocache(file: &File) {
     // SAFETY: valid fd; F_GETFL/F_SETFL take no pointer arguments.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags != -1 {
+        if flags != -1 && !cfg!(target_os = "solaris") {
             libc::fcntl(fd, libc::F_SETFL, flags | libc::O_DIRECT);
         }
     }
