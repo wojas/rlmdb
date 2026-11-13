@@ -386,10 +386,10 @@ functions of the other features of stage 7 (`mdb_env_set_encrypt`,
   (`EACCES` for writes in a read-only transaction, 1.0:
   `MDB_IS_READONLY`).
 
-Tools (`rlmdb-tools`): only `mdb_load` gets `-F 0.9|1.0` (a new file).
-`mdb_copy` copies pages, so its copy has the source's format; a `-F` there
-would be the converting copy (§4.3), not there yet. `mdb_stat` and
-`mdb_dump` do not print a format line (it fits neither tool's upstream
+Tools (`rlmdb-tools`): only `rlmdb_load` gets `-F 0.9|1.0` (a new file).
+`rlmdb_copy` copies pages, so its copy has the source's format; a `-F`
+there would be the converting copy (§4.3), not there yet. `rlmdb_stat` and
+`rlmdb_dump` do not print a format line (it fits neither tool's upstream
 output); instead each tool prints what the C tool of the environment's
 format prints: the upstream tools of each release stay the oracle for
 their own format (`rlmdb-tools/README.md`, "LMDB 1.0 environments";

@@ -45,9 +45,10 @@ environment and checking what each sees.
   otherwise.
 
 * `rtools` (`src/bin/rtools.rs`) is the Rust tools of `../rlmdb-tools` in
-  one executable (`rtools mdb_stat -a env` runs `mdb_stat` with `argv[0]`
-  `mdb_stat`): cargo builds a package's binaries for its own tests only,
-  and the C 1.0 tools the Rust ones are compared with are built here.
+  one executable (`rtools mdb_stat -a env` runs what `rlmdb_stat` runs,
+  with `argv[0]` `mdb_stat`): cargo builds a package's binaries for its
+  own tests only, and the C 1.0 tools the Rust ones are compared with are
+  built here.
 
 The C programs are compiled into `$OUT_DIR/bin` (`interop::bins` has the
 paths); `rpeer` and `rtools` are normal `[[bin]]`s of this crate.

@@ -159,9 +159,12 @@ fn link_program(include: &Path, exe: &Path, inputs: &[&Path]) -> Command {
 }
 
 /// A command running `exe` with `argv[0] = name`: `arg0` on Unix. On
-/// Windows, where `argv[0]` is the program as named, `exe` (whose file name
-/// must be `name.exe`) is run by its name, from its directory put first on
-/// the child's `PATH`.
+/// Windows, where `argv[0]` is the program as named, the command runs
+/// `name` from a directory put first on the child's `PATH` that has it as
+/// `name.exe`: `exe`'s own directory if that is its file name, else a
+/// directory next to it with a copy of `exe` under that name (the Rust
+/// tools are `rlmdb_stat.exe` & co., run as `mdb_stat` to compare their
+/// messages with C's).
 pub fn command_as(exe: &Path, name: &str) -> Command {
     #[cfg(unix)]
     {
@@ -172,8 +175,10 @@ pub fn command_as(exe: &Path, name: &str) -> Command {
     }
     #[cfg(windows)]
     {
-        assert_eq!(exe.file_stem().and_then(|s| s.to_str()), Some(name));
-        let dir = exe.parent().expect("a directory");
+        let dir = match named_copy_dir(exe, name) {
+            Ok(dir) => dir,
+            Err(e) => panic!("copying {} as {name}: {e}", exe.display()),
+        };
         let mut path = std::ffi::OsString::from(dir);
         if let Some(old) = std::env::var_os("PATH") {
             path.push(";");
@@ -183,6 +188,46 @@ pub fn command_as(exe: &Path, name: &str) -> Command {
         cmd.env("PATH", path);
         cmd
     }
+}
+
+/// The directory in which `name.exe` is `exe` (see [`command_as`]).
+#[cfg(windows)]
+fn named_copy_dir(exe: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let parent = exe.parent().unwrap_or(Path::new("."));
+    if exe.file_stem().and_then(|s| s.to_str()) == Some(name) {
+        return Ok(parent.to_path_buf());
+    }
+    let stem = exe.file_stem().map(|s| s.to_string_lossy().into_owned());
+    let dir = parent.join(format!("as-{name}-{}", stem.unwrap_or_default()));
+    let target = dir.join(format!("{name}.exe"));
+    let source = if exe.extension().is_some() {
+        exe.to_path_buf()
+    } else {
+        exe.with_extension("exe")
+    };
+    let fresh = |t: &Path| -> bool {
+        let (Ok(a), Ok(b)) = (fs::metadata(&source), fs::metadata(t)) else {
+            return false;
+        };
+        a.len() == b.len() && a.modified().ok() <= b.modified().ok()
+    };
+    if !fresh(&target) {
+        fs::create_dir_all(&dir)?;
+        // Copied under a temporary name and renamed, for concurrent tests
+        // (threads of one test binary too, hence the counter); a copy that
+        // is running cannot be replaced, and is the same file.
+        static COPIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!("{name}.{}.{n}.tmp", std::process::id()));
+        fs::copy(&source, &tmp)?;
+        if fs::rename(&tmp, &target).is_err() {
+            let _ = fs::remove_file(&tmp);
+            if !target.exists() {
+                return Err(std::io::Error::other("copy vanished"));
+            }
+        }
+    }
+    Ok(dir)
 }
 
 /// An argument from bytes: as they are on Unix, UTF-8 on Windows.
@@ -364,11 +409,11 @@ pub fn bin(imp: Impl, tool: &str) -> PathBuf {
     match imp {
         Impl::C => c_dir().join(tool),
         Impl::Rust => PathBuf::from(match tool {
-            "mdb_stat" => env!("CARGO_BIN_EXE_mdb_stat"),
-            "mdb_dump" => env!("CARGO_BIN_EXE_mdb_dump"),
-            "mdb_load" => env!("CARGO_BIN_EXE_mdb_load"),
-            "mdb_copy" => env!("CARGO_BIN_EXE_mdb_copy"),
-            "mdb_drop" => env!("CARGO_BIN_EXE_mdb_drop"),
+            "mdb_stat" => env!("CARGO_BIN_EXE_rlmdb_stat"),
+            "mdb_dump" => env!("CARGO_BIN_EXE_rlmdb_dump"),
+            "mdb_load" => env!("CARGO_BIN_EXE_rlmdb_load"),
+            "mdb_copy" => env!("CARGO_BIN_EXE_rlmdb_copy"),
+            "mdb_drop" => env!("CARGO_BIN_EXE_rlmdb_drop"),
             other => panic!("no Rust tool {other}"),
         }),
     }

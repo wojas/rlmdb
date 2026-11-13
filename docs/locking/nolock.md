@@ -118,10 +118,10 @@ reader table, as the diagram shows.
   lock file, and they are invisible to it. Do not mix the two on one
   environment.
 
-This includes the `mdb_*` tools, which use a lock file. Run `mdb_stat`,
-`mdb_dump` or `mdb_copy` on such an environment only while your program
-is stopped. To make a backup while it runs, let the program copy the
-environment itself, with `mdb_env_copy` in C or `env.copy_to_path` in
+This includes the command-line tools, rlmdb's and C's, which use a lock
+file. Run `rlmdb_stat`, `rlmdb_dump` or `rlmdb_copy` on such an
+environment only while your program is stopped. To make a backup while
+it runs, let the program copy the environment itself, with `mdb_env_copy` in C or `env.copy_to_path` in
 Rust.
 
 ## Turning it on

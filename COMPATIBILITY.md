@@ -294,9 +294,9 @@ of it changes the files or what another process concludes about them.
   `MDB_NOTFOUND` or move sensibly instead of reading free page space;
   other cursors' duplicate counts are correct (row 14); malformed input
   gives errors, never a crash or a read outside a slice (row 3). Tool fixes:
-  `mdb_load` keeps the first database's flags (row 1) and handles `-a`,
-  `format=print` and odd lines correctly (rows 23–26), `mdb_stat -r` exits 0
-  (row 2).
+  `rlmdb_load` keeps the first database's flags (row 1) and handles `-a`,
+  `format=print` and odd lines correctly (rows 23–26), `rlmdb_stat -r`
+  exits 0 (row 2).
 * Version: `mdb_version()` of `librlmdb` reports rlmdb's own version and
   the line of `rlmdb_version_string()`, as programs link against it
   explicitly. The C API's stubs, which stand in for C, report their series
@@ -373,7 +373,7 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
   (lmdb-js prerelease builds); a header of neither format is `MDB_INVALID`.
   All of it is decided before the lock file is touched. A new environment is
   LMDB 0.9 unless 1.0 is requested: per environment
-  (`EnvironmentBuilder::format`, `rlmdb_env_set_format`, `mdb_load -F`),
+  (`EnvironmentBuilder::format`, `rlmdb_env_set_format`, `rlmdb_load -F`),
   else by the process default (`rlmdb::set_default_format`,
   `rlmdb_set_default_format`), else by the environment variable
   `RLMDB_DEFAULT_FORMAT=1.0` (read by the C API and the tools, by the Rust
@@ -428,8 +428,8 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
   `KNOWN_C_BUGS.md`, section "LMDB 1.0").
 * **The tools** (`rlmdb-tools`) open existing 1.0 files in their format and
   print what C 1.0's tools print for them (the per-database page size of
-  `mdb_stat`, named databases with their NUL found by `-a`); `mdb_load -F
-  1.0` loads what `mdb_load10` loads, page for page, honouring
+  `rlmdb_stat`, named databases with their NUL found by `-a`); `rlmdb_load
+  -F 1.0` loads what `mdb_load10` loads, page for page, honouring
   `db_pagesize=`. Not reproduced: C 1.0 reports the process's map address
   where the file records none (`mdb_stat -e`, `mapaddr=` in dumps).
 
@@ -456,9 +456,9 @@ differences of `DESIGN.md` ("The LMDB 1.0 data file"). The promises:
 | `rlmdb.h` format functions and 1.0's constants; `mdb_env_get_maxkeysize` before and after the open; `MDB_ENCRYPT` refused; `mdb_strerror` of 1.0's codes | `rlmdb-capi/tests/capi_format.rs` (`tests/c/capi_format.c`), `rlmdb-capi/src/version.rs` and `src/format.rs` unit tests |
 | The C API with 1.0 environments at 1, 4 and 64 KiB pages: keys longer than 511 bytes, inline data above 16 KiB, `MDB_RESERVE`, `MDB_MULTIPLE`, `MDB_CURRENT`, inputs that point into dirty pages | `rlmdb-capi/tests/c/capi_format.c` (`test_large_items`) |
 | C 1.0 reads what the C API writes (data sets verified by `cpeer10`, its page audit, `mdb_dump10`, `mdb_stat10`) and the C API reads what C 1.0 writes (`cpeer_capi verify`, keys over 511 bytes from `mdb_load10`) | `interop/tests/capi10.rs` |
-| The tools on 1.0 files print what C 1.0's print and leave the files C 1.0's leave (`mdb_load -F 1.0`, `mdb_stat`, `mdb_dump`, `mdb_drop`, `mdb_copy`, on `mdb_load10` and `mtest*10` environments) | `interop/tests/tools10.rs` |
+| The tools on 1.0 files print what C 1.0's print and leave the files C 1.0's leave (`rlmdb_load -F 1.0`, `rlmdb_stat`, `rlmdb_dump`, `rlmdb_drop`, `rlmdb_copy`, on `mdb_load10` and `mtest*10` environments) | `interop/tests/tools10.rs` |
 | `MDB_PREVSNAPSHOT` as in C 1.0, in both formats: the previous snapshot until the first commit, the flag reported until then, `MDB_ENV_BUSY` for a writer next to another process, other processes waiting for the first commit, read-only handles alone and shared, `NO_LOCK`, copies; the file a commit on the previous snapshot leaves and a compacting copy of a previous snapshot byte for byte C 1.0's; C 0.9 and C 1.0 audit what Rust writers leave; C 1.0's bugs (rows 67 to 69) shown in its build; a peer that waited for a handle holding the exclusive lock builds on the latest snapshot (row 70); a prepared transaction's commit ends the flag, its rollback, a rollback while the flag lasts, which ends it (row 71) | `rlmdb/tests/prev_snapshot.rs`, `rlmdb-capi/tests/capi_prevsnapshot.rs` (`tests/c/capi_prevsnapshot.c` against C 1.0, the 1.0 stub and `librlmdb` on both formats, two-phase commit included), `interop` scenario `prev_snapshot` (every pair with a peer that has the flag, 0.9 and 1.0, 256 B to 64 KiB pages) |
-| The tools' `-v` as C 1.0's (`mdb_stat`, `mdb_dump`, `mdb_copy -c` byte for byte; `mdb_copy -v` a copy of the previous snapshot, row 69); on 0.9 files, what C 0.9's tools said before the last commit; C 1.0's tools on the 1.0 stub with `-v` | `interop/tests/tools10.rs` (`dash_v_matches_c10`), `rlmdb-tools/tests/prev_snapshot.rs`, `rlmdb-capi/tests/mtest.rs` (`mtest*_1_0`) |
+| The tools' `-v` as C 1.0's (`rlmdb_stat`, `rlmdb_dump`, `rlmdb_copy -c` byte for byte; `rlmdb_copy -v` a copy of the previous snapshot, row 69); on 0.9 files, what C 0.9's tools said before the last commit; C 1.0's tools on the 1.0 stub with `-v` | `interop/tests/tools10.rs` (`dash_v_matches_c10`), `rlmdb-tools/tests/prev_snapshot.rs`, `rlmdb-capi/tests/mtest.rs` (`mtest*_1_0`) |
 | The tools' `-F` and `RLMDB_DEFAULT_FORMAT` handling; nothing changes for 0.9 files | `rlmdb-tools/tests/format.rs` |
 | Opt-in features: the list and defaults of the build, enabling and disabling by name (and in Rust by `Feature`), unknown names (`RLMDB_UNKNOWN_FEATURE`), fixed ones (`RLMDB_FEATURE_IS_FIXED`), the state before and after the open, `RLMDB_FEATURES` (separators, `-`, last entry wins, a typo fails the open before any file is touched), the program winning over it, the features in the version string | unit tests in `rlmdb/src/feature.rs` (all three states, with a made-up table), `rlmdb/tests/features.rs`, `rlmdb-capi/tests/c/capi_features.c`, `rlmdb-tools/tests/format.rs` |
 | Feature `split-freelist` (`docs/split-freelist.md`, `docs/split-freelist-details.md`): with it, the pages a transaction frees go into records of at most one page under consecutive keys from its txnid, and the commit writes its snapshot into both meta pages under two consecutive txnids; `PreparedTxn::id` and `mdb_txn_id` after `mdb_txn_prepare` report the second; every page used once; readers of older snapshots keep their pages; the previous meta page stays intact when the next writer writes pages and aborts; such a commit cannot be rolled back; a pair a dying process left half written is left as it is; a failed second meta write keeps the commit; `NO_LOCK` with a stale reader; without the feature, or where one record suffices, one record as in C. No C peer runs over these files | `rlmdb/tests/split_freelist.rs`, `rlmdb::core::freelist` unit test `split_free_pages_audit` (page audit), `rlmdb-capi/tests/c/capi_features.c` (`test_split_freelist`) |
