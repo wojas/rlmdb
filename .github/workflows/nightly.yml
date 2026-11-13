@@ -74,6 +74,20 @@ jobs:
       - name: test --ignored
         run: cargo test -p rlmdb --release -- --ignored
 
+  android:
+    # The whole suite in a Termux container (scripts/termux-test.sh: Android's
+    # bionic and Termux's Rust and clang on the runner's Linux kernel; not a
+    # device or an emulator). The pull request CI only compiles and lints
+    # for Android (ci.yml, job bsd-check): Android is close enough to Linux
+    # that a daily run is enough.
+    name: Whole suite (Android x86-64, Termux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+      - name: test in Termux
+        run: scripts/termux-test.sh
+
   big-endian:
     # LMDB files are host-endian; this runs the suites on a big-endian
     # host. The tests and the C oracle are cross-compiled for s390x in a

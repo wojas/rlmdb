@@ -187,14 +187,19 @@ pub fn pwritev(file: &File, bufs: &[&[u8]], offset: u64) -> io::Result<usize> {
 
 /// `MDB_FDATASYNC`: `fdatasync` on Linux and FreeBSD, `fcntl(F_FULLFSYNC)`
 /// on macOS (plain `fsync` does not flush the drive cache there), `fsync`
-/// on OpenBSD, NetBSD and DragonFly, as C 0.9 picks for them (mdb.c lines
-/// 136-149; FreeBSD has `fdatasync` from 11.1 on).
+/// on OpenBSD, NetBSD, DragonFly and Android, as C 0.9 picks for them
+/// (mdb.c lines 136-151; FreeBSD has `fdatasync` from 11.1 on).
 pub fn fdatasync(file: &File) -> io::Result<()> {
     loop {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         // SAFETY: valid fd; F_FULLFSYNC takes no argument.
         let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) };
-        #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+        #[cfg(any(
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly",
+            target_os = "android"
+        ))]
         // SAFETY: valid fd.
         let rc = unsafe { libc::fsync(file.as_raw_fd()) };
         #[cfg(not(any(
@@ -202,7 +207,8 @@ pub fn fdatasync(file: &File) -> io::Result<()> {
             target_os = "ios",
             target_os = "openbsd",
             target_os = "netbsd",
-            target_os = "dragonfly"
+            target_os = "dragonfly",
+            target_os = "android"
         )))]
         // SAFETY: valid fd.
         let rc = unsafe { libc::fdatasync(file.as_raw_fd()) };

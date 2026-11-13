@@ -244,7 +244,8 @@ further: `docs/AGENTS.md`.
   `Pair`, never `Peer::C` or the 0.9 tools directly.
 * The CI runs the whole suite on Linux x86-64 and the platform suite
   (`RLMDB_TEST_SCOPE=platform`) on macOS, Windows and Linux arm64; the
-  nightly runs the whole suite everywhere (`interop/README.md`, "Scope").
+  nightly runs the whole suite everywhere, Android included (in a Termux
+  container, `scripts/termux-test.sh`; `interop/README.md`, "Scope").
   A new test runs in both scopes unless it only repeats on another
   platform what Linux checks (another page size, more of the generic
   matrix, mutation or model runs): then it returns early with a SKIPPED
