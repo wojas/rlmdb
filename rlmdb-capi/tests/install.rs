@@ -24,6 +24,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use common::*;
 
@@ -75,12 +76,36 @@ fn install(stage: &Path, from: &Path) -> PathBuf {
     install_under(stage, from, PREFIX)
 }
 
-/// The directory cargo built the three libraries in.
+/// A directory with the three libraries cargo built: the one cargo built
+/// them in (before 1.100, `target/<profile>/deps`), else, when cargo kept
+/// each package's outputs apart (cargo 1.100's
+/// `build/<package>/<hash>/out`), a scratch directory with copies of them.
 fn built_dir() -> PathBuf {
-    artifact_cdylib(Artifact::Rlmdb)
-        .parent()
-        .unwrap()
-        .to_path_buf()
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let artifacts = [Artifact::Rlmdb, Artifact::Lmdb09, Artifact::Lmdb10];
+        let dirs: Vec<PathBuf> = artifacts
+            .iter()
+            .map(|&a| artifact_cdylib(a).parent().unwrap().to_path_buf())
+            .collect();
+        if dirs.iter().all(|d| *d == dirs[0]) {
+            return dirs[0].clone();
+        }
+        let gathered = builder().scratch("built-libraries");
+        for (artifact, dir) in artifacts.iter().zip(&dirs) {
+            // "librlmdb.a", "librlmdb.so", "rlmdb.dll", "rlmdb.dll.lib", ...
+            let name = artifact.lib_name();
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let file = entry.file_name().to_string_lossy().into_owned();
+                let base = file.strip_prefix("lib").unwrap_or(&file);
+                if base.split('.').next() == Some(name) && entry.path().is_file() {
+                    fs::copy(entry.path(), gathered.join(&file)).unwrap();
+                }
+            }
+        }
+        gathered
+    })
+    .clone()
 }
 
 /// Compiles `capi_whoami.c` with the `lmdb.h` of the first of `includes`

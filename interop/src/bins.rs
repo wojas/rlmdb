@@ -270,28 +270,68 @@ const STATICLIB: &str = if cfg!(target_env = "msvc") {
 
 /// The Rust `librlmdb.a` built by cargo for the `librlmdb` package of
 /// `rlmdb-capi` (a dev-dependency of this crate, so it is built before the
-/// tests): in `target/<profile>/deps` next to the running test executable,
-/// or one level up.
+/// tests), among cargo's outputs for the running test executable
+/// ([`built_file`]).
 pub fn rust_staticlib() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
-    let mut dirs = Vec::new();
-    if let Some(deps) = exe.parent() {
-        dirs.push(deps.to_path_buf());
-        if let Some(profile) = deps.parent() {
-            dirs.push(profile.to_path_buf());
-            dirs.push(profile.join("deps"));
+    built_file(STATICLIB).ok_or_else(|| {
+        Error::new(format!(
+            "the Rust librlmdb.a (rlmdb-capi) is not among cargo's outputs for {}: build it \
+             with `cargo test -p rlmdb-interop` (librlmdb is a dev-dependency)",
+            exe.display()
+        ))
+    })
+}
+
+/// The file `name` that cargo built for the profile of the running test
+/// executable: in `target/<profile>` (where cargo copies the outputs of
+/// the packages it was asked to build), in `deps` (cargo before 1.100) or
+/// in `build/<package>/<hash>/out` (cargo 1.100, also for dependencies).
+/// The newest if there are several: a target directory may hold the
+/// outputs of older builds.
+pub fn built_file(name: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    find_built_file(&exe, name)
+}
+
+/// The directory of cargo's outputs for this build profile
+/// (`target/<profile>`), found from the path of the running test
+/// executable. Cargo before 1.100 puts that in `target/<profile>/deps`;
+/// cargo 1.100's build directory keeps it in
+/// `target/<profile>/build/<package>/<hash>/out`.
+fn profile_dir(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    if dir.file_name()? == "deps" {
+        return dir.parent().map(Path::to_path_buf);
+    }
+    let build = exe.ancestors().nth(4)?;
+    if build.file_name()? == "build" {
+        return build.parent().map(Path::to_path_buf);
+    }
+    None
+}
+
+/// [`built_file`] for the test executable `exe`.
+fn find_built_file(exe: &Path, name: &str) -> Option<PathBuf> {
+    let profile = profile_dir(exe)?;
+    let mut candidates = vec![profile.join(name), profile.join("deps").join(name)];
+    if let Ok(packages) = std::fs::read_dir(profile.join("build")) {
+        for package in packages.flatten() {
+            if let Ok(units) = std::fs::read_dir(package.path()) {
+                for unit in units.flatten() {
+                    candidates.push(unit.path().join("out").join(name));
+                }
+            }
         }
     }
-    dirs.iter()
-        .map(|d| d.join(STATICLIB))
-        .find(|p| p.is_file())
-        .ok_or_else(|| {
-            Error::new(format!(
-                "the Rust librlmdb.a (rlmdb-capi) is not next to {}: build it with \
-                 `cargo test -p rlmdb-interop` (librlmdb is a dev-dependency)",
-                exe.display()
-            ))
+    candidates
+        .into_iter()
+        .filter_map(|p| {
+            let modified = std::fs::metadata(&p).ok()?.modified().ok()?;
+            Some((modified, p))
         })
+        .max()
+        .map(|(_, p)| p)
 }
 
 /// Links `cpeer_capi` from the recipe `build.rs` wrote and the Rust
@@ -357,5 +397,54 @@ pub fn cpeer_capi() -> Result<&'static Path> {
     match PATH.get_or_init(|| link_cpeer_capi().map_err(|e| e.message().to_owned())) {
         Ok(p) => Ok(p),
         Err(e) => Err(Error::new(e.clone())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_built_file;
+    use std::path::Path;
+
+    fn touch(p: &Path) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"x").unwrap();
+    }
+
+    /// Both layouts of cargo's outputs: `deps` (before 1.100) and
+    /// `build/<package>/<hash>/out` (1.100), with a file of a dependency
+    /// that only the new layout keeps in its unit's directory.
+    #[test]
+    fn built_files_in_both_layouts() {
+        let scratch = crate::testenv::temp_root().unwrap();
+        let root = scratch.path();
+        let profile = root.join("debug");
+
+        let old_exe = profile.join("deps/layout-0123");
+        touch(&old_exe);
+        touch(&profile.join("deps/librlmdb.a"));
+        touch(&profile.join("rpeer"));
+        assert_eq!(
+            find_built_file(&old_exe, "librlmdb.a"),
+            Some(profile.join("deps/librlmdb.a"))
+        );
+        assert_eq!(
+            find_built_file(&old_exe, "rpeer"),
+            Some(profile.join("rpeer"))
+        );
+        assert_eq!(find_built_file(&old_exe, "missing"), None);
+
+        let new_exe = profile.join("build/rlmdb-interop/0123/out/layout-0123");
+        touch(&new_exe);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let lib = profile.join("build/librlmdb/4567/out/librlmdb.a");
+        touch(&lib);
+        // The newest of the two copies.
+        assert_eq!(find_built_file(&new_exe, "librlmdb.a"), Some(lib));
+        assert_eq!(
+            find_built_file(&new_exe, "rpeer"),
+            Some(profile.join("rpeer"))
+        );
+        // Not under a profile directory of either layout.
+        assert_eq!(find_built_file(&root.join("x/y"), "rpeer"), None);
     }
 }
