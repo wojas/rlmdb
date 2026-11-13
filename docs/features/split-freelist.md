@@ -174,7 +174,7 @@ working on the environment as usual.
 - Readers see the state before the transaction, and then the committed
   state. There is nothing in between.
 - The last transaction ID rises by more than one.
-- `mdb_stat -ff` lists several freelist records for the transaction.
+- `rlmdb_stat -ff` lists several freelist records for the transaction.
 
 ## Rare cases
 

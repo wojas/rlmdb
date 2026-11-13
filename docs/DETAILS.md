@@ -43,8 +43,9 @@ The patch level 85 lets a program tell it runs on rlmdb. Upstream's
 down to the page numbers on the free list. `rlmdb.h` adds the version
 and format functions (`rlmdb_*`).
 
-`rlmdb-tools` has `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` and
-`mdb_drop`, with the C tools' options, output and exit codes. Upstream's
+`rlmdb-tools` has `rlmdb_stat`, `rlmdb_dump`, `rlmdb_load`, `rlmdb_copy`
+and `rlmdb_drop`, with the options, output and exit codes of the C tools
+`mdb_stat` & co.; the `rlmdb_` names let both be installed. Upstream's
 man pages apply; the differences are in
 [`rlmdb-tools/README.md`](../rlmdb-tools/README.md).
 
@@ -61,7 +62,7 @@ well as 0.9's, chosen per environment:
 * An existing file opens in its own format (`rlmdb::sniff_format`).
   Asking for the other one fails with `MDB_VERSION_MISMATCH`.
 * A new file is 0.9 unless 1.0 is asked for: `.format(Format::V10)`,
-  `rlmdb_env_set_format`, `mdb_load -F 1.0`, or the 1.0 stub.
+  `rlmdb_env_set_format`, `rlmdb_load -F 1.0`, or the 1.0 stub.
 * 1.0 page sizes range from 256 B to 64 KiB.
 * rlmdb writes the pages C 1.0 writes, and C 1.0 processes can share the
   environment. One process can have both formats open.
@@ -169,7 +170,7 @@ rlmdb/            the Rust library
 rlmdb-capi/       the C API
   include/        lmdb.h (LMDB 1.0.3) and rlmdb.h
   artifacts/      librlmdb and the two stubs
-rlmdb-tools/      the mdb_* tools
+rlmdb-tools/      the rlmdb_* tools
 interop/          cross-process tests
 bench/            benchmarks against C
 tests/lmdb-c/     C LMDB 0.9.37 and 1.0.3, the reference

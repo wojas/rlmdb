@@ -25,8 +25,9 @@ flowchart LR
 - **Stubs for programs that are already built.** A stub is rlmdb under
   the name `liblmdb`. Put it in front of C LMDB and the program runs on
   rlmdb without a rebuild.
-- **The `mdb_*` tools.** `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy`
-  and `mdb_drop`, with the options and output of the C tools.
+- **The command-line tools.** `rlmdb_stat`, `rlmdb_dump`, `rlmdb_load`,
+  `rlmdb_copy` and `rlmdb_drop`, with the options and output of the C
+  tools `mdb_stat`, `mdb_dump` and so on.
 - **A Rust library.** The `rlmdb` crate has a safe API and links no C
   code. See its [API reference](api/rlmdb/index.html).
 

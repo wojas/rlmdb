@@ -70,12 +70,14 @@ library path. A stub never replaces an installed C LMDB by accident.
 
 ## The command-line tools
 
-The `mdb_*` tools are built separately:
+The tools are built separately:
 
 ```sh
 cargo build --release -p rlmdb-tools
 ```
 
-This puts `mdb_stat`, `mdb_dump`, `mdb_load`, `mdb_copy` and `mdb_drop`
-into `target/release/`. They take the options of the C tools and print
-the same output, so the LMDB man pages apply.
+This puts `rlmdb_stat`, `rlmdb_dump`, `rlmdb_load`, `rlmdb_copy` and
+`rlmdb_drop` into `target/release/`. Each one does what the C tool
+named with `mdb_` instead of `rlmdb_` does: `rlmdb_stat` takes the
+options of `mdb_stat` and prints the same output, so the LMDB man pages
+apply. The different names let you install them next to the C tools.

@@ -82,7 +82,7 @@ RLMDB_FEATURES=-split-freelist ./prog
 
 Who reads the variable:
 
-- C programs and the `mdb_*` tools read it.
+- C programs on rlmdb and the `rlmdb_*` tools read it.
 - Rust programs read it only if they ask for it, with
   `.read_environment(true)` on the builder.
 - Programs that run setuid or setgid never read it.

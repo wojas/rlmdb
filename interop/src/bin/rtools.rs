@@ -1,10 +1,11 @@
 //! The tools of `rlmdb-tools` (`mdb_stat`, `mdb_dump`, `mdb_load`,
 //! `mdb_copy`, `mdb_drop`) in one executable, for the tests of this crate:
 //! `rtools <tool> <args...>` runs `<tool>` with `argv[0] = <tool>`, so its
-//! messages name it as the tool's own binary would. Cargo builds a
-//! package's binaries for its integration tests (`CARGO_BIN_EXE_rtools`),
-//! not those of other packages, and the C 1.0 tools the Rust ones are
-//! compared with are built here.
+//! messages name it as the C tool's do (the tools' own binaries are
+//! `rlmdb_stat` & co.). Cargo builds a package's binaries for its
+//! integration tests (`CARGO_BIN_EXE_rtools`), not those of other
+//! packages, and the C 1.0 tools the Rust ones are compared with are built
+//! here.
 
 use std::ffi::OsString;
 

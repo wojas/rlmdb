@@ -6,7 +6,7 @@
 
 [project]
 site_name = "rlmdb"
-site_description = "A drop-in replacement for the LMDB C library, written in Rust: liblmdb for C programs, the mdb_* tools, and a Rust API."
+site_description = "A drop-in replacement for the LMDB C library, written in Rust: liblmdb for C programs, the rlmdb_* command-line tools, and a Rust API."
 site_url = "https://rlmdb.wojas.nl/"
 copyright = "Copyright 2026 rlmdb's contributors. Distributed under the OpenLDAP Public License 2.8."
 
