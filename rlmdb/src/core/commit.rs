@@ -596,7 +596,7 @@ pub(crate) fn write_meta_page(
         _ => env.data_file(),
     };
     let written = os::write_all_at(fd, &buf[META_MAPSIZE..], off).and_then(|()| {
-        if cfg!(any(target_os = "macos", target_os = "ios")) && sync_fd {
+        if cfg!(target_vendor = "apple") && sync_fd {
             // O_DSYNC does not flush the drive cache on macOS.
             if let Some(f) = env.meta_file() {
                 os::fdatasync(f)?;
@@ -645,7 +645,7 @@ pub(crate) fn write_duplicate_meta(env: &Environment, meta: &Meta) -> bool {
         _ => env.data_file(),
     };
     let written = os::write_all_at(fd, &buf[META_MAPSIZE..], off).and_then(|()| {
-        if cfg!(any(target_os = "macos", target_os = "ios")) && sync_fd {
+        if cfg!(target_vendor = "apple") && sync_fd {
             if let Some(f) = env.meta_file() {
                 os::fdatasync(f)?;
             }

@@ -103,6 +103,7 @@ the data file while it is open (`SIGBUS`).
 | Platform | Status |
 |---|---|
 | Linux glibc, x86-64 and arm64; macOS arm64; Windows x86-64 (MSVC, MinGW-w64) | CI |
+| iOS, tvOS, watchOS, visionOS (64-bit) | compiles; not tested |
 | Linux glibc, s390x (big-endian) | nightly CI under QEMU |
 | FreeBSD, OpenBSD | tested by hand; FreeBSD weekly in CI |
 | NetBSD, DragonFly, Android | not tested |

@@ -191,15 +191,14 @@ pub fn pwritev(file: &File, bufs: &[&[u8]], offset: u64) -> io::Result<usize> {
 /// 136-149; FreeBSD has `fdatasync` from 11.1 on).
 pub fn fdatasync(file: &File) -> io::Result<()> {
     loop {
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        #[cfg(target_vendor = "apple")]
         // SAFETY: valid fd; F_FULLFSYNC takes no argument.
         let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) };
         #[cfg(any(target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
         // SAFETY: valid fd.
         let rc = unsafe { libc::fsync(file.as_raw_fd()) };
         #[cfg(not(any(
-            target_os = "macos",
-            target_os = "ios",
+            target_vendor = "apple",
             target_os = "openbsd",
             target_os = "netbsd",
             target_os = "dragonfly"
@@ -240,14 +239,14 @@ pub fn fsync(file: &File) -> io::Result<()> {
 /// multiples of it.
 pub fn set_nocache(file: &File) {
     let fd = file.as_raw_fd();
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(target_vendor = "apple")]
     // SAFETY: valid fd; F_NOCACHE takes an int argument.
     unsafe {
         libc::fcntl(fd, libc::F_NOCACHE, 1);
     }
     #[cfg(target_os = "openbsd")]
     let _ = fd;
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "openbsd")))]
+    #[cfg(not(any(target_vendor = "apple", target_os = "openbsd")))]
     // SAFETY: valid fd; F_GETFL/F_SETFL take no pointer arguments.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -661,8 +660,7 @@ impl LockMap {
     /// store semaphore names; dead code on the mutex layouts.
     #[cfg_attr(
         not(any(
-            target_os = "macos",
-            target_os = "ios",
+            target_vendor = "apple",
             target_os = "openbsd",
             target_os = "netbsd",
             target_os = "dragonfly"
@@ -680,7 +678,7 @@ impl LockMap {
 
     /// Writes bytes at `offset` (volatile byte writes). Only used while the
     /// caller holds the exclusive file lock and initialises the table.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
     pub fn write_bytes(&self, offset: usize, bytes: &[u8]) {
         let p = self.checked_ptr(offset, 1);
         assert!(
@@ -696,7 +694,7 @@ impl LockMap {
 
     /// Raw pointer to `size` bytes at `offset` with the given alignment, for
     /// the pthread mutexes that live in the lock file (Linux).
-    #[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(dead_code))]
+    #[cfg_attr(target_vendor = "apple", allow(dead_code))]
     pub(crate) fn raw_ptr(&self, offset: usize, size: usize, align: usize) -> *mut u8 {
         assert!(offset % align == 0, "misaligned lock file object");
         assert!(offset + size <= self.len, "lock file object out of bounds");

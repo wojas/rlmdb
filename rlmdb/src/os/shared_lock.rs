@@ -67,7 +67,7 @@ pub enum LockStatus {
     /// [`SharedMutex::mark_consistent`] is called. Never reported by POSIX
     /// named semaphores (they are not robust), only by robust mutexes and
     /// SysV semaphores.
-    #[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(dead_code))]
+    #[cfg_attr(target_vendor = "apple", allow(dead_code))]
     OwnerDied,
 }
 
@@ -84,8 +84,7 @@ pub struct SharedLocks {
 // ===========================================================================
 
 #[cfg(not(any(
-    target_os = "macos",
-    target_os = "ios",
+    target_vendor = "apple",
     target_os = "openbsd",
     target_os = "netbsd",
     target_os = "dragonfly"
@@ -236,8 +235,7 @@ mod imp {
 // ===========================================================================
 
 #[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
+    target_vendor = "apple",
     target_os = "openbsd",
     target_os = "netbsd",
     target_os = "dragonfly"
@@ -700,7 +698,7 @@ mod imp {
     target_os = "openbsd",
     target_os = "netbsd",
     target_os = "dragonfly",
-    all(test, any(target_os = "macos", target_os = "ios"))
+    all(test, target_os = "macos")
 ))]
 mod sysv {
     use super::{LockMap, LockStatus};
@@ -713,16 +711,16 @@ mod sysv {
     use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicI32, Ordering};
 
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(target_os = "macos")]
     use libc::{sembuf, semctl, semget, semop, GETVAL, SEM_UNDO, SETALL};
 
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    #[cfg(not(target_os = "macos"))]
     use ffi::{sembuf, semctl, semget, semop, GETVAL, SEM_UNDO, SETALL};
 
     /// The SysV semaphore calls, which the `libc` crate does not bind for
     /// these BSDs. Prototypes and values from their `<sys/sem.h>` (the
     /// values are 4.4BSD's, the same on all three).
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    #[cfg(not(target_os = "macos"))]
     mod ffi {
         use libc::{c_int, c_short, c_ushort};
 
@@ -765,7 +763,7 @@ mod sysv {
     #[repr(C, align(8))]
     struct SemidDs([u8; 512]);
 
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(target_os = "macos")]
     const _: () = assert!(size_of::<libc::semid_ds>() <= size_of::<SemidDs>());
 
     /// One semaphore of the set, used as a mutex (`struct mdb_mutex`): the
@@ -1159,7 +1157,7 @@ mod sysv {
             assert_eq!((value(id, READER), value(id, WRITER)), (1, 1));
             // The size `check_reusable` probed for is the one IPC_STAT
             // reports.
-            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            #[cfg(target_os = "macos")]
             {
                 // SAFETY: semid_ds is a plain C struct; all-zero is valid.
                 let mut ds: libc::semid_ds = unsafe { std::mem::zeroed() };

@@ -30,7 +30,8 @@ fn link_options(soname: &str, dylib: &str) {
             println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,{soname}");
             println!("cargo:rustc-cdylib-link-arg=-Wl,-z,nodelete");
         }
-        "macos" => {
+        // The Apple systems with dynamic libraries (watchOS has none).
+        "macos" | "ios" | "tvos" | "visionos" => {
             println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/{dylib}");
             // Room in the Mach-O header for the installed path, which
             // `install_name_tool -id` writes over the short `@rpath` one:
