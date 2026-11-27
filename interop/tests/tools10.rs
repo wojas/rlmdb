@@ -31,6 +31,13 @@ struct Run {
     stderr: String,
 }
 
+/// The output of `child` (the command `label`) once it has exited. A tool
+/// that hangs is killed after the peers' time limit and fails the test
+/// with its command line, instead of blocking the test run.
+fn wait(child: std::process::Child, label: &str) -> std::process::Output {
+    interop::wait_with_output(child, label).unwrap_or_else(|e| panic!("{e}"))
+}
+
 /// Runs `cmd` with `stdin`, `RLMDB_DEFAULT_FORMAT` set to `var` or removed.
 fn run_cmd(mut cmd: Command, stdin: &[u8], var: Option<&str>) -> Run {
     match var {
@@ -40,6 +47,7 @@ fn run_cmd(mut cmd: Command, stdin: &[u8], var: Option<&str>) -> Run {
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let label = format!("{cmd:?}");
     let mut child = cmd.spawn().expect("spawn a tool");
     let mut input = child.stdin.take().unwrap();
     let data = stdin.to_vec();
@@ -47,7 +55,7 @@ fn run_cmd(mut cmd: Command, stdin: &[u8], var: Option<&str>) -> Run {
     let feeder = std::thread::spawn(move || {
         let _ = input.write_all(&data);
     });
-    let out = child.wait_with_output().unwrap();
+    let out = wait(child, &label);
     let _ = feeder.join();
     Run {
         code: out.status.code().unwrap_or(-1),
@@ -428,10 +436,9 @@ fn mdb_stat_and_mdb_dump_of_mtest10_environments() {
     for name in ["mtest", "mtest2", "mtest3", "mtest4", "mtest5"] {
         let dir = tmp();
         std::fs::create_dir(dir.path().join("testdb")).unwrap();
-        let out = Command::new(bins::mtest10(name).unwrap())
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
+        let mut mtest = Command::new(bins::mtest10(name).unwrap());
+        mtest.current_dir(dir.path());
+        let out = interop::command_output(mtest).unwrap_or_else(|e| panic!("{e}"));
         assert!(out.status.success(), "{name}");
         let env = dir.path().join("testdb");
         for opts in [&["-a", "-f"][..], &["-e"][..]] {
@@ -637,13 +644,14 @@ fn run_bin(mut cmd: Command, stdin: &[u8]) -> BinRun {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let label = format!("{cmd:?}");
     let mut child = cmd.spawn().expect("spawn a tool");
     let mut input = child.stdin.take().unwrap();
     let data = stdin.to_vec();
     let feeder = std::thread::spawn(move || {
         let _ = input.write_all(&data);
     });
-    let out = child.wait_with_output().unwrap();
+    let out = wait(child, &label);
     let _ = feeder.join();
     BinRun {
         code: out.status.code().unwrap_or(-1),

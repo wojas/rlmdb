@@ -31,6 +31,11 @@
 # 256-byte pages has taken over five minutes (a 300 s margin failed three
 # runs out of four). A peer that hangs still fails the test, later. (The
 # MinGW-w64 job runs no interop scenarios and needs no such margin.)
+#
+# timeout-minutes is about three times a job's usual run (12 to 14 minutes
+# with MSVC, 7 to 9 with MinGW-w64): room for a cold cache and for two
+# commands that run into INTEROP_TIMEOUT_SECS, and a test that hangs
+# outside that limit costs 45 minutes of a runner, not two hours.
 name: Windows
 
 on:
@@ -52,7 +57,7 @@ jobs:
   msvc:
     name: Windows x86-64 (MSVC)
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 45
     steps:
       - name: line endings as committed
         run: git config --global core.autocrlf false
@@ -87,7 +92,7 @@ jobs:
   gnu:
     name: Windows x86-64 (GNU, MinGW-w64)
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
     steps:
       - name: line endings as committed
         run: git config --global core.autocrlf false

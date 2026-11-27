@@ -531,6 +531,101 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<Option<Exit
     }
 }
 
+/// [`Child::wait_with_output`] with the peers' time limit
+/// (`INTEROP_TIMEOUT_SECS` in `README.md`), for tests that run a tool
+/// themselves: a child that is still running then is killed, and the error
+/// names it (`label`), says what the system reports about the process and
+/// shows the end of what it wrote. Without a limit a tool that hangs
+/// blocks its test, and the test run, until something outside stops them,
+/// and nothing says which command it was.
+///
+/// As with [`Child::wait_with_output`], stdout and stderr are collected if
+/// they are pipes, and stdin is the caller's business. The time limit
+/// also covers the pipes: if they stay open after the child has exited (a
+/// process it started holds them), that is an error too.
+pub fn wait_with_output(child: Child, label: &str) -> Result<std::process::Output> {
+    wait_with_output_for(child, label, default_timeout())
+}
+
+/// [`Command::output`] with the peers' time limit: `cmd` runs with stdin
+/// closed and its output collected, and is killed if it runs too long
+/// ([`wait_with_output`]; the error names it by its `Debug` form).
+pub fn command_output(mut cmd: Command) -> Result<std::process::Output> {
+    let label = format!("{cmd:?}");
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::new(format!("cannot start `{label}`: {e}")))?;
+    wait_with_output(child, &label)
+}
+
+/// [`wait_with_output`] with the time limit `timeout`.
+fn wait_with_output_for(
+    mut child: Child,
+    label: &str,
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    fn bytes<R: Read + Send + 'static>(r: Option<R>) -> JoinHandle<Vec<u8>> {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let out = bytes(child.stdout.take());
+    let err = bytes(child.stderr.take());
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Ok(status);
+        }
+        if Instant::now() >= deadline {
+            // What the process is doing, before it is gone.
+            let mut report = crate::os::process_report(child.id());
+            if !crate::os::kill_within(&mut child, Duration::from_secs(10)) {
+                report.push_str("\n(still there 10 s after it was killed)");
+            }
+            break Err(report);
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    // The pipes close when the child is gone, unless a process it started
+    // has them too; a killed child gets a few seconds for that.
+    let pipe_deadline = deadline.max(Instant::now() + Duration::from_secs(5));
+    while !(out.is_finished() && err.is_finished()) && Instant::now() < pipe_deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    // What it wrote, if the pipes have closed.
+    let text = |h: JoinHandle<Vec<u8>>| {
+        if h.is_finished() {
+            String::from_utf8_lossy(&h.join().unwrap_or_default()).into_owned()
+        } else {
+            "[the pipe is still open]\n".to_owned()
+        }
+    };
+    match status {
+        Ok(status) if out.is_finished() && err.is_finished() => Ok(std::process::Output {
+            status,
+            stdout: out.join().unwrap_or_default(),
+            stderr: err.join().unwrap_or_default(),
+        }),
+        Ok(status) => Err(Error::new(format!(
+            "`{label}` exited ({status}), but its output pipes stayed open: a process \
+             it started still holds them\n--- processes ---\n{}",
+            crate::os::process_report(child.id())
+        ))),
+        Err(report) => Err(Error::new(format!(
+            "`{label}` timed out after {timeout:?} and was killed\n--- process ---\n{report}\n--- stdout ---\n{}--- stderr ---\n{}",
+            tail(&text(out), 40),
+            tail(&text(err), 40)
+        ))),
+    }
+}
+
 /// Run `cmd` to completion with optional stdin data and a timeout.
 pub(crate) fn run_command(
     mut cmd: Command,
@@ -803,4 +898,111 @@ impl DeadProcess {
     /// Close the handle (as dropping the value does): the process id is
     /// free for new processes, and C's reader check sees the process gone.
     pub fn close(self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Set for the children of the tests below: `hang` or `orphan`.
+    const HANG_VAR: &str = "INTEROP_TEST_HANG";
+    /// Where the `orphan` child writes the process id of the process it
+    /// leaves behind.
+    const ORPHAN_VAR: &str = "INTEROP_TEST_ORPHAN_FILE";
+
+    /// This test binary running [`hung_child`] alone, with `mode` in
+    /// [`HANG_VAR`] (none if empty), its output in pipes.
+    fn spawn_child(mode: &str, orphan_file: Option<&Path>) -> Child {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", "peer::tests::hung_child", "--nocapture"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match mode {
+            "" => cmd.env_remove(HANG_VAR),
+            mode => cmd.env(HANG_VAR, mode),
+        };
+        if let Some(f) = orphan_file {
+            cmd.env(ORPHAN_VAR, f);
+        }
+        cmd.spawn().unwrap()
+    }
+
+    /// The child of the tests below. With `hang` it writes a line and
+    /// waits (far longer than the parent's limit); with `orphan` it starts
+    /// a `hang` child that inherits its stdout and stderr, writes that
+    /// child's process id to the file named in [`ORPHAN_VAR`] and exits.
+    /// On its own, in a normal test run, it does nothing.
+    #[test]
+    fn hung_child() {
+        match std::env::var(HANG_VAR).as_deref() {
+            Ok("hang") => {
+                eprintln!("waiting");
+                thread::sleep(Duration::from_secs(600));
+            }
+            Ok("orphan") => {
+                // Left running on purpose: the test stops it.
+                #[allow(clippy::zombie_processes)]
+                let child = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "peer::tests::hung_child", "--nocapture"])
+                    .env(HANG_VAR, "hang")
+                    .stdin(Stdio::null())
+                    .spawn()
+                    .unwrap();
+                let file = std::env::var_os(ORPHAN_VAR).unwrap();
+                std::fs::write(file, child.id().to_string()).unwrap();
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn wait_with_output_kills_a_hung_child() {
+        // A child that exits: its status and output, as from
+        // `Child::wait_with_output`.
+        let out =
+            wait_with_output_for(spawn_child("", None), "child", Duration::from_secs(60)).unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("1 passed"));
+        // A child that hangs: killed at the limit, and the error names the
+        // command and shows what the child wrote.
+        let start = Instant::now();
+        let hung = spawn_child("hang", None);
+        let err = wait_with_output_for(hung, "the hung child", Duration::from_secs(2))
+            .expect_err("the child hangs")
+            .to_string();
+        assert!(start.elapsed() < Duration::from_secs(60), "{err}");
+        assert!(err.contains("`the hung child` timed out"), "{err}");
+        assert!(err.contains("waiting"), "{err}");
+        // The report of the process names the test it ran.
+        assert!(err.contains("hung_child"), "{err}");
+    }
+
+    /// A child that exits while a process it started keeps its output
+    /// pipes open: an error after the limit, not a wait for the pipes.
+    #[test]
+    fn wait_with_output_does_not_wait_for_inherited_pipes() {
+        let dir = crate::testenv::temp_root().unwrap();
+        let file = dir.path().join("orphan");
+        let start = Instant::now();
+        let child = spawn_child("orphan", Some(&file));
+        let res = wait_with_output_for(child, "the parent", Duration::from_secs(2));
+        let elapsed = start.elapsed();
+        // The process left behind, which the child started.
+        let orphan = std::fs::read_to_string(&file).unwrap();
+        #[cfg(windows)]
+        let kill = Command::new("taskkill")
+            .args(["/F", "/PID", &orphan])
+            .output();
+        #[cfg(not(windows))]
+        let kill = Command::new("kill").args(["-9", &orphan]).output();
+        assert!(
+            kill.unwrap().status.success(),
+            "cannot stop process {orphan}"
+        );
+        let err = res.expect_err("the pipes stay open").to_string();
+        assert!(elapsed < Duration::from_secs(60), "{err}");
+        assert!(err.contains("`the parent` exited"), "{err}");
+        assert!(err.contains("output pipes stayed open"), "{err}");
+    }
 }

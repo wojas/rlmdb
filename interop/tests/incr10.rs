@@ -46,13 +46,15 @@ fn run(prog: &Path, name: &str, args: &[&str], stdin: &[u8]) -> Ran {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let label = format!("{cmd:?}");
     let mut child = cmd.spawn().expect("spawn");
     let mut input = child.stdin.take().unwrap();
     let data = stdin.to_vec();
     let feeder = std::thread::spawn(move || {
         let _ = input.write_all(&data);
     });
-    let out = child.wait_with_output().unwrap();
+    // A tool that hangs is killed and fails the test with its command line.
+    let out = interop::wait_with_output(child, &label).unwrap_or_else(|e| panic!("{e}"));
     let _ = feeder.join();
     Ran {
         code: out.status.code().unwrap_or(-1),
