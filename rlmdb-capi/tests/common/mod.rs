@@ -431,6 +431,8 @@ pub fn rust_native_libs() -> &'static [&'static str] {
             "-lm",
             "-lcompiler_rt",
         ]
+    } else if cfg!(target_os = "android") {
+        &["-ldl", "-llog", "-lunwind", "-lm", "-lc"]
     } else if cfg!(target_os = "dragonfly") {
         &[
             "-lrt",
@@ -468,6 +470,7 @@ pub fn target_triple() -> String {
     match std::env::consts::OS {
         "macos" => format!("{arch}-apple-darwin"),
         "linux" => format!("{arch}-unknown-linux-gnu"),
+        "android" => format!("{arch}-linux-android"),
         "windows" if cfg!(target_env = "msvc") => format!("{arch}-pc-windows-msvc"),
         "windows" => format!("{arch}-pc-windows-gnu"),
         os => format!("{arch}-unknown-{os}"),
@@ -487,6 +490,12 @@ fn cc_build(out_dir: &Path) -> cc::Build {
     // C LMDB uses no pthreads on Windows.
     if !cfg!(windows) {
         b.flag_if_supported("-pthread");
+    }
+    // On Android, define `ANDROID`, as Android's build systems do: C 0.9
+    // tests it to build without robust mutexes (bionic has none; mdb.c line
+    // 297).
+    if cfg!(target_os = "android") {
+        b.define("ANDROID", None);
     }
     b
 }

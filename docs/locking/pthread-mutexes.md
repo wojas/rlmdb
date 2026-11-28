@@ -1,6 +1,7 @@
 # Robust pthread mutexes
 
-Used on Linux, Android and FreeBSD, for both formats.
+Used on Linux and FreeBSD, for both formats. Android uses the same
+mutexes, but they are not robust there: see [On Android](#on-android).
 
 This is the most forgiving of the lock implementations. When a process
 dies while it holds a lock, the next one to take the lock is told so and
@@ -69,6 +70,19 @@ abort. Restart the process to get out of it.
 
 In Rust this cannot happen by accident: a write transaction cannot move
 to another thread, and dropping it aborts it.
+
+## On Android
+
+Android's C library, bionic, has no robust mutexes. C LMDB uses plain
+process-shared mutexes there, and so does rlmdb. Everything on this
+page holds except the recovery: a process that dies while it holds the
+writer lock leaves it taken, and every other writer waits.
+
+This is the weakness of [POSIX named semaphores](posix-semaphores.md),
+and the way out is the same: close the environment in every process.
+The first process to open it again sets up new mutexes in the lock
+file. See
+[Getting writers going again](posix-semaphores.md#getting-writers-going-again).
 
 ## Limits
 

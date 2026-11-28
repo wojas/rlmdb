@@ -12,6 +12,11 @@
 //!   `pthread_mutex_lock` returns `EOWNERDEAD` and the caller must repair
 //!   state and call [`SharedMutex::mark_consistent`] (`mdb_mutex_failed`,
 //!   line 10463).
+//! * **Android**: the same mutexes, but not robust. Bionic has no robust
+//!   mutexes, and C turns `MDB_USE_ROBUST` off there (mdb.c line 297,
+//!   which tests the macro `ANDROID` that Android's build systems define;
+//!   mdb10.c line 365 tests `__ANDROID__`). A writer that dies holding the
+//!   mutex leaves it locked, as a macOS semaphore does.
 //! * **macOS** (`MDB_USE_POSIX_SEM`): two POSIX named semaphores,
 //!   `"/MDBr<hash>"` and `"/MDBw<hash>"`, where `<hash>` encodes an FNV-1a
 //!   hash of `(st_dev, st_ino)` of the lock file. The exclusive opener
@@ -114,6 +119,37 @@ mod imp {
         ) as *mut libc::pthread_mutex_t
     }
 
+    /// `PTHREAD_PROCESS_SHARED`, which the `libc` crate does not define for
+    /// Android (bionic's `<pthread.h>`: 1).
+    #[cfg(target_os = "android")]
+    const PTHREAD_PROCESS_SHARED: libc::c_int = 1;
+    #[cfg(not(target_os = "android"))]
+    use libc::PTHREAD_PROCESS_SHARED;
+
+    /// Makes the mutexes `attr` initialises robust, where C does
+    /// (`MDB_ROBUST_SUPPORTED`, mdb.c line 5038): everywhere but Android.
+    ///
+    /// # Safety
+    ///
+    /// `attr` must be an initialised mutex attribute object.
+    #[cfg(not(target_os = "android"))]
+    unsafe fn set_robust(attr: &mut libc::pthread_mutexattr_t) -> libc::c_int {
+        // SAFETY: attr is initialised (the caller's contract).
+        unsafe { libc::pthread_mutexattr_setrobust(attr, libc::PTHREAD_MUTEX_ROBUST) }
+    }
+
+    /// Android: nothing to do, the mutexes stay plain process-shared ones
+    /// (bionic has no robust mutexes; C builds without
+    /// `MDB_ROBUST_SUPPORTED` there).
+    ///
+    /// # Safety
+    ///
+    /// None needed; `unsafe` only to match the other platforms.
+    #[cfg(target_os = "android")]
+    unsafe fn set_robust(_attr: &mut libc::pthread_mutexattr_t) -> libc::c_int {
+        0
+    }
+
     fn check(rc: libc::c_int) -> io::Result<()> {
         if rc == 0 {
             Ok(())
@@ -160,9 +196,19 @@ mod imp {
 
         /// `pthread_mutex_consistent`, after repairing the state a dead
         /// owner left behind.
+        #[cfg(not(target_os = "android"))]
         pub fn mark_consistent(&self) -> io::Result<()> {
             // SAFETY: as in `lock`; we hold the mutex in EOWNERDEAD state.
             check(unsafe { libc::pthread_mutex_consistent(self.mutex) })
+        }
+
+        /// Never needed on Android: a mutex that is not robust never
+        /// reports a dead owner, so `lock` never returns
+        /// [`LockStatus::OwnerDied`]. `EINVAL` (bionic has no
+        /// `pthread_mutex_consistent`).
+        #[cfg(target_os = "android")]
+        pub fn mark_consistent(&self) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(libc::EINVAL))
         }
     }
 
@@ -194,10 +240,9 @@ mod imp {
                 );
                 let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
                 check(libc::pthread_mutexattr_init(&mut attr))?;
-                let mut rc =
-                    libc::pthread_mutexattr_setpshared(&mut attr, libc::PTHREAD_PROCESS_SHARED);
+                let mut rc = libc::pthread_mutexattr_setpshared(&mut attr, PTHREAD_PROCESS_SHARED);
                 if rc == 0 {
-                    rc = libc::pthread_mutexattr_setrobust(&mut attr, libc::PTHREAD_MUTEX_ROBUST);
+                    rc = set_robust(&mut attr);
                 }
                 if rc == 0 {
                     rc = libc::pthread_mutex_init(r, &attr);

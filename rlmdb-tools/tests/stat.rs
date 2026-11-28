@@ -215,7 +215,11 @@ fn reader_table_exit_code() {
         let (c, r) = both("mdb_stat", &argv, b"", dir.path());
         assert_eq!(c.stdout, r.stdout, "{case}");
         assert_eq!(c.stderr, r.stderr, "{case}");
-        let c_exit = i32::from(!cfg!(any(windows, target_os = "openbsd")));
+        let c_exit = i32::from(!cfg!(any(
+            windows,
+            target_os = "openbsd",
+            target_os = "android"
+        )));
         assert_eq!((c.code, r.code), (c_exit, 0), "{case}");
     }
     for case in ["-r -a", "-rr -f", "-r -s plain", "-err -ffa"] {

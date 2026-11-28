@@ -180,6 +180,11 @@ const C_FLAGS: &[&str] = &[
     "-Wno-unused-parameter",
     "-Wbad-function-cast",
     "-Wuninitialized",
+    // Android: `ANDROID`, as Android's build systems define it: C 0.9
+    // tests it to build without robust mutexes (bionic has none; mdb.c line
+    // 297).
+    #[cfg(target_os = "android")]
+    "-DANDROID",
 ];
 
 /// The upstream programs built against `liblmdb.a`: the `Makefile`'s

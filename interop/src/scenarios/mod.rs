@@ -1037,12 +1037,13 @@ pub fn delete_verify(pair: Pair) -> Result<()> {
 
 /// `KNOWN_C_BUGS.md` row 34: C 1.0's `mdb_env_set_pagesize` stores the page
 /// size in `me_os_psize`, so a copy by a process that called it opens the
-/// destination with `O_DIRECT` (Linux) and writes multiples of the page
-/// size, which fails with `EINVAL` on file systems that honour `O_DIRECT`
-/// when the page size is below the device's logical block size. `None`,
-/// with a SKIPPED note, when `out` is exactly that failure (the C 1.0 peer
-/// on Linux, a page size below 4 KiB, `mdb_env_copy2` failing with
-/// `EINVAL`); `Some(out)` when the copy succeeded; the error otherwise.
+/// destination with `O_DIRECT` (Linux and Android) and writes multiples of
+/// the page size, which fails with `EINVAL` on file systems that honour
+/// `O_DIRECT` when the page size is below the device's logical block size.
+/// `None`, with a SKIPPED note, when `out` is exactly that failure (the C
+/// 1.0 peer on Linux or Android, a page size below 4 KiB, `mdb_env_copy2`
+/// failing with `EINVAL`); `Some(out)` when the copy succeeded; the error
+/// otherwise.
 pub fn copy_or_skip(
     copier: Peer,
     pair: &Pair,
@@ -1055,7 +1056,7 @@ pub fn copy_or_skip(
     let unbuffered_failure = if cfg!(windows) {
         out.stderr.contains("failed: 87") || out.stderr.contains("parameter is incorrect")
     } else {
-        cfg!(target_os = "linux")
+        cfg!(any(target_os = "linux", target_os = "android"))
             && (out.stderr.contains("Invalid argument") || out.stderr.contains("failed: 22"))
     };
     if copier == Peer::C10

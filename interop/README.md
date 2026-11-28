@@ -71,6 +71,7 @@ open in one process (`rpeer formats-loop`).
 `RLMDB_TEST_SCOPE=platform` (read at test time, by every crate's tests)
 selects the platform suite, which the CI of macOS, Windows (MSVC) and
 Linux arm64 runs; Linux x86-64's CI, the nightly runs on every platform
+(Android in a Termux container)
 and `scripts/check-all.sh` run everything. The platform suite keeps what
 depends on the platform: of the scenario matrix, every pair at the OS
 page size with the scenarios of `scenarios::PLATFORM_SCENARIOS` (the

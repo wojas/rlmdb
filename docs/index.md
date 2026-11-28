@@ -71,7 +71,8 @@ flowchart LR
   [benchmark results](https://github.com/wojas/rlmdb/blob/main/bench/RESULTS.md)
   have the numbers.
 - **Platforms.** Tested on 64-bit Linux, macOS, Windows, FreeBSD and
-  OpenBSD. Other 64-bit platforms that C LMDB runs on, such as NetBSD,
-  DragonFly and Android, are likely to work but are not tested yet.
+  OpenBSD, and on Android's C library in a container. Other 64-bit
+  platforms that C LMDB runs on, such as NetBSD and DragonFly, are
+  likely to work but are not tested yet.
 - **Status.** rlmdb has no release yet. You build it from the
   [repository](https://github.com/wojas/rlmdb).

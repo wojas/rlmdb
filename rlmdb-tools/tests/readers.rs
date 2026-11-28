@@ -58,9 +58,9 @@ impl Drop for Holder {
 
 /// The exit code of C's `mdb_stat -r` without `-a`/`-s`/`-f`: that of the
 /// last `fputs` of the reader list (KNOWN_C_BUGS.md row 2), which returns a
-/// positive count with glibc and macOS, 0 with the Windows C runtime and
-/// OpenBSD's libc.
-const C_R_EXIT: i32 = if cfg!(any(windows, target_os = "openbsd")) {
+/// positive count with glibc and macOS, 0 with the Windows C runtime,
+/// OpenBSD's libc and Android's bionic.
+const C_R_EXIT: i32 = if cfg!(any(windows, target_os = "openbsd", target_os = "android")) {
     0
 } else {
     1

@@ -280,9 +280,10 @@ fn rust_layout() -> Vec<(String, u64)> {
     use std::mem::{align_of, size_of, size_of_val};
 
     // The lock file names its locks (semaphores, Windows mutexes) or holds
-    // them (pthread mutexes); only semaphores are not robust.
+    // them (pthread mutexes); semaphores and Android's mutexes are not
+    // robust.
     let sem = lockfile::LOCK_V09.objects.stores_names();
-    let robust = !lockfile::USES_NAMED_SEMAPHORES;
+    let robust = lockfile::ROBUST_SUPPORTED;
     let mutex_align = if sem { 1 } else { sys::MUTEX_ALIGN };
     let hdr = [0u8; l::PAGE_HDR_SIZE];
     let pg = PageRef::new(&hdr).unwrap();

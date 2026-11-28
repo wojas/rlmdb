@@ -322,6 +322,13 @@ compile_error!(
 
 // --- version 1 (LMDB 0.9) -------------------------------------------------
 
+/// `MDB_ROBUST_SUPPORTED` of the C 0.9 build on this platform: whether the
+/// writer lock tells its next holder that the previous one died
+/// (`MDB_OWNERDEAD`). Robust pthread mutexes (Linux, FreeBSD) and Windows'
+/// mutexes do; POSIX named semaphores do not, and neither do Android's
+/// mutexes, which bionic cannot make robust (mdb.c line 297).
+pub const ROBUST_SUPPORTED: bool = !USES_NAMED_SEMAPHORES && !cfg!(target_os = "android");
+
 /// `MNAME_LEN` of version 1: size of the mutex (Linux) or semaphore name
 /// (macOS) fields.
 pub const MNAME_LEN: usize = platform::MNAME_LEN;
