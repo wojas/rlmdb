@@ -3,21 +3,24 @@
 //!
 //! Each tool lives in its own module with a `main(args) -> exit code`
 //! function; the binaries in `src/bin/` only forward `std::env::args_os()`
-//! to it:
+//! to it. The binaries are named `rlmdb_*`, so that they can be installed
+//! next to the C tools:
 //!
-//! * [`stat`]: `mdb_stat` (`tests/lmdb-c/0.9/mdb_stat.c`),
-//! * [`dump`]: `mdb_dump` (`mdb_dump.c`),
-//! * [`load`]: `mdb_load` (`mdb_load.c`),
-//! * [`copy`]: `mdb_copy` (`mdb_copy.c`),
-//! * [`drop`](mod@drop): `mdb_drop`, which 0.9.37 does not have; modelled
-//!   on LMDB 1.0's `mdb_drop.c`.
+//! * [`stat`]: `rlmdb_stat`, C's `mdb_stat` (`tests/lmdb-c/0.9/mdb_stat.c`),
+//! * [`dump`]: `rlmdb_dump`, C's `mdb_dump` (`mdb_dump.c`),
+//! * [`load`]: `rlmdb_load`, C's `mdb_load` (`mdb_load.c`),
+//! * [`copy`]: `rlmdb_copy`, C's `mdb_copy` (`mdb_copy.c`),
+//! * [`drop`](mod@drop): `rlmdb_drop`, C's `mdb_drop`, which 0.9.37 does
+//!   not have; modelled on LMDB 1.0's `mdb_drop.c`.
 //!
 //! The tools behave like the C ones byte for byte: same options (parsed by
 //! [`getopt`], which reproduces the platform's `getopt(3)`, including GNU
 //! argument permutation on Linux), same output, same messages on standard
 //! error and same exit codes. Arguments, database names and paths are
-//! handled as bytes, as C does. The deliberate differences (C bugs that are
-//! not reproduced) are listed in `README.md`.
+//! handled as bytes, as C does. Messages name the tool by `argv[0]`, as
+//! C's do: `rlmdb_stat: …` under its own name, `mdb_stat: …` under C's.
+//! The deliberate differences (C bugs that are not reproduced) are listed
+//! in `README.md`.
 //!
 //! Shared helpers: [`cfmt`] (C formatting and parsing: `%p`, `isprint`,
 //! `atoi`, `sscanf` numbers, `mdb_strerror`), [`output`] (buffered standard

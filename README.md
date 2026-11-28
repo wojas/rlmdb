@@ -4,7 +4,7 @@
 [![Nightly](https://github.com/wojas/rlmdb/actions/workflows/nightly.yml/badge.svg)](https://github.com/wojas/rlmdb/actions/workflows/nightly.yml)
 
 A Rust rewrite of [LMDB](http://www.lmdb.tech/) that shares data and lock files with C LMDB.
-Ships a Rust library, a drop-in `liblmdb` for C programs, and the `mdb_*` tools.
+Ships a Rust library, a drop-in `liblmdb` for C programs, and the command-line tools (`rlmdb_stat`, `rlmdb_dump`, …).
 
 ## Goals
 

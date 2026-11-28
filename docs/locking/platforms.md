@@ -45,8 +45,8 @@ Processes share an environment when they agree on the files. That means:
   nothing on another.
 - **The same byte order.** LMDB writes its files in the byte order of
   the machine. A big-endian and a little-endian machine cannot use the
-  same files. To move data from one to the other, use `mdb_dump` and
-  `mdb_load`.
+  same files. To move data from one to the other, use `rlmdb_dump` and
+  `rlmdb_load`.
 - **The same C library.** On Linux the lock is a structure of the C
   library, stored in the lock file. A program built with glibc and one
   built with musl do not agree on it. Watch for this when a container

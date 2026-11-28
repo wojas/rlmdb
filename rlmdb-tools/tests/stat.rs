@@ -173,6 +173,26 @@ fn errors_and_usage() {
     }
 }
 
+/// The binaries are `rlmdb_stat` & co. (the tests run them as `mdb_stat`
+/// & co. to compare them with C); run under their own name, their messages
+/// name them so, as C's name themselves after `argv[0]`.
+#[test]
+fn own_name() {
+    for tool in ["mdb_stat", "mdb_dump", "mdb_load", "mdb_copy", "mdb_drop"] {
+        let exe = bin(Impl::Rust, tool);
+        let own = format!("rl{tool}");
+        let stem = exe.file_stem().and_then(|s| s.to_str());
+        assert_eq!(stem, Some(own.as_str()), "{}", exe.display());
+        let out = std::process::Command::new(&exe).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.starts_with("usage: ") && stderr.contains(&own),
+            "{own}: {stderr}"
+        );
+        assert_eq!(out.status.code(), Some(1), "{own}: {stderr}");
+    }
+}
+
 #[cfg(unix)]
 fn run_with_arg0(imp: Impl, arg0: &str, argv: &[Vec<u8>]) -> Run {
     use std::os::unix::process::CommandExt;

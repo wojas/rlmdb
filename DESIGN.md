@@ -65,8 +65,9 @@ Out of scope for now (leave the door open, do not design it away):
 * `tests/lmdb-c/0.9/mtest*.c`: small C test programs; they must run
   unchanged against `rlmdb-capi`.
 * `tests/lmdb-c/0.9/mdb_stat.c`, `mdb_dump.c`, `mdb_load.c`,
-  `mdb_copy.c`: the tools, reimplemented in `rlmdb-tools` (`mdb_drop` does not
-  exist in 0.9.37; the Rust one is an extra modelled on 1.0's).
+  `mdb_copy.c`: the tools, reimplemented in `rlmdb-tools` as `rlmdb_stat`
+  & co. (`mdb_drop` does not exist in 0.9.37; `rlmdb_drop` is an extra
+  modelled on 1.0's).
 
 ## On-disk format (what "compatible" means)
 
@@ -406,7 +407,7 @@ side either way.
   tests/lmdb-c/       the C reference sources (LMDB 0.9 and 1.0), vendored
   rlmdb/          the library (package `rlmdb`, lib `rlmdb`)
   rlmdb-capi/          the C ABI (artifacts/: librlmdb, the liblmdb stubs); include/lmdb.h (1.0's), rlmdb.h
-  rlmdb-tools/         mdb_stat, mdb_dump, mdb_load, mdb_copy, mdb_drop in Rust
+  rlmdb-tools/         rlmdb_stat, rlmdb_dump, rlmdb_load, rlmdb_copy, rlmdb_drop
   interop/            cross-process compatibility tests (builds the C library)
 ```
 

@@ -148,7 +148,10 @@ deferred until the core has been validated through the C API.
   erased in one place (`erased.rs`); handle ownership is explicit.
 * The tools in `rlmdb-tools` match the C tools' options, output, messages
   and exit codes; the C tools are their test oracle, each release for its
-  own format (C 1.0's for 1.0 files, in `interop/tests/tools10.rs`).
+  own format (C 1.0's for 1.0 files, in `interop/tests/tools10.rs`). Their
+  binaries are named `rlmdb_stat` & co., so they can be installed next to
+  C's `mdb_*`; like C's, their messages use `argv[0]`, and the tests run
+  them under the C names to compare.
 * The public C API of `librlmdb` is LMDB 1.0's plus rlmdb's own
   functions: `include/lmdb.h` is the pristine LMDB 1.0.3 header (byte for
   byte `tests/lmdb-c/1.0/lmdb.h` after one comment block;

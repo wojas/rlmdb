@@ -69,10 +69,10 @@ transaction when the data is ready.
 A read transaction takes no lock while it reads. When it begins, it
 takes a slot in the reader table, which needs a lock for a moment, and
 writes the snapshot it uses into the slot. You can
-see the table with `mdb_stat -r`:
+see the table with `rlmdb_stat -r`:
 
 ```console
-$ mdb_stat -r data
+$ rlmdb_stat -r data
 Reader Table Status
     pid     thread     txnid
      63142 200e09200 1
@@ -143,10 +143,10 @@ Two things follow:
 A process that dies in a read transaction leaves its slot in the table.
 The slot keeps old pages alive, as an open read transaction would.
 Other processes do not notice by themselves. Clear such slots with
-`mdb_stat -rr`:
+`rlmdb_stat -rr`:
 
 ```console
-$ mdb_stat -rr data
+$ rlmdb_stat -rr data
 Reader Table Status
     pid     thread     txnid
      63650 200e09200 1
