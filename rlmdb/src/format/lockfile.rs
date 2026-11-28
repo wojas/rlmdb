@@ -119,8 +119,7 @@ const fn log2_mod(p2: usize, n: u32) -> usize {
 /// (`MDB_USE_POSIX_SEM`). C 1.0 uses them only on macOS; the other BSDs
 /// switch to SysV semaphores ([`LOCK_V10`]`.objects`).
 pub const USES_NAMED_SEMAPHORES: bool = cfg!(any(
-    target_os = "macos",
-    target_os = "ios",
+    target_vendor = "apple",
     target_os = "openbsd",
     target_os = "netbsd",
     target_os = "dragonfly"
@@ -210,7 +209,7 @@ impl LockObjects {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_vendor = "apple")]
 mod platform {
     use super::LockObjects;
 
@@ -306,8 +305,7 @@ mod platform {
 }
 
 #[cfg(not(any(
-    target_os = "macos",
-    target_os = "ios",
+    target_vendor = "apple",
     target_os = "linux",
     target_os = "android",
     target_os = "freebsd",
@@ -425,7 +423,7 @@ const V2_READERS: usize = if V2_HAS_MT2 {
 
 /// `MDB_LOCK_TYPE` with `MDB_USE_POSIX_SEM` (mdb10.c line 980):
 /// `4 + ALIGNOF2(mdb_hash_t)/8 % 2`. (Every platform's value is tested.)
-#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
 const fn lock_type_posix_sem(hash_align: usize) -> usize {
     4 + hash_align / 8 % 2
 }
@@ -435,8 +433,7 @@ const fn lock_type_posix_sem(hash_align: usize) -> usize {
 /// `10 + LOG2_MOD(ALIGNOF2(pthread_mutex_t), 5) + sizeof(pthread_mutex_t) / 4 % 22 * 5`.
 #[cfg_attr(
     any(
-        target_os = "macos",
-        target_os = "ios",
+        target_vendor = "apple",
         target_os = "openbsd",
         target_os = "netbsd",
         target_os = "dragonfly",
@@ -813,7 +810,7 @@ mod tests {
         assert_ne!(lock_desc(other), lock_desc(inputs(32, sem)));
     }
 
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(target_vendor = "apple")]
     #[test]
     fn macos_layout() {
         // Version 1: magic, format, rmname[32], txnid@40, numreaders@48 -> 52 -> 56.

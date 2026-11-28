@@ -13,6 +13,7 @@ table below), 64-bit.
 | Platform | Lock primitive (C's and ours) | Status |
 |---|---|---|
 | macOS (arm64) | POSIX named semaphores `/MDBr…`, `/MDBw…`; reader slots at offset 128 | tested |
+| iOS, tvOS, watchOS, visionOS (64-bit) | as macOS: C builds every Apple system alike (`__APPLE__`), and so does rlmdb (`target_vendor = "apple"`) | untested; compiles and lints (iOS with stable Rust, the others with nightly `-Zbuild-std`: tier 3 targets). watchOS has no dynamic libraries, so `rlmdb-capi` builds only `librlmdb.a` there; 32-bit watchOS (`arm64_32`) is not supported |
 | Linux, glibc, aarch64 | process-shared robust `pthread_mutex_t` (48 bytes) in the lock file; slots at 192 | tested (Docker, `scripts/linux-test.sh`) |
 | Linux, glibc, x86-64 | as above, 40-byte mutex; slots at 128 | tested in CI (`.github/workflows/ci.yml`, Linux x86-64 job: the workspace suite, the interop matrix included); layout follows `size_of::<pthread_mutex_t>()` |
 | Linux, glibc, s390x (big-endian) | as above, 40-byte mutex; slots at 128 | tested under QEMU user emulation (`LINUX_TEST_TARGET=s390x-unknown-linux-gnu scripts/linux-test.sh`, nightly CI); see *Byte order* |

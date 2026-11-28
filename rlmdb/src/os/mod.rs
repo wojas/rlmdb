@@ -13,6 +13,10 @@
 //!   semaphores on macOS; on OpenBSD, NetBSD and DragonFly named semaphores
 //!   for LMDB 0.9 lock files and a SysV semaphore set for LMDB 1.0 ones).
 //!
+//! "macOS" in this module and below stands for every Apple system (iOS,
+//! tvOS, watchOS, visionOS): C builds them all alike (`__APPLE__`), and so
+//! does rlmdb (`target_vendor = "apple"`).
+//!
 //! On Windows, `windows.rs` provides the same public surface (`DataMap`,
 //! `LockMap`, `lock_byte`, `SharedMutex`, …) after mdb.c's `_WIN32` paths:
 //! file mappings, `LockFileEx` on the lock file, named mutexes; its module
@@ -150,8 +154,7 @@ fn runs_privileged() -> bool {
 /// Whether the process runs with privileges its user does not have (see
 /// [`secure_var`]).
 #[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
+    target_vendor = "apple",
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
@@ -169,8 +172,7 @@ fn runs_privileged() -> bool {
     not(any(
         target_os = "linux",
         target_os = "android",
-        target_os = "macos",
-        target_os = "ios",
+        target_vendor = "apple",
         target_os = "freebsd",
         target_os = "openbsd",
         target_os = "netbsd",

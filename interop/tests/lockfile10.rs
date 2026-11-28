@@ -227,7 +227,7 @@ fn header(env: &TestEnv, layout: &LockLayout) -> TxnInfoSnapshot {
 /// lines 6064-6084): 64-bit FNV-1a of `struct { dev_t dev; ino_t ino; }`
 /// of the lock file, zeroed first. macOS: 4-byte `dev_t`, 4 bytes of
 /// padding, 8-byte `ino_t`.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_vendor = "apple")]
 fn c10_mutex_id(lock_file: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
     let md = std::fs::metadata(lock_file).expect("stat lock file");
@@ -242,17 +242,14 @@ fn c10_mutex_id(lock_file: &Path) -> u64 {
 /// The header is a version 2 header with `mti_txnid` `txnid`, and on macOS
 /// the semaphores are named after the hash C 1.0 would have stored for
 /// this lock file.
-#[cfg_attr(
-    not(any(target_os = "macos", target_os = "ios")),
-    allow(unused_variables)
-)]
+#[cfg_attr(not(target_vendor = "apple"), allow(unused_variables))]
 fn assert_v2_header(env: &TestEnv, a: &Attached, txnid: u64) -> TxnInfoSnapshot {
     let h = a.header();
     assert_eq!(h.magic, MDB_MAGIC);
     assert_eq!(h.format, LOCK_V10.lock_format);
     assert_eq!(h.txnid, txnid);
     assert_eq!(h.mutex_id.is_some(), LOCK_V10.objects.stores_hash());
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(target_vendor = "apple")]
     assert_eq!(h.mutex_id, Some(c10_mutex_id(&env.lock_file())));
     h
 }

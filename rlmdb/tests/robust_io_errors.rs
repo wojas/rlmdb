@@ -648,7 +648,7 @@ fn robust_read_only_reader_skips_unpublished_first_commit() {
 /// and the file holds the old txnid either way; the injected failure
 /// above covers the state.)
 #[cfg(unix)]
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_vendor = "apple")]
 #[test]
 fn robust_failed_full_fsync_is_fatal() {
     let null = std::fs::OpenOptions::new()
