@@ -77,9 +77,11 @@ fn flags() {
 
 #[test]
 fn scalar_types_are_64_bit() {
-    for t in ["pgno_t", "txnid_t", "size_t", "pthread_t"] {
+    for t in ["pgno_t", "txnid_t", "size_t"] {
         assert_eq!(get(&format!("sizeof({t})")), 8, "{t}");
     }
+    // 8 bytes but on illumos and Solaris (an unsigned int).
+    assert_eq!(get("sizeof(pthread_t)"), sys::PTHREAD_SIZE as u64);
     assert_eq!(get("sizeof(indx_t)"), 2);
     assert_eq!(get("sizeof(pid_t)"), 4);
     assert_eq!(get("sizeof(unsigned int)"), 4);
@@ -165,8 +167,13 @@ fn meta() {
 #[test]
 fn reader_slot() {
     assert_eq!(get("sizeof(MDB_reader)"), 64);
-    // mrb_tid: a pthread_t, a DWORD on Windows.
-    let (tid_off, tid_size) = if cfg!(windows) { (12, 4) } else { (16, 8) };
+    // mrb_tid: a pthread_t (8 bytes, or 4 on illumos and Solaris), a DWORD
+    // on Windows.
+    let (tid_off, tid_size) = if cfg!(windows) || sys::PTHREAD_SIZE == 4 {
+        (12, 4)
+    } else {
+        (16, 8)
+    };
     assert_eq!(get("sizeof(MDB_rxbody)"), tid_off + tid_size);
     for (field, off, size) in [
         ("mrb_txnid", 0, 8),
@@ -254,6 +261,7 @@ mod sys {
     use std::mem::{align_of, size_of};
     pub const PID_ALIGN: usize = align_of::<libc::pid_t>();
     pub const PTHREAD_ALIGN: usize = align_of::<libc::pthread_t>();
+    pub const PTHREAD_SIZE: usize = size_of::<libc::pthread_t>();
     pub const MUTEX_SIZE: usize = size_of::<libc::pthread_mutex_t>();
     pub const MUTEX_ALIGN: usize = align_of::<libc::pthread_mutex_t>();
 }
@@ -263,6 +271,7 @@ mod sys {
     use std::mem::{align_of, size_of};
     pub const PID_ALIGN: usize = align_of::<std::ffi::c_int>();
     pub const PTHREAD_ALIGN: usize = align_of::<*mut std::ffi::c_void>();
+    pub const PTHREAD_SIZE: usize = size_of::<*mut std::ffi::c_void>();
     pub const MUTEX_SIZE: usize = size_of::<*mut std::ffi::c_void>();
     pub const MUTEX_ALIGN: usize = align_of::<*mut std::ffi::c_void>();
 }
@@ -335,7 +344,7 @@ fn rust_layout() -> Vec<(String, u64)> {
         ("alignof(size_t)".into(), align_of::<usize>()),
         ("sizeof(pid_t)".into(), size_of_val(&reader.pid)),
         ("alignof(pid_t)".into(), sys::PID_ALIGN),
-        ("sizeof(pthread_t)".into(), size_of_val(&reader.thread)),
+        ("sizeof(pthread_t)".into(), sys::PTHREAD_SIZE),
         ("alignof(pthread_t)".into(), sys::PTHREAD_ALIGN),
         ("sizeof(pthread_mutex_t)".into(), sys::MUTEX_SIZE),
         ("alignof(pthread_mutex_t)".into(), sys::MUTEX_ALIGN),

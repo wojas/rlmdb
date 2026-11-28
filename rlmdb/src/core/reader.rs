@@ -428,7 +428,8 @@ impl LockRegion {
             .store_u64(self.layout.reader_offset(i) + READER_TXNID, txnid)
     }
 
-    /// `mr_tid`: a `pthread_t` (8 bytes) on Unix, a `DWORD` on Windows.
+    /// `mr_tid`: a `pthread_t` on Unix (8 bytes; 4 on illumos and
+    /// Solaris), a `DWORD` on Windows.
     fn slot_tid(&self, i: usize) -> u64 {
         let off = self.layout.reader_offset(i) + READER_TID;
         match READER_TID_SIZE {

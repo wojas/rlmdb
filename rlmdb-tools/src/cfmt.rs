@@ -76,7 +76,8 @@ fn dos_errno(code: i32) -> i32 {
 }
 
 /// `printf("%p", addr)`: `0x` and lower-case hex; a null pointer is
-/// `(nil)` with glibc and `0x0` elsewhere. On Windows 16 hex digits:
+/// `(nil)` with glibc and `0x0` elsewhere. Lower-case hex without `0x` on
+/// illumos and Solaris (`0` for a null pointer). On Windows 16 hex digits:
 /// upper-case from MSVC's C runtime, lower-case from MinGW-w64's own
 /// `printf`, which C99 programs on msvcrt (the runtime of Rust's
 /// `x86_64-pc-windows-gnu`) get by default (`__USE_MINGW_ANSI_STDIO`).
@@ -87,6 +88,8 @@ pub fn pointer(addr: u64) -> String {
         format!("{addr:016x}")
     } else if addr == 0 && cfg!(target_os = "linux") {
         "(nil)".to_owned()
+    } else if cfg!(any(target_os = "illumos", target_os = "solaris")) {
+        format!("{addr:x}")
     } else {
         format!("{addr:#x}")
     }
@@ -275,6 +278,8 @@ mod tests {
             "0000000000001ABC"
         } else if cfg!(windows) {
             "0000000000001abc"
+        } else if cfg!(any(target_os = "illumos", target_os = "solaris")) {
+            "1abc"
         } else {
             "0x1abc"
         };

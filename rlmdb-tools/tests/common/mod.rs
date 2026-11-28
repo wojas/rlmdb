@@ -99,6 +99,8 @@ fn target_triple() -> String {
         "macos" => format!("{arch}-apple-darwin"),
         "linux" => format!("{arch}-unknown-linux-gnu"),
         "android" => format!("{arch}-linux-android"),
+        "solaris" if arch == "sparc64" => "sparcv9-sun-solaris".to_string(),
+        "solaris" => format!("{arch}-pc-solaris"),
         "windows" if cfg!(target_env = "msvc") => format!("{arch}-pc-windows-msvc"),
         "windows" => format!("{arch}-pc-windows-gnu"),
         os => format!("{arch}-unknown-{os}"),
@@ -343,7 +345,7 @@ fn build_shared(
 
 /// Takes an exclusive advisory lock on `file`, waiting for other holders;
 /// it is released when the file is closed.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "solaris")))]
 fn lock_exclusive(file: &fs::File) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
     loop {
@@ -359,9 +361,10 @@ fn lock_exclusive(file: &fs::File) -> std::io::Result<()> {
     }
 }
 
-/// Elsewhere the build is not locked (`File::lock`, Rust 1.89, replaces
-/// this once the MSRV allows); concurrent builds then race for the rename.
-#[cfg(not(unix))]
+/// Elsewhere (Windows; Solaris, which has no `flock`) the build is not
+/// locked (`File::lock`, Rust 1.89, replaces this once the MSRV allows);
+/// concurrent builds then race for the rename.
+#[cfg(not(all(unix, not(target_os = "solaris"))))]
 fn lock_exclusive(_file: &fs::File) -> std::io::Result<()> {
     Ok(())
 }

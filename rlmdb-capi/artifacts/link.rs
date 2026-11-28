@@ -13,9 +13,9 @@
 //   another still uses LMDB. On Linux the library is linked with `-z
 //   nodelete` (`DF_1_NODELETE`, as if loaded with `RTLD_NODELETE`):
 //   `dlclose` keeps it, and a later `dlopen` gets the same, already
-//   initialised copy. Android and the BSDs, also ELF, get the same flag
-//   (Android's linker honours it, checked in a Termux container; untested
-//   on the BSDs). macOS needs no flag: dyld never unloads an image with
+//   initialised copy. Android, the BSDs, illumos and Solaris, also ELF,
+//   get the same flag (Android's and illumos' linkers honour it; untested
+//   on the BSDs and Solaris). macOS needs no flag: dyld never unloads an image with
 //   thread-local variables, and Rust's standard library has them.
 //   `rlmdb-capi/tests/capi_dlopen.rs` checks both. Windows needs no flag
 //   either: `FreeLibrary` unloads the DLL with its last reference, as it
@@ -38,6 +38,11 @@ fn link_options(soname: &str, dylib: &str) {
             // without it, a long prefix fails with "larger updated load
             // commands do not fit".
             println!("cargo:rustc-cdylib-link-arg=-Wl,-headerpad_max_install_names");
+        }
+        // The illumos and Solaris link editor takes the SONAME with -h.
+        "illumos" | "solaris" => {
+            println!("cargo:rustc-cdylib-link-arg=-Wl,-h,{soname}");
+            println!("cargo:rustc-cdylib-link-arg=-Wl,-z,nodelete");
         }
         _ => {}
     }

@@ -1,7 +1,8 @@
 # Robust pthread mutexes
 
-Used on Linux and FreeBSD, for both formats. Android uses the same
-mutexes, but they are not robust there: see [On Android](#on-android).
+Used on Linux, FreeBSD, illumos and Solaris, for both formats. Android
+uses the same mutexes, but they are not robust there: see
+[On Android](#on-android).
 
 This is the most forgiving of the lock implementations. When a process
 dies while it holds a lock, the next one to take the lock is told so and
@@ -91,7 +92,7 @@ file. See
   began it.
 - **The same C library in every process.** The size and the content of a
   mutex are private to the C library: 40 bytes with glibc on x86-64, 48
-  on arm64, 8 on FreeBSD. glibc and musl do not agree on it. A mismatch
+  on arm64, 8 on FreeBSD, 24 on illumos. glibc and musl do not agree on it. A mismatch
   is not always reported. With format 1.0 some are caught when the
   environment is opened (`MDB_VERSION_MISMATCH`). With format 0.9 none
   are. The open then succeeds and the locks do not work: writers hang,

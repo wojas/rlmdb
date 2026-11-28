@@ -9,7 +9,7 @@
 //!   thread id, `strerror`.
 //! * [`shared_lock`]: the two inter-process locks guarding the reader table
 //!   and the writer, implemented the way the C build on the same platform does
-//!   it (robust process-shared pthread mutexes on Linux/FreeBSD, POSIX named
+//!   it (robust process-shared pthread mutexes on Linux/FreeBSD/illumos, POSIX named
 //!   semaphores on macOS; on OpenBSD, NetBSD and DragonFly named semaphores
 //!   for LMDB 0.9 lock files and a SysV semaphore set for LMDB 1.0 ones).
 //!

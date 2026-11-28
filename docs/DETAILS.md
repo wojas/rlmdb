@@ -105,8 +105,9 @@ the data file while it is open (`SIGBUS`).
 | Linux glibc, x86-64 and arm64; macOS arm64; Windows x86-64 (MSVC, MinGW-w64) | CI |
 | Linux glibc, s390x (big-endian) | nightly CI under QEMU |
 | FreeBSD, OpenBSD | tested by hand; FreeBSD weekly in CI |
+| illumos | weekly CI in an OmniOS VM |
 | Android (bionic), x86-64 and arm64 | nightly CI in a Termux container, not on a device |
-| NetBSD, DragonFly | not tested |
+| NetBSD, DragonFly, Solaris | not tested |
 | 32-bit targets | not supported: the file format depends on `sizeof(size_t)` |
 
 Lock files and page sizes differ per platform; see
@@ -160,7 +161,7 @@ runs cargo in a Linux container limited to 2 GiB of memory;
 CI runs fmt, clippy, docs and the tests on Linux (x86-64, arm64), macOS
 and Windows for pull requests and pushes to main. Nightly it runs the
 ignored tests, the s390x tests and the tests on Android in a Termux
-container; weekly the FreeBSD tests.
+container; weekly the FreeBSD and illumos tests.
 
 ## Repository layout
 

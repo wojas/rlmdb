@@ -45,7 +45,10 @@
 //! it immediately (installing handlers would need `unsafe`). Write errors
 //! other than a closed pipe, which C ignores, are reported. Windows has no
 //! `SIGPIPE`: there C writes on to a closed pipe, its writes failing, and
-//! exits as if the dump had succeeded; so does the Rust tool.
+//! exits as if the dump had succeeded; so does the Rust tool. On illumos and
+//! Solaris C's handler lasts for one signal (System V `signal`), so C then
+//! dies of the next `SIGPIPE`; the Rust tool exits with 1 there too
+//! (`KNOWN_C_BUGS.md` row 77).
 
 use std::fs::OpenOptions;
 

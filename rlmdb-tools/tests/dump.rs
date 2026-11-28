@@ -175,7 +175,20 @@ fn closed_pipe() {
         stdout.read_exact(&mut first).unwrap();
         drop(stdout);
         let out = child.wait_with_output().unwrap();
-        results.push((first.to_vec(), out.stderr, out.status.code()));
+        // On illumos and Solaris C's `signal` handler lasts for one signal,
+        // so C dies of the next SIGPIPE (13); the Rust tool exits with 1
+        // (KNOWN_C_BUGS.md row 77).
+        #[cfg(any(target_os = "illumos", target_os = "solaris"))]
+        let code = if imp == Impl::C {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(out.status.signal(), Some(13), "{:?}", out.status);
+            Some(1)
+        } else {
+            out.status.code()
+        };
+        #[cfg(not(any(target_os = "illumos", target_os = "solaris")))]
+        let code = out.status.code();
+        results.push((first.to_vec(), out.stderr, code));
     }
     assert_eq!(results[0], results[1]);
     if cfg!(windows) {
