@@ -35,7 +35,9 @@ jobs:
   check:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # About three times the usual run (8 to 15 minutes): a test that hangs
+    # is stopped then.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -98,7 +100,7 @@ jobs:
     # interop/build.rs). bsd.yml runs the tests in a FreeBSD VM.
     name: Check BSD targets
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     env:
       RLMDB_SKIP_C_BUILD: 1
     steps:

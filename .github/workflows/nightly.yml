@@ -10,6 +10,10 @@
 # Windows TMP and TEMP point at the runner's local disk and the interop
 # scenarios get a longer timeout, as in windows.yml (whose header says
 # why).
+#
+# timeout-minutes is two to three times a job's usual run (the whole suite:
+# 9 minutes on Linux, 17 on macOS, 25 to 28 on Windows; the ignored tests:
+# 4; big-endian: 50 to 67), so that a test that hangs is stopped then.
 name: Nightly
 
 on:
@@ -27,7 +31,7 @@ jobs:
   full:
     name: Whole suite (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -66,7 +70,7 @@ jobs:
   ignored:
     name: Ignored tests (Linux x86-64, release)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -81,7 +85,7 @@ jobs:
     # LINUX_TEST_TARGET), one crate at a time.
     name: Big-endian (Linux s390x, QEMU)
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-qemu-action@v4

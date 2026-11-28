@@ -53,6 +53,12 @@ fn disk_tmp() -> tempfile::TempDir {
         .unwrap()
 }
 
+/// `cmd`'s output ([`Command::output`]); a program that hangs is killed
+/// and fails the test with its command line.
+fn output(cmd: Command) -> std::process::Output {
+    interop::command_output(cmd).unwrap_or_else(|e| panic!("{e}"))
+}
+
 /// Runs a C program (with `stdin` as input), requires success, returns
 /// stdout.
 fn run(prog: &Path, args: &[&str], dir: Option<&Path>, stdin: Option<&str>) -> String {
@@ -64,13 +70,16 @@ fn run(prog: &Path, args: &[&str], dir: Option<&Path>, stdin: Option<&str>) -> S
     if let Some(d) = dir {
         cmd.current_dir(d);
     }
+    let label = format!("{cmd:?}");
     let mut child = cmd.spawn().unwrap();
     let mut input = child.stdin.take().unwrap();
     if let Some(s) = stdin {
         input.write_all(s.as_bytes()).unwrap();
     }
     drop(input);
-    let out = child.wait_with_output().unwrap();
+    // A program that hangs is killed and fails the test with its command
+    // line.
+    let out = interop::wait_with_output(child, &label).unwrap_or_else(|e| panic!("{e}"));
     assert!(
         out.status.success(),
         "{} {args:?}: {}",
@@ -386,10 +395,9 @@ fn rlmdb_reads_mtest10_environments() {
         // named DB if there are any (`-a` fails otherwise).
         let text = run(bins::mdb_dump10(), &[path_str(&env_path)], None, None);
         let mut dumped = parse_dump(&text).unwrap();
-        let all = Command::new(bins::mdb_dump10())
-            .args(["-a", path_str(&env_path)])
-            .output()
-            .unwrap();
+        let mut all = Command::new(bins::mdb_dump10());
+        all.args(["-a", path_str(&env_path)]);
+        let all = output(all);
         if all.status.success() {
             dumped.extend(parse_dump(&String::from_utf8_lossy(&all.stdout)).unwrap());
         }
@@ -612,11 +620,9 @@ fn c10_reader_pins_pages_against_rlmdb_writer() {
     // A dataset the C reader verifies in its snapshot when released; rlmdb
     // rewrites that database underneath it.
     let dataset = ["held", "2000", "7"];
-    let fill = Command::new(bins::cpeer10())
-        .args(["fill", path_str(dir.path())])
-        .args(dataset)
-        .output()
-        .unwrap();
+    let mut fill = Command::new(bins::cpeer10());
+    fill.args(["fill", path_str(dir.path())]).args(dataset);
+    let fill = output(fill);
     assert!(
         fill.status.success(),
         "{}",
@@ -666,7 +672,8 @@ fn c10_reader_pins_pages_against_rlmdb_writer() {
     drop(txn);
     // Released, the C reader verifies its snapshot of `held` as it was.
     drop(reader.stdin.take());
-    let out = reader.wait_with_output().unwrap();
+    let out =
+        interop::wait_with_output(reader, "cpeer10 hold-reader").unwrap_or_else(|e| panic!("{e}"));
     assert!(
         out.status.success(),
         "C 1.0's snapshot changed under rlmdb's writes:\n{}",
@@ -676,11 +683,9 @@ fn c10_reader_pins_pages_against_rlmdb_writer() {
     audit10(dir.path());
     assert_ne!(before, c10_records(dir.path(), Some("t")));
     // The control: the same verification of the current contents fails.
-    let now = Command::new(bins::cpeer10())
-        .args(["verify", path_str(dir.path())])
-        .args(dataset)
-        .output()
-        .unwrap();
+    let mut now = Command::new(bins::cpeer10());
+    now.args(["verify", path_str(dir.path())]).args(dataset);
+    let now = output(now);
     assert!(
         !now.status.success(),
         "rlmdb's writes to `held` are visible"
@@ -756,10 +761,9 @@ fn rpeer_audits_1_0_files_like_cpeer10() {
         rust_load(r.path(), &data_set(ps, 0x33), ps);
         for env in [c.path(), r.path()] {
             let run_audit = |prog: &Path| {
-                let out = Command::new(prog)
-                    .args(["check-freelist", path_str(env)])
-                    .output()
-                    .unwrap();
+                let mut cmd = Command::new(prog);
+                cmd.args(["check-freelist", path_str(env)]);
+                let out = output(cmd);
                 assert!(
                     out.status.success(),
                     "{}",
